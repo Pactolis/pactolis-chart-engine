@@ -44,6 +44,7 @@ configureChartLocale({
 Each public module is its own entry point, listed under `exports` in
 [package.json](package.json), for example `@pactolis/chart-engine/core/engine`.
 Separate entry points keep bundlers able to split the engine across lazy chunks.
+The package also ships its TypeScript sources with source maps for debugging.
 Other files in the package are internal and may change in any release.
 
 ## Development
