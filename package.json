@@ -299,11 +299,16 @@
     "check": "tsc --noEmit",
     "check:exports": "node scripts/check-exports.mjs",
     "test": "npm run build && node scripts/run-tests.mjs \"tests/**/*.test.mjs\"",
-    "prepack": "npm run build"
+    "prepack": "npm run build",
+    "check:browser": "tsc -p tsconfig.browser.json",
+    "test:browser": "playwright test",
+    "harness": "vite"
   },
   "devDependencies": {
+    "@playwright/test": "^1.63.0",
     "@types/node": "^26.6.3",
-    "typescript": "^6.0.3"
+    "typescript": "^6.0.3",
+    "vite": "^8.3.4"
   },
   "engines": {
     "node": ">=22"

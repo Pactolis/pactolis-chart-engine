@@ -1,0 +1,14 @@
+{
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "rootDir": ".",
+    "noEmit": true,
+    "allowImportingTsExtensions": true,
+    "types": ["node"],
+    "paths": {
+      "/harness/*": ["./harness/*"],
+      "/src/*": ["./src/*"]
+    }
+  },
+  "include": ["src/**/*", "harness/**/*", "tests/browser/support/history.ts", "playwright.config.ts", "vite.config.ts"]
+}
