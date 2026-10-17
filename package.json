@@ -1,0 +1,314 @@
+{
+  "name": "@pactolis/chart-engine",
+  "version": "0.1.0",
+  "description": "Canvas chart engine behind Pactolis: footprint and candlestick rendering, scales, indicators, order book heatmaps and drawing tools.",
+  "license": "Apache-2.0",
+  "author": "Pactolis",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Pactolis/pactolis-chart-engine.git"
+  },
+  "homepage": "https://github.com/Pactolis/pactolis-chart-engine#readme",
+  "bugs": {
+    "url": "https://github.com/Pactolis/pactolis-chart-engine/issues"
+  },
+  "keywords": [
+    "chart",
+    "canvas",
+    "footprint",
+    "candlestick",
+    "trading",
+    "orderflow"
+  ],
+  "type": "module",
+  "exports": {
+    "./core/analysis/anchoredVwap": {
+      "types": "./dist/core/analysis/anchoredVwap.d.ts",
+      "default": "./dist/core/analysis/anchoredVwap.js"
+    },
+    "./core/analysis/mondayRange": {
+      "types": "./dist/core/analysis/mondayRange.d.ts",
+      "default": "./dist/core/analysis/mondayRange.js"
+    },
+    "./core/analysis/nakedPoc": {
+      "types": "./dist/core/analysis/nakedPoc.d.ts",
+      "default": "./dist/core/analysis/nakedPoc.js"
+    },
+    "./core/analysis/orderFlowProfile": {
+      "types": "./dist/core/analysis/orderFlowProfile.d.ts",
+      "default": "./dist/core/analysis/orderFlowProfile.js"
+    },
+    "./core/analysis/periods": {
+      "types": "./dist/core/analysis/periods.d.ts",
+      "default": "./dist/core/analysis/periods.js"
+    },
+    "./core/analysis/previousWeekStrategy": {
+      "types": "./dist/core/analysis/previousWeekStrategy.d.ts",
+      "default": "./dist/core/analysis/previousWeekStrategy.js"
+    },
+    "./core/analysis/rangeProfile": {
+      "types": "./dist/core/analysis/rangeProfile.d.ts",
+      "default": "./dist/core/analysis/rangeProfile.js"
+    },
+    "./core/analysis/referenceLevels": {
+      "types": "./dist/core/analysis/referenceLevels.d.ts",
+      "default": "./dist/core/analysis/referenceLevels.js"
+    },
+    "./core/analysis/topTradingDays": {
+      "types": "./dist/core/analysis/topTradingDays.d.ts",
+      "default": "./dist/core/analysis/topTradingDays.js"
+    },
+    "./core/analysis/volumeProfile": {
+      "types": "./dist/core/analysis/volumeProfile.d.ts",
+      "default": "./dist/core/analysis/volumeProfile.js"
+    },
+    "./core/analysisContext": {
+      "types": "./dist/core/analysisContext.d.ts",
+      "default": "./dist/core/analysisContext.js"
+    },
+    "./core/analysisRevision": {
+      "types": "./dist/core/analysisRevision.d.ts",
+      "default": "./dist/core/analysisRevision.js"
+    },
+    "./core/analysisSnapshot": {
+      "types": "./dist/core/analysisSnapshot.d.ts",
+      "default": "./dist/core/analysisSnapshot.js"
+    },
+    "./core/analysisSnapshotPolicy": {
+      "types": "./dist/core/analysisSnapshotPolicy.d.ts",
+      "default": "./dist/core/analysisSnapshotPolicy.js"
+    },
+    "./core/cache/boundedCache": {
+      "types": "./dist/core/cache/boundedCache.d.ts",
+      "default": "./dist/core/cache/boundedCache.js"
+    },
+    "./core/chartLocale": {
+      "types": "./dist/core/chartLocale.d.ts",
+      "default": "./dist/core/chartLocale.js"
+    },
+    "./core/chartPanelState": {
+      "types": "./dist/core/chartPanelState.d.ts",
+      "default": "./dist/core/chartPanelState.js"
+    },
+    "./core/domain/market": {
+      "types": "./dist/core/domain/market.d.ts",
+      "default": "./dist/core/domain/market.js"
+    },
+    "./core/drawingTypes": {
+      "types": "./dist/core/drawingTypes.d.ts",
+      "default": "./dist/core/drawingTypes.js"
+    },
+    "./core/engine/view": {
+      "types": "./dist/core/engine/view.d.ts",
+      "default": "./dist/core/engine/view.js"
+    },
+    "./core/envelope": {
+      "types": "./dist/core/envelope.d.ts",
+      "default": "./dist/core/envelope.js"
+    },
+    "./core/footprintPolicy": {
+      "types": "./dist/core/footprintPolicy.d.ts",
+      "default": "./dist/core/footprintPolicy.js"
+    },
+    "./core/indicatorTypes": {
+      "types": "./dist/core/indicatorTypes.d.ts",
+      "default": "./dist/core/indicatorTypes.js"
+    },
+    "./core/loadTrace": {
+      "types": "./dist/core/loadTrace.d.ts",
+      "default": "./dist/core/loadTrace.js"
+    },
+    "./core/model/footprint": {
+      "types": "./dist/core/model/footprint.d.ts",
+      "default": "./dist/core/model/footprint.js"
+    },
+    "./core/orderFlowProfileSettings": {
+      "types": "./dist/core/orderFlowProfileSettings.d.ts",
+      "default": "./dist/core/orderFlowProfileSettings.js"
+    },
+    "./core/orderbookHeatmap/settings": {
+      "types": "./dist/core/orderbookHeatmap/settings.d.ts",
+      "default": "./dist/core/orderbookHeatmap/settings.js"
+    },
+    "./core/performanceTelemetry": {
+      "types": "./dist/core/performanceTelemetry.d.ts",
+      "default": "./dist/core/performanceTelemetry.js"
+    },
+    "./core/priceStep": {
+      "types": "./dist/core/priceStep.d.ts",
+      "default": "./dist/core/priceStep.js"
+    },
+    "./core/settings": {
+      "types": "./dist/core/settings.d.ts",
+      "default": "./dist/core/settings.js"
+    },
+    "./core/syncAllowlist": {
+      "types": "./dist/core/syncAllowlist.d.ts",
+      "default": "./dist/core/syncAllowlist.js"
+    },
+    "./core/time": {
+      "types": "./dist/core/time.d.ts",
+      "default": "./dist/core/time.js"
+    },
+    "./core/timeframes": {
+      "types": "./dist/core/timeframes.d.ts",
+      "default": "./dist/core/timeframes.js"
+    },
+    "./core/types": {
+      "types": "./dist/core/types.d.ts",
+      "default": "./dist/core/types.js"
+    },
+    "./core/ui/seriesPalette": {
+      "types": "./dist/core/ui/seriesPalette.d.ts",
+      "default": "./dist/core/ui/seriesPalette.js"
+    },
+    "./features/chart/ChartDataPipelinePorts": {
+      "types": "./dist/features/chart/ChartDataPipelinePorts.d.ts",
+      "default": "./dist/features/chart/ChartDataPipelinePorts.js"
+    },
+    "./features/chart/ChartInputController": {
+      "types": "./dist/features/chart/ChartInputController.d.ts",
+      "default": "./dist/features/chart/ChartInputController.js"
+    },
+    "./features/chart/ChartRuntime": {
+      "types": "./dist/features/chart/ChartRuntime.d.ts",
+      "default": "./dist/features/chart/ChartRuntime.js"
+    },
+    "./features/chart/ChartRuntimePorts": {
+      "types": "./dist/features/chart/ChartRuntimePorts.d.ts",
+      "default": "./dist/features/chart/ChartRuntimePorts.js"
+    },
+    "./features/chart/ChartServicePorts": {
+      "types": "./dist/features/chart/ChartServicePorts.d.ts",
+      "default": "./dist/features/chart/ChartServicePorts.js"
+    },
+    "./features/chart/captureReadiness": {
+      "types": "./dist/features/chart/captureReadiness.d.ts",
+      "default": "./dist/features/chart/captureReadiness.js"
+    },
+    "./features/chart/chartCommands": {
+      "types": "./dist/features/chart/chartCommands.d.ts",
+      "default": "./dist/features/chart/chartCommands.js"
+    },
+    "./features/chart/chartDataSource": {
+      "types": "./dist/features/chart/chartDataSource.d.ts",
+      "default": "./dist/features/chart/chartDataSource.js"
+    },
+    "./features/chart/chartDataState": {
+      "types": "./dist/features/chart/chartDataState.d.ts",
+      "default": "./dist/features/chart/chartDataState.js"
+    },
+    "./features/chart/chartHost": {
+      "types": "./dist/features/chart/chartHost.d.ts",
+      "default": "./dist/features/chart/chartHost.js"
+    },
+    "./features/chart/chartPanelFocus": {
+      "types": "./dist/features/chart/chartPanelFocus.d.ts",
+      "default": "./dist/features/chart/chartPanelFocus.js"
+    },
+    "./features/chart/chartSurfaceModel": {
+      "types": "./dist/features/chart/chartSurfaceModel.d.ts",
+      "default": "./dist/features/chart/chartSurfaceModel.js"
+    },
+    "./features/chart/contextMenuModel": {
+      "types": "./dist/features/chart/contextMenuModel.d.ts",
+      "default": "./dist/features/chart/contextMenuModel.js"
+    },
+    "./features/chart/drawingInteractionState": {
+      "types": "./dist/features/chart/drawingInteractionState.d.ts",
+      "default": "./dist/features/chart/drawingInteractionState.js"
+    },
+    "./features/chart/historyContracts": {
+      "types": "./dist/features/chart/historyContracts.d.ts",
+      "default": "./dist/features/chart/historyContracts.js"
+    },
+    "./features/chart/historyWindowPolicy": {
+      "types": "./dist/features/chart/historyWindowPolicy.d.ts",
+      "default": "./dist/features/chart/historyWindowPolicy.js"
+    },
+    "./features/chart/nativeCapture": {
+      "types": "./dist/features/chart/nativeCapture.d.ts",
+      "default": "./dist/features/chart/nativeCapture.js"
+    },
+    "./features/chart/parseTimeframeInput": {
+      "types": "./dist/features/chart/parseTimeframeInput.d.ts",
+      "default": "./dist/features/chart/parseTimeframeInput.js"
+    },
+    "./features/drawings/drawingManager": {
+      "types": "./dist/features/drawings/drawingManager.d.ts",
+      "default": "./dist/features/drawings/drawingManager.js"
+    },
+    "./features/drawings/toolRegistry": {
+      "types": "./dist/features/drawings/toolRegistry.d.ts",
+      "default": "./dist/features/drawings/toolRegistry.js"
+    },
+    "./features/indicators/gexWall": {
+      "types": "./dist/features/indicators/gexWall.d.ts",
+      "default": "./dist/features/indicators/gexWall.js"
+    },
+    "./features/indicators/indicatorDataSource": {
+      "types": "./dist/features/indicators/indicatorDataSource.d.ts",
+      "default": "./dist/features/indicators/indicatorDataSource.js"
+    },
+    "./features/indicators/indicatorPaneHeaders": {
+      "types": "./dist/features/indicators/indicatorPaneHeaders.d.ts",
+      "default": "./dist/features/indicators/indicatorPaneHeaders.js"
+    },
+    "./features/indicators/indicatorSettingsModalContract": {
+      "types": "./dist/features/indicators/indicatorSettingsModalContract.d.ts",
+      "default": "./dist/features/indicators/indicatorSettingsModalContract.js"
+    },
+    "./features/indicators/metricContracts": {
+      "types": "./dist/features/indicators/metricContracts.d.ts",
+      "default": "./dist/features/indicators/metricContracts.js"
+    },
+    "./features/indicators/registry": {
+      "types": "./dist/features/indicators/registry.d.ts",
+      "default": "./dist/features/indicators/registry.js"
+    },
+    "./features/indicators/types": {
+      "types": "./dist/features/indicators/types.d.ts",
+      "default": "./dist/features/indicators/types.js"
+    },
+    "./features/orderbook/heatmapContracts": {
+      "types": "./dist/features/orderbook/heatmapContracts.d.ts",
+      "default": "./dist/features/orderbook/heatmapContracts.js"
+    },
+    "./features/orderbook/heatmapSettingsSource": {
+      "types": "./dist/features/orderbook/heatmapSettingsSource.d.ts",
+      "default": "./dist/features/orderbook/heatmapSettingsSource.js"
+    },
+    "./features/replay/replayController": {
+      "types": "./dist/features/replay/replayController.d.ts",
+      "default": "./dist/features/replay/replayController.js"
+    },
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "dist/**/*.js",
+    "dist/**/*.js.map",
+    "dist/**/*.d.ts",
+    "dist/**/*.d.ts.map",
+    "src",
+    "LICENSE",
+    "NOTICE",
+    "README.md"
+  ],
+  "scripts": {
+    "build": "node -e \"require('fs').rmSync('dist',{recursive:true,force:true})\" && tsc -p tsconfig.build.json",
+    "check": "tsc --noEmit",
+    "check:exports": "node scripts/check-exports.mjs",
+    "test": "npm run build && node scripts/run-tests.mjs \"tests/**/*.test.mjs\"",
+    "prepack": "npm run build"
+  },
+  "devDependencies": {
+    "@types/node": "^26.6.3",
+    "typescript": "^6.0.3"
+  },
+  "engines": {
+    "node": ">=22"
+  },
+  "publishConfig": {
+    "access": "public"
+  }
+}
