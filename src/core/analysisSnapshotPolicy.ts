@@ -1,0 +1,15 @@
+export const AI_ANALYSIS_POLICY = Object.freeze({
+  candleBars: 128,
+  indicatorSamples: 128,
+  orderFlowSummaryBars: 96,
+  deltaBySizeBars: 64,
+  fullFootprintBars: 24,
+  anchoredVwapSamples: 64,
+  profileTargetBins: 96,
+  profileMaxBins: 128,
+  orderBookLevelsPerSide: 12,
+  orderBookBooks: 6,
+  marketStructureEvents: 32,
+  snapshotTargetBytes: 320 * 1024,
+  providerBodyTargetBytes: 448 * 1024,
+});
