@@ -90,7 +90,10 @@ function fetchHistory(q: HistoryQuery): Promise<FootprintBar[]> {
 
 async function streamHistory(q: HistoryQuery, onBatch: (batch: HistoryBatch) => void | Promise<void>): Promise<HistoryStreamSummary> {
   let meta: EnvelopeMeta | undefined;
-  const bars = await readHistory(historyParams(q), q.signal, (m) => { meta = m; q.onMeta?.(m); });
+  // `stream=1` lets specs tell streamed loads from one-shot reads.
+  const params = historyParams(q);
+  params.set("stream", "1");
+  const bars = await readHistory(params, q.signal, (m) => { meta = m; q.onMeta?.(m); });
   const cellCount = bars.reduce((sum, bar) => sum + bar.cells.size, 0);
   if (bars.length) await onBatch({ bars, sequence: 0, meta, cellCount });
   return { count: bars.length, cellCount };
@@ -107,6 +110,14 @@ function fetchRepairHistory(q: RepairHistoryQuery): Promise<FootprintBar[]> {
     purpose: "__repair_trade_id_v1",
   });
   return readHistory(params, q.signal, q.onMeta);
+}
+
+// `<meta name="footprint-config" content="targetBars=N">`, read once at import like a
+// host's runtime config, sets how many bars a chart loads when it opens.
+function configuredTargetBars(): number {
+  const meta = document.querySelector<HTMLMetaElement>('meta[name="footprint-config"]');
+  const value = Number(new URLSearchParams(meta?.content ?? "").get("targetBars"));
+  return Number.isFinite(value) && value > 0 ? value : 4000;
 }
 
 const sharedLiveOhlc = new Map<string, Promise<FootprintBar[]>>();
@@ -131,5 +142,5 @@ export const httpHistorySource: ChartDataSource = {
     return { state: "idle", total: 0, done: 0, frac: 0, lastDoneAt: 0 };
   },
   isDirectCandleMarket: () => false,
-  initialHistoryBars: 1000,
+  initialHistoryBars: configuredTargetBars(),
 };

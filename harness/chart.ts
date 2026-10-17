@@ -19,6 +19,7 @@ import { configureIndicatorDataSource } from "../src/features/indicators/indicat
 import { createIndicatorPaneHeadersModel } from "../src/features/indicators/indicatorPaneHeaders.js";
 import { configureOrderbookHeatmapSettingsSource } from "../src/features/orderbook/heatmapSettingsSource.js";
 import { httpHistorySource } from "./historySource.js";
+import { requestLiquidationSeries } from "./liquidationSource.js";
 import { messages } from "./messages.js";
 import { createHarnessServices, type HarnessServices } from "./services.js";
 
@@ -103,7 +104,7 @@ configureChartLocale({
 });
 
 configureIndicatorDataSource({
-  requestLiquidationSeries: () => ({ status: "idle" }),
+  requestLiquidationSeries,
   requestCoinalyzeDerivativeSeries: () => ({ status: "idle" }),
   requestFuturesPositioningSeries: () => ({ status: "idle" }),
   fetchOptionsGexSurface: () => Promise.reject(new Error("options GEX is not served by the harness")),
@@ -151,7 +152,7 @@ export function mountChart(
   return mountChartRuntime(root, state, services, panelId, surface, onStateChange);
 }
 
-// `/harness/?chart=<market>&timeframe=<tf>&type=<chartType>` mounts one chart that fills
+// `/harness/?chart=<market>&timeframe=<tf>&type=<chartType>&priceStep=<step>[&priceStepResolved=0]` mounts one chart that fills
 // the window, with the default harness services, as panel "harness-chart".
 export let harnessChart: { panelId: string; root: HTMLElement; handle: ChartMountHandle; services: HarnessServices } | undefined;
 
@@ -162,7 +163,11 @@ if (market) {
   root.className = "harness-chart";
   root.style.cssText = "position:fixed;inset:0;overflow:hidden;";
   document.body.appendChild(root);
-  const services = createHarnessServices();
+  const priceStep = Number(params.get("priceStep"));
+  const services = createHarnessServices({
+    ...(priceStep > 0 ? { priceStep } : {}),
+    priceStepResolved: params.get("priceStepResolved") !== "0",
+  });
   const panelId = "harness-chart";
   const handle = mountChart(root, {
     type: "chart",
