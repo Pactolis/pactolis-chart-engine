@@ -54,7 +54,14 @@ npm ci
 npm run check          # type check
 npm test               # build, then run the unit tests with node --test
 npm run check:exports  # every entry point exists and loads
+npm run test:browser   # Playwright specs against the harness page in Chromium
+npm run harness        # serve the harness at http://127.0.0.1:4173/harness/?chart=BINANCE_FUTURES:btcusdt
 ```
+
+Browser specs live in `tests/browser/`. They open `harness/index.html`, which wires
+the engine's ports with stand-ins (a JSON `/history` endpoint the specs answer with
+Playwright routes, an English locale, empty indicator data) and mounts charts from
+the TypeScript sources. Run `npx playwright install chromium` once before the first run.
 
 See [CONTRIBUTING.md](CONTRIBUTING.md).
 
