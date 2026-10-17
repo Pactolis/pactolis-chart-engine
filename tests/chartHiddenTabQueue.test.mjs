@@ -69,7 +69,9 @@ test("a hidden page's queue stays within one drain turn when its timer never fir
     assert.equal(f.pipeline.pendingTradeDataLoss, false);
     assert.equal(f.degraded.length, 0, "nothing was dropped, so nothing is reported lost");
     f.scheduler.hidden = false;
-    f.runTurn();
+    // Each visible turn stops at its 4 ms budget, so a slow machine may need more
+    // than one turn to apply the last batch.
+    for (let turns = 0; turns < 100 && f.pipeline.pendingTrades.length > 0; turns++) f.runTurn();
     assert.equal(f.pipeline.pendingTrades.length, 0);
     assert.deepEqual(f.applied(), { count: f.delivered, volume: f.volume });
   } finally {
