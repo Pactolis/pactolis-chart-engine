@@ -153,7 +153,7 @@ function rawFootprintBar(startTime, open, high, low, close, cellEntries) {
   };
 }
 
-test("T08-A S1: visual bucketing leaves raw FootprintBars deep-equal unchanged", async () => {
+test("visual bucketing leaves raw FootprintBars deep-equal unchanged", async () => {
   const { buildPixelCellBuckets } = await import("../dist/core/render/chartLod.js");
   const bars = [
     rawFootprintBar(1800000600000, 100, 110, 95, 105, [[100, 3, 1, 2, 1], [104, 2, 2, 2, 1]]),
@@ -179,7 +179,7 @@ test("T08-A S1: visual bucketing leaves raw FootprintBars deep-equal unchanged",
   for (let b = 0; b < bars.length; b++) for (const [priceBin, cell] of cellEntries[b]) assert.equal(bars[b].cells.get(priceBin), cell, `bar${b} cell ${priceBin}`);
 });
 
-test("T08-A S2: [from,to) edges, holes, empty ranges and negative CSS x positions", () => {
+test("[from,to) edges, holes, empty ranges and negative CSS x positions", () => {
   const bars = [
     { open: 10, high: 12, low: 9, close: 11 },
     { open: 11, high: 15, low: 10, close: 14 },
@@ -210,7 +210,7 @@ test("T08-A S2: [from,to) edges, holes, empty ranges and negative CSS x position
   ]);
 });
 
-test("T08-A S3: pixel cell buckets conserve buy/sell volumes (literal oracle)", async () => {
+test("pixel cell buckets conserve buy/sell volumes (literal oracle)", async () => {
   const { buildPixelCellBuckets } = await import("../dist/core/render/chartLod.js");
   const cells = [
     { priceBin: 100, buyVol: 2, sellVol: 5 },
@@ -238,7 +238,7 @@ test("T08-A S3: pixel cell buckets conserve buy/sell volumes (literal oracle)", 
   assert.equal(buy - sell, -6);
 });
 
-test("T08-A S4: visual bucket OHLC is not the raw close series (no semantic leak)", () => {
+test("visual bucket OHLC is not the raw close series (no semantic leak)", () => {
   const bars = [
     { open: 50, high: 52, low: 49, close: 51 },
     { open: 51, high: 55, low: 48, close: 49 },
@@ -257,7 +257,7 @@ test("T08-A S4: visual bucket OHLC is not the raw close series (no semantic leak
   assert.equal(bucket.low, 47);
 });
 
-test("T08-A S4b: real MA and replay consumers read the raw series, not visual buckets", async () => {
+test("real MA and replay consumers read the raw series, not visual buckets", async () => {
   const { FootprintSeries } = await import("../dist/core/model/footprint.js");
   const { movingAverageIndicatorDefinition } = await import("../dist/features/indicators/builtins/movingAverage.js");
   const { ChartReplayCoordinator } = await import("../dist/features/chart/ChartReplayCoordinator.js");
@@ -275,7 +275,7 @@ test("T08-A S4b: real MA and replay consumers read the raw series, not visual bu
   const rawTotals = (list) => list.map((bar) => [bar.volume, bar.delta, bar.count]);
   assert.deepEqual(rawTotals(series.listReadonly()), [[4, 2, 2], [4, 0, 2], [4, -4, 1]]);
 
-  // Real indicator on the actual series (context shape mirrors the T06-A oracle).
+  // Real indicator on the actual series.
   const settings = { ...movingAverageIndicatorDefinition.defaultSettings(), lines: [
     { id: "sma2", method: "sma", period: 2, timeframe: "chart", color: "#44aaff", enabled: true },
     { id: "sma3", method: "sma", period: 3, timeframe: "chart", color: "#ffaa44", enabled: true },
@@ -338,7 +338,7 @@ test("T08-A S4b: real MA and replay consumers read the raw series, not visual bu
   assert.equal(coordinator.isActive(), false);
 });
 
-test("T08-A S5: physical->CSS normalisation is explicit (dpr=2) and deterministic", () => {
+test("physical->CSS normalisation is explicit (dpr=2) and deterministic", () => {
   const bars = [
     { open: 1, high: 3, low: 0, close: 2 },
     { open: 2, high: 5, low: 1, close: 4 },
@@ -358,7 +358,7 @@ test("T08-A S5: physical->CSS normalisation is explicit (dpr=2) and deterministi
   // Full GPU/DPR visual rendering verification: NOT_RUN (unit scope only).
 });
 
-test("T08-A S6: FootprintSeries raw bars stay canonical through visual aggregation", async () => {
+test("FootprintSeries raw bars stay canonical through visual aggregation", async () => {
   const { FootprintSeries } = await import("../dist/core/model/footprint.js");
   const { buildPixelCellBuckets } = await import("../dist/core/render/chartLod.js");
   const series = new FootprintSeries({ intervalMs: 60000, priceStep: 1 });
@@ -386,7 +386,7 @@ test("T08-A S6: FootprintSeries raw bars stay canonical through visual aggregati
   assert.equal(series.structureRevision, structureRevision);
 });
 
-test("T08-A S7: dense bounded property suite — coverage, extrema, totals, determinism", async () => {
+test("dense bounded property suite — coverage, extrema, totals, determinism", async () => {
   const { buildPixelCellBuckets } = await import("../dist/core/render/chartLod.js");
   let seed = 0x5eed;
   const rnd = () => (seed = (Math.imul(seed, 1664525) + 1013904223) >>> 0) / 4294967296;

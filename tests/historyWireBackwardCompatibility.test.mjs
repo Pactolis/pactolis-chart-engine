@@ -68,7 +68,7 @@ function replacementBar(t, open) {
 // 1) Pipeline day-patch reconcile (public patchDay hook; patterns reused from
 //    tests/chartHistoryContractGuards.test.mjs without editing it).
 // ---------------------------------------------------------------------------
-test("T15-B-FE patchDay keeps a healthy day when a degraded sparse response arrives", async (t) => {
+test("patchDay keeps a healthy day when a degraded sparse response arrives", async (t) => {
   // Given a chart holding two healthy bars for the day and a patch response
   // that is sparse (one bar) and degraded (provenance error + footprint
   // coverage status "degraded");
@@ -103,7 +103,7 @@ test("T15-B-FE patchDay keeps a healthy day when a degraded sparse response arri
   }
 });
 
-test("T15-B-FE patchDay keeps a healthy day when candle coverage reports an error", async (t) => {
+test("patchDay keeps a healthy day when candle coverage reports an error", async (t) => {
   // Given the same healthy chart and a sparse patch response whose envelope
   // reports candleCoverage status "error" (kline source failed) without a
   // degraded flag;
@@ -134,7 +134,7 @@ test("T15-B-FE patchDay keeps a healthy day when candle coverage reports an erro
   }
 });
 
-test("T15-B-FE patchDay replaces the day for a healthy verified-canonical response (positive control)", async (t) => {
+test("patchDay replaces the day for a healthy verified-canonical response (positive control)", async (t) => {
   // Given a healthy chart and a full non-degraded patch response with verified
   // canonical footprint coverage and new OHLC;
   // When patchDay applies it;
@@ -169,7 +169,7 @@ test("T15-B-FE patchDay replaces the day for a healthy verified-canonical respon
   }
 });
 
-test("T15-B-FE patchDay still replaces a fully re-provided day when footprint coverage is merely pending", async (t) => {
+test("patchDay still replaces a fully re-provided day when footprint coverage is merely pending", async (t) => {
   // Given a full-day patch response (every seeded bucket re-provided) whose
   // footprint coverage is pending with no covered range;
   // When patchDay applies it;
@@ -204,7 +204,7 @@ test("T15-B-FE patchDay still replaces a fully re-provided day when footprint co
 });
 
 // ---------------------------------------------------------------------------
-test("T15-B-FE RED: sparse non-degraded patchDay applies returned bars but keeps unowned omitted candles", async (t) => {
+test("sparse non-degraded patchDay applies returned bars but keeps unowned omitted candles", async (t) => {
   // Given a chart holding two healthy bars for the actual UTC day of T0 and a
   // sparse (one-bar) non-degraded patch response whose footprint coverage is
   // normal pending and whose requested range spans the whole actual UTC day
@@ -273,7 +273,7 @@ test("T15-B-FE RED: sparse non-degraded patchDay applies returned bars but keeps
   }
 });
 
-test("T15-B-FE patchDay deletes an omitted candle only when the verified snapshot owns its bucket", async (t) => {
+test("patchDay deletes an omitted candle only when the verified snapshot owns its bucket", async (t) => {
   // Given a sparse (one-bar) non-degraded patch response whose candleCoverage is
   // a verified snapshot that verifiably owns both seeded buckets (requested range
   // and closedThrough cover them);
@@ -315,7 +315,7 @@ test("T15-B-FE patchDay deletes an omitted candle only when the verified snapsho
   }
 });
 
-test("T15-B-FE patchDay keeps an omitted candle when the verified snapshot belongs to another market", async (t) => {
+test("patchDay keeps an omitted candle when the verified snapshot belongs to another market", async (t) => {
   // Given the same sparse response whose candleCoverage is verified but bound to
   // a different instrument (the ownership boundary must bind to this market);
   // When patchDay applies it;
@@ -360,7 +360,7 @@ test("T15-B-FE patchDay keeps an omitted candle when the verified snapshot belon
     pipeline.dispose();
   }
 });
-test("T15-B-FE RED: verified+closed empty snapshot owns the day and deletes its candles", async (t) => {
+test("verified+closed empty snapshot owns the day and deletes its candles", async (t) => {
   // Given a chart holding two healthy bars for the actual UTC day of T0 and a
   // fully EMPTY (zero bars) non-degraded patch response whose candleCoverage is
   // a verified snapshot that verifiably owns both seeded buckets (requested
@@ -401,7 +401,7 @@ test("T15-B-FE RED: verified+closed empty snapshot owns the day and deletes its 
   }
 });
 
-test("T15-B-FE empty response without verified closed ownership preserves the prior day", async (t) => {
+test("empty response without verified closed ownership preserves the prior day", async (t) => {
   // Given the same two healthy bars and a fully EMPTY patch response, for each
   // ownership failure mode: (a) no candleCoverage at all, (b) a snapshot that
   // is not verified, (c) a degraded envelope even with verified coverage,
@@ -502,7 +502,7 @@ test("T15-B-FE empty response without verified closed ownership preserves the pr
   }
 });
 
-test("T15-B-FE bounded positive control: an owned empty bucket with no existing bar consumes its queued trade", async (t) => {
+test("bounded positive control: an owned empty bucket with no existing bar consumes its queued trade", async (t) => {
   // Given a verified EMPTY snapshot that owns ONLY the first closed bucket T0
   // (requestedTo and closedThrough both end at T0 + MINUTE - 1), no existing
   // bar in that owned bucket, one unowned same-day bar at T0 + 2 * MINUTE,
@@ -570,7 +570,7 @@ test("T15-B-FE bounded positive control: an owned empty bucket with no existing 
   }
 });
 
-test("T15-B-FE bounded empty control: ownership stops at the requested range boundary", async (t) => {
+test("bounded empty control: ownership stops at the requested range boundary", async (t) => {
   // Given two healthy bars in the actual UTC day of T0 and a fully EMPTY
   // (zero bars) non-degraded patch response whose verified snapshot requested
   // range covers only the first bucket (requestedTo bucket-starts at T0)
@@ -615,7 +615,7 @@ test("T15-B-FE bounded empty control: ownership stops at the requested range bou
   }
 });
 
-test("T15-B-FE bounded empty control: ownership stops at the closedThrough boundary", async (t) => {
+test("bounded empty control: ownership stops at the closedThrough boundary", async (t) => {
   // Given the same two healthy bars and a fully EMPTY non-degraded response
   // whose verified snapshot requested range covers both buckets but whose
   // closedThrough only closes the first (the second bucket was still open at
@@ -660,7 +660,7 @@ test("T15-B-FE bounded empty control: ownership stops at the closedThrough bound
   }
 });
 
-test("T15-B-FE patchDay conserves a queued live trade against an unowned omitted bucket", async (t) => {
+test("patchDay conserves a queued live trade against an unowned omitted bucket", async (t) => {
   // Given a chart holding two healthy bars, one live trade queued through the
   // PUBLIC services.subscribeToTrades port into a bucket the patch response
   // omits and does not own (no candleCoverage), and a scheduler that parks the
@@ -749,7 +749,7 @@ test("T15-B-FE patchDay conserves a queued live trade against an unowned omitted
 // legitimately creates through the PUBLIC trade port cannot be in that map and
 // the later series.replaceRange may erase it.
 // ---------------------------------------------------------------------------
-test("T15-B-FE RED: same-generation live trade applied inside history-patched onBeforeUpdate survives the day replaceRange", async (t) => {
+test("same-generation live trade applied inside history-patched onBeforeUpdate survives the day replaceRange", async (t) => {
   // Given a chart holding one snapshot-owned bar at T0 and one unowned
   // same-day bar at T0 + 2 * MINUTE (seed finance O 100 / H 101 / L 99 /
   // C 100, V 5, D 1, N 5, empty cells), a verified EMPTY candle snapshot that
@@ -952,7 +952,7 @@ test("T15-B-FE RED: same-generation live trade applied inside history-patched on
 // a fresh canonical negative control proving the fix does not leak live
 // trade-order bounds onto a new bar instance at the same timestamp.
 // ---------------------------------------------------------------------------
-test("FE-338 regression: a protected live bar keeps its live trade-order bounds across a public replaceRange", () => {
+test("a protected live bar keeps its live trade-order bounds across a public replaceRange", () => {
   // Given a restorable Date.now stub pinned at T0 + MINUTE + 40s so the
   // protected-live bucket is deterministically T0 + MINUTE, and a public
   // FootprintSeries (interval MINUTE, priceStep 10, reference MARKET)
@@ -1020,7 +1020,7 @@ test("FE-338 regression: a protected live bar keeps its live trade-order bounds 
   }
 });
 
-test("FE-338 regression: a fresh canonical bar instance at the same timestamp does not inherit the prior live bounds", () => {
+test("a fresh canonical bar instance at the same timestamp does not inherit the prior live bounds", () => {
   // Given a public FootprintSeries whose live print id 779 @ +30s buy 100.1
   // qty 2 sits in the long-closed T0 + MINUTE bucket (real current time is
   // far outside it, so no protected-live branch applies);
@@ -1080,7 +1080,7 @@ test("FE-338 regression: a fresh canonical bar instance at the same timestamp do
 // so an already-covered watermark trade (id <= W) becomes re-applicable and
 // double-counts finance. Public FootprintSeries surface only.
 // ---------------------------------------------------------------------------
-test("FE-338 RED: a repair-owned bucket survives a same-reference replaceRange and keeps rejecting its covered watermark trade", () => {
+test("a repair-owned bucket survives a same-reference replaceRange and keeps rejecting its covered watermark trade", () => {
   // Given a pinned wall clock far outside every bucket below (no protected
   // live bar interferes), a public FootprintSeries (interval MINUTE,
   // priceStep 1, reference MARKET), a hand-authored canonical five-print bar
@@ -1238,7 +1238,7 @@ test("FE-338 RED: a repair-owned bucket survives a same-reference replaceRange a
 // bars must resolve ownership by the FINAL last-wins stored identity. Public
 // FootprintSeries surface only, fresh series per variant.
 // ---------------------------------------------------------------------------
-test("FE-338 GREEN control: retained repair ownership works without live bounds and follows the final winning duplicate identity", () => {
+test("retained repair ownership works without live bounds and follows the final winning duplicate identity", () => {
   // Given a pinned wall clock far outside every bucket below (no protected
   // live bar interferes), a public FootprintSeries (interval MINUTE,
   // priceStep 1, reference MARKET) seeded per variant with the hand-authored

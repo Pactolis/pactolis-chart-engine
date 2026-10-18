@@ -147,7 +147,7 @@ const RSI3_BASE = [null, null, null, 75, 600 / 11, 75];
 
 // --- SMA / EMA ---------------------------------------------------------------------
 
-test("T06-A MA full: SMA(3) and EMA(2) match hand-calculated values", () => {
+test("MA full: SMA(3) and EMA(2) match hand-calculated values", () => {
   const series = loadSeries(BASE_CLOSES);
   const ctx = makeContext(series, movingAverageIndicatorDefinition, { lines: [smaLine("sma3", 3), emaLine("ema2", 2)] });
   const { result, counters } = countersDuring(() => movingAverageIndicatorDefinition.prepareData(ctx));
@@ -159,7 +159,7 @@ test("T06-A MA full: SMA(3) and EMA(2) match hand-calculated values", () => {
   });
 });
 
-test("T06-A MA tail tick: incremental SMA/EMA tail equals the hand-calculated value", () => {
+test("MA tail tick: incremental SMA/EMA tail equals the hand-calculated value", () => {
   const series = loadSeries(BASE_CLOSES);
   const ctx = makeContext(series, movingAverageIndicatorDefinition, { lines: [smaLine("sma3", 3), emaLine("ema2", 2)] });
   movingAverageIndicatorDefinition.prepareData(ctx);
@@ -177,7 +177,7 @@ test("T06-A MA tail tick: incremental SMA/EMA tail equals the hand-calculated va
   assert.deepEqual(counters, { "indicator.incremental.hit.moving-average": 1 });
 });
 
-test("T06-A MA non-tail tick: a middle close change rebuilds the whole SMA/EMA history", () => {
+test("MA non-tail tick: a middle close change rebuilds the whole SMA/EMA history", () => {
   const series = loadSeries(BASE_CLOSES);
   const ctx = makeContext(series, movingAverageIndicatorDefinition, { lines: [smaLine("sma3", 3), emaLine("ema2", 2)] });
   movingAverageIndicatorDefinition.prepareData(ctx);
@@ -198,7 +198,7 @@ test("T06-A MA non-tail tick: a middle close change rebuilds the whole SMA/EMA h
   });
 });
 
-test("T06-A MA append: a new bar falls back to full and extends with the hand-calculated value", () => {
+test("MA append: a new bar falls back to full and extends with the hand-calculated value", () => {
   const series = loadSeries(BASE_CLOSES);
   const ctx = makeContext(series, movingAverageIndicatorDefinition, { lines: [smaLine("sma3", 3), emaLine("ema2", 2)] });
   movingAverageIndicatorDefinition.prepareData(ctx);
@@ -215,7 +215,7 @@ test("T06-A MA append: a new bar falls back to full and extends with the hand-ca
   assert.equal(counters["indicator.incremental.hit.moving-average"], undefined);
 });
 
-test("T06-A MA reset: clear then reload with new closes recomputes from scratch", () => {
+test("MA reset: clear then reload with new closes recomputes from scratch", () => {
   const series = loadSeries(BASE_CLOSES);
   const ctx = makeContext(series, movingAverageIndicatorDefinition, { lines: [smaLine("sma3", 3)] });
   movingAverageIndicatorDefinition.prepareData(ctx);
@@ -231,7 +231,7 @@ test("T06-A MA reset: clear then reload with new closes recomputes from scratch"
   assert.equal(counters["indicator.incremental.full.moving-average"], 1);
 });
 
-test("T06-A MA footprint-only change: enrichment with identical OHLCV recomputes nothing", () => {
+test("MA footprint-only change: enrichment with identical OHLCV recomputes nothing", () => {
   const series = loadSeries(BASE_CLOSES);
   const ctx = makeContext(series, movingAverageIndicatorDefinition, { lines: [smaLine("sma3", 3), emaLine("ema2", 2)] });
   movingAverageIndicatorDefinition.prepareData(ctx);
@@ -249,7 +249,7 @@ test("T06-A MA footprint-only change: enrichment with identical OHLCV recomputes
   assert.deepEqual(counters, { "indicator.incremental.hit.moving-average": 1 });
 });
 
-test("T06-A MA settings: a period edit recomputes, a colour-only edit keeps values and repaints", () => {
+test("MA settings: a period edit recomputes, a colour-only edit keeps values and repaints", () => {
   const series = loadSeries(BASE_CLOSES);
   const ctx = makeContext(series, movingAverageIndicatorDefinition, { lines: [smaLine("sma", 3)] });
   movingAverageIndicatorDefinition.prepareData(ctx);
@@ -269,7 +269,7 @@ test("T06-A MA settings: a period edit recomputes, a colour-only edit keeps valu
   assert.equal(colourEdit.result.meta.series[0].color, "#ff0000");
 });
 
-test("T06-A MA unsupported: a daily-timeframe line never takes the incremental path", () => {
+test("MA unsupported: a daily-timeframe line never takes the incremental path", () => {
   // Daily bars; a daily SMA(2) is plotted on each bar from completed daily candles
   // that ended at or before that bar opened: bar2 = (10 + 11)/2, bar3 = (11 + 10)/2.
   const series = loadSeries([10, 11, 10, 12], DAY);
@@ -288,7 +288,7 @@ test("T06-A MA unsupported: a daily-timeframe line never takes the incremental p
 
 // --- Wilder RSI --------------------------------------------------------------------
 
-test("T06-A RSI full: Wilder RSI(3) matches hand-calculated values", () => {
+test("RSI full: Wilder RSI(3) matches hand-calculated values", () => {
   const series = loadSeries(BASE_CLOSES);
   const ctx = makeContext(series, rsiIndicatorDefinition, { period: 3 });
   const { result, counters } = countersDuring(() => rsiIndicatorDefinition.prepareData(ctx));
@@ -299,7 +299,7 @@ test("T06-A RSI full: Wilder RSI(3) matches hand-calculated values", () => {
   });
 });
 
-test("T06-A RSI tail tick: incremental Wilder step equals the hand-calculated value", () => {
+test("RSI tail tick: incremental Wilder step equals the hand-calculated value", () => {
   const series = loadSeries(BASE_CLOSES);
   const ctx = makeContext(series, rsiIndicatorDefinition, { period: 3 });
   rsiIndicatorDefinition.prepareData(ctx);
@@ -320,7 +320,7 @@ test("T06-A RSI tail tick: incremental Wilder step equals the hand-calculated va
   assert.deepEqual(second.counters, { "indicator.incremental.hit.rsi": 1 });
 });
 
-test("T06-A RSI tail tick with no losses in the window stays at 100 on the incremental path", () => {
+test("RSI tail tick with no losses in the window stays at 100 on the incremental path", () => {
   // Rising closes leave the Wilder average loss at exactly 0, so RS is undefined
   // and RSI is 100 by definition; the tail step must not divide by zero.
   const series = loadSeries([10, 11, 12, 13, 14]);
@@ -333,7 +333,7 @@ test("T06-A RSI tail tick with no losses in the window stays at 100 on the incre
   assert.deepEqual(counters, { "indicator.incremental.hit.rsi": 1 });
 });
 
-test("T06-A RSI non-tail tick: a middle close change rebuilds the Wilder history", () => {
+test("RSI non-tail tick: a middle close change rebuilds the Wilder history", () => {
   const series = loadSeries(BASE_CLOSES);
   const ctx = makeContext(series, rsiIndicatorDefinition, { period: 3 });
   rsiIndicatorDefinition.prepareData(ctx);
@@ -352,7 +352,7 @@ test("T06-A RSI non-tail tick: a middle close change rebuilds the Wilder history
   });
 });
 
-test("T06-A RSI append: a new bar falls back to full and extends with the hand-calculated value", () => {
+test("RSI append: a new bar falls back to full and extends with the hand-calculated value", () => {
   const series = loadSeries(BASE_CLOSES);
   const ctx = makeContext(series, rsiIndicatorDefinition, { period: 3 });
   rsiIndicatorDefinition.prepareData(ctx);
@@ -367,7 +367,7 @@ test("T06-A RSI append: a new bar falls back to full and extends with the hand-c
   assert.equal(counters["indicator.incremental.hit.rsi"], undefined);
 });
 
-test("T06-A RSI reset: clear then reload with new closes recomputes from scratch", () => {
+test("RSI reset: clear then reload with new closes recomputes from scratch", () => {
   const series = loadSeries(BASE_CLOSES);
   const ctx = makeContext(series, rsiIndicatorDefinition, { period: 3 });
   rsiIndicatorDefinition.prepareData(ctx);
@@ -381,7 +381,7 @@ test("T06-A RSI reset: clear then reload with new closes recomputes from scratch
   assert.equal(counters["indicator.incremental.full.rsi"], 1);
 });
 
-test("T06-A RSI footprint-only change: enrichment with identical OHLCV recomputes nothing", () => {
+test("RSI footprint-only change: enrichment with identical OHLCV recomputes nothing", () => {
   const series = loadSeries(BASE_CLOSES);
   const ctx = makeContext(series, rsiIndicatorDefinition, { period: 3 });
   rsiIndicatorDefinition.prepareData(ctx);
@@ -396,7 +396,7 @@ test("T06-A RSI footprint-only change: enrichment with identical OHLCV recompute
   assert.deepEqual(counters, { "indicator.incremental.hit.rsi": 1 });
 });
 
-test("T06-A RSI settings: a period edit recomputes with the new hand-calculated values", () => {
+test("RSI settings: a period edit recomputes with the new hand-calculated values", () => {
   const series = loadSeries(BASE_CLOSES);
   const ctx = makeContext(series, rsiIndicatorDefinition, { period: 3 });
   rsiIndicatorDefinition.prepareData(ctx);
@@ -417,7 +417,7 @@ test("T06-A RSI settings: a period edit recomputes with the new hand-calculated 
   assert.equal(styleEdit.result.meta.series[0].color, "#ff0000");
 });
 
-test("T06-A RSI unsupported: a tail tick on the seed bar falls back to full", () => {
+test("RSI unsupported: a tail tick on the seed bar falls back to full", () => {
   // Four closes with period 3: bar 3 is the Wilder seed, so there is no previous
   // smoothed state to step from.
   const series = loadSeries([10, 11, 10, 12]);
@@ -452,7 +452,7 @@ function assertPrefixUnchanged(actual, before, label) {
   }
 }
 
-test("T06-A MA no look-ahead: a later sentinel bar leaves every earlier SMA/EMA value untouched", () => {
+test("MA no look-ahead: a later sentinel bar leaves every earlier SMA/EMA value untouched", () => {
   const series = loadSeries(BASE_CLOSES);
   const ctx = makeContext(series, movingAverageIndicatorDefinition, { lines: [smaLine("sma3", 3), emaLine("ema2", 2)] });
   const prefix = movingAverageIndicatorDefinition.prepareData(ctx);
@@ -485,7 +485,7 @@ test("T06-A MA no look-ahead: a later sentinel bar leaves every earlier SMA/EMA 
   assert.deepEqual(ticked.counters, { "indicator.incremental.hit.moving-average": 1 });
 });
 
-test("T06-A RSI no look-ahead: a later sentinel bar leaves every earlier Wilder RSI value untouched", () => {
+test("RSI no look-ahead: a later sentinel bar leaves every earlier Wilder RSI value untouched", () => {
   const series = loadSeries(BASE_CLOSES);
   const ctx = makeContext(series, rsiIndicatorDefinition, { period: 3 });
   const rsiPrefix = plotValues(rsiIndicatorDefinition.prepareData(ctx));

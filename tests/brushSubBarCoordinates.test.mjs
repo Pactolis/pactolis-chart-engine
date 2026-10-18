@@ -90,10 +90,10 @@ function prove(f, rawLogical, expectedTime) {
   return point;
 }
 
-test("R18-01: brush magnet OFF candle midpoint maps to that candle timestamp", () =>
+test("brush magnet OFF candle midpoint maps to that candle timestamp", () =>
   withMagnet(false, () => prove(fixture(), 1.5, T + INTERVAL)));
 
-test("R18-02: three X samples within one bar retain distinct sub-bar timestamps", () =>
+test("three X samples within one bar retain distinct sub-bar timestamps", () =>
   withMagnet(false, () => {
     const f = fixture();
     const points = [
@@ -104,7 +104,7 @@ test("R18-02: three X samples within one bar retain distinct sub-bar timestamps"
     assert.equal(new Set(points.map((point) => point.time)).size, 3);
   }));
 
-test("R18-03: fractional CSS spacing preserves points across multiple bars", () =>
+test("fractional CSS spacing preserves points across multiple bars", () =>
   withMagnet(false, () => {
     const f = fixture({ spacing: 13.25 });
     for (const [x, time] of [[0.75, T + 15_000], [1.9, T + 84_000], [2.625, T + 127_500]]) {
@@ -112,14 +112,14 @@ test("R18-03: fractional CSS spacing preserves points across multiple bars", () 
     }
   }));
 
-test("R18-04: actual single-bar series extrapolates by declared interval", () =>
+test("actual single-bar series extrapolates by declared interval", () =>
   withMagnet(false, () => {
     const f = fixture({ times: [T] });
     prove(f, -0.25, T - 45_000);
     prove(f, 1.75, T + 75_000);
   }));
 
-test("R18-05: both visible edge X coordinates survive without new clamping", () =>
+test("both visible edge X coordinates survive without new clamping", () =>
   withMagnet(false, () => {
     // Edge raw logical values are -0.25 and 3.75; no inverse oracle.
     const f = fixture({ spacing: 13.25, offset: 3.3125 });
@@ -128,14 +128,14 @@ test("R18-05: both visible edge X coordinates survive without new clamping", () 
     prove(f, 3.75, T + 195_000);
   }));
 
-test("R18-06: real series gap uses fixture piecewise time, not fixed interval", () =>
+test("real series gap uses fixture piecewise time, not fixed interval", () =>
   withMagnet(false, () => {
     const f = fixture({ times: [T, T + 60_000, T + 240_000, T + 300_000] });
     prove(f, 1.75, T + 105_000);
     prove(f, 2.25, T + 195_000);
   }));
 
-test("R18-07 protected: non-brush and null active tool retain legacy candle time", () =>
+test("non-brush and null active tool retain legacy candle time", () =>
   withMagnet(false, () => {
     for (const tool of ["trend", null]) {
       const f = fixture({ tool });
@@ -147,7 +147,7 @@ test("R18-07 protected: non-brush and null active tool retain legacy candle time
     }
   }));
 
-test("R18-08 protected: persistent and temporary Ctrl/Meta magnet preserve quantized time/OHLC", () => {
+test("persistent and temporary Ctrl/Meta magnet preserve quantized time/OHLC", () => {
   const modes = [
     { persistent: true, temporary: false, price: 104.5 },
     ...[{ ctrlKey: true, metaKey: false }, { ctrlKey: false, metaKey: true }].map((event) => ({

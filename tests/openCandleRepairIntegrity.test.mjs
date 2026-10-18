@@ -250,14 +250,14 @@ async function runOrdering({ flushBeforeSnapshot, scheduler = manualScheduler(),
   }
 }
 
-test("S1: repair is deterministic when queued trades flush before snapshot resolution", async (t) => {
+test("repair is deterministic when queued trades flush before snapshot resolution", async (t) => {
   useFakeChartDataSource(t);
   const previousNow = Date.now;
   Date.now = () => START + 90_000;
   try { await runOrdering({ flushBeforeSnapshot: true }); } finally { Date.now = previousNow; }
 });
 
-test("S1b/S4/S6: repair is deterministic when snapshot resolves before queued flush", async (t) => {
+test("repair is deterministic when snapshot resolves before queued flush", async (t) => {
   useFakeChartDataSource(t);
   const previousNow = Date.now;
   Date.now = () => START + 90_000;
@@ -395,14 +395,14 @@ async function runRawFillOrdering(flushBeforeSnapshot) {
   }
 }
 
-test("T02-D S1: raw-fill totals remain exactly once when queued flush precedes snapshot", async (t) => {
+test("raw-fill totals remain exactly once when queued flush precedes snapshot", async (t) => {
   useFakeChartDataSource(t);
   const previousNow = Date.now;
   Date.now = () => START + 90_000;
   try { await runRawFillOrdering(true); } finally { Date.now = previousNow; }
 });
 
-test("T02-D S1b: raw-fill totals remain exactly once when snapshot precedes queued flush", async (t) => {
+test("raw-fill totals remain exactly once when snapshot precedes queued flush", async (t) => {
   useFakeChartDataSource(t);
   const previousNow = Date.now;
   Date.now = () => START + 90_000;

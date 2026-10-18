@@ -424,7 +424,7 @@ test("pair change bootstraps repair after resubscribe without requiring a new tr
   }
 });
 
-test("T02-D R1: identical immutable normal delivery applies financial totals once across flushes", { timeout: 10_000 }, async (t) => {
+test("identical immutable normal delivery applies financial totals once across flushes", { timeout: 10_000 }, async (t) => {
   useFakeChartDataSource(t);
   const previousNow = Date.now;
   const scenario = { callbacks: 0, pending: new Set(), resources: [] };
@@ -934,7 +934,7 @@ function t02dAssertBSame(b, baseline) {
   assert.equal(b.sessionCb, baseline.sessionCb);
 }
 
-test('T02-D Q1: equal-value anonymous normal events retain both contributions', { timeout: 10_000 }, async (t) => {
+test('equal-value anonymous normal events retain both contributions', { timeout: 10_000 }, async (t) => {
   useFakeChartDataSource(t);
   const budget = t02dBudget();
   const expected = { open: 10_002, high: 10_002, low: 10_002, close: 10_002, volume: 4, delta: 4, count: 6, cells: [[10_002, 4, 0, 6, 6, 0]] };
@@ -955,7 +955,7 @@ test('T02-D Q1: equal-value anonymous normal events retain both contributions', 
   });
 });
 
-test('T02-D Q2: absent or non-string IDs stay anonymous', { timeout: 10_000 }, async (t) => {
+test('absent or non-string IDs stay anonymous', { timeout: 10_000 }, async (t) => {
   useFakeChartDataSource(t);
   const budget = t02dBudget();
   const variants = [['empty', '', true], ['undefined', undefined, true], ['absent', undefined, false], ['null', null, true], ['number-zero', 0, true]];
@@ -971,7 +971,7 @@ test('T02-D Q2: absent or non-string IDs stay anonymous', { timeout: 10_000 }, a
   }
 });
 
-test('T02-D Q3: string zero identity deduplicates normal delivery', { timeout: 10_000 }, async (t) => {
+test('string zero identity deduplicates normal delivery', { timeout: 10_000 }, async (t) => {
   useFakeChartDataSource(t);
   const budget = t02dBudget();
   await withT02DOwners(budget, 1, async ([fixture]) => {
@@ -984,7 +984,7 @@ test('T02-D Q3: string zero identity deduplicates normal delivery', { timeout: 1
   });
 });
 
-test('T02-D Q4: mixed identified and anonymous delivery preserves order and totals', { timeout: 10_000 }, async (t) => {
+test('mixed identified and anonymous delivery preserves order and totals', { timeout: 10_000 }, async (t) => {
   useFakeChartDataSource(t);
   const budget = t02dBudget();
   await withT02DOwners(budget, 1, async ([fixture]) => {
@@ -1005,7 +1005,7 @@ test('T02-D Q4: mixed identified and anonymous delivery preserves order and tota
   });
 });
 
-test('T02-D Q5: normal identity dedup remains owner-local', { timeout: 10_000 }, async (t) => {
+test('normal identity dedup remains owner-local', { timeout: 10_000 }, async (t) => {
   useFakeChartDataSource(t);
   const budget = t02dBudget();
   await withT02DOwners(budget, 2, async ([a, b]) => {
@@ -1045,7 +1045,7 @@ test('T02-D Q5: normal identity dedup remains owner-local', { timeout: 10_000 },
   });
 });
 
-test('T02-D QL: liquidation contributions preserve legacy no-dedup semantics', { timeout: 10_000 }, async (t) => {
+test('liquidation contributions preserve legacy no-dedup semantics', { timeout: 10_000 }, async (t) => {
   useFakeChartDataSource(t);
   const budget = t02dBudget();
   const expected = {
@@ -1325,7 +1325,7 @@ async function t02dPrimeOwnerV2(ledger, fixture, sessionReady = false) {
   ledger.assertBounds();
 }
 
-test('T02-D L1: post-repair late trades preserve event-time OHLC in the repair-owned open candle', { timeout: 10_000 }, async (t) => {
+test('post-repair late trades preserve event-time OHLC in the repair-owned open candle', { timeout: 10_000 }, async (t) => {
   useFakeChartDataSource(t);
   const ledger = t02dCreateCaseLedger();
   const prefix = {
@@ -1486,7 +1486,7 @@ test('T02-D L1: post-repair late trades preserve event-time OHLC in the repair-o
   ledger.assertBounds();
 });
 
-test('T02-D L2: normal event-time ordering holds for one-batch and per-delivery flushes', { timeout: 10_000 }, async (t) => {
+test('normal event-time ordering holds for one-batch and per-delivery flushes', { timeout: 10_000 }, async (t) => {
   useFakeChartDataSource(t);
   const ledger = t02dCreateCaseLedger();
   const expected = {
@@ -1543,7 +1543,7 @@ test('T02-D L2: normal event-time ordering holds for one-batch and per-delivery 
   ledger.assertBounds();
 });
 
-test('T02-D L3: wrong-market events cannot mutate either subscribed owner', { timeout: 10_000 }, async (t) => {
+test('wrong-market events cannot mutate either subscribed owner', { timeout: 10_000 }, async (t) => {
   useFakeChartDataSource(t);
   const ledger = t02dCreateCaseLedger();
   const expectedA = {
@@ -1607,7 +1607,7 @@ test('T02-D L3: wrong-market events cannot mutate either subscribed owner', { ti
   });
   ledger.assertBounds();
 });
-test('T02-D C1: superseded repair metadata cannot notify the active owner', { timeout: 10_000 }, async (t) => {
+test('superseded repair metadata cannot notify the active owner', { timeout: 10_000 }, async (t) => {
   useFakeChartDataSource(t);
   const ledger = t02dCreateCaseLedger();
   const serverStepsA = [];
@@ -1780,7 +1780,7 @@ test('T02-D C1: superseded repair metadata cannot notify the active owner', { ti
   ledger.assertBounds();
 });
 
-test('T02-D C2: disposed repair metadata cannot emit public callbacks', { timeout: 10_000 }, async (t) => {
+test('disposed repair metadata cannot emit public callbacks', { timeout: 10_000 }, async (t) => {
   useFakeChartDataSource(t);
   const ledger = t02dCreateCaseLedger();
   const serverStepsA = [];
@@ -2299,7 +2299,7 @@ async function o1Scenario(mode, ledger) {
     assert.equal(a.requests.length, 2); ledger.check();
   });
 }
-test('O1 real overflow, stale repair ordering, and owner isolation', { timeout: 30000, concurrency: false }, async t => {
+test('real overflow, stale repair ordering, and owner isolation', { timeout: 30000, concurrency: false }, async t => {
   useFakeChartDataSource(t);
   const aggregate = o1Aggregate();
   for (const mode of ['OLD_BEFORE_CURRENT_PROOF', 'OLD_AFTER_CURRENT_PROOF', 'OLD_RESOLVED_ON_BEFORE_UPDATE']) {

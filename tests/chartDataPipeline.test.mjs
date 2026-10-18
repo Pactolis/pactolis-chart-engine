@@ -1167,7 +1167,7 @@ test("twoPhase: fires cell-less update first, then cell-included update", async 
   pipeline.dispose();
 });
 
-test("twoPhase: zero-cell phase 2 still settles without claiming footprint readiness", async (t) => {
+test("twoPhase: zero-cell phase-2 still settles without claiming footprint readiness", async (t) => {
   const events = [];
   useFakeChartDataSource(t, {
     history: () => [historyBar(BAR_T, { open: 1, high: 1, low: 1, close: 1, volume: 1, delta: 0, count: 1 })],
@@ -1191,7 +1191,7 @@ test("twoPhase: zero-cell phase 2 still settles without claiming footprint readi
   pipeline.dispose();
 });
 
-test("twoPhase: phase 2 result is dropped if market/timeframe changes before it lands (generation guard)", async (t) => {
+test("twoPhase: phase-2 result is dropped if market/timeframe changes before it lands (generation guard)", async (t) => {
   let resolveFast;
   let resolveFull;
   const svc = makeServices();
@@ -1257,7 +1257,7 @@ test("twoPhase=false (default) behaves exactly like the pre-existing single-phas
   pipeline.dispose();
 });
 
-test("twoPhase: phase 1 fetch error does not block phase 2 from delivering full data", async (t) => {
+test("twoPhase: phase-1 fetch error does not block phase-2 from delivering full data", async (t) => {
   const events = [];
   let call = 0;
   useFakeChartDataSource(t, {
@@ -1292,7 +1292,7 @@ test("twoPhase: phase 1 fetch error does not block phase 2 from delivering full 
 
 // ── twoPhase chunked cell loading, newest-first (HANDOFF-0288 GÖREV 2) ───────
 
-test("twoPhase: phase 2 partitions exact 25/26/425/1001 bucket ranges", async (t) => {
+test("twoPhase: phase-2 partitions exact 25/26/425/1001 bucket ranges", async (t) => {
   const interval = 60_000;
 
   const expected = new Map([
@@ -2035,7 +2035,7 @@ async function t02aLoadScenario(t, { count, mode, olderProof }) {
 
 for (const count of [3, 26]) {
   for (const mode of ["healthy", "empty-error", "sparse-error"]) {
-    test(`T02A-${count}-${mode}: public twoPhase closed-candle financial matrix`,
+    test(`public twoPhase closed-candle financial matrix (${count}-${mode})`,
       { timeout: 10_000 }, (t) => t02aLoadScenario(t, { count, mode }));
   }
 }
@@ -2044,15 +2044,15 @@ for (const count of [3, 26]) {
 // error/absent/invalid ownership, Then its candle is preserved with its phase-1
 // oracle. A verified older absence removes it: preservation is not unconditional.
 for (const olderProof of ["error", "missing", "wrong-instrument", "wrong-window", "unclosed", "verified"]) {
-  test(`T02A-26-older-${olderProof}: per-response absence ownership isolation`,
+  test(`per-response absence ownership isolation (26-older-${olderProof})`,
     { timeout: 10_000 }, (t) => t02aLoadScenario(t, { count: 26, mode: "healthy", olderProof }));
 }
 
-// T02-B qualifier slice2 (issue #310): two pipelines on one shared tracked public
+// Two pipelines on one shared tracked public
 // subscription service. Given both owners primed with real live data, When owner A
 // runs real live/patch/config/market operations, Then A's exact event contracts hold
 // and owner B keeps its subscription, data, revisions and callback state untouched.
-test("T02B qualifier C: shared-service owner isolation with exact event contracts", async (t) => {
+test("shared-service owner isolation with exact event contracts", async (t) => {
   const marketA = "BINANCE_FUTURES:btcusdt";
   const marketB = "BINANCE_FUTURES:ethusdt";
   const marketA2 = "BINANCE_FUTURES:solusdt";
@@ -2321,3 +2321,121 @@ test("disposed pipeline ignores a late matching-market readiness notification", 
   assert.strictEqual(pipeline.series, disposedSeries, "late callback must not replace series");
   assert.deepEqual(pipeline.series.listReadonly(), disposedBars, "late callback must not schedule series work");
 });
+
+const PIPELINE_MINUTE = 60_000;
+const PIPELINE_T0 = Date.UTC(2024, 0, 1);
+
+function cellsHistoryBar(startTime, cells) {
+  return {
+    startTime,
+    open: 100, high: 101, low: 99, close: 100,
+    volume: 5, delta: 5, count: 5,
+    liquidationBuyVol: 0, liquidationSellVol: 0,
+    cells: new Map(cells.map((cell) => [cell.priceBin, {
+      buyVol: 0, sellVol: 0, count: 0, buyCount: 0, sellCount: 0,
+      liquidationBuyVol: 0, liquidationSellVol: 0,
+      ...cell,
+    }])),
+    hasRef: true,
+    completeness: "complete",
+    sources: ["history"],
+    updatedAt: startTime,
+  };
+}
+
+function coverageMeta(q) {
+  return {
+    schemaVersion: 2,
+    generatedAt: q.to,
+    footprint: { available: true },
+    footprintCoverage: {
+      schemaVersion: 1,
+      source: "binance-usdm-aggTrade",
+      instrument: q.reference,
+      authority: "provisional",
+      status: "complete",
+      requestedFrom: q.from,
+      requestedTo: q.to,
+      coveredFrom: q.from,
+      coveredThrough: q.to,
+      durableThroughId: null,
+      projectionThroughId: "100",
+      authorityToken: "token",
+      reasonCode: null,
+    },
+  };
+}
+
+test("a timeframe change during a market switch keeps the new market's price step", async () => {
+  const ethStep = deferred();
+  const services = {
+    subscribeToTrades: () => () => {},
+    fetchPriceStepResult: (market) => market.endsWith("ethusdt") ? ethStep.promise : Promise.resolve({ step: 10, resolved: true }),
+    fetchPriceStep: async () => 10,
+    fetchPricePrecision: async () => undefined,
+    triggerAutoSync() {},
+  };
+  const pipeline = new ChartDataPipeline({ market: "BINANCE_FUTURES:btcusdt", intervalMs: PIPELINE_MINUTE, priceStep: 10, services });
+  const marketSwitch = pipeline.changeConfig({ market: "BINANCE_FUTURES:ethusdt" });
+  await new Promise(setImmediate);
+  let timeframeDone = false;
+  const timeframeSwitch = pipeline.changeConfig({ intervalMs: 5 * PIPELINE_MINUTE }).then(() => { timeframeDone = true; });
+  await new Promise(setImmediate);
+  assert.equal(timeframeDone, false, "the timeframe change waits for the market's step");
+
+  ethStep.resolve({ step: 0.5, resolved: true });
+  await Promise.all([marketSwitch, timeframeSwitch]);
+  assert.equal(pipeline.series.config.priceStep, 0.5);
+  assert.equal(pipeline.intervalMs, 5 * PIPELINE_MINUTE);
+  pipeline.dispose();
+});
+
+test("recent coverage replacement keeps the liquidations the bar already held", async () => {
+  const from = PIPELINE_T0;
+  const to = from + PIPELINE_MINUTE;
+  let emit = () => {};
+  const liquidation = (qty, time) => ({ time, price: 100, qty, isBuy: false, liquidation: true, market: "M", receivedAt: time });
+  const services = {
+    subscribeToTrades: (_market, cb) => { emit = cb; return () => {}; },
+    fetchPriceStep: async () => 1,
+    fetchPricePrecision: async () => undefined,
+    triggerAutoSync() {},
+    fetchHistory: async (q) => {
+      // Arrives while the repair is in flight and is applied live before the snapshot lands.
+      emit(liquidation(3, from + 2_000));
+      q.onMeta?.(coverageMeta(q));
+      return [cellsHistoryBar(from, [{ priceBin: 101, buyVol: 5, count: 5, buyCount: 5 }])];
+    },
+  };
+  const pipeline = new ChartDataPipeline({ market: "M", intervalMs: PIPELINE_MINUTE, priceStep: 1, services });
+  pipeline.series.upsertBar(cellsHistoryBar(from, [{ priceBin: 100, buyVol: 1, count: 1, buyCount: 1 }]));
+  pipeline.series.addTrade(liquidation(2, from + 1_000));
+  assert.equal(pipeline.series.at(0).liquidationSellVol, 2);
+
+  assert.equal(await pipeline.repairRecentFootprintCoverage(from, to), "complete");
+  const bar = pipeline.series.at(0);
+  assert.equal(bar.cells.get(101)?.buyVol, 5, "the snapshot's cells are applied");
+  assert.equal(bar.liquidationSellVol, 5, "earlier and in-flight liquidations each count once");
+  assert.equal(bar.cells.get(100)?.liquidationSellVol, 5);
+  pipeline.dispose();
+});
+
+test("a failed day patch does not stop later day patches", async () => {
+  const services = {
+    subscribeToTrades: () => () => {},
+    fetchPriceStep: async () => 1,
+    fetchPricePrecision: async () => undefined,
+    triggerAutoSync() {},
+  };
+  const pipeline = new ChartDataPipeline({ market: "M", intervalMs: PIPELINE_MINUTE, priceStep: 1, services });
+  const ran = [];
+  pipeline._patchDayNow = async (from) => {
+    ran.push(from);
+    if (ran.length === 1) throw new Error("bad bar");
+  };
+  const day = 24 * 60 * PIPELINE_MINUTE;
+  await assert.rejects(pipeline.patchDay(PIPELINE_T0), /bad bar/);
+  await pipeline.patchDay(PIPELINE_T0 + day);
+  assert.deepEqual(ran, [PIPELINE_T0, PIPELINE_T0 + day]);
+  pipeline.dispose();
+});

@@ -62,3 +62,18 @@ test("dispose ve replacement token guard eski callback'in instance'a yazmasını
   assert.match(contract, /token|generation|session/);
   assert.match(managerSource, /dispose\(\)/);
 });
+
+globalThis.$state ??= (value) => value;
+const { executeChartAction } = await import("../dist/features/chart/chartCommands.js");
+
+test("the indicator pane menu's auto scale item toggles instead of resetting", () => {
+  const calls = [];
+  const target = {
+    resetIndicatorPaneScale: (id) => { calls.push(["reset", id]); return true; },
+    toggleIndicatorPaneAutoScale: (id) => { calls.push(["toggle", id]); return true; },
+  };
+  executeChartAction({ kind: "indicator-toggle-auto-scale", paneId: "rsi-1" }, target, {});
+  executeChartAction({ kind: "indicator-reset-scale", paneId: "rsi-1" }, target, {});
+  assert.deepEqual(calls, [["toggle", "rsi-1"], ["reset", "rsi-1"]]);
+});
+

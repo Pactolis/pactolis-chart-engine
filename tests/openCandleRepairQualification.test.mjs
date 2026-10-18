@@ -169,7 +169,7 @@ async function withClock(run) {
   try { return await run(); } finally { Date.now = previousNow; }
 }
 
-test("T02-D REPAIR-REENTRANT: a reset inside the repair's degraded callback suppresses the stale history event", async (t) => {
+test("a reset inside the repair's degraded callback suppresses the stale history event", async (t) => {
   useFakeChartDataSource(t);
   await withClock(async () => {
     const fixture = makeRepairFixture();
@@ -195,7 +195,7 @@ test("T02-D REPAIR-REENTRANT: a reset inside the repair's degraded callback supp
   });
 });
 
-test("T02-D REPAIR-REENTRANT: a reconnect raised from the healthy report keeps the new repair pending", async (t) => {
+test("a reconnect raised from the healthy report keeps the new repair pending", async (t) => {
   useFakeChartDataSource(t);
   await withClock(async () => {
     const held = deferred();
@@ -235,7 +235,7 @@ async function repairedFixture(options) {
   return fixture;
 }
 
-test("T02-D I1: an immutable reconnect replay under a higher transport generation changes nothing", async (t) => {
+test("an immutable reconnect replay under a higher transport generation changes nothing", async (t) => {
   useFakeChartDataSource(t);
   await withClock(async () => {
     const all = [...PROJECTION, ...TAIL];
@@ -261,7 +261,7 @@ test("T02-D I1: an immutable reconnect replay under a higher transport generatio
   });
 });
 
-test("T02-D I1: a stale-generation session after the reconnect is ignored", async (t) => {
+test("a stale-generation session after the reconnect is ignored", async (t) => {
   useFakeChartDataSource(t);
   await withClock(async () => {
     const fixture = await repairedFixture();
@@ -277,7 +277,7 @@ test("T02-D I1: a stale-generation session after the reconnect is ignored", asyn
   });
 });
 
-test("T02-D older event time above W: a late trade with id > W lands once in the closed snapshot bucket, id <= W never", async (t) => {
+test("older event time above W: a late trade with id > W lands once in the closed snapshot bucket, id <= W never", async (t) => {
   useFakeChartDataSource(t);
   await withClock(async () => {
     const fixture = await repairedFixture();
@@ -306,7 +306,7 @@ test("T02-D older event time above W: a late trade with id > W lands once in the
   });
 });
 
-test("T02-D P1: a sessionless series reset applies the same immutable events once in the new series", async () => {
+test("a sessionless series reset applies the same immutable events once in the new series", async () => {
   await withClock(async () => {
     const events = [trade(1, START + 1_000, 10_000, 2, true), trade(2, START + 2_000, 10_001, 3, false)];
     const resets = {
@@ -337,7 +337,7 @@ test("T02-D P1: a sessionless series reset applies the same immutable events onc
   });
 });
 
-test("T02-D session-active reset: a reset during a repair drops the old snapshot and old watermark", async (t) => {
+test("session-active reset: a reset during a repair drops the old snapshot and old watermark", async (t) => {
   useFakeChartDataSource(t);
   await withClock(async () => {
     const held = deferred();
@@ -368,7 +368,7 @@ test("T02-D session-active reset: a reset during a repair drops the old snapshot
   });
 });
 
-test("T02-D cancellation: a repair cancelled by a timeframe change never reports healthy from its late response", async (t) => {
+test("cancellation: a repair cancelled by a timeframe change never reports healthy from its late response", async (t) => {
   useFakeChartDataSource(t);
   await withClock(async () => {
     const held = deferred();
@@ -395,7 +395,7 @@ test("T02-D cancellation: a repair cancelled by a timeframe change never reports
   });
 });
 
-test("T02-D second owner: another pipeline on the same market is unaffected by the first one's repair and resets", async (t) => {
+test("second owner: another pipeline on the same market is unaffected by the first one's repair and resets", async (t) => {
   useFakeChartDataSource(t);
   await withClock(async () => {
     const fixture = makeRepairFixture();
@@ -440,7 +440,7 @@ test("T02-D second owner: another pipeline on the same market is unaffected by t
   });
 });
 
-test("T02-D repeated overflow: resyncs stop at the limit with an error, never a false healthy, and a new session recovers", async (t) => {
+test("repeated overflow: resyncs stop at the limit with an error, never a false healthy, and a new session recovers", async (t) => {
   useFakeChartDataSource(t);
   await withClock(async () => {
     const helds = [];
@@ -508,8 +508,8 @@ test("T02-D repeated overflow: resyncs stop at the limit with an error, never a 
   });
 });
 
-// PR421 regressions: metadata validation and stream liveness are independent gates.
-test("T02-D REPAIR-MISSING-METADATA: missing repairSnapshot stays pending; valid metadata is accepted", async () => {
+// Metadata validation and stream liveness are independent gates.
+test("missing repairSnapshot stays pending; valid metadata is accepted", async () => {
   const { repairSnapshotReason } = await import("../dist/features/chart/LiveTradeRepairController.js");
   const q = { reference: "M", from: START, to: START + INTERVAL - 1, interval: INTERVAL, priceStep: 1 };
   const reason = (meta) => repairSnapshotReason(meta, "M", q.from, q.to, INTERVAL, 1, null);
@@ -519,7 +519,7 @@ test("T02-D REPAIR-MISSING-METADATA: missing repairSnapshot stays pending; valid
   assert.equal(reason(valid), null, "independent positive: the same range with valid repair metadata");
 });
 
-test("T02-D REPAIR-WRONG-IDENTITY: another instrument stays pending; matching identity is accepted", async () => {
+test("another instrument stays pending; matching identity is accepted", async () => {
   const { repairSnapshotReason } = await import("../dist/features/chart/LiveTradeRepairController.js");
   const q = { reference: "M", from: START, to: START + INTERVAL - 1, interval: INTERVAL, priceStep: 1 };
   const valid = repairMeta(q, "102");
@@ -529,7 +529,7 @@ test("T02-D REPAIR-WRONG-IDENTITY: another instrument stays pending; matching id
   assert.equal(reason(valid), null, "independent positive: matching instrument");
 });
 
-test("T02-D REPAIR-INCOMPLETE-PROOF: an unproven watermark stays pending; complete V2 proof is accepted", async () => {
+test("an unproven watermark stays pending; complete V2 proof is accepted", async () => {
   const { repairSnapshotReason } = await import("../dist/features/chart/LiveTradeRepairController.js");
   const q = { reference: "M", from: START, to: START + INTERVAL - 1, interval: INTERVAL, priceStep: 1 };
   const valid = repairMeta(q, "102");
@@ -541,7 +541,7 @@ test("T02-D REPAIR-INCOMPLETE-PROOF: an unproven watermark stays pending; comple
   assert.equal(reason(valid), null, "independent positive: complete resolver watermark proof");
 });
 
-test("T02-D REPAIR-WATERMARK-REGRESSION: a lower watermark errors; equal and advancing watermarks are accepted", async () => {
+test("a lower watermark errors; equal and advancing watermarks are accepted", async () => {
   const { repairSnapshotReason } = await import("../dist/features/chart/LiveTradeRepairController.js");
   const q = { reference: "M", from: START, to: START + INTERVAL - 1, interval: INTERVAL, priceStep: 1 };
   const reason = (watermark) => repairSnapshotReason(repairMeta(q, watermark), "M", q.from, q.to, INTERVAL, 1, 102n);
@@ -550,7 +550,7 @@ test("T02-D REPAIR-WATERMARK-REGRESSION: a lower watermark errors; equal and adv
   assert.equal(reason("103"), null, "independent positive: advancing watermark");
 });
 
-test("T02-D REPAIR-NO-LIVE-EVIDENCE: valid metadata alone cannot publish; genuine post-ACK TAIL settles exactly once", async (t) => {
+test("valid metadata alone cannot publish; genuine post-ACK TAIL settles exactly once", async (t) => {
   useFakeChartDataSource(t);
   await withClock(async () => {
     const fixture = makeRepairFixture();
@@ -577,7 +577,7 @@ test("T02-D REPAIR-NO-LIVE-EVIDENCE: valid metadata alone cannot publish; genuin
 });
 
 
-test("PR421 wide-price guard skips OHLC, not volume/cells; full W103 snapshot owns all four", async () => {
+test("wide-price guard skips OHLC, not volume/cells; full W103 snapshot owns all four", async () => {
   const { FootprintSeries } = await import("../dist/core/model/footprint.js");
   const events = [trade(100, START + 1, 1500, 1, true),
     trade(101, START + 2, 500, 1, false), trade(102, START + 3, 3500, 1, true),

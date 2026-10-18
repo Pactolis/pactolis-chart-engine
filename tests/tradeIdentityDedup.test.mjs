@@ -4,7 +4,7 @@ import { FootprintSeries } from "../dist/core/model/footprint.js";
 import { ChartDataPipeline } from "../dist/features/chart/ChartDataPipeline.js";
 import { joinedTail } from "../dist/features/chart/LiveTradeRepairController.js";
 
-// T02-D (#311) identity dedup qualification at the series layer, where live
+// Identity dedup qualification at the series layer, where live
 // normal trades are deduplicated by market + trade ID.
 const INTERVAL = 60_000;
 const START = 1_700_000_040_000 - (1_700_000_040_000 % INTERVAL);
@@ -23,7 +23,7 @@ function totals(series, start) {
   return { open: bar.open, high: bar.high, low: bar.low, close: bar.close, volume: bar.volume, delta: bar.delta, count: bar.count };
 }
 
-test("T02-D D1: a late re-delivered identified trade is not counted twice after dedup memory pruning", () => {
+test("a late re-delivered identified trade is not counted twice after dedup memory pruning", () => {
   const series = new FootprintSeries({ intervalMs: INTERVAL, priceStep: 1 });
   series.addTrade(trade("1", START + 1_000));
   // Independent oracle: IDs 2..FLOOD+1 are distinct trades 10 ms apart, so the
@@ -42,7 +42,7 @@ test("T02-D D1: a late re-delivered identified trade is not counted twice after 
   assert.deepEqual(totals(series, START), expected);
 });
 
-test("T02-D D2: the pruned-ID floor only rejects re-deliveries, never newer trades, other markets or anonymous trades", () => {
+test("the pruned-ID floor only rejects re-deliveries, never newer trades, other markets or anonymous trades", () => {
   const series = new FootprintSeries({ intervalMs: INTERVAL, priceStep: 1 });
   for (let id = 1; id <= FLOOD; id++) series.addTrade(trade(String(id), START + id * 10));
   const last = FLOOD * 10;
@@ -59,7 +59,7 @@ test("T02-D D2: the pruned-ID floor only rejects re-deliveries, never newer trad
   assert.equal(series.identityConflictCount, 0);
 });
 
-test("T02-D D3: same ID with a different payload keeps the first delivery and is counted as a conflict", () => {
+test("same ID with a different payload keeps the first delivery and is counted as a conflict", () => {
   const series = new FootprintSeries({ intervalMs: INTERVAL, priceStep: 1 });
   series.addTrade(trade("301", START + 1_000, 100, 2));
   series.addTrade(trade("301", START + 1_000, 100, 2));
@@ -93,7 +93,7 @@ function makePipelineFixture() {
   };
 }
 
-test("T02-D D4: a live identity conflict stops the owner reporting healthy; identical repeats do not", () => {
+test("a live identity conflict stops the owner reporting healthy; identical repeats do not", () => {
   const fixture = makePipelineFixture();
   try {
     fixture.emit(trade("401", START + 1_000, 100, 2));
@@ -114,7 +114,7 @@ test("T02-D D4: a live identity conflict stops the owner reporting healthy; iden
   }
 });
 
-test("T02-D D5: on markets without ordered trade IDs, pruning never drops a new trade delivered out of order", () => {
+test("on markets without ordered trade IDs, pruning never drops a new trade delivered out of order", () => {
   // Opaque and venue-specific decimal IDs carry no order, so no floor may be inferred
   // from them or from event time; a late new trade must still be applied.
   for (const [market, idOf] of [["OKX:btc-usdt", (n) => "okx-" + n], ["HYPERLIQUID:btc", (n) => String(9_000_000_000 - n)]]) {
@@ -134,7 +134,7 @@ test("T02-D D5: on markets without ordered trade IDs, pruning never drops a new 
   }
 });
 
-test("T02-D D6: an identity conflict stays reported until the series is reset", () => {
+test("an identity conflict stays reported until the series is reset", () => {
   const fixture = makePipelineFixture();
   try {
     fixture.emit(trade("601", START + 1_000, 100, 2));
@@ -158,7 +158,7 @@ test("T02-D D6: an identity conflict stays reported until the series is reset", 
   }
 });
 
-test("T02-D D7: the repair tail keeps the first delivery of an ID and counts a conflicting repeat", () => {
+test("the repair tail keeps the first delivery of an ID and counts a conflicting repeat", () => {
   const first = trade("702", START + 1_000, 100, 2);
   const conflicting = trade("702", START + 1_000, 109, 8, false);
   const identical = trade("703", START + 2_000, 101, 1);
@@ -168,7 +168,7 @@ test("T02-D D7: the repair tail keeps the first delivery of an ID and counts a c
   assert.equal(joined.conflicts, 1);
 });
 
-test("T02-D D8: a held conflict is released when the series itself is reset (async price-step correction)", () => {
+test("a held conflict is released when the series itself is reset (async price-step correction)", () => {
   const fixture = makePipelineFixture();
   try {
     fixture.emit(trade("801", START + 1_000, 100, 2));

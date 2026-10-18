@@ -53,8 +53,13 @@ export type FreshnessReason = "NO_TRADE_YET" | "TRANSPORT_OFFLINE" | "TRADE_AGE"
 
 export interface ChartDataStateInputs {
   historyStatus: "idle" | "loading" | "settled" | "failed";
+  /** Diagnostic message when `historyStatus === "failed"`. */
+  historyErrorDetail?: string;
+  historyFailureDetail?: string;
   /** A candle range whose kline source failed and is being asked for again. */
   candleSourceGap: boolean;
+  /** Range / diagnostic detail when `candleSourceGap` is true. */
+  candleSourceGapDetail?: string;
   /** Live repair / integrity gate of this chart's pipeline. */
   integrity: "pending" | "healthy" | "error";
   integrityDetail: string;
@@ -71,6 +76,8 @@ export interface ChartDataStateInputs {
   footprintCoverageComplete: boolean;
   /** A history window came back degraded (e.g. the footprint store dropped bars). */
   footprintHistoryDegraded: boolean;
+  /** Diagnostic detail for footprint degradation, gap, or dropped trades. */
+  footprintDetail?: string;
   recentFootprintRepairActive: boolean;
   /** Event time of the newest trade applied to the series, or null before the first one. */
   lastTradeTime: number | null;
@@ -104,36 +111,36 @@ export const DEFAULT_CHART_DATA_THRESHOLDS: ChartDataStateThresholds = Object.fr
 
 export interface ChartDataState {
   ohlc: { state: OhlcState; reason: OhlcReason; detail: string };
-  footprint: { state: FootprintState; reason: FootprintReason };
+  footprint: { state: FootprintState; reason: FootprintReason; detail?: string };
   freshness: { state: FreshnessState; phase: FreshnessPhase; reason: FreshnessReason; ageMs: number | null };
   healthy: boolean;
 }
 
 function evaluateOhlc(input: ChartDataStateInputs): ChartDataState["ohlc"] {
   if (input.historyStatus === "idle" || input.historyStatus === "loading") return { state: "loading", reason: "HISTORY_LOADING", detail: "" };
-  if (input.historyStatus === "failed") return { state: "error", reason: "HISTORY_FAILED", detail: "" };
+  if (input.historyStatus === "failed") return { state: "error", reason: "HISTORY_FAILED", detail: input.historyErrorDetail ?? input.historyFailureDetail ?? "" };
   if (input.integrity === "error") {
     const reason = input.integrityDetail.startsWith(LIVE_REPAIR_UNRESOLVED_DETAIL) ? "LIVE_REPAIR_FAILED" : "INTEGRITY_ERROR";
     return { state: "error", reason, detail: input.integrityDetail };
   }
-  if (input.candleSourceGap) return { state: "gap", reason: "CANDLE_SOURCE_GAP", detail: "" };
+  if (input.candleSourceGap) return { state: "gap", reason: "CANDLE_SOURCE_GAP", detail: input.candleSourceGapDetail ?? "" };
   if (input.liveTradesDropped) return { state: "repairing", reason: "LIVE_TRADES_DROPPED", detail: input.integrityDetail };
   if (input.integrity === "pending") return { state: "repairing", reason: "LIVE_REPAIR_PENDING", detail: input.integrityDetail };
   return { state: "ok", reason: null, detail: "" };
 }
 
 function evaluateFootprint(input: ChartDataStateInputs): ChartDataState["footprint"] {
-  if (input.footprintSupported === false) return { state: "unsupported", reason: "MARKET_UNSUPPORTED" };
-  if (input.historyStatus === "idle" || input.historyStatus === "loading") return { state: "unknown", reason: "HISTORY_LOADING" };
-  if (input.footprintSupported === undefined) return { state: "unknown", reason: "SUPPORT_UNKNOWN" };
-  if (input.historyStatus === "failed") return { state: "unknown", reason: "HISTORY_FAILED" };
-  if (!input.footprintReceived) return { state: "missing", reason: "NOT_COLLECTED" };
-  if (input.liveTradesDropped) return { state: "degraded", reason: "LIVE_TRADES_DROPPED" };
-  if (input.recentFootprintRepairActive) return { state: "pending", reason: "RECENT_REPAIR_PENDING" };
-  if (input.footprintHistoryDegraded) return { state: "degraded", reason: "HISTORY_DEGRADED" };
-  if (!input.footprintCoverageReported) return { state: "unknown", reason: "COVERAGE_UNREPORTED" };
-  if (!input.footprintCoverageComplete) return { state: "partial", reason: "COVERAGE_INCOMPLETE" };
-  return { state: "complete", reason: null };
+  if (input.footprintSupported === false) return { state: "unsupported", reason: "MARKET_UNSUPPORTED", detail: "" };
+  if (input.historyStatus === "idle" || input.historyStatus === "loading") return { state: "unknown", reason: "HISTORY_LOADING", detail: "" };
+  if (input.footprintSupported === undefined) return { state: "unknown", reason: "SUPPORT_UNKNOWN", detail: "" };
+  if (input.historyStatus === "failed") return { state: "unknown", reason: "HISTORY_FAILED", detail: input.historyErrorDetail ?? input.historyFailureDetail ?? "" };
+  if (!input.footprintReceived) return { state: "missing", reason: "NOT_COLLECTED", detail: input.footprintDetail ?? "" };
+  if (input.liveTradesDropped) return { state: "degraded", reason: "LIVE_TRADES_DROPPED", detail: input.footprintDetail || input.integrityDetail };
+  if (input.recentFootprintRepairActive) return { state: "pending", reason: "RECENT_REPAIR_PENDING", detail: input.footprintDetail ?? "" };
+  if (input.footprintHistoryDegraded) return { state: "degraded", reason: "HISTORY_DEGRADED", detail: input.footprintDetail ?? "" };
+  if (!input.footprintCoverageReported) return { state: "unknown", reason: "COVERAGE_UNREPORTED", detail: input.footprintDetail ?? "" };
+  if (!input.footprintCoverageComplete) return { state: "partial", reason: "COVERAGE_INCOMPLETE", detail: input.footprintDetail ?? "" };
+  return { state: "complete", reason: null, detail: "" };
 }
 
 function evaluateFreshness(
