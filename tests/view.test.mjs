@@ -9,7 +9,7 @@ function makeView({ width = 600, colWidth = 50 } = {}) {
   return view;
 }
 
-test("rescaleColWidthForInterval preserves the visible time window across a timeframe change (DEC-0094)", () => {
+test("rescaleColWidthForInterval preserves the visible time window across a timeframe change", () => {
   // 4h→1d: each bar spans 6× the time, so colWidth must grow 6× to keep the same time window.
   const view = makeView({ colWidth: 3 });
   view.rescaleColWidthForInterval(4 * 3600_000, 24 * 3600_000);

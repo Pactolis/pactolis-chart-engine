@@ -151,6 +151,47 @@ for (const scenario of scenarios) {
   });
 }
 
+test("diagnostic details propagate to OHLC and footprint states without loss", () => {
+  const failed = evaluateChartDataState(proven({
+    historyStatus: "failed",
+    historyErrorDetail: "HTTP 503 Gateway Unavailable",
+  }), NOW);
+  assert.equal(failed.ohlc.reason, "HISTORY_FAILED");
+  assert.equal(failed.ohlc.detail, "HTTP 503 Gateway Unavailable");
+  assert.equal(failed.footprint.reason, "HISTORY_FAILED");
+  assert.equal(failed.footprint.detail, "HTTP 503 Gateway Unavailable");
+
+  const gap = evaluateChartDataState(proven({
+    candleSourceGap: true,
+    candleSourceGapDetail: "2024-01-01T00:00:00.000Z .. 2024-01-01T00:10:00.000Z",
+  }), NOW);
+  assert.equal(gap.ohlc.reason, "CANDLE_SOURCE_GAP");
+  assert.equal(gap.ohlc.detail, "2024-01-01T00:00:00.000Z .. 2024-01-01T00:10:00.000Z");
+
+  const partial = evaluateChartDataState(proven({
+    footprintCoverageComplete: false,
+    footprintDetail: "Reason: SYNC_PENDING · Covered 2024-01-01T00:00:00.000Z .. 2024-01-01T00:06:59.999Z",
+  }), NOW);
+  assert.equal(partial.footprint.reason, "COVERAGE_INCOMPLETE");
+  assert.equal(partial.footprint.detail, "Reason: SYNC_PENDING · Covered 2024-01-01T00:00:00.000Z .. 2024-01-01T00:06:59.999Z");
+
+  const degraded = evaluateChartDataState(proven({
+    footprintHistoryDegraded: true,
+    footprintCoverageComplete: false,
+    footprintDetail: "footprint-store: read timeout · Footprint dropped 2 bars",
+  }), NOW);
+  assert.equal(degraded.footprint.reason, "HISTORY_DEGRADED");
+  assert.equal(degraded.footprint.detail, "footprint-store: read timeout · Footprint dropped 2 bars");
+
+  const dropped = evaluateChartDataState(proven({
+    liveTradesDropped: true,
+    integrity: "pending",
+    integrityDetail: "PENDING_TRADE_BUFFER_OVERFLOW",
+  }), NOW);
+  assert.equal(dropped.footprint.reason, "LIVE_TRADES_DROPPED");
+  assert.equal(dropped.footprint.detail, "PENDING_TRADE_BUFFER_OVERFLOW");
+});
+
 test("freshness thresholds: 1 s live target, then the app's 15 s stale and 60 s offline", () => {
   assert.deepEqual({ ...DEFAULT_CHART_DATA_THRESHOLDS }, { liveMs: 1_000, staleMs: 15_000, offlineMs: 60_000 });
   const at = (ageMs) => evaluateChartDataState(proven({ lastTradeTime: NOW - ageMs }), NOW).freshness;
@@ -252,9 +293,33 @@ test("pipeline: a history load whose coverage stops short reads partial, not com
   assert.equal(inputs.footprintReceived, true);
   assert.equal(inputs.footprintCoverageReported, true);
   assert.equal(inputs.footprintCoverageComplete, false);
+  assert.match(inputs.footprintDetail, /^Uncovered from /);
   const state = evaluateChartDataState({ ...inputs, historyStatus: "settled", footprintSupported: true, transportOffline: false }, Date.now());
   assert.equal(state.footprint.state, "partial");
+  assert.equal(state.footprint.detail, inputs.footprintDetail);
   assert.equal(state.healthy, false);
+  pipeline.dispose();
+});
+
+test("pipeline: degraded history load populates footprintDetail with provenance and dropped bars", async (t) => {
+  const realNow = Date.now;
+  Date.now = () => TO + 5 * INTERVAL;
+  t.after(() => { Date.now = realNow; });
+  const pipeline = pipelineWith(t, (q) => ({
+    schemaVersion: 2, generatedAt: q.to, degraded: true,
+    provenance: [{ source: "footprint-store", status: "partial", error: "shard read timeout" }],
+    footprint: { available: true, allowed: true, droppedBars: 3 },
+    footprintCoverage: { ...footprintCoverage(q, { status: "degraded" }), reasonCode: "SHARD_UNAVAILABLE" },
+  }));
+  await pipeline.loadHistory({ from: FROM, to: TO });
+  const inputs = pipeline.dataStateInputs();
+  assert.equal(inputs.footprintHistoryDegraded, true);
+  assert.match(inputs.footprintDetail, /footprint-store: shard read timeout/);
+  assert.match(inputs.footprintDetail, /Footprint dropped 3 bars/);
+  const state = evaluateChartDataState({ ...inputs, historyStatus: "settled", footprintSupported: true, transportOffline: false }, Date.now());
+  assert.equal(state.footprint.state, "degraded");
+  assert.equal(state.footprint.reason, "HISTORY_DEGRADED");
+  assert.equal(state.footprint.detail, inputs.footprintDetail);
   pipeline.dispose();
 });
 
@@ -280,6 +345,7 @@ test("pipeline: a recent repair that reaches back over the uncovered tail comple
   const outcome = await pipeline.repairRecentFootprintCoverage(TO - 5 * INTERVAL + 1, TO + 2 * INTERVAL);
   assert.equal(outcome, "complete");
   assert.equal(pipeline.dataStateInputs().footprintCoverageComplete, true);
+  assert.equal(pipeline.dataStateInputs().footprintDetail, "");
   assert.equal(pipeline.dataStateInputs().recentFootprintRepairActive, false);
   pipeline.dispose();
 });

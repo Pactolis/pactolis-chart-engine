@@ -351,6 +351,8 @@ export class ChartDataPipeline {
   private activeHistoryFootprintUncoveredFrom = Infinity;
   /** The active history load had a degraded window that was not a candle-source gap. */
   private activeHistoryFootprintDegraded = false;
+  private activeHistoryFootprintDetail = "";
+  private activeHistoryErrorDetail = "";
   /** The latest history load read candles from Binance directly and asked for no footprint. */
   activeHistoryCandlesOnly = false;
   /** Last state this pipeline reported to its integrity gate. */
@@ -371,14 +373,24 @@ export class ChartDataPipeline {
     const publishedThrough = meta?.footprint?.lastPublishedDay;
     if (typeof publishedThrough === "number" && publishedThrough >= 0) this.lastPublishedDay = publishedThrough;
     this.reportServerPriceStep(meta);
-    if (!this.onDataDegraded || !reportDegraded) return;
+    if (!reportDegraded) return;
     if (meta?.degraded) {
-      const provenanceDetail = meta.provenance?.find((p) => p.error)?.error;
+      const errorEntries = (meta.provenance ?? []).filter((p): p is typeof p & { error: string } => Boolean(p.error));
       const droppedBars = meta.footprint?.droppedBars ?? 0;
-      const detail = provenanceDetail ?? (droppedBars > 0 ? `Footprint dropped ${droppedBars} bars` : "");
-      this.onDataDegraded(true, detail);
+      const reasonCode = meta.footprintCoverage?.reasonCode;
+      const footprintParts = errorEntries.map((p) => (p.source && !p.error.includes(p.source) ? `${p.source}: ${p.error}` : p.error));
+      if (droppedBars > 0) footprintParts.push(`Footprint dropped ${droppedBars} bars`);
+      if (reasonCode && !footprintParts.some((part) => part.includes(reasonCode))) footprintParts.push(`Reason: ${reasonCode}`);
+      this.activeHistoryFootprintDetail = footprintParts.join(" · ");
+      if (this.onDataDegraded) {
+        const provenanceDetail = errorEntries.length > 1
+          ? errorEntries.map((p) => (p.source && !p.error.includes(p.source) ? `${p.source}: ${p.error}` : p.error)).join(" · ")
+          : errorEntries[0]?.error;
+        const detail = provenanceDetail ?? (droppedBars > 0 ? `Footprint dropped ${droppedBars} bars` : (reasonCode ?? ""));
+        this.onDataDegraded(true, detail);
+      }
     } else {
-      this.onDataDegraded(false, "");
+      this.onDataDegraded?.(false, "");
     }
   };
 
@@ -482,8 +494,28 @@ export class ChartDataPipeline {
 
   /** The pipeline-owned part of the chart's data state (#314); see chartDataState.ts. */
   dataStateInputs(): PipelineDataStateInputs {
+    const gap = this.activeHistoryCandleSourceGap;
+    const candleSourceGapDetail = gap
+      ? `Gap ${new Date(gap.from).toISOString()} .. ${new Date(gap.to).toISOString()}`
+      : "";
+    let footprintDetail = this.activeHistoryFootprintDetail;
+    if (!footprintDetail) {
+      if (this.pendingTradeDataLoss && this.integrityState.detail) {
+        footprintDetail = this.integrityState.detail;
+      } else if (this.recentCoverageRepair !== null) {
+        footprintDetail = "Recent footprint coverage repair in progress";
+      } else if (
+        this.activeHistoryCoverageSeen
+        && !this.activeHistoryFootprintCoverageComplete
+        && Number.isFinite(this.activeHistoryFootprintUncoveredFrom)
+      ) {
+        footprintDetail = `Uncovered from ${new Date(this.activeHistoryFootprintUncoveredFrom).toISOString()}`;
+      }
+    }
     return {
-      candleSourceGap: this.activeHistoryCandleSourceGap !== null,
+      historyErrorDetail: this.activeHistoryErrorDetail,
+      candleSourceGap: gap !== null,
+      candleSourceGapDetail,
       integrity: this.integrityState.state,
       integrityDetail: this.integrityState.detail,
       liveTradesDropped: this.pendingTradeDataLoss,
@@ -492,6 +524,7 @@ export class ChartDataPipeline {
       footprintCoverageReported: this.activeHistoryCoverageSeen,
       footprintCoverageComplete: this.activeHistoryFootprintCoverageComplete,
       footprintHistoryDegraded: this.activeHistoryFootprintDegraded,
+      footprintDetail,
       recentFootprintRepairActive: this.recentCoverageRepair !== null,
       lastTradeTime: Number.isFinite(this.lastAppliedTradeTime) ? this.lastAppliedTradeTime : null,
     };
@@ -533,6 +566,11 @@ export class ChartDataPipeline {
     this.explicitHistoryReconcile = historyReconcile;
     try {
       await this._loadHistory(opts);
+    } catch (error) {
+      if (!this.disposed && historyReconcile.generation === this.generation) {
+        this.activeHistoryErrorDetail = error instanceof Error ? error.message : String(error);
+      }
+      throw error;
     } finally {
       if (this.explicitHistoryReconcile === historyReconcile) this.explicitHistoryReconcile = null;
       if (historyReconcile.deferred.size > 0 && !this.disposed && historyReconcile.generation === this.generation) {
@@ -711,6 +749,7 @@ export class ChartDataPipeline {
       if (from <= this.activeHistoryFootprintUncoveredFrom && this.activeHistoryCoverageSeen
         && this.activeHistoryFootprintAvailable && !this.activeHistoryFootprintDegraded) {
         this.activeHistoryFootprintCoverageComplete = true;
+        this.activeHistoryFootprintDetail = "";
       }
       this.integrityReporter?.report("healthy");
       this.onDataDegraded?.(false, "");
@@ -739,6 +778,8 @@ export class ChartDataPipeline {
     this.activeHistoryCoverageAllComplete = true;
     this.activeHistoryFootprintUncoveredFrom = Infinity;
     this.activeHistoryFootprintDegraded = false;
+    this.activeHistoryFootprintDetail = "";
+    this.activeHistoryErrorDetail = "";
     logLoadTrace(traceId, "pipeline.history.begin", { from: opts.from, to: opts.to, twoPhase: !!opts.twoPhase, rebuild });
     let loadHasDegradedMeta = false;
     let loadDegradedMeta: EnvelopeMeta | undefined;
@@ -1210,6 +1251,8 @@ export class ChartDataPipeline {
       this.lastBarStart = -1;
       this.lastAppliedTradeTime = -Infinity;
       this.identityConflict = null;
+      this.activeHistoryFootprintDetail = "";
+      this.activeHistoryErrorDetail = "";
       this.integrityReporter?.report("healthy");
       this.onDataDegraded?.(false, "");
       this.resetCellFillState();
@@ -1445,6 +1488,8 @@ export class ChartDataPipeline {
     this.lastBarStart = -1;
     this.lastAppliedTradeTime = -Infinity;
     this.identityConflict = null;
+    this.activeHistoryFootprintDetail = "";
+    this.activeHistoryErrorDetail = "";
     this.integrityReporter?.report("healthy");
     this.onDataDegraded?.(false, "");
     this.resetCellFillState();

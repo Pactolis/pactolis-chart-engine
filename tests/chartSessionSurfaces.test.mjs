@@ -479,7 +479,7 @@ test("resize reports a layout change and context restore a full one", () => {
   session.destroy();
 });
 
-test("T09-A1 two-owner RAF isolation survives owner teardown", () => {
+test("two-owner RAF isolation survives owner teardown", () => {
   const ownerA = makeSession();
   const ownerB = makeSession();
   const staleFrames = [];
@@ -514,7 +514,7 @@ test("T09-A1 two-owner RAF isolation survives owner teardown", () => {
   assert.equal(ownerB.win.queuedRafs(), 0);
 });
 
-test("T09-A1 CPU lifecycle preserves owner state, DPR migration, and resource balance", () => {
+test("CPU lifecycle preserves owner state, DPR migration, and resource balance", () => {
   const ownerA = makeSession();
   const ownerB = makeSession({ barBase: 199, viewValues: { colWidth: 11, offsetX: 37, priceTop: 240, pricePerPx: 0.5, subPanesH: 28, priceAxisW: 72, area: { left: 52, top: 20, width: 480, height: 260 } } });
   assert.notEqual(ownerA.view, ownerB.view);
@@ -636,7 +636,7 @@ test("T09-A1 CPU lifecycle preserves owner state, DPR migration, and resource ba
   assert.equal(migratedWin.mediaListenerCount(), 0, "destroy releases the replacement-owner DPR listener");
 });
 
-test("T09-A3b owner adoption cancels the pending RAF on its actual old window and re-schedules on the new owner", () => {
+test("owner adoption cancels the pending RAF on its actual old window and re-schedules on the new owner", () => {
   // Given: one live session holding a pending frame (realm-local id 1) on the OLD owner
   // window, plus an independent NEW owner window whose only queued frame carries the same
   // realm-local id 1 for an UNRELATED control callback - a deliberate cross-realm RAF id
@@ -697,3 +697,86 @@ test("T09-A3b owner adoption cancels the pending RAF on its actual old window an
   assert.deepEqual(ownerA.counts, { gpu: 1, annotation: 1, interaction: 1 }, "no chart render may run after destroy");
   assert.deepEqual(controlRuns, ["control-1"], "both non-chart controls stayed alive across adoption and destroy");
 });
+
+const { ChartRenderCoordinator } = await import("../dist/features/chart/ChartRenderCoordinator.js");
+const { FootprintSeries } = await import("../dist/core/model/footprint.js");
+const { FootprintRenderer } = await import("../dist/core/render/footprintRenderer.js");
+const { View } = await import("../dist/core/engine/view.js");
+
+function viewConfig(overrides = {}) {
+  return {
+    chartType: "footprint",
+    tpoMode: "letters",
+    tpoProfilePeriod: "session",
+    tpoBracketSize: 30,
+    clusterCellData: "volume",
+    profileCellData: "volume",
+    candles: true,
+    heat: true,
+    cellNumbers: true,
+    poc: true,
+    stackedImbalance: true,
+    ...overrides,
+  };
+}
+
+test("a visibility toggle and a restored renderer both receive the panel config", () => {
+  const pushed = [];
+  const overlayPushed = [];
+  let renderer = { setChartConfig: (config) => pushed.push(["first", config]) };
+  const coordinator = new ChartRenderCoordinator({
+    session: { invalidate() {} },
+    overlay: { setChartConfig: (config) => overlayPushed.push(config) },
+    getRenderer: () => renderer,
+    listIndicators: () => [],
+  });
+
+  coordinator.applyConfig(viewConfig());
+  const layers = coordinator.getGpuLayerIds();
+  coordinator.applyConfig(viewConfig({ heat: false }));
+  assert.equal(pushed.at(-1)[1].heat, false, "heat-only change must reach the renderer");
+  assert.equal(overlayPushed.at(-1).heat, false, "heat-only change must reach the overlay");
+  assert.equal(coordinator.getGpuLayerIds(), layers, "visibility toggles do not rebuild the layer composition");
+
+  // WebGL restore: a new renderer with the same layer key still gets the panel config.
+  renderer = { setChartConfig: (config) => pushed.push(["restored", config]) };
+  coordinator.applyConfig(viewConfig({ heat: false }));
+  assert.deepEqual(pushed.at(-1)[0], "restored");
+  assert.equal(pushed.at(-1)[1].heat, false);
+  coordinator.dispose();
+});
+
+test("the GPU flush uses the canvas window's DPR, not the main window's", () => {
+  const previous = globalThis.window;
+  globalThis.window = { devicePixelRatio: 1 };
+  try {
+    const canvas = { ownerDocument: { defaultView: { devicePixelRatio: 2 } } };
+    const gl = new Proxy({ canvas, drawingBufferWidth: 1600, drawingBufferHeight: 1200 }, {
+      get(target, prop) {
+        if (prop in target) return target[prop];
+        if (typeof prop === "string" && /^[A-Z_0-9]+$/.test(prop)) return 1;
+        return () => ({});
+      },
+    });
+    const renderer = new FootprintRenderer(gl);
+    const flushes = [];
+    renderer.batch = {
+      begin() {},
+      rect() {},
+      flush: (w, h) => flushes.push([w, h]),
+      dispose() {},
+    };
+    renderer.setChartConfig(viewConfig());
+    const series = new FootprintSeries({ intervalMs: 60_000, priceStep: 1 });
+    const view = new View();
+    view.area = { left: 0, top: 0, width: 800, height: 600 };
+    view.priceTop = 120;
+    view.pricePerPx = 0.1;
+    renderer.renderLayers(view, series, new Set());
+    assert.deepEqual(flushes.at(-1), [800, 600]);
+  } finally {
+    if (previous === undefined) delete globalThis.window;
+    else globalThis.window = previous;
+  }
+});
+

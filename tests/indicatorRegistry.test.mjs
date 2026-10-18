@@ -239,8 +239,8 @@ test("built-in header labels include compact metadata", async () => {
   assert.equal(liqLabel, "Liquidations 1d · src 1D · 9ex · USD+COIN · 20 sym");
 });
 
-// --- T02B qualifier slice1 (#310): instance/pane identity + independent defaults ---
-test("T02B qualifier registry owns instance and pane identity with independent defaults", async () => {
+// --- instance/pane identity + independent defaults ---
+test("registry owns instance and pane identity with independent defaults", async () => {
   const { createIndicatorInstance, getIndicatorDefinition } = await registry();
   const definition = getIndicatorDefinition("moving-average");
   assert.ok(definition);
@@ -279,8 +279,8 @@ test("T02B qualifier registry owns instance and pane identity with independent d
   assert.equal(instanceA.settings.lines[0].id, instanceB.settings.lines[0].id);
 });
 
-// --- TASK #328 (T10-B) CVD lifecycle pilot: static identity + clone-safe defaults ---
-test("T10-B CVD pilot: static CVD registration identity is stable and defaults stay clone-safe", async () => {
+// --- CVD lifecycle: static identity + clone-safe defaults ---
+test("static CVD registration identity is stable and defaults stay clone-safe", async () => {
   const { createIndicatorInstance, getIndicatorDefinition, listIndicatorDefinitions } = await registry();
   const cvdFirst = getIndicatorDefinition("cvd");
   const cvdSecond = getIndicatorDefinition("cvd");
@@ -308,8 +308,8 @@ test("T10-B CVD pilot: static CVD registration identity is stable and defaults s
   assert.notStrictEqual(maInstance.settings.lines, movingAverage.defaultSettings().lines, "unrelated registration keeps independent deep-cloned defaults");
   assert.notStrictEqual(maInstance.settings.lines[0], movingAverage.defaultSettings().lines[0], "unrelated registration keeps nested line objects decoupled from defaults");
 });
-// --- TASK #328 (T10-B) finding 3: full moving-average independence across CVD lifecycle actions ---
-test("T10-B CVD pilot: CVD actions leave full moving-average settings, defaults and nested references untouched", async () => {
+// --- full moving-average independence across CVD lifecycle actions ---
+test("CVD actions leave full moving-average settings, defaults and nested references untouched", async () => {
   const { createIndicatorInstance, getIndicatorDefinition } = await registry();
   const movingAverage = getIndicatorDefinition("moving-average");
   assert.ok(movingAverage);

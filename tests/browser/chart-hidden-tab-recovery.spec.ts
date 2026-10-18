@@ -90,7 +90,7 @@ async function waitForFile(path: string, timeoutMs: number): Promise<string> {
 
 const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 
-test("#315 hidden tab: the live queue stays bounded under Chromium's intensive timer throttling", async ({}, testInfo) => {
+test("hidden tab: the live queue stays bounded under Chromium's intensive timer throttling", async ({}, testInfo) => {
   test.setTimeout(HIDDEN_MS + 120_000);
   const baseURL = String(testInfo.project.use.baseURL ?? "http://127.0.0.1:4173");
   const userDataDir = mkdtempSync(join(tmpdir(), "pactolis-hidden-tab-"));
@@ -345,11 +345,11 @@ const nativeFreezeTest = test.extend<{}, { nativeBrowser: Browser }>({
     try { await use(page); } finally { if (!page.isClosed()) await page.close(); }
   },
 });
-nativeFreezeTest.describe("#326 mounted native freeze", () => {
+nativeFreezeTest.describe("mounted native freeze", () => {
 // Headed: the default suite has no display; Chart Lifecycle Qualification runs it under Xvfb and requires its attachment.
 // Skipped at collection, before the worker fixture tries to start a headed Chromium.
 nativeFreezeTest.skip(!process.env.DISPLAY, "#326 native freeze needs a display (Chart Lifecycle Qualification)");
-nativeFreezeTest("#326 native frozen page: Node socket producer, enqueue ACK and actual addTrade ledger", async ({ page, context }, testInfo) => {
+nativeFreezeTest("native frozen page: Node socket producer, enqueue ACK and actual addTrade ledger", async ({ page, context }, testInfo) => {
   test.setTimeout(90_000);
   const { RealBigTradesWebSocketServer } = await import("./support/realBigTradesWebSocketServer.js");
   const server = new RealBigTradesWebSocketServer();
