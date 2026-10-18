@@ -45,10 +45,24 @@ jobs:
       - run: npm ci --no-audit --no-fund
       - run: npm run check:browser
       - run: npx --no-install playwright install --with-deps chromium
-      - run: npm run test:browser
+      - run: npm run test:browser -- --project=default
       - if: failure()
         uses: actions/upload-artifact@v4
         with:
           name: playwright-results
           path: test-results/
           retention-days: 7
+
+  census:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24
+      - run: npm ci --no-audit --no-fund
+      - run: npx --no-install playwright install --with-deps chromium
+      - run: npm run test:browser -- --project=census

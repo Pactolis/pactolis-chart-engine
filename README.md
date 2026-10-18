@@ -55,6 +55,7 @@ npm run check          # type check
 npm test               # build, then run the unit tests with node --test
 npm run check:exports  # every entry point exists and loads
 npm run test:browser   # Playwright specs against the harness page in Chromium
+                       # (--project=default, or --project=census for the multi-chart load census)
 npm run harness        # serve the harness at http://127.0.0.1:4173/harness/?chart=BINANCE_FUTURES:btcusdt
 ```
 

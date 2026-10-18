@@ -1,0 +1,142 @@
+name: Chart Endurance
+
+# #308 endurance measurement: the 4L2 or 8Tam workload with live trades for
+# 30 or 60 minutes (see ENDURANCE in tests/browser/chart-multi-market-census
+# .spec.ts). Trade correctness is gated; heap and latency drift are reported
+# only. The attached endurance-evidence.json is the only uploaded artifact.
+on:
+  # Weekly 60 min 4L2 run on main.
+  schedule:
+    - cron: "7 4 * * 0"
+  workflow_dispatch:
+    inputs:
+      minutes:
+        description: "Endurance length in minutes"
+        type: choice
+        options: ["30", "60"]
+        default: "30"
+      profile:
+        description: "Endurance workload profile"
+        type: choice
+        options: ["4L2", "8Tam"]
+        default: "4L2"
+      source_sha:
+        description: "Exact 40-hex commit to run against (required)"
+        type: string
+        required: true
+  # A change to this workflow or the census spec proves itself with a 30 min run.
+  pull_request:
+    branches: [main]
+    paths:
+      - ".github/workflows/chart-endurance.yml"
+      - "tests/browser/chart-multi-market-census.spec.ts"
+      - "harness/**"
+
+# Runs of the same declared source SHA serialize; none is cancelled.
+concurrency:
+  group: chart-endurance-${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || (github.event_name == 'schedule' && github.sha || inputs.source_sha) }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  endurance:
+    runs-on: ubuntu-latest
+    timeout-minutes: ${{ (github.event_name == 'schedule' || inputs.minutes == '60') && 120 || 60 }}
+    env:
+      CHART_ENDURANCE_MINUTES: ${{ github.event_name == 'schedule' && '60' || inputs.minutes || '30' }}
+      CHART_ENDURANCE_PROFILE: ${{ github.event_name == 'schedule' && '4L2' || inputs.profile || '4L2' }}
+      CHART_ENDURANCE_SOURCE_SHA: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || (github.event_name == 'schedule' && github.sha || inputs.source_sha) }}
+    steps:
+      - name: Refuse fork PRs (explicit SKIP, not acceptance)
+        if: github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository
+        run: |
+          echo "::error::fork pull requests are an explicit SKIP, not acceptance; use a same-repo branch"
+          exit 1
+      - name: Validate the declared source SHA (before install)
+        run: |
+          echo "declared source SHA: $CHART_ENDURANCE_SOURCE_SHA"
+          printf '%s' "$CHART_ENDURANCE_SOURCE_SHA" | grep -Eq '^[0-9a-f]{40}$' \
+            || { echo "::error::source_sha must be an exact 40-hex commit"; exit 1; }
+      - uses: actions/checkout@v5
+        with:
+          ref: ${{ env.CHART_ENDURANCE_SOURCE_SHA }}
+          persist-credentials: false
+      - name: Assert HEAD equals the declared SHA (before install)
+        run: test "$(git rev-parse HEAD)" = "$CHART_ENDURANCE_SOURCE_SHA"
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24
+      - run: npm ci --no-audit --no-fund
+      - name: Install Chromium browser
+        run: npx --no-install playwright install --with-deps chromium
+      - name: Endurance browser run
+        run: npx --no-install playwright test --project=census --grep endurance --workers=1 --retries=0 --reporter=line
+      - name: Assert HEAD still equals the declared SHA (always)
+        if: always()
+        run: test "$(git rev-parse HEAD)" = "$CHART_ENDURANCE_SOURCE_SHA"
+      - name: Validate and log endurance evidence (read-only, bounded)
+        if: always()
+        run: |
+          node --input-type=module -e '
+            import { readdirSync, readFileSync, statSync } from "node:fs";
+            import { join } from "node:path";
+            const fail = (why) => { console.error("::error::endurance evidence invalid: " + why); process.exit(1); };
+            const found = [];
+            try {
+              const visit = (dir) => readdirSync(dir, { withFileTypes: true }).forEach((entry) => {
+                const full = join(dir, entry.name);
+                if (entry.isDirectory()) visit(full);
+                else if (entry.name === "endurance-evidence.json") found.push(full);
+              });
+              visit("test-results");
+            } catch { fail("no test-results directory"); }
+            if (found.length !== 1) fail("expected exactly 1 endurance-evidence.json, found " + found.length);
+            const bytes = statSync(found[0]).size;
+            if (bytes > 256 * 1024) fail("evidence is " + bytes + " bytes, over the 256 KiB bound");
+            const e = JSON.parse(readFileSync(found[0], "utf8"));
+            if (e.test !== "chart-multi-market-census") fail("wrong test");
+            if (e.terminal !== "PASS") fail("terminal " + e.terminal);
+            if (e.provenance?.declaredSourceSHA !== process.env.CHART_ENDURANCE_SOURCE_SHA) fail("declared source SHA mismatch");
+            const expectedProfile = process.env.CHART_ENDURANCE_PROFILE === "8Tam" ? "endurance-8tam" : "endurance";
+            if (e.profile !== expectedProfile) fail("profile mismatch");
+            const minutes = Number(process.env.CHART_ENDURANCE_MINUTES);
+            if (e.minutes !== minutes) fail("minutes mismatch");
+            if (!Number.isFinite(e.elapsedMs) || e.elapsedMs < minutes * 60000) fail("elapsedMs under the full run");
+            const samples = e.samples ?? [];
+            const sampleMs = 60000;
+            // #345: match the writer sampling contract, not just a count:
+            // floor(actual duration / sampleMs) derived count, 1-based minute
+            // numbering, positive intervals spaced at most 1.5 * sampleMs and
+            // a full (N - 1) * sampleMs span, so compressed timestamps fail.
+            if (samples.length < Math.floor(e.elapsedMs / sampleMs)) fail("sample count under floor(elapsedMs / sampleMs)");
+            samples.forEach((s, i) => {
+              if (s.minute !== i + 1) fail("sample " + (i + 1) + " minute numbering");
+              if (!Number.isFinite(s.at) || s.at < 0) fail("sample " + (i + 1) + " timestamp");
+              if (!Number.isFinite(s.heapBytes) || s.heapBytes < 0 || s.heapBytes > 1073741824) fail("sample " + (i + 1) + " heap");
+              if (i) {
+                const gap = s.at - samples[i - 1].at;
+                if (!(gap > 0) || gap > 1.5 * sampleMs) fail("sample " + (i + 1) + " interval spacing");
+              }
+            });
+            if (samples.length > 1 && samples[samples.length - 1].at - samples[0].at < (samples.length - 1) * sampleMs)
+              fail("sample span under (N - 1) * sampleMs");
+            if (e.stages?.financial !== "passed" || e.stages?.cleanup !== "passed" || e.stages?.evidence !== "written") fail("stages");
+            const served = e.provenance?.servedSources ?? [];
+            if (!served.length || !served.every((r) => r.status === 200 && /^[0-9a-f]{64}$/.test(r.bodySha256 ?? ""))) fail("served provenance");
+            const heaps = samples.map((s) => s.heapBytes);
+            console.log("endurance evidence summary: source=" + e.provenance.declaredSourceSHA
+              + " profile=" + e.profile + " minutes=" + e.minutes + " elapsedMs=" + e.elapsedMs
+              + " samples=" + samples.length + " heapMin=" + Math.min(...heaps) + " heapMax=" + Math.max(...heaps)
+              + " trades=" + (e.delivery?.tradesTotal ?? "null") + " messages=" + (e.delivery?.messagesTotal ?? "null")
+              + " censusBars=" + (e.census?.totals?.bars ?? "null") + " censusCells=" + (e.census?.totals?.cells ?? "null")
+              + " testSha256=" + e.provenance.executedTest?.testFileSha256);
+          '
+      - name: Upload endurance evidence only (failure honest)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: endurance-evidence-${{ env.CHART_ENDURANCE_SOURCE_SHA }}
+          path: test-results/**/endurance-evidence.json
+          if-no-files-found: error
