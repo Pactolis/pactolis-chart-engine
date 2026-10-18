@@ -1,4 +1,4 @@
-iimport assert from 'node:assert/strict';
+import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
 import { readFileSync } from 'node:fs';
 import test from 'node:test';
@@ -27,7 +27,7 @@ function listedCensusTests(shard) {
       for (const item of spec.tests ?? []) {
         assert.equal(typeof spec.id, 'string', 'each census spec needs a string id');
         assert.ok(spec.id.trim().length > 0, 'each census spec needs a nonempty id');
-        names.push(`${spec.id} :: ${item.projectName}`);
+        names.push(`${spec.id} :: ${spec.title} :: ${item.projectName}`);
       }
     }
   };
