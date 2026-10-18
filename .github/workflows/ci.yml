@@ -53,9 +53,13 @@ jobs:
           path: test-results/
           retention-days: 7
 
-  census:
+  census-shards:
     runs-on: ubuntu-latest
     timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [1, 2]
     steps:
       - uses: actions/checkout@v5
         with:
@@ -65,4 +69,22 @@ jobs:
           node-version: 24
       - run: npm ci --no-audit --no-fund
       - run: npx --no-install playwright install --with-deps chromium
-      - run: npm run test:browser -- --project=census
+      - run: npm run test:browser -- --project=census --fully-parallel --workers=1 --shard=${{ matrix.shard }}/2
+      - if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: census-results-${{ matrix.shard }}
+          path: test-results/
+          retention-days: 7
+
+  census:
+    name: census
+    needs: census-shards
+    if: ${{ always() }}
+    runs-on: ubuntu-latest
+    steps:
+      - run: |
+          if [ "${{ needs.census-shards.result }}" != "success" ]; then
+            echo "Census shards did not all succeed"
+            exit 1
+          fi
