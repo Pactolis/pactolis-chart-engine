@@ -38,7 +38,7 @@ o ölçüm "çalıştı/GREEN" sayılmaz.
 
 [.github/workflows/ci.yml](../.github/workflows/ci.yml): PR + main push, Node 22/24/26 matrisinde
 `check` + `test` + `check:exports` + `npm pack --dry-run`; ayrı `browser` job (default project,
-Playwright chromium) ve `census` job. Browser job yalnız failure durumunda `test-results/` klasörünü
+Playwright chromium) ve iki `census-shards` runner ile aggregate `census` gate. Her shard Playwright full-parallel, tek worker kullanır; aggregate yalnızca iki shard da başarılıysa geçer. Başarısız shard'lar `census-results-<shard>` benzersiz artifact'ını yükler. Browser job yalnız failure durumunda `test-results/` klasörünü
 `playwright-results` artifact'ı olarak yükler.
 
 [.github/workflows/chart-endurance.yml](../.github/workflows/chart-endurance.yml): weekly 60 dk 4L2
