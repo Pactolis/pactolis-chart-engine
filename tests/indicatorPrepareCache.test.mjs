@@ -68,10 +68,10 @@ test("indicator prepare cache invalidates time-sensitive policies when their tim
   assert.equal(computes, 2);
 });
 
-// --- T02B qualifier slice1 (#310): owner-local invalidation with real series ---
+// --- owner-local invalidation with real series ---
 import { FootprintSeries } from "../dist/core/model/footprint.js";
 
-test("T02B qualifier primed prepare caches keep owner-local invalidation", () => {
+test("primed prepare caches keep owner-local invalidation", () => {
   const intervalMs = 60_000;
   const baseStart = Date.UTC(2026, 0, 1);
   const historyBars = () => [0, 1, 2].map((index) => {

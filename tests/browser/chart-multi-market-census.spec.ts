@@ -1747,7 +1747,7 @@ async function runScenario(scenario: Scenario, page: Page, testInfo?: TestInfo) 
 
 // Negative oracle for the minute-sample validator: short, dense/duplicate,
 // unknown-heap and non-finite-timestamp sets must all be rejected.
-test("#308 census minute-sample validator rejects fabricated sets", () => {
+test("census minute-sample validator rejects fabricated sets", () => {
   const good = Array.from({ length: 3 }, (_, index) => ({ minute: index + 1, at: 60_000 * (index + 1), heapBytes: 1_000 }));
   expect(validateEnduranceSamples(good, 180_000, 3, 60_000)).toEqual([]);
   expect(validateEnduranceSamples(good.slice(0, 2), 180_000, 3, 60_000).join()).toContain("count");
@@ -1763,7 +1763,7 @@ for (const scenario of SCENARIOS) test(scenario.title, ({ page }) => runScenario
 // Endurance runs only on request: the "Chart endurance" workflow sets
 // CHART_ENDURANCE_MINUTES.
 test(ENDURANCE_PROFILE.title, async ({ page }, testInfo) => {
-  test.skip(ENDURANCE_MINUTES <= 0, "set CHART_ENDURANCE_MINUTES to run the #308 endurance profile");
+  test.skip(ENDURANCE_MINUTES <= 0, "set CHART_ENDURANCE_MINUTES to run the endurance profile");
   await runScenario(ENDURANCE_PROFILE, page, testInfo);
 });
 
@@ -1773,7 +1773,7 @@ test(ENDURANCE_PROFILE.title, async ({ page }, testInfo) => {
 // worker option and cannot be changed by describe-scoped test.use.
 const nativeTest = test.extend({
   browser: [async ({ playwright, browserName, launchOptions, headless, channel }, use) => {
-    if (browserName !== "chromium") throw new Error("#326 native qualification requires Chromium CDP");
+    if (browserName !== "chromium") throw new Error("native qualification requires Chromium CDP");
     const browser = await playwright.chromium.launch({
       ...launchOptions, headless, channel,
       args: [...(launchOptions.args ?? []), "--enable-automation"],
@@ -1782,9 +1782,9 @@ const nativeTest = test.extend({
     finally { await browser.close({ reason: "Test ended." }); }
   }, { scope: "worker", timeout: 0 }],
 });
-// #326: qualification only; fixture analysis service + real Bridge, not engine proof.
+// Qualification only; fixture analysis service + real Bridge, not engine proof.
 // One document, 1/4/8 owners x eight cycles. No active accounting record is reset.
-nativeTest("#326 native lifecycle qualification: repeated mounted owner census", async ({ page, browser }, testInfo) => {
+nativeTest("native lifecycle qualification: repeated mounted owner census", async ({ page, browser }, testInfo) => {
   test.setTimeout(300_000);
   const transport: Array<{ market: string; format: string; bars: number; bytes: number; completed: boolean }> = [];
   const errors: string[] = [];

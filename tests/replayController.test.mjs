@@ -160,3 +160,96 @@ test("randomTime resolves to a completed-bar boundary", () => {
     Math.random = original;
   }
 });
+
+globalThis.$state ??= (value) => value;
+const { ChartReplayCoordinator } = await import("../dist/features/chart/ChartReplayCoordinator.js");
+const { FootprintSeries } = await import("../dist/core/model/footprint.js");
+
+const REPLAY_MINUTE = 60_000;
+const REPLAY_T0 = Date.UTC(2024, 0, 1);
+
+function replayHistoryBar(startTime, cells) {
+  return {
+    startTime,
+    open: 100, high: 101, low: 99, close: 100,
+    volume: 5, delta: 5, count: 5,
+    liquidationBuyVol: 0, liquidationSellVol: 0,
+    cells: new Map(cells.map((cell) => [cell.priceBin, {
+      buyVol: 0, sellVol: 0, count: 0, buyCount: 0, sellCount: 0,
+      liquidationBuyVol: 0, liquidationSellVol: 0,
+      ...cell,
+    }])),
+    hasRef: true,
+    completeness: "complete",
+    sources: ["history"],
+    updatedAt: startTime,
+  };
+}
+
+function replayHarness() {
+  const series = new FootprintSeries({ intervalMs: REPLAY_MINUTE, priceStep: 1 });
+  for (let index = 0; index < 4; index++) {
+    series.upsertBar(replayHistoryBar(REPLAY_T0 + index * REPLAY_MINUTE, [{ priceBin: 100, buyVol: 1 }]));
+  }
+  const host = {
+    market: "BINANCE_FUTURES:btcusdt",
+    paused: [],
+    reloads: 0,
+    pipeline: { series, intervalMs: REPLAY_MINUTE, setPaused: (paused) => host.paused.push(paused) },
+    session: { invalidate() {} },
+    timeViewport: { applyDataUpdate() {}, placeReplayPrefixEnd() {} },
+    svc: { updateAnalysisFromSeries() {} },
+    isDisposed: () => false,
+    getMarket: () => host.market,
+    autoFit() {},
+    updateHook() {},
+    loadHistory: async () => { host.reloads++; },
+  };
+  const coordinator = new ChartReplayCoordinator(host);
+  const snapshots = [];
+  coordinator.subscribe((snapshot) => snapshots.push(snapshot));
+  return { host, series, coordinator, snapshots };
+}
+
+test("leaving the replayed market ends replay without reloading the old market", () => {
+  const { host, series, coordinator, snapshots } = replayHarness();
+  coordinator.start();
+  coordinator.selectFirst();
+  assert.equal(series.length, 0);
+
+  host.market = "BINANCE_FUTURES:ethusdt";
+  coordinator.exitForMarketChange(host.market);
+  assert.equal(coordinator.isActive(), false);
+  assert.equal(host.reloads, 0, "the new market loads its own history");
+  assert.equal(snapshots.at(-1), null);
+  assert.equal(host.paused.at(-1), false);
+});
+
+test("a replay step never writes the old market's bar into another market's series", () => {
+  const { host, series, coordinator, snapshots } = replayHarness();
+  coordinator.start();
+  coordinator.selectFirst();
+  host.market = "BINANCE_FUTURES:ethusdt";
+  coordinator.step();
+  assert.equal(series.length, 0, "the BTC bar must not land on the ETH series");
+  assert.equal(coordinator.isActive(), false);
+  assert.equal(snapshots.at(-1), null, "no stale replay snapshot may follow the exit");
+});
+
+test("replay exit reports a failed history reload instead of leaving it unhandled", async () => {
+  const { host, coordinator } = replayHarness();
+  const warnings = [];
+  const originalWarn = console.warn;
+  console.warn = (...args) => warnings.push(args);
+  try {
+    host.loadHistory = async () => { throw new Error("offline"); };
+    coordinator.start();
+    coordinator.exit();
+    await new Promise(setImmediate);
+  } finally {
+    console.warn = originalWarn;
+  }
+  assert.equal(warnings.length, 1);
+  assert.match(String(warnings[0][0]), /replay/);
+});
+

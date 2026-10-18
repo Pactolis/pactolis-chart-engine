@@ -148,7 +148,7 @@ test("duplicate and out-of-order trades are deterministic", () => {
   assert.equal(series.at(1).volume, 2);
 });
 
-test("periodic history refresh does not re-stall live OHLC (TASK-018)", () => {
+test("periodic history refresh does not re-stall live OHLC", () => {
   const series = new FootprintSeries({ intervalMs: 60_000, priceStep: 10 });
   const bar = (close, vol = 1, count = 1) => ({
     startTime: 0, open: 100, high: Math.max(100, close), low: Math.min(100, close), close,
@@ -162,7 +162,7 @@ test("periodic history refresh does not re-stall live OHLC (TASK-018)", () => {
   assert.equal(series.at(0).close, 105, "history refresh must not re-stall live OHLC");
 });
 
-test("reference-market trades drive OHLC; a stale referenceMarket basis-shifts them (TASK-035)", () => {
+test("reference-market trades drive OHLC; a stale referenceMarket basis-shifts them", () => {
   const series = new FootprintSeries({ intervalMs: 60_000, priceStep: 1, referenceMarket: "OLD:x" });
   const bar = (close) => ({
     startTime: 0, open: close, high: close, low: close, close,
@@ -202,3 +202,105 @@ test("live inserts cap an open chart's bar map and keep the newest bars", () => 
   assert.equal(series.length, MAX_SERIES_BARS);
   assert.equal(series.at(0).startTime, ACTIVE_TIME + (extra + 1) * intervalMs);
 });
+
+const { FootprintRenderer } = await import("../dist/core/render/footprintRenderer.js");
+const { View } = await import("../dist/core/engine/view.js");
+
+const FOOTPRINT_MINUTE = 60_000;
+const FOOTPRINT_T0 = Date.UTC(2024, 0, 1);
+
+function footprintHistoryBar(startTime, cells, ohlc = {}) {
+  return {
+    startTime,
+    open: 100, high: 101, low: 99, close: 100,
+    volume: 5, delta: 5, count: 5,
+    liquidationBuyVol: 0, liquidationSellVol: 0,
+    cells: new Map(cells.map((cell) => [cell.priceBin, {
+      buyVol: 0, sellVol: 0, count: 0, buyCount: 0, sellCount: 0,
+      liquidationBuyVol: 0, liquidationSellVol: 0,
+      ...cell,
+    }])),
+    hasRef: true,
+    completeness: "complete",
+    sources: ["history"],
+    updatedAt: startTime,
+    ...ohlc,
+  };
+}
+
+function fakeGl(dpr) {
+  const canvas = { ownerDocument: { defaultView: { devicePixelRatio: dpr } } };
+  return new Proxy({ canvas, drawingBufferWidth: 800 * dpr, drawingBufferHeight: 600 * dpr }, {
+    get(target, prop) {
+      if (prop in target) return target[prop];
+      if (typeof prop === "string" && /^[A-Z_0-9]+$/.test(prop)) return 1;
+      return () => ({});
+    },
+  });
+}
+
+function recordingRenderer(dpr = 1) {
+  const renderer = new FootprintRenderer(fakeGl(dpr));
+  const rects = [];
+  const flushes = [];
+  renderer.batch = {
+    begin() {},
+    rect: (x, y, w, h) => rects.push({ x, y, w, h }),
+    flush: (w, h) => flushes.push([w, h]),
+    dispose() {},
+  };
+  return { renderer, rects, flushes };
+}
+
+function plotView() {
+  const view = new View();
+  view.area = { left: 0, top: 0, width: 800, height: 600 };
+  view.priceTop = 120;
+  view.pricePerPx = 0.1;
+  return view;
+}
+
+test("OHLC maintenance keeps the live trade order, so a delayed trade cannot move the close back", () => {
+  const market = "BINANCE_FUTURES:btcusdt";
+  const series = new FootprintSeries({ intervalMs: FOOTPRINT_MINUTE, priceStep: 1, referenceMarket: market });
+  const trade = (time, price, id) => ({ time, price, qty: 1, isBuy: true, market, id: String(id), receivedAt: time });
+  series.addTrade(trade(FOOTPRINT_T0 + 1_000, 100, 1));
+  series.addTrade(trade(FOOTPRINT_T0 + 3_000, 100.2, 3));
+  series.reassertOHLC(FOOTPRINT_T0, 100, 100.2, 100, { close: 100.2, preferIncomingClose: true, observedAt: FOOTPRINT_T0 + 3_500 });
+  series.addTrade(trade(FOOTPRINT_T0 + 2_000, 99.9, 2));
+  assert.equal(series.at(0).close, 100.2, "a trade older than the close must not replace it");
+  assert.equal(series.at(0).low, 99.9);
+  series.addTrade(trade(FOOTPRINT_T0 + 4_000, 100.1, 4));
+  assert.equal(series.at(0).close, 100.1, "a newer trade still moves the close");
+  assert.equal(series.at(0).open, 100, "the reasserted open stays authoritative");
+});
+
+test("single-price bars and cells on the high's bin edge keep their footprint row", () => {
+  const { renderer } = recordingRenderer();
+  const view = plotView();
+  const flat = footprintHistoryBar(FOOTPRINT_T0, [{ priceBin: 100, buyVol: 1 }], { open: 100, high: 100, low: 100, close: 100 });
+  const flatRect = renderer.clippedCellRect(view, flat, 100, 1);
+  assert.ok(flatRect && flatRect.height > 0, "a single-price bar's only cell must be drawn");
+
+  const edge = footprintHistoryBar(FOOTPRINT_T0, [{ priceBin: 105, buyVol: 1 }], { open: 101, high: 105, low: 101, close: 105 });
+  const edgeRect = renderer.clippedCellRect(view, edge, 105, 1);
+  assert.ok(edgeRect && edgeRect.height > 0, "the cell holding the high must be drawn");
+  assert.equal(renderer.clippedCellRect(view, edge, 107, 1), null, "cells outside the traded range stay hidden");
+
+  const merged = renderer.clipPixelSpanToBar(view, flat, view.yOfPrice(100) - 0.5, 1);
+  assert.ok(merged && merged.height > 0, "the pixel-merged path keeps a single-price bar too");
+});
+
+test("a price gap ends a stacked imbalance run", () => {
+  const { renderer, rects } = recordingRenderer();
+  const view = plotView();
+  const bins = [100, 101, 103, 104];
+  const bar = footprintHistoryBar(FOOTPRINT_T0, bins.map((priceBin) => ({ priceBin, buyVol: 1 })), { high: 105, low: 100 });
+  renderer.markRuns(view, bar, bins.map((priceBin) => ({ priceBin })), 1, [true, true, true, true], 0, 2, { r: 0, g: 1, b: 0, a: 1 });
+  assert.equal(rects.length, 0, "two runs of two are not a stack of three");
+
+  const consecutive = [100, 101, 102];
+  renderer.markRuns(view, bar, consecutive.map((priceBin) => ({ priceBin })), 1, [true, true, true], 0, 2, { r: 0, g: 1, b: 0, a: 1 });
+  assert.equal(rects.length, 3);
+});
+

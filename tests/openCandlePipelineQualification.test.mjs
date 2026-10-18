@@ -31,7 +31,7 @@ function view(series, start = START) {
   return { open: bar.open, high: bar.high, low: bar.low, close: bar.close, volume: bar.volume, delta: bar.delta, count: bar.count, cells };
 }
 
-test("T02-D SERIES-SPLIT-TAIL: a tail trade applied as candle then footprint keeps both components exactly once", () => {
+test("a tail trade applied as candle then footprint keeps both components exactly once", () => {
   const series = new FootprintSeries({ intervalMs: INTERVAL, priceStep: 1 });
   series.replaceRange(START, START + INTERVAL, [provenBar()]);
   series.commitRepairOwnership([START], 10n, []);
@@ -53,7 +53,7 @@ test("T02-D SERIES-SPLIT-TAIL: a tail trade applied as candle then footprint kee
   assert.deepEqual(view(series), expected);
 });
 
-test("T02-D SERIES-SPLIT-TAIL: a whole tail trade is not re-applied by a later split replay", () => {
+test("a whole tail trade is not re-applied by a later split replay", () => {
   const series = new FootprintSeries({ intervalMs: INTERVAL, priceStep: 1 });
   series.replaceRange(START, START + INTERVAL, [provenBar()]);
   series.commitRepairOwnership([START], 10n, []);
@@ -66,7 +66,7 @@ test("T02-D SERIES-SPLIT-TAIL: a whole tail trade is not re-applied by a later s
   assert.deepEqual(view(series), once);
 });
 
-test("T02-D SERIES-OWNED-UPSERT: upsertBar cannot overwrite a repair-owned or fenced bucket without a proof", () => {
+test("upsertBar cannot overwrite a repair-owned or fenced bucket without a proof", () => {
   const series = new FootprintSeries({ intervalMs: INTERVAL, priceStep: 1 });
   series.replaceRange(START, START + 2 * INTERVAL, [provenBar(), provenBar(START + INTERVAL)]);
   series.commitRepairOwnership([START], 10n, []);
@@ -150,7 +150,7 @@ function makePipelineFixture({ synchronous = false } = {}) {
   };
 }
 
-test("T02-D PIPELINE-A-01: a recent-coverage repair that retries on an unidentified trade leaves series and queue untouched", async () => {
+test("a recent-coverage repair that retries on an unidentified trade leaves series and queue untouched", async () => {
   const fixture = makePipelineFixture();
   try {
     const outcome = fixture.pipeline.repairRecentFootprintCoverage(START, START + INTERVAL);
@@ -175,7 +175,7 @@ test("T02-D PIPELINE-A-01: a recent-coverage repair that retries on an unidentif
   }
 });
 
-test("T02-D PIPELINE-A-02: a superseded history load cannot write its metadata into the current load", async (t) => {
+test("a superseded history load cannot write its metadata into the current load", async (t) => {
   const startTime = Math.floor(Date.now() / INTERVAL) * INTERVAL - 3 * INTERVAL;
   const fastResponses = [];
   // This read ignores AbortSignal on purpose, so a superseded response really arrives.
@@ -222,7 +222,7 @@ async function withHistory(t, history, run) {
   return run();
 }
 
-test("T02-D PIPELINE-B-01: a history snapshot is dropped when the public before-update callback resets the pipeline", async (t) => {
+test("a history snapshot is dropped when the public before-update callback resets the pipeline", async (t) => {
   const startTime = Math.floor(Date.now() / INTERVAL) * INTERVAL - 3 * INTERVAL;
   await withHistory(t, async (query) => {
     if (query.includeFootprint === false) return [];
@@ -244,7 +244,7 @@ test("T02-D PIPELINE-B-01: a history snapshot is dropped when the public before-
   });
 });
 
-test("T02-D PIPELINE-B-01: a day patch is dropped when the public before-update callback disposes the pipeline", async (t) => {
+test("a day patch is dropped when the public before-update callback disposes the pipeline", async (t) => {
   const day = Math.floor(Date.now() / 86_400_000) * 86_400_000 - 2 * 86_400_000;
   await withHistory(t, async () => [sourceBar(day, 10)], async () => {
     const fixture = makePipelineFixture();
@@ -257,7 +257,7 @@ test("T02-D PIPELINE-B-01: a day patch is dropped when the public before-update 
   });
 });
 
-test("T02-D PIPELINE-B-01: a live bar seed stops when the public before-update callback disposes the pipeline", () => {
+test("a live bar seed stops when the public before-update callback disposes the pipeline", () => {
   const fixture = makePipelineFixture();
   const liveStart = Math.floor(Date.now() / INTERVAL) * INTERVAL;
   fixture.pipeline.onBeforeUpdate = () => fixture.pipeline.dispose();
@@ -269,7 +269,7 @@ test("T02-D PIPELINE-B-01: a live bar seed stops when the public before-update c
   assert.equal(fixture.updates.length, 0);
 });
 
-test("T02-D PIPELINE-B-02: an invalid history snapshot does not dequeue the live trades it would have reconciled", async (t) => {
+test("an invalid history snapshot does not dequeue the live trades it would have reconciled", async (t) => {
   const startTime = Math.floor(Date.now() / INTERVAL) * INTERVAL - 3 * INTERVAL;
   const fastGate = deferred();
   let fastRequested = false;
@@ -309,7 +309,7 @@ test("T02-D PIPELINE-B-02: an invalid history snapshot does not dequeue the live
   });
 });
 
-test("T02-D PIPELINE-B-02: an invalid recent-coverage snapshot keeps the queue, the series and the repair slot intact", async () => {
+test("an invalid recent-coverage snapshot keeps the queue, the series and the repair slot intact", async () => {
   const fixture = makePipelineFixture();
   try {
     const outcome = fixture.pipeline.repairRecentFootprintCoverage(START, START + 2 * INTERVAL);
@@ -346,7 +346,7 @@ function candleCoverage(from, toInclusive, status = "verified") {
   };
 }
 
-test("T02-D canonical history: returned buckets take the source bar, omitted owned buckets go, omitted unowned ones stay", async (t) => {
+test("canonical history: returned buckets take the source bar, omitted owned buckets go, omitted unowned ones stay", async (t) => {
   const b0 = Math.floor(Date.now() / INTERVAL) * INTERVAL - 7 * INTERVAL;
   const [b1, b2, b3, b4] = [1, 2, 3, 4].map((n) => b0 + n * INTERVAL);
   const source = (start, o) => historyBar(start, { open: o, high: o + 5, low: o - 5, close: o + 1, volume: 40, delta: -4, count: 12, liquidationBuyVol: 0, liquidationSellVol: 0 });
@@ -382,7 +382,7 @@ test("T02-D canonical history: returned buckets take the source bar, omitted own
   }
 });
 
-test("T02-D cancellation: cancelling an explicit history load re-queues the live trades it deferred, applied once", async (t) => {
+test("cancellation: cancelling an explicit history load re-queues the live trades it deferred, applied once", async (t) => {
   const b0 = Math.floor(Date.now() / INTERVAL) * INTERVAL - 4 * INTERVAL;
   let requested = false;
   await withHistory(t, ({ signal }) => new Promise((_resolve, reject) => {
@@ -411,7 +411,7 @@ test("T02-D cancellation: cancelling an explicit history load re-queues the live
   });
 });
 
-test("T02-D PIPELINE-B-01: a trade delivered from inside the before-update callback voids a recent-coverage plan instead of being dropped", async () => {
+test("a trade delivered from inside the before-update callback voids a recent-coverage plan instead of being dropped", async () => {
   const fixture = makePipelineFixture();
   try {
     const outcome = fixture.pipeline.repairRecentFootprintCoverage(START, START + INTERVAL);
@@ -437,7 +437,7 @@ test("T02-D PIPELINE-B-01: a trade delivered from inside the before-update callb
   }
 });
 
-test("T02-D PIPELINE-B-01: a trade delivered from inside the before-update callback is reconciled by the history snapshot, not added on top", async (t) => {
+test("a trade delivered from inside the before-update callback is reconciled by the history snapshot, not added on top", async (t) => {
   const startTime = Math.floor(Date.now() / INTERVAL) * INTERVAL - 3 * INTERVAL;
   const coverage = candleCoverage(startTime, startTime + INTERVAL - 1);
   await withHistory(t, async (query) => {
@@ -464,7 +464,7 @@ test("T02-D PIPELINE-B-01: a trade delivered from inside the before-update callb
   });
 });
 
-test("T02-D PIPELINE-B-01: a closed-bucket trade delivered from the day-patch callback is already in the built day, so it is not added on top", async (t) => {
+test("a closed-bucket trade delivered from the day-patch callback is already in the built day, so it is not added on top", async (t) => {
   const DAY = 86_400_000;
   const day = Math.floor(Date.now() / DAY) * DAY - 2 * DAY;
   await withHistory(t, async () => [sourceBar(day, 10)], async () => {
@@ -486,7 +486,7 @@ test("T02-D PIPELINE-B-01: a closed-bucket trade delivered from the day-patch ca
   });
 });
 
-test("T02-D PIPELINE-B-01: with a synchronous scheduler, trades flushed from the before-update callback do not abort history or day patches", async (t) => {
+test("with a synchronous scheduler, trades flushed from the before-update callback do not abort history or day patches", async (t) => {
   const startTime = Math.floor(Date.now() / INTERVAL) * INTERVAL - 3 * INTERVAL;
   const coverage = candleCoverage(startTime, startTime + INTERVAL - 1);
   await withHistory(t, async (query) => {
@@ -529,7 +529,7 @@ test("T02-D PIPELINE-B-01: with a synchronous scheduler, trades flushed from the
   });
 });
 
-test("T02-D SERIES-OWNED-UPSERT: a live bar seed rejected by a repair-owned bucket is not reported as applied", () => {
+test("a live bar seed rejected by a repair-owned bucket is not reported as applied", () => {
   const fixture = makePipelineFixture();
   try {
     const liveStart = Math.floor(Date.now() / INTERVAL) * INTERVAL;
@@ -545,7 +545,7 @@ test("T02-D SERIES-OWNED-UPSERT: a live bar seed rejected by a repair-owned buck
   }
 });
 
-test("T02-D PIPELINE-B-01: a reset raised from the coverage-unknown degraded callback drops the rest of that history snapshot", async (t) => {
+test("a reset raised from the coverage-unknown degraded callback drops the rest of that history snapshot", async (t) => {
   const b0 = Math.floor(Date.now() / INTERVAL) * INTERVAL - 5 * INTERVAL;
   const b1 = b0 + INTERVAL;
   const fastGate = deferred();

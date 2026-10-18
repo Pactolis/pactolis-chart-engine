@@ -9,7 +9,7 @@ test("niceStepForPrice computes a sensible step per price magnitude", () => {
   assert.equal(niceStepForPrice(0), 10);       // no price → fallback
 });
 
-test("reconcilePriceStep overrides a clearly-wrong canonical step (TASK: ETH 10-USD bins)", () => {
+test("reconcilePriceStep overrides a clearly-wrong canonical step (ETH 10-USD bins)", () => {
   // ETH synced with a foreign step of 10 while the price-derived step is 0.5 → use computed.
   assert.equal(reconcilePriceStep(10, 0.5), 0.5);
   // A correctly-synced market keeps its canonical step (hash consistency).

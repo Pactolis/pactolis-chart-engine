@@ -126,7 +126,7 @@ test("PNG compositor draws only the annotation canvas over GPU pixels", async ()
   assert.equal(calls.filter((entry) => entry[0] === "drawImage").length, 1);
 });
 
-test("ChartCaptureCoordinator wraps native capture with TASK-464 pre/post state token validation", async () => {
+test("ChartCaptureCoordinator wraps native capture with pre/post state token validation", async () => {
   const fs = await import("node:fs/promises");
   const [runtimeSource, coordinatorSource] = await Promise.all([
     fs.readFile(new URL("../src/features/chart/ChartRuntime.ts", import.meta.url), "utf8"),
