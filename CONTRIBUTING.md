@@ -4,7 +4,9 @@ Thanks for your interest in the Pactolis Chart Engine.
 
 - Open an issue to report a bug or propose a change. Pull requests are accepted from
   repository collaborators.
-- Run `npm run check`, `npm test` and `npm run check:exports` before sending a change, and `npm run test:browser` when it touches rendering, input or the chart runtime.
+- Run `npm run check`, `npm test` and `npm run check:exports` before sending a change, and `npm run test:browser` when it touches rendering, input or the chart runtime. The CI workflows run the same gates on GitHub-hosted runners.
+- Repository-only contributor documentation lives under `md/`; start from
+  [md/INDEX.md](md/INDEX.md).
 - Keep the engine free of runtime dependencies, UI frameworks and browser storage.
   Anything the engine needs from its host goes through a port (see the README).
 - Adding or removing an entry under `exports` in `package.json` changes the public API;

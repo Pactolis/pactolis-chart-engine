@@ -26,7 +26,7 @@ Configure the ports once at startup, before the first chart mounts:
 | `configureIndicatorDataSource` | `features/indicators/indicatorDataSource` | Data for indicators that need more than candles |
 | `configureOrderbookHeatmapSettingsSource` | `features/orderbook/heatmapSettingsSource` | Order book heatmap settings |
 | `configureFootprintBootstrapMarkets` | `core/syncAllowlist` | Markets assumed to have footprint data until the server says otherwise |
-| `configurePerformanceTelemetry` | `core/performanceTelemetry` | Optional timing sink |
+| `configurePerformanceTelemetry` | `core/performanceTelemetry` | Optional opt-in telemetry (`{ enabled }`); in-process metrics snapshot via `snapshotPerformanceTelemetry` — no callback/sink API |
 
 ```ts
 import { configureChartLocale } from "@pactolis/chart-engine/core/chartLocale";
@@ -42,7 +42,7 @@ configureChartLocale({
 ## Entry points
 
 Each public module is its own entry point, listed under `exports` in
-[package.json](package.json), for example `@pactolis/chart-engine/core/engine`.
+[package.json](package.json), for example `@pactolis/chart-engine/core/engine/view`.
 Separate entry points keep bundlers able to split the engine across lazy chunks.
 The package also ships its TypeScript sources with source maps for debugging.
 Other files in the package are internal and may change in any release.
@@ -64,7 +64,17 @@ the engine's ports with stand-ins (a JSON `/history` endpoint the specs answer w
 Playwright routes, an English locale, empty indicator data) and mounts charts from
 the TypeScript sources. Run `npx playwright install chromium` once before the first run.
 
-See [CONTRIBUTING.md](CONTRIBUTING.md).
+Repository-only documentation for contributors lives under `md/` (not part of the
+published package); start from
+[md/INDEX.md](https://github.com/Pactolis/pactolis-chart-engine/blob/main/md/INDEX.md).
+The same gates run in the
+repository's GitHub Actions workflows on GitHub-hosted runners.
+
+Development commands above are CI/runner references: on governed Pactolis workstations
+tests/checks are run by CI and runners, not executed locally; external contributors run
+them in their own environments.
+
+See [CONTRIBUTING.md](https://github.com/Pactolis/pactolis-chart-engine/blob/main/CONTRIBUTING.md).
 
 ## License
 
