@@ -16,8 +16,10 @@ export default defineConfig({
   projects: [
     // The multi-chart census and its endurance profile take most of the run; CI
     // gives them their own job.
-    { name: "default", testIgnore: ["**/chart-multi-market-census.spec.ts"] },
+    { name: "default", testIgnore: ["**/chart-multi-market-census.spec.ts", "**/heatmap-multichart-frame-perf.spec.ts"] },
     { name: "census", testMatch: ["**/chart-multi-market-census.spec.ts"] },
+    // Report-only frame timings, meant for a machine with a real GPU; CI does not run it.
+    { name: "perf", testMatch: ["**/heatmap-multichart-frame-perf.spec.ts"] },
   ],
   webServer: {
     command: "node ./node_modules/vite/bin/vite.js --configLoader native",

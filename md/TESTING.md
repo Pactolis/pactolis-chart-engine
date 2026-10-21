@@ -11,7 +11,7 @@ Komut kaynakları: [package.json](../package.json) scripts, [scripts/run-tests.m
 | `npm test` | Önce `npm run build` (`tsc -p tsconfig.build.json`), sonra `node --test` ile `tests/**/*.test.mjs` unit suite'i; Node 22/23+ isolation flag farkını `scripts/run-tests.mjs` çözümler |
 | `npm run check:exports` | `exports` listesindeki her entry'nin var olduğunu ve yüklendiğini doğrular |
 | `npm run check:browser` | `tsc -p tsconfig.browser.json` |
-| `npm run test:browser` | Playwright; `default` project `chart-multi-market-census.spec.ts` hariç tüm `tests/browser/*.spec.ts`, `census` project yalnız census spec'i |
+| `npm run test:browser` | Playwright; `default` project `chart-multi-market-census.spec.ts` ve `heatmap-multichart-frame-perf.spec.ts` hariç tüm `tests/browser/*.spec.ts`, `census` project yalnız census spec'i, `perf` project yalnız heatmap ölçüm spec'i |
 | `npm run harness` | Vite ile `harness/index.html`'i servis eder |
 
 ## Unit testler
@@ -33,6 +33,25 @@ Endurance kanıt ayrımı (.github/workflows/chart-endurance.yml): **trade doğr
 latency değerleri yalnız **raporlanır**, bunlar correctness gate'i değildir. Doğrulanmış bir
 latency/heap iyileşme iddiası için yüklenen `endurance-evidence.json` artifact'ı gerekir; artifact yoksa
 o ölçüm "çalıştı/GREEN" sayılmaz.
+
+## Heatmap ölçümü (perf project)
+
+`heatmap-multichart-frame-perf.spec.ts` orderbook heatmap'in Canvas2D ve GPU (varsayılan kapalı
+prototip) yollarını 1, 4, 8 ve 16 grafikte ABBA sırasıyla karşılaştırır ve her grafik sayısı için bir
+`heatmap-multichart-perf` JSON satırı yazar. Yalnız **raporlar**; hız eşiği yoktur, CI'da koşmaz.
+Yazılımsal GL'de (SwiftShader) sadece spec'in çalıştığını gösterir; anlamlı sayı için gerçek GPU'lu
+bir makinede koşulmalı:
+
+```sh
+HEATMAP_PERF_GL=default npx playwright test --project=perf       # Windows/macOS
+HEATMAP_PERF_GL=angle-gl npx playwright test --project=perf      # Linux (ANGLE/OpenGL)
+HEATMAP_PERF_CHARTS=4,8 HEATMAP_PERF_GL=angle-vulkan npx playwright test --project=perf
+```
+
+Alanlar: `frameMs` (invalidate'ten son grafiğin render dönüşüne, RAF beklemesi dahil),
+`renderSpanMs` (karedeki ilk render başlangıcından son render bitişine), `annotationMs` ve
+`gpuDrawMs` (N grafiğin yüzey çizim süreleri toplamı). 16 grafik Chromium'un sayfa başına ~16 WebGL
+context sınırında olduğu için o koşu context kaybını hata saymaz, `lostContexts` olarak raporlar.
 
 ## CI ve artifact kapsamı
 
