@@ -586,11 +586,26 @@ function drawHoverTable(ctx: CanvasRenderingContext2D, view: View, crosshair: Cr
   y = Math.max(top, y);
 
   ctx.save();
-  ctx.fillStyle = "rgba(13, 17, 23, 0.94)";
-  ctx.strokeStyle = "rgba(139, 148, 158, 0.35)";
+  ctx.fillStyle = "rgba(11, 16, 24, 0.95)";
+  ctx.strokeStyle = "rgba(148, 163, 184, 0.28)";
   ctx.lineWidth = 1;
-  ctx.fillRect(x, y, tableW, tableH);
-  ctx.strokeRect(x + 0.5, y + 0.5, tableW - 1, tableH - 1);
+  if (typeof ctx.roundRect === "function" && typeof ctx.fill === "function") {
+    ctx.beginPath();
+    ctx.roundRect(x, y, tableW, tableH, 6);
+    ctx.fill();
+    ctx.beginPath();
+    ctx.roundRect(x + 0.5, y + 0.5, Math.max(0, tableW - 1), Math.max(0, tableH - 1), 5.5);
+    ctx.stroke();
+  } else {
+    ctx.fillRect(x, y, tableW, tableH);
+    ctx.strokeRect(x + 0.5, y + 0.5, tableW - 1, tableH - 1);
+  }
+  const priceColX = x + columns * HOVER_CELL_W;
+  ctx.strokeStyle = "rgba(148, 163, 184, 0.18)";
+  ctx.beginPath();
+  ctx.moveTo(priceColX + 0.5, y + 1);
+  ctx.lineTo(priceColX + 0.5, y + tableH - 1);
+  ctx.stroke();
   ctx.font = "11px ui-monospace, SFMono-Regular, Menlo, monospace";
   ctx.textAlign = "center";
   ctx.textBaseline = "middle";
@@ -603,15 +618,15 @@ function drawHoverTable(ctx: CanvasRenderingContext2D, view: View, crosshair: Cr
         ctx.fillRect(cellX + 1, rowY + 1, HOVER_CELL_W - 2, HOVER_ROW_H - 2);
       }
       if (row === table.centerRow && column === table.centerColumn) {
-        ctx.strokeStyle = "rgba(230, 237, 243, 0.9)";
+        ctx.strokeStyle = "rgba(56, 189, 248, 0.92)";
         ctx.strokeRect(cellX + 1.5, rowY + 1.5, HOVER_CELL_W - 3, HOVER_ROW_H - 3);
       }
-      ctx.fillStyle = "#e6edf3";
+      ctx.fillStyle = "#eef2fb";
       const text = value === null ? (table.failed ? "–" : "…") : formatHeatmapValue(value, table.unit);
       ctx.fillText(text, cellX + HOVER_CELL_W / 2, rowY + HOVER_ROW_H / 2);
     });
-    ctx.fillStyle = "#8b949e";
-    ctx.fillText(price.toFixed(1), x + columns * HOVER_CELL_W + HOVER_PRICE_W / 2, rowY + HOVER_ROW_H / 2);
+    ctx.fillStyle = "#94a3b8";
+    ctx.fillText(price.toFixed(1), priceColX + HOVER_PRICE_W / 2, rowY + HOVER_ROW_H / 2);
   });
   ctx.restore();
 }

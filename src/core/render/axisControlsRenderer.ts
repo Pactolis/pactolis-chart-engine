@@ -34,8 +34,8 @@ export function drawPriceScaleControls(
     { id: "logarithmic", x: x + size + gap, y, w: size, h: size },
   ];
 
-  drawPriceScaleControlButton(ctx, controls[0], "O", view.isPriceAutoScale());
-  drawPriceScaleControlButton(ctx, controls[1], "L", view.isLogScale());
+  drawPriceScaleControlButton(ctx, controls[0], "O", view.isPriceAutoScale(), isPointInControl(crosshair, controls[0]));
+  drawPriceScaleControlButton(ctx, controls[1], "L", view.isLogScale(), isPointInControl(crosshair, controls[1]));
   return controls;
 }
 
@@ -59,25 +59,55 @@ export function drawIndicatorScaleControls(
     { paneId: pane.id, id: "autoScale", x, y, w: size, h: size },
     { paneId: pane.id, id: "logarithmic", x: x + size + gap, y, w: size, h: size },
   ];
-  drawPriceScaleControlButton(ctx, controls[0], "O", true);
-  drawPriceScaleControlButton(ctx, controls[1], "L", pane.scaleMode === "log");
+  drawPriceScaleControlButton(ctx, controls[0], "O", true, isPointInControl(crosshair, controls[0]));
+  drawPriceScaleControlButton(ctx, controls[1], "L", pane.scaleMode === "log", isPointInControl(crosshair, controls[1]));
   return controls;
+}
+
+function isPointInControl(crosshair: Crosshair | undefined, rect: PriceScaleControlRect): boolean {
+  return Boolean(
+    crosshair?.visible
+      && crosshair.x >= rect.x
+      && crosshair.x <= rect.x + rect.w
+      && crosshair.y >= rect.y
+      && crosshair.y <= rect.y + rect.h,
+  );
 }
 
 function drawPriceScaleControlButton(
   ctx: CanvasRenderingContext2D,
   rect: PriceScaleControlRect,
   label: string,
-  active: boolean
+  active: boolean,
+  hovered = false,
 ): void {
   ctx.save();
-  ctx.fillStyle = active ? uiColor.bgActive : uiColor.bgShade;
-  ctx.fillRect(rect.x, rect.y, rect.w, rect.h);
-  ctx.strokeStyle = active ? uiColor.textHeading : uiColor.separatorStrong;
+  const fill = active
+    ? "rgba(56, 189, 248, 0.16)"
+    : hovered
+      ? "rgba(30, 41, 59, 0.85)"
+      : "rgba(15, 22, 34, 0.88)";
+  const border = active
+    ? "rgba(56, 189, 248, 0.55)"
+    : hovered
+      ? "rgba(148, 163, 184, 0.38)"
+      : "rgba(148, 163, 184, 0.22)";
+  ctx.fillStyle = fill;
+  ctx.strokeStyle = border;
   ctx.lineWidth = 1;
-  ctx.strokeRect(rect.x + 0.5, rect.y + 0.5, rect.w - 1, rect.h - 1);
+  if (typeof ctx.roundRect === "function" && typeof ctx.fill === "function") {
+    ctx.beginPath();
+    ctx.roundRect(rect.x, rect.y, rect.w, rect.h, 4);
+    ctx.fill();
+    ctx.beginPath();
+    ctx.roundRect(rect.x + 0.5, rect.y + 0.5, Math.max(0, rect.w - 1), Math.max(0, rect.h - 1), 3.5);
+    ctx.stroke();
+  } else {
+    ctx.fillRect(rect.x, rect.y, rect.w, rect.h);
+    ctx.strokeRect(rect.x + 0.5, rect.y + 0.5, rect.w - 1, rect.h - 1);
+  }
   ctx.font = "bold 11px ui-monospace, monospace";
-  ctx.fillStyle = active ? uiColor.textHeading : uiColor.textSecondary;
+  ctx.fillStyle = active || hovered ? uiColor.textHeading : uiColor.textSecondary;
   ctx.textAlign = "center";
   ctx.textBaseline = "middle";
   ctx.fillText(label, rect.x + rect.w / 2, rect.y + rect.h / 2 + 0.5);

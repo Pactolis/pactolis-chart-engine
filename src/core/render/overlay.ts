@@ -1116,11 +1116,13 @@ export class Overlay {
       .filter((label) => label.desiredY >= view.area.top && label.desiredY <= view.area.top + view.area.height);
     const labels = placeVerticalLabels(candidates, view.area.top, view.area.top + view.area.height, 2);
     for (const label of labels) {
-      const width = ctx.measureText(label.text).width + 8;
+      const width = ctx.measureText(label.text).width + 12;
       const x = view.area.left + view.area.width - 4;
-      ctx.fillStyle = lineLabelPillBg;
-      ctx.fillRect(x - width, label.y - boxH / 2, width, boxH);
+      const boxX = x - width;
+      const boxY = label.y - boxH / 2;
+      drawOverlayPill(ctx, boxX, boxY, width, boxH, 4, lineLabelPillBg, "rgba(148, 163, 184, 0.22)");
       ctx.fillStyle = label.color;
+      ctx.fillRect?.(boxX + 1, boxY + 2, 2, Math.max(2, boxH - 4));
       ctx.fillText(label.text, x - 4, label.y);
     }
     ctx.restore();
@@ -1207,25 +1209,69 @@ export class Overlay {
     this.onHudText?.(hudText);
 
     const prefix = `${hovered ? "◆ " : ""}O ${bar.open.toFixed(pd)}  H ${bar.high.toFixed(pd)}  L ${bar.low.toFixed(pd)}  C ${bar.close.toFixed(pd)}  Vol ${unit}${volTxt}`;
-    ctx.fillText(prefix, x, 8);
     const prefixWidth = ctx.measureText(prefix + "   ").width;
-    ctx.fillStyle = bar.delta >= 0 ? uiColor.buy : uiColor.sell;
     const deltaPart = `Δ ${bar.delta >= 0 ? "+" : "-"}${unit}${deltaTxt}`;
-    ctx.fillText(deltaPart, x + prefixWidth, 8);
-    ctx.fillStyle = uiColor.textSecondary;
     const deltaWidth = ctx.measureText(deltaPart + "   ").width;
     const tradesPart = `Trades ${bar.count.toLocaleString("en-US")}`;
-    ctx.fillText(tradesPart, x + prefixWidth + deltaWidth, 8);
     const tradesWidth = ctx.measureText(tradesPart + "   ").width;
 
     const rangePart = `Range ${rangePct.toFixed(2)}%`;
     const rangeX = x + prefixWidth + deltaWidth + tradesWidth;
-    ctx.fillText(rangePart, rangeX, 8);
     const rangeWidth = ctx.measureText(rangePart + "   ").width;
 
-    ctx.fillStyle = changePct >= 0 ? uiColor.buy : uiColor.sell;
     const chgPart = `Chg ${changePct >= 0 ? "+" : ""}${changePct.toFixed(2)}%`;
+    const chgWidth = ctx.measureText(chgPart).width;
+    const pillW = Math.min(
+      Math.max(0, view.area.width - 8),
+      prefixWidth + deltaWidth + tradesWidth + rangeWidth + chgWidth + 12,
+    );
+    drawOverlayPill(ctx, x - 6, 4, pillW, 20, 5, "rgba(11, 16, 24, 0.78)", "rgba(148, 163, 184, 0.16)");
+
+    ctx.fillStyle = uiColor.textHeading;
+    ctx.fillText(prefix, x, 8);
+    ctx.fillStyle = bar.delta >= 0 ? uiColor.buy : uiColor.sell;
+    ctx.fillText(deltaPart, x + prefixWidth, 8);
+    ctx.fillStyle = uiColor.textSecondary;
+    ctx.fillText(tradesPart, x + prefixWidth + deltaWidth, 8);
+    ctx.fillText(rangePart, rangeX, 8);
+    ctx.fillStyle = changePct >= 0 ? uiColor.buy : uiColor.sell;
     ctx.fillText(chgPart, rangeX + rangeWidth, 8);
+  }
+}
+
+function drawOverlayPill(
+  ctx: CanvasRenderingContext2D,
+  x: number,
+  y: number,
+  w: number,
+  h: number,
+  radius: number,
+  fill: string,
+  stroke?: string,
+): void {
+  if (w <= 0 || h <= 0) return;
+  ctx.fillStyle = fill;
+  if (
+    typeof ctx.roundRect === "function" &&
+    typeof ctx.fill === "function" &&
+    typeof ctx.beginPath === "function" &&
+    typeof ctx.stroke === "function"
+  ) {
+    ctx.beginPath();
+    ctx.roundRect(x, y, w, h, radius);
+    ctx.fill();
+    if (stroke) {
+      ctx.strokeStyle = stroke;
+      ctx.beginPath();
+      ctx.roundRect(x + 0.5, y + 0.5, Math.max(0, w - 1), Math.max(0, h - 1), Math.max(0, radius - 0.5));
+      ctx.stroke();
+    }
+    return;
+  }
+  ctx.fillRect?.(x, y, w, h);
+  if (stroke) {
+    ctx.strokeStyle = stroke;
+    ctx.strokeRect?.(x + 0.5, y + 0.5, Math.max(0, w - 1), Math.max(0, h - 1));
   }
 }
 

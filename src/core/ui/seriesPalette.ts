@@ -67,12 +67,12 @@ export const gexWallTagTextColor = "#071016";
 // look of the axis.
 export const axisGridLineColor = "rgba(255,255,255,0.05)";
 export const axisMajorLabelColor = "#c9d2e0";
-export const axisLabelBorderColor = "rgba(255,255,255,0.15)";
+export const axisLabelBorderColor = "rgba(148, 163, 184, 0.24)";
 export const axisMajorTickColor = "rgba(255,255,255,0.2)";
-export const timeAxisCrosshairLabelBg = "#1e2535";
+export const timeAxisCrosshairLabelBg = "rgba(15, 22, 34, 0.94)";
 export const indicatorPaneBackgroundColor = "#0b0d12";
-export const indicatorBadgeBg = "rgba(5, 8, 13, 0.96)";
-export const indicatorBadgeBorder = "rgba(255,255,255,0.18)";
+export const indicatorBadgeBg = "rgba(15, 22, 34, 0.88)";
+export const indicatorBadgeBorder = "rgba(148, 163, 184, 0.22)";
 export const indicatorReadoutTextColor = "#f2f5fb";
 export const indicatorMessageTextColor = "#aeb7c7";
 export const indicatorLastValueTextColor = "#07111f";
@@ -140,7 +140,7 @@ export const drawingLabelPillBorder = "rgba(255, 255, 255, 0.10)";
 export const drawingAnchorPrimaryFill = "#ffffff";
 export const drawingAnchorOutline = "#111722";
 // overlay.ts chrome: line-label pill backdrop, crosshair lines.
-export const lineLabelPillBg = "rgba(13,15,20,0.82)";
+export const lineLabelPillBg = "rgba(11, 16, 24, 0.88)";
 export const crosshairLineColor = "rgba(255,255,255,0.25)";
 export const syncCrosshairLineColor = "rgba(150,170,200,0.35)";
 

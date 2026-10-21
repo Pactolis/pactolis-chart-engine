@@ -72,19 +72,32 @@ export function drawIndicatorBadge(
   canvas.textAlign = options.align ?? "left";
   canvas.textBaseline = "middle";
 
-  const padX = 7;
+  const padX = 8;
   const h = 20;
   const maxWidth = options.maxWidth ?? 260;
   const clipped = truncateCanvasText(canvas, text, Math.max(32, maxWidth - padX * 2));
   const w = Math.min(maxWidth, canvas.measureText(clipped).width + padX * 2);
   const left = canvas.textAlign === "right" ? x - w : x;
+  const top = y - h / 2;
 
   canvas.fillStyle = indicatorBadgeBg;
-  canvas.fillRect(left, y - h / 2, w, h);
-  canvas.strokeStyle = indicatorBadgeBorder;
-  canvas.strokeRect(left + 0.5, y - h / 2 + 0.5, w - 1, h - 1);
+  if (typeof canvas.roundRect === "function" && typeof canvas.fill === "function") {
+    canvas.beginPath();
+    canvas.roundRect(left, top, w, h, 4);
+    canvas.fill();
+    canvas.strokeStyle = indicatorBadgeBorder;
+    canvas.beginPath();
+    canvas.roundRect(left + 0.5, top + 0.5, Math.max(0, w - 1), Math.max(0, h - 1), 3.5);
+    canvas.stroke();
+  } else {
+    canvas.fillRect(left, top, w, h);
+    canvas.strokeStyle = indicatorBadgeBorder;
+    canvas.strokeRect(left + 0.5, top + 0.5, w - 1, h - 1);
+  }
+  canvas.fillStyle = options.color ?? uiColor.info;
+  canvas.fillRect(left + 1, top + 3, 2, h - 6);
   canvas.fillStyle = options.color ?? uiColor.textHeading;
-  canvas.fillText(clipped, canvas.textAlign === "right" ? x - padX : x + padX, y);
+  canvas.fillText(clipped, canvas.textAlign === "right" ? x - padX : x + padX + 2, y);
   canvas.restore();
 }
 
@@ -146,8 +159,20 @@ export function drawIndicatorLastValueLabel(
   canvas.textBaseline = "middle";
   canvas.textAlign = "right";
   const width = canvas.measureText(text).width + padX * 2;
+  const boxX = x - width;
+  const boxY = options.y - height / 2;
   canvas.fillStyle = options.color;
-  canvas.fillRect(x - width, options.y - height / 2, width, height);
+  if (typeof canvas.roundRect === "function" && typeof canvas.fill === "function") {
+    canvas.beginPath();
+    canvas.roundRect(boxX, boxY, width, height, 4);
+    canvas.fill();
+    canvas.strokeStyle = "rgba(15, 22, 34, 0.45)";
+    canvas.beginPath();
+    canvas.roundRect(boxX + 0.5, boxY + 0.5, Math.max(0, width - 1), Math.max(0, height - 1), 3.5);
+    canvas.stroke();
+  } else {
+    canvas.fillRect(boxX, boxY, width, height);
+  }
   canvas.fillStyle = options.textColor ?? indicatorLastValueTextColor;
   canvas.fillText(text, x - padX, options.y);
   canvas.restore();
@@ -210,10 +235,21 @@ export function drawIndicatorCrosshairValueLabel(
   const boxH = 16;
   const y = Math.max(top + boxH / 2, Math.min(bottom - boxH / 2, ch.y));
   const boxX = axisX + axisW - boxW - 1;
-  canvas.fillStyle = uiColor.bgPanelAlt;
-  canvas.fillRect(boxX, y - boxH / 2, boxW, boxH);
-  canvas.strokeStyle = axisLabelBorderColor;
-  canvas.strokeRect(boxX + 0.5, y - boxH / 2 + 0.5, boxW - 1, boxH - 1);
+  const boxY = y - boxH / 2;
+  canvas.fillStyle = "rgba(15, 22, 34, 0.94)";
+  if (typeof canvas.roundRect === "function" && typeof canvas.fill === "function") {
+    canvas.beginPath();
+    canvas.roundRect(boxX, boxY, boxW, boxH, 4);
+    canvas.fill();
+    canvas.strokeStyle = axisLabelBorderColor;
+    canvas.beginPath();
+    canvas.roundRect(boxX + 0.5, boxY + 0.5, Math.max(0, boxW - 1), Math.max(0, boxH - 1), 3.5);
+    canvas.stroke();
+  } else {
+    canvas.fillRect(boxX, boxY, boxW, boxH);
+    canvas.strokeStyle = axisLabelBorderColor;
+    canvas.strokeRect(boxX + 0.5, boxY + 0.5, boxW - 1, boxH - 1);
+  }
   canvas.fillStyle = uiColor.textHeading;
   canvas.textAlign = "right";
   canvas.textBaseline = "middle";

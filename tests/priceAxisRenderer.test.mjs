@@ -2,6 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { View } from "../dist/core/engine/view.js";
 import { DEFAULT_CHART_LAYOUT_OPTIONS } from "../dist/core/model/chartLayoutOptions.js";
+import { drawPriceScaleControls } from "../dist/core/render/axisControlsRenderer.js";
 import { drawPriceAxis, drawPriceMarkers, drawCrosshairPriceLabel } from "../dist/core/render/priceAxisRenderer.js";
 import { settings } from "../dist/core/settings.js";
 import { axisGridLineColor, uiColor } from "../dist/core/ui/seriesPalette.js";
@@ -124,3 +125,23 @@ for (const mode of ["linear", "log"]) {
     }
   });
 }
+
+test("price scale controls render rounded active and hover button states when roundRect is available", () => {
+  const view = new View();
+  view.area = { left: 0, top: 0, width: 800, height: 500 };
+  view.priceAxisW = DEFAULT_CHART_LAYOUT_OPTIONS.priceAxisWidth;
+  const ctx = makeContext();
+  const roundRects = [];
+  ctx.roundRect = (x, y, w, h, r) => {
+    roundRects.push({ x, y, w, h, r, fillStyle: ctx.fillStyle, strokeStyle: ctx.strokeStyle });
+  };
+  ctx.fill = () => {
+    ctx.calls.push({ op: "fill", fillStyle: ctx.fillStyle });
+  };
+
+  const controls = drawPriceScaleControls(ctx, view, { x: 830, y: 488, visible: true });
+  assert.equal(controls.length, 2);
+  assert.equal(roundRects.length, 4, "each of the two buttons draws a rounded fill and rounded border");
+  assert.equal(roundRects[0].r, 4);
+  assert.equal(ctx.calls.some((call) => call.op === "fill" && call.fillStyle === "rgba(56, 189, 248, 0.16)"), true);
+});
