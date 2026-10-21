@@ -1,4 +1,4 @@
-import type { FootprintCell } from "../types.js";
+import type { FootprintBar, FootprintCell } from "../types.js";
 
 export interface CellTradeCounts {
   buy: number;
@@ -65,4 +65,23 @@ export function cellAverageTradeSizes(cell: FootprintCell): CellAverageTradeSize
     sell: counts.sell > 0 ? cell.sellVol / counts.sell : 0,
     total: counts.total > 0 ? cellTotalVolume(cell) / counts.total : 0,
   };
+}
+
+export function quoteVolumeForBar(bar: FootprintBar): number {
+  if (bar.cells.size > 0) {
+    let cellVolSum = 0;
+    let cellNotionalSum = 0;
+    for (const cell of bar.cells.values()) {
+      const cellVol = cell.buyVol + cell.sellVol;
+      cellVolSum += cellVol;
+      cellNotionalSum += cell.priceBin * cellVol;
+    }
+    if (cellVolSum > 0) {
+      const total = bar.volume > cellVolSum
+        ? cellNotionalSum + (bar.volume - cellVolSum) * bar.close
+        : cellNotionalSum;
+      if (Number.isFinite(total) && total >= 0) return total;
+    }
+  }
+  return Math.max(0, bar.close * bar.volume);
 }

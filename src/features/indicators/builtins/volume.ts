@@ -2,7 +2,7 @@ import type { IndicatorDefinition, IndicatorDrawContext, IndicatorSettings } fro
 import { simpleMovingAverage, volumeSeries } from "../../../core/analysis/calc/ta.js";
 import { compactNumber } from "../render/indicatorPaneUi.js";
 import { parseMarket } from "../../../core/domain/market.js";
-import type { FootprintBar } from "../../../core/types.js";
+import { quoteVolumeForBar } from "../../../core/model/footprintCellMetrics.js";
 // Canvas defaults mirror theme.ts semantic tokens; kept Node-safe for registry tests.
 const VOLUME_COLORS = { buy: `#${"3fe0a0"}`, sell: `#${"e06c75"}`, info: `#${"38bdf8"}`, ma: `#${"eef2fb"}` } as const;
 import { defaultPaneSettings, drawMultiSeries, makeNumberPoints, makeSeriesPoints, numericSetting, prepareMultiSeries, simpleHeader, standardAppearanceFields, stringSetting, visibleIndexRange, type PlotSeries } from "./taShared.js";
@@ -31,14 +31,7 @@ function prepareVolume(ctx: IndicatorDrawContext<VolumeSettings>) {
   return prepareMultiSeries(ctx, series, { scaleMode: "volume", formatter: compactNumber, baseline: 0, readoutSeries });
 }
 export function volumeBarColor(delta: number, upColor: string, downColor: string): string { return delta < 0 ? downColor : upColor; }
-export function quoteVolumeForBar(bar: FootprintBar): number {
-  if (bar.cells.size > 0) {
-    let total = 0;
-    for (const cell of bar.cells.values()) total += cell.priceBin * (cell.buyVol + cell.sellVol);
-    if (Number.isFinite(total) && total >= 0) return total;
-  }
-  return Math.max(0, bar.close * bar.volume);
-}
+export { quoteVolumeForBar };
 export const volumeIndicatorDefinition: IndicatorDefinition<VolumeSettings> = {
   type: "volume", name: "Volume", category: "volume", defaultPane: "separate", canOverlay: false, defaultPlacement: "separate-pane", supportedPlacements: ["separate-pane"], paneHeight: 104,
   defaultSettings: () => defaultPaneSettings({ maPeriod: 20, showMa: false, deltaColored: true, upColor: VOLUME_COLORS.buy, downColor: VOLUME_COLORS.sell, maColor: VOLUME_COLORS.ma }) as VolumeSettings,
