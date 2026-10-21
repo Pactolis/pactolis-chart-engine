@@ -151,12 +151,14 @@ test("HUD notional volume and Volume indicator quoteVolume stay consistent acros
       undefined,
       undefined,
       undefined,
+      undefined,
       (text) => {
         hudText = text;
       },
     );
     overlay.renderInteraction(view, series, { x: 0, y: 0, visible: false }, [0, i + 1], ["hud"]);
     assert.ok(hudText?.includes(expectedHudVol[i]), `bar ${i} HUD should include ${expectedHudVol[i]}, got: ${hudText}`);
+    assert.ok(ctx.texts[0]?.includes(expectedHudVol[i]), `bar ${i} drawn HUD prefix should include ${expectedHudVol[i]}, got: ${ctx.texts[0]}`);
   }
 });
 
