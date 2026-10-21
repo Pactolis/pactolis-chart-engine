@@ -92,10 +92,21 @@ export function drawCrosshairTimeLabel(
   const labelW = ctx.measureText(timeLabel).width + 10;
   const labelX = alignLabelCenter(hx, labelW, axis);
   const labelY = axis.top + 1;
+  const boxLeft = labelX - labelW / 2;
   ctx.fillStyle = timeAxisCrosshairLabelBg;
-  ctx.fillRect(labelX - labelW / 2, labelY, labelW, 16);
-  ctx.strokeStyle = axisLabelBorderColor;
-  ctx.strokeRect(labelX - labelW / 2 + 0.5, labelY + 0.5, labelW - 1, 15);
+  if (typeof ctx.roundRect === "function" && typeof ctx.fill === "function") {
+    ctx.beginPath();
+    ctx.roundRect(boxLeft, labelY, labelW, 16, 3.5);
+    ctx.fill();
+    ctx.strokeStyle = axisLabelBorderColor;
+    ctx.beginPath();
+    ctx.roundRect(boxLeft + 0.5, labelY + 0.5, Math.max(0, labelW - 1), 15, 3);
+    ctx.stroke();
+  } else {
+    ctx.fillRect(boxLeft, labelY, labelW, 16);
+    ctx.strokeStyle = axisLabelBorderColor;
+    ctx.strokeRect(boxLeft + 0.5, labelY + 0.5, labelW - 1, 15);
+  }
   ctx.fillStyle = uiColor.textHeading;
   ctx.textAlign = "center";
   ctx.textBaseline = "top";
@@ -139,7 +150,13 @@ function drawTimeMarkers(
     ctx.lineTo(x, axisY + 6);
     ctx.stroke();
     ctx.fillStyle = marker.color;
-    ctx.fillRect(left, axisY + 1, boxW, 16);
+    if (typeof ctx.roundRect === "function" && typeof ctx.fill === "function") {
+      ctx.beginPath();
+      ctx.roundRect(left, axisY + 1, boxW, 16, 3.5);
+      ctx.fill();
+    } else {
+      ctx.fillRect(left, axisY + 1, boxW, 16);
+    }
     ctx.fillStyle = uiColor.bgApp;
     ctx.fillText(label, labelX, axisY + 4);
   }

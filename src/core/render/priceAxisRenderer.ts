@@ -98,8 +98,19 @@ export function drawPriceMarkers(
     const maxBoxW = label.text || livePrice ? Math.max(axisW - 2, 180) : axisW - 2;
     const boxW = Math.min(maxBoxW, Math.ceil(ctx.measureText(text).width) + padX * 2);
     const boxX = axisX + axisW - boxW - 1;
+    const boxY = label.y - boxH / 2;
     ctx.fillStyle = label.color;
-    ctx.fillRect(boxX, label.y - boxH / 2, boxW, boxH);
+    if (typeof ctx.roundRect === "function" && typeof ctx.fill === "function") {
+      ctx.beginPath();
+      ctx.roundRect(boxX, boxY, boxW, boxH, 3.5);
+      ctx.fill();
+      ctx.strokeStyle = "rgba(11, 16, 24, 0.38)";
+      ctx.beginPath();
+      ctx.roundRect(boxX + 0.5, boxY + 0.5, Math.max(0, boxW - 1), Math.max(0, boxH - 1), 3);
+      ctx.stroke();
+    } else {
+      ctx.fillRect(boxX, boxY, boxW, boxH);
+    }
     ctx.fillStyle = uiColor.bgApp;
     ctx.textAlign = "right";
     ctx.fillText(text, boxX + boxW - padX, label.y);
@@ -124,10 +135,21 @@ export function drawCrosshairPriceLabel(
   const boxW = Math.min(axisW - 2, Math.ceil(ctx.measureText(text).width) + padX * 2);
   const boxX = axisX + axisW - boxW - 1;
   const labelY = clampLabelY(view, ch.y, PRICE_LABEL_HEIGHT);
+  const boxY = labelY - PRICE_LABEL_HEIGHT / 2;
   ctx.fillStyle = uiColor.bgPanelAlt;
-  ctx.fillRect(boxX, labelY - PRICE_LABEL_HEIGHT / 2, boxW, PRICE_LABEL_HEIGHT);
-  ctx.strokeStyle = axisLabelBorderColor;
-  ctx.strokeRect(boxX + 0.5, labelY - 7.5, boxW - 1, 15);
+  if (typeof ctx.roundRect === "function" && typeof ctx.fill === "function") {
+    ctx.beginPath();
+    ctx.roundRect(boxX, boxY, boxW, PRICE_LABEL_HEIGHT, 3.5);
+    ctx.fill();
+    ctx.strokeStyle = axisLabelBorderColor;
+    ctx.beginPath();
+    ctx.roundRect(boxX + 0.5, labelY - 7.5, Math.max(0, boxW - 1), 15, 3);
+    ctx.stroke();
+  } else {
+    ctx.fillRect(boxX, boxY, boxW, PRICE_LABEL_HEIGHT);
+    ctx.strokeStyle = axisLabelBorderColor;
+    ctx.strokeRect(boxX + 0.5, labelY - 7.5, boxW - 1, 15);
+  }
   ctx.fillStyle = uiColor.textHeading;
   ctx.textAlign = "right";
   ctx.textBaseline = "middle";
