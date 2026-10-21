@@ -5,6 +5,7 @@ import {
   cellAverageTradeSizes,
   cellDeltaPercent,
   cellTradeCounts,
+  quoteVolumeForBar,
 } from "../dist/core/model/footprintCellMetrics.js";
 
 test("cell trade counts prefer exact bid/ask counts", () => {
@@ -21,4 +22,27 @@ test("cell trade counts split old total-only caches by volume ratio", () => {
 
   assert.deepEqual(cellTradeCounts(cell), { buy: 15, sell: 5, total: 20 });
   assert.deepEqual(cellAverageTradeSizes(cell), { buy: 5, sell: 5, total: 5 });
+});
+
+test("quoteVolumeForBar handles full cells, partial cells, and liquidation-only cells", () => {
+  const fullBar = {
+    close: 105,
+    volume: 3,
+    cells: new Map([[100, { priceBin: 100, buyVol: 1, sellVol: 2 }]]),
+  };
+  assert.equal(quoteVolumeForBar(fullBar), 300);
+
+  const partialBar = {
+    close: 105,
+    volume: 5,
+    cells: new Map([[100, { priceBin: 100, buyVol: 1, sellVol: 2 }]]),
+  };
+  assert.equal(quoteVolumeForBar(partialBar), 510);
+
+  const liquidationOnlyBar = {
+    close: 105,
+    volume: 3,
+    cells: new Map([[100, { priceBin: 100, buyVol: 0, sellVol: 0, liquidationBuyVol: 4 }]]),
+  };
+  assert.equal(quoteVolumeForBar(liquidationOnlyBar), 315);
 });

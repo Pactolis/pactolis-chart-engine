@@ -1,7 +1,7 @@
 // Canvas2D layer: cell volume numbers, price/time axes, crosshair, HUD.
 import type { View } from "../engine/view.js";
 import { cellImbalance, type FootprintSeries } from "../model/footprint.js";
-import { cellAverageTradeSize, cellAverageTradeSizes, cellDeltaPercent, cellTradeCounts } from "../model/footprintCellMetrics.js";
+import { cellAverageTradeSize, cellAverageTradeSizes, cellDeltaPercent, cellTradeCounts, quoteVolumeForBar } from "../model/footprintCellMetrics.js";
 import { settings, type ChartViewConfig } from "../settings.js";
 import { cellTextModeFor } from "./chartLod.js";
 import type { IndicatorPaneRender } from "../indicatorTypes.js";
@@ -61,7 +61,7 @@ function fmtVol(v: number): string {
 /** Format a USDT notional value (qty * price) compactly. */
 function fmtNotional(v: number): string {
   if (v >= 1e6) return (v / 1e6).toFixed(2) + "M";
-  if (v >= 1e3) return (v / 1e3).toFixed(0) + "k";
+  if (v >= 1e3) return (v / 1e3).toFixed(1) + "k";
   return v.toFixed(0);
 }
 
@@ -1188,7 +1188,7 @@ export class Overlay {
     }
 
     const unit = this.showNotional ? "$" : "₿";
-    const volTxt = this.showNotional ? fmtNotional(bar.volume * bar.close) : fmtVol(bar.volume);
+    const volTxt = this.showNotional ? fmtNotional(quoteVolumeForBar(bar)) : fmtVol(bar.volume);
     const deltaTxt = this.showNotional
       ? fmtNotional(Math.abs(bar.delta) * bar.close)
       : Math.abs(bar.delta).toFixed(2);
