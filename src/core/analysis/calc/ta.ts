@@ -78,7 +78,8 @@ export function tradeSizeBucketIndex(notionalUsd: number): number {
  * Adds `signedQuantity` to the size bucket of `notionalUsd` and returns the array to store.
  * A live bar takes one of these per trade, so an array that is already normalized (one
  * entry per bucket, all finite, writable) is updated in place rather than rebuilt; any
- * other input comes back as a normalized copy.
+ * other input comes back as a normalized copy. A bar loaded with such an array keeps
+ * using it, the way it keeps using the `cells` it was loaded with.
  */
 export function addDeltaBySize(target: number[] | undefined, notionalUsd: number, signedQuantity: number): number[] {
   const next = isNormalizedDeltaBySize(target) ? target : normalizeDeltaBySize(target);
