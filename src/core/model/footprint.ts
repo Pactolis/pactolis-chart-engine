@@ -97,8 +97,14 @@ const MONOTONIC_TRADE_ID_MARKET = /^BINANCE(_FUTURES)?:/;
 
 interface RecentTrade {
   time: number;
-  /** Payload of an identified trade, compared when the same identity is delivered again. */
-  payload?: string;
+  /**
+   * Payload of an identified trade (`price`, `qty`, `tradeCount`, `flags`), compared when
+   * the same identity is delivered again.
+   */
+  price?: number;
+  qty?: number;
+  tradeCount?: number;
+  flags?: number;
   /** Market and aggTrade ID of an identified normal trade on a monotonic-ID market. */
   market?: string;
   id?: bigint;
@@ -106,6 +112,25 @@ interface RecentTrade {
 
 export function identifiedPayload(trade: AggTrade): string {
   return `${trade.time}|${trade.price}|${trade.qty}|${trade.tradeCount ?? 1}|${trade.isBuy ? 1 : 0}|${trade.liquidation ? 1 : 0}`;
+}
+
+/** Side and liquidation flag of a trade, the two bits `identifiedPayload` ends with. */
+function payloadFlags(trade: AggTrade): number {
+  return (trade.isBuy ? 1 : 0) | (trade.liquidation ? 2 : 0);
+}
+
+/**
+ * Whether `seen` holds the payload `identifiedPayload(trade)` spells out. Both come from
+ * validated trades, whose time, price and quantity are finite, so two payloads are the same
+ * string exactly when their fields are the same numbers; comparing the fields spares a
+ * string per trade that the live path would only ever look at on a repeat.
+ */
+function samePayload(seen: RecentTrade, trade: AggTrade): boolean {
+  return seen.time === trade.time
+    && seen.price === trade.price
+    && seen.qty === trade.qty
+    && seen.tradeCount === (trade.tradeCount ?? 1)
+    && seen.flags === payloadFlags(trade);
 }
 
 function exactTradeId(value: unknown): bigint | null {
@@ -604,12 +629,12 @@ export class FootprintSeries {
     validateTrade(trade);
     const start = bucketStart(trade.time, this.cfg.intervalMs);
     const fingerprint = dedupe ? tradeFingerprint(trade) : "";
-    const payload = dedupe && trade.id ? identifiedPayload(trade) : undefined;
+    const identified = dedupe && Boolean(trade.id);
     if (dedupe) {
       // First delivery wins; a repeat with a different payload is still rejected below
       // but counted so the owner can stop reporting the data as healthy.
       const seen = this.recentTrades.get(fingerprint);
-      if (seen?.payload !== undefined && seen.payload !== payload) this.identityConflictCountValue++;
+      if (seen?.price !== undefined && !(identified && samePayload(seen, trade))) this.identityConflictCountValue++;
     }
     const remainder = this.repairOwnedRemainder(trade, start, includeCandle, includeFootprint);
     if (!remainder.candle && !remainder.footprint) return;
@@ -618,16 +643,18 @@ export class FootprintSeries {
     if (dedupe) {
       if (this.recentTrades.has(fingerprint)) return;
       const market = trade.market ?? "";
-      const id = payload !== undefined && trade.liquidation !== true && MONOTONIC_TRADE_ID_MARKET.test(market)
+      const id = identified && trade.liquidation !== true && MONOTONIC_TRADE_ID_MARKET.test(market)
         ? exactTradeId(trade.id)
         : null;
       if (id !== null) {
         const floor = this.prunedTradeIdFloor.get(market);
         if (floor !== undefined && id <= floor) return;
       }
-      this.recentTrades.set(fingerprint, payload === undefined
+      this.recentTrades.set(fingerprint, !identified
         ? { time: trade.time }
-        : id === null ? { time: trade.time, payload } : { time: trade.time, payload, market, id });
+        : id === null
+          ? { time: trade.time, price: trade.price, qty: trade.qty, tradeCount: trade.tradeCount ?? 1, flags: payloadFlags(trade) }
+          : { time: trade.time, price: trade.price, qty: trade.qty, tradeCount: trade.tradeCount ?? 1, flags: payloadFlags(trade), market, id });
       if (this.recentTrades.size > 50_000 && trade.time >= this.nextRecentTradesPruneAt) {
         const retentionMs = Math.max(this.cfg.intervalMs * 2, 60_000);
         const cutoff = trade.time - retentionMs;
