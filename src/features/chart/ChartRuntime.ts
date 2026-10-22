@@ -1271,6 +1271,8 @@ class ChartRuntimeImpl implements ChartRuntime, ChartInputHost {
     for (const element of this.ownedElements) element.remove();
     this.surface.historyOverlay = false;
     this.surface.historyBackground = false;
+    // The host-wide drawing manager remembers the last chart that drew; let go of this one.
+    this.svc.getAnalysisContext(this.state.market, true)?.drawings?.releaseHitTestContext(this.view);
   }
 
   startReplay(): void {

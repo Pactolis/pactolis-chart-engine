@@ -542,6 +542,9 @@ export class DrawingManager {
     this.lastTime = time;
   }
 
+  /** Drops the view and time mapping `view`'s chart supplied, so a disposed chart is not kept reachable here; other charts' stay. */
+  releaseHitTestContext(view: View): void { if (this.lastView === view) { this.lastView = null; this.lastTime = null; } }
+
   hitTestAt(point: DrawingPoint, screen?: { x: number; y: number }): Drawing | null {
     const selectable = [...this.drawings].reverse().find((drawing) =>
       drawing.visible &&
