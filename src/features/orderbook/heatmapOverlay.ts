@@ -8,6 +8,7 @@ import {
   isOrderbookHeatmapMarket,
   type OrderbookHeatmapSettings,
 } from "../../core/orderbookHeatmap/settings.js";
+import { isPerformanceTelemetryEnabled, recordPerformanceDuration } from "../../core/performanceTelemetry.js";
 import { orderbookHeatmapSettingsSource } from "./heatmapSettingsSource.js";
 import type { OrderbookHeatmapBar, OrderbookHeatmapRequest, OrderbookHeatmapResponse } from "./heatmapContracts.js";
 import {
@@ -75,6 +76,15 @@ interface ChunkState {
   status: "loading" | "ready" | "error";
   /** When the chunk (or its live tail) was last fetched. */
   fetchedAt: number;
+}
+
+/** What `beginFrame` resolves for an active frame: settings, tier, threshold and the visible bar window. */
+interface HeatmapFramePreamble {
+  settings: OrderbookHeatmapSettings;
+  tier: HeatmapTier;
+  threshold: number;
+  first: number;
+  last: number;
 }
 
 interface HoverWindow {
@@ -200,7 +210,7 @@ export class OrderbookHeatmapOverlay {
   private beginFrame(
     series: FootprintSeries,
     range: [number, number],
-  ): { settings: OrderbookHeatmapSettings; tier: HeatmapTier; threshold: number; first: number; last: number } | null {
+  ): HeatmapFramePreamble | null {
     if (!this.active() || series.length === 0) return null;
     const tier = heatmapTierFor(series.config.intervalMs);
     const settings = this.settings;
@@ -265,6 +275,9 @@ export class OrderbookHeatmapOverlay {
    * single reservation; a denial returns null without building any prepared
    * payload or cache allocation, and the returned frame carries the lease
    * until its owner drops the last reference.
+   *
+   * With performance telemetry enabled, the production form records its time
+   * as `chart.gpu.heatmap.prepare.ms`; the legacy form is not timed.
    */
   prepareGpuCells(
     view: View,
@@ -282,6 +295,26 @@ export class OrderbookHeatmapOverlay {
     }
     const preamble = this.beginFrame(series, range);
     if (!preamble) return null;
+    // Timed once the heatmap is active: an inactive chart records nothing, while
+    // a frame that ends at the cell cap or in a denied reservation did pay for
+    // its precount and is recorded. No closure, so the frame path allocates
+    // nothing extra; disabled telemetry costs one flag read.
+    const startedAt = isPerformanceTelemetryEnabled() ? performance.now() : null;
+    try {
+      return this.prepareReservedGpuCells(preamble, view, series, range, reserve);
+    } finally {
+      if (startedAt !== null) recordPerformanceDuration("chart.gpu.heatmap.prepare.ms", performance.now() - startedAt);
+    }
+  }
+
+  /** The production (reserved) prepare after the shared frame preamble; see `prepareGpuCells`. */
+  private prepareReservedGpuCells(
+    preamble: HeatmapFramePreamble,
+    view: View,
+    series: FootprintSeries,
+    range: [number, number],
+    reserve: (logicalBytes: number) => { release(): void } | null,
+  ): HeatmapGpuCellFrame | null {
     const right = view.area.left + view.area.width;
     const { top, height } = view.area;
     const step = preamble.settings.bucketStep;
