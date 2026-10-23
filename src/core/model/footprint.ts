@@ -99,6 +99,9 @@ const MAX_NUMBER_ID_DIGITS = 15;
  * futures). Other venues' IDs, decimal or not, carry no order a pruning floor can use.
  */
 const MONOTONIC_TRADE_ID_MARKET = /^BINANCE(_FUTURES)?:/;
+/** What `repairOwnedRemainder` answers with: the components of a trade that may still be applied. */
+const REMAINDER_CANDLE = 1;
+const REMAINDER_FOOTPRINT = 2;
 
 interface RecentTrade {
   time: number;
@@ -620,27 +623,28 @@ export class FootprintSeries {
 
   /**
    * Returns which components of a normal trade may still be applied to a fenced or
-   * repair-owned bucket. Candle and footprint are consumed separately, so a tail trade
-   * replayed as candle and footprint in two calls keeps both halves exactly once.
+   * repair-owned bucket, as a set of `REMAINDER_*` bits (0 when none is left). Candle and
+   * footprint are consumed separately, so a tail trade replayed as candle and footprint in
+   * two calls keeps both halves exactly once.
    */
   private repairOwnedRemainder(
     trade: AggTrade,
     start: number,
     includeCandle: boolean,
     includeFootprint: boolean,
-  ): { candle: boolean; footprint: boolean } {
-    const all = { candle: includeCandle, footprint: includeFootprint };
+  ): number {
+    const all = (includeCandle ? REMAINDER_CANDLE : 0) | (includeFootprint ? REMAINDER_FOOTPRINT : 0);
     if (trade.liquidation === true) return all;
     const ownership = this.repairFences.get(start) ?? this.repairOwnership.get(start);
     if (!ownership) return all;
     if (this.referenceMarket && trade.market !== undefined && trade.market !== this.referenceMarket) return all;
     const id = exactTradeId(trade.id);
-    if (id === null || id <= ownership.watermark) return { candle: false, footprint: false };
+    if (id === null || id <= ownership.watermark) return 0;
     const key = id.toString();
     const candle = includeCandle && !ownership.seenTailIds.has(`c:${key}`);
     const footprint = includeFootprint && !ownership.seenTailIds.has(`f:${key}`);
     markTailConsumed(ownership.seenTailIds, id, candle, footprint);
-    return { candle, footprint };
+    return (candle ? REMAINDER_CANDLE : 0) | (footprint ? REMAINDER_FOOTPRINT : 0);
   }
 
   private addTradeInternal(trade: AggTrade, dedupe: boolean, includeCandle: boolean, includeFootprint: boolean): void {
@@ -655,9 +659,9 @@ export class FootprintSeries {
       if (seen?.price !== undefined && !(identified && samePayload(seen, trade))) this.identityConflictCountValue++;
     }
     const remainder = this.repairOwnedRemainder(trade, start, includeCandle, includeFootprint);
-    if (!remainder.candle && !remainder.footprint) return;
-    includeCandle = remainder.candle;
-    includeFootprint = remainder.footprint;
+    if (remainder === 0) return;
+    includeCandle = (remainder & REMAINDER_CANDLE) !== 0;
+    includeFootprint = (remainder & REMAINDER_FOOTPRINT) !== 0;
     if (dedupe) {
       if (this.recentTrades.has(fingerprint)) return;
       const market = trade.market ?? "";
