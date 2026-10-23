@@ -31,6 +31,9 @@ interface CarriedCells {
   deltaBySize: number[] | undefined;
 }
 
+/** A decimal aggTrade ID: a number while it is exact (up to 15 digits), a bigint beyond that. */
+type TradeId = number | bigint;
+
 interface RepairOwnership {
   watermark: bigint;
   seenTailIds: Set<string>;
@@ -39,7 +42,7 @@ interface RepairOwnership {
 interface RefTradeOrder {
   time: number;
   sequence: number | null;
-  id: bigint | null;
+  id: TradeId | null;
 }
 
 interface RefTradeBounds {
@@ -89,6 +92,8 @@ const MAX_REPAIR_OWNED_BUCKETS = 32;
 export const MAX_SERIES_BARS = 50_000;
 const DECIMAL_TRADE_ID = /^(0|[1-9][0-9]*)$/;
 const MAX_U64 = 18_446_744_073_709_551_615n;
+/** Decimal IDs up to this many digits stay below 2^53, so a number holds them exactly. */
+const MAX_NUMBER_ID_DIGITS = 15;
 /**
  * Markets whose trade IDs are exchange aggTrade IDs that only grow (Binance spot and
  * futures). Other venues' IDs, decimal or not, carry no order a pruning floor can use.
@@ -97,25 +102,63 @@ const MONOTONIC_TRADE_ID_MARKET = /^BINANCE(_FUTURES)?:/;
 
 interface RecentTrade {
   time: number;
-  /** Payload of an identified trade, compared when the same identity is delivered again. */
-  payload?: string;
+  /**
+   * Payload of an identified trade (`price`, `qty`, `tradeCount`, `flags`), compared when
+   * the same identity is delivered again.
+   */
+  price?: number;
+  qty?: number;
+  tradeCount?: number;
+  flags?: number;
   /** Market and aggTrade ID of an identified normal trade on a monotonic-ID market. */
   market?: string;
-  id?: bigint;
+  id?: TradeId;
 }
 
 export function identifiedPayload(trade: AggTrade): string {
   return `${trade.time}|${trade.price}|${trade.qty}|${trade.tradeCount ?? 1}|${trade.isBuy ? 1 : 0}|${trade.liquidation ? 1 : 0}`;
 }
 
-function exactTradeId(value: unknown): bigint | null {
-  if (typeof value !== "string" || value.length > 20 || !DECIMAL_TRADE_ID.test(value)) return null;
-  const parsed = BigInt(value);
-  return parsed <= MAX_U64 ? parsed : null;
+/** Side and liquidation flag of a trade, the two bits `identifiedPayload` ends with. */
+function payloadFlags(trade: AggTrade): number {
+  return (trade.isBuy ? 1 : 0) | (trade.liquidation ? 2 : 0);
+}
+
+/**
+ * Whether `seen` holds the payload `identifiedPayload(trade)` spells out. Both come from
+ * validated trades, whose time, price and quantity are finite, so two payloads are the same
+ * string exactly when their fields are the same numbers; comparing the fields spares a
+ * string per trade that the live path would only ever look at on a repeat.
+ */
+function samePayload(seen: RecentTrade, trade: AggTrade): boolean {
+  return seen.time === trade.time
+    && seen.price === trade.price
+    && seen.qty === trade.qty
+    && seen.tradeCount === (trade.tradeCount ?? 1)
+    && seen.flags === payloadFlags(trade);
+}
+
+function exactTradeId(value: unknown): TradeId | null {
+  if (typeof value !== "string") return null;
+  const length = value.length;
+  if (length === 0 || length > 20) return null;
+  if (length > MAX_NUMBER_ID_DIGITS) {
+    if (!DECIMAL_TRADE_ID.test(value)) return null;
+    const parsed = BigInt(value);
+    return parsed <= MAX_U64 ? parsed : null;
+  }
+  let parsed = 0;
+  for (let i = 0; i < length; i++) {
+    const digit = value.charCodeAt(i) - 48;
+    if (digit < 0 || digit > 9) return null;
+    parsed = parsed * 10 + digit;
+  }
+  // No leading zeros, as DECIMAL_TRADE_ID requires.
+  return length > 1 && value.charCodeAt(0) === 48 ? null : parsed;
 }
 
 /** Tail IDs are tracked per component (`c:` candle, `f:` footprint). */
-function markTailConsumed(seen: Set<string>, id: bigint, candle: boolean, footprint: boolean): void {
+function markTailConsumed(seen: Set<string>, id: TradeId, candle: boolean, footprint: boolean): void {
   const key = id.toString();
   if (candle) seen.add(`c:${key}`);
   if (footprint) seen.add(`f:${key}`);
@@ -159,7 +202,7 @@ export class FootprintSeries {
    * re-delivery; without this floor it would be counted a second time. Other markets
    * keep the bounded-window dedup only.
    */
-  private readonly prunedTradeIdFloor = new Map<string, bigint>();
+  private readonly prunedTradeIdFloor = new Map<string, TradeId>();
   private resetEpochValue = 0;
   private identityConflictCountValue = 0;
   private readonly repairOwnership = new Map<number, RepairOwnership>();
@@ -565,7 +608,7 @@ export class FootprintSeries {
     for (const trade of trades) this.addTradeInternal(trade, false, false, true);
   }
 
-  private raisePrunedTradeIdFloor(market: string, id: bigint): void {
+  private raisePrunedTradeIdFloor(market: string, id: TradeId): void {
     const floor = this.prunedTradeIdFloor.get(market);
     if (floor === undefined || id > floor) this.prunedTradeIdFloor.set(market, id);
   }
@@ -604,12 +647,12 @@ export class FootprintSeries {
     validateTrade(trade);
     const start = bucketStart(trade.time, this.cfg.intervalMs);
     const fingerprint = dedupe ? tradeFingerprint(trade) : "";
-    const payload = dedupe && trade.id ? identifiedPayload(trade) : undefined;
+    const identified = dedupe && Boolean(trade.id);
     if (dedupe) {
       // First delivery wins; a repeat with a different payload is still rejected below
       // but counted so the owner can stop reporting the data as healthy.
       const seen = this.recentTrades.get(fingerprint);
-      if (seen?.payload !== undefined && seen.payload !== payload) this.identityConflictCountValue++;
+      if (seen?.price !== undefined && !(identified && samePayload(seen, trade))) this.identityConflictCountValue++;
     }
     const remainder = this.repairOwnedRemainder(trade, start, includeCandle, includeFootprint);
     if (!remainder.candle && !remainder.footprint) return;
@@ -618,16 +661,18 @@ export class FootprintSeries {
     if (dedupe) {
       if (this.recentTrades.has(fingerprint)) return;
       const market = trade.market ?? "";
-      const id = payload !== undefined && trade.liquidation !== true && MONOTONIC_TRADE_ID_MARKET.test(market)
+      const id = identified && trade.liquidation !== true && MONOTONIC_TRADE_ID_MARKET.test(market)
         ? exactTradeId(trade.id)
         : null;
       if (id !== null) {
         const floor = this.prunedTradeIdFloor.get(market);
         if (floor !== undefined && id <= floor) return;
       }
-      this.recentTrades.set(fingerprint, payload === undefined
+      this.recentTrades.set(fingerprint, !identified
         ? { time: trade.time }
-        : id === null ? { time: trade.time, payload } : { time: trade.time, payload, market, id });
+        : id === null
+          ? { time: trade.time, price: trade.price, qty: trade.qty, tradeCount: trade.tradeCount ?? 1, flags: payloadFlags(trade) }
+          : { time: trade.time, price: trade.price, qty: trade.qty, tradeCount: trade.tradeCount ?? 1, flags: payloadFlags(trade), market, id });
       if (this.recentTrades.size > 50_000 && trade.time >= this.nextRecentTradesPruneAt) {
         const retentionMs = Math.max(this.cfg.intervalMs * 2, 60_000);
         const cutoff = trade.time - retentionMs;

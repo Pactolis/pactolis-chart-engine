@@ -55,6 +55,11 @@ export function resetFootprintSupport(): void {
   serverReported.clear();
 }
 
+// A footprint series asks for its market's support on every live trade, always with the same
+// string; remembering the last answer spares the strings the normalization builds each time.
+let lastNormalizedInput = "";
+let lastNormalizedOutput = "";
+
 /**
  * Market id'sinin kanonik hâli: borsa büyük, sembol küçük harf.
  *
@@ -63,10 +68,15 @@ export function resetFootprintSupport(): void {
  * gibi reddediliyordu. Rust tarafındaki `normalize_market` ile aynı davranış.
  */
 export function normalizeMarket(market: string): string {
+  if (market === lastNormalizedInput) return lastNormalizedOutput;
   const trimmed = market.trim();
   const separator = trimmed.indexOf(":");
-  if (separator < 0) return trimmed.toLowerCase();
-  return `${trimmed.slice(0, separator).toUpperCase()}:${trimmed.slice(separator + 1).toLowerCase()}`;
+  const normalized = separator < 0
+    ? trimmed.toLowerCase()
+    : `${trimmed.slice(0, separator).toUpperCase()}:${trimmed.slice(separator + 1).toLowerCase()}`;
+  lastNormalizedInput = market;
+  lastNormalizedOutput = normalized;
+  return normalized;
 }
 
 /**
