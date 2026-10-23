@@ -12,8 +12,9 @@ test.use({
  * Given a BTCUSDT perp chart with acknowledged books and the private GPU
  * density opt-in on,
  * When frames render with performance telemetry off and then on,
- * Then `chart.gpu.heatmap.prepare.ms` gets a sample for every frame rendered
- * with telemetry on, none before, and the density was really GPU-owned.
+ * Then `chart.gpu.heatmap.prepare.ms` and `chart.gpu.heatmap.render.ms` each
+ * get a sample for every frame rendered with telemetry on, none before, and
+ * the density was really GPU-owned.
  */
 type RuntimeProbe = {
   heatmapTexturePrototypeEnabled: boolean;
@@ -28,9 +29,9 @@ type RuntimeProbe = {
   session: { captureCompositePng(): Promise<{ blob: Blob }> };
 };
 const hookSelector = '[data-testid="chart-hook"]:not([data-ft-synthetic="1"])';
-const METRIC = "chart.gpu.heatmap.prepare.ms";
+const METRICS = ["chart.gpu.heatmap.prepare.ms", "chart.gpu.heatmap.render.ms"];
 
-test("GPU heatmap prepare time reaches performance telemetry only while it is on", async ({ page }) => {
+test("GPU heatmap stage times reach performance telemetry only while it is on", async ({ page }) => {
   await page.setViewportSize({ width: 1800, height: 1000 });
   // Four unit trades per bar: open 250, low 50, high 350, close 260.
   const bars = buildBars(500).map((bar) => ({
@@ -91,11 +92,13 @@ test("GPU heatmap prepare time reaches performance telemetry only while it is on
       && [...book.chunks.values()].every((chunk) => chunk.status === "ready");
   }, id)).toBe(true);
 
-  const result = await page.evaluate(async ({ id, metric }) => {
+  const result = await page.evaluate(async ({ id, metrics }) => {
     const { getChartRuntime } = await import("/harness/chart.ts");
     const telemetry = await import("/src/core/performanceTelemetry.ts");
     const r = getChartRuntime(id) as unknown as RuntimeProbe;
-    const count = () => telemetry.snapshotPerformanceTelemetry().metrics[metric]?.count ?? 0;
+    const counts = () => Object.fromEntries(
+      metrics.map((metric) => [metric, telemetry.snapshotPerformanceTelemetry().metrics[metric]?.count ?? 0]),
+    );
     // Each capture renders one frame of all three surfaces.
     const frames = async (n: number) => {
       for (let i = 0; i < n; i++) {
@@ -108,21 +111,24 @@ test("GPU heatmap prepare time reaches performance telemetry only while it is on
       r.heatmapTexturePrototypeEnabled = true;
       telemetry.configurePerformanceTelemetry({ enabled: false });
       await frames(2);
-      const whileOff = count();
+      const whileOff = counts();
       telemetry.configurePerformanceTelemetry({ enabled: true });
       await frames(3);
-      const whileOn = count();
+      const whileOn = counts();
+      const snapshot = telemetry.snapshotPerformanceTelemetry().metrics;
       return { whileOff, whileOn, gpuOwned: r.heatmapGpuFrame !== null,
-        snapshot: telemetry.snapshotPerformanceTelemetry().metrics[metric] };
+        snapshot: Object.fromEntries(metrics.map((metric) => [metric, snapshot[metric]])) };
     } finally {
       r.heatmapTexturePrototypeEnabled = false;
       telemetry.configurePerformanceTelemetry({ enabled: wasEnabled });
     }
-  }, { id, metric: METRIC });
+  }, { id, metrics: METRICS });
 
-  console.log("heatmap-gpu-prepare-telemetry " + JSON.stringify(result));
+  console.log("heatmap-gpu-stage-telemetry " + JSON.stringify(result));
   expect(result.gpuOwned, "the density must really be GPU-owned").toBe(true);
-  expect(result.whileOff, "no sample while telemetry is off").toBe(0);
-  expect(result.whileOn, "a sample for every frame rendered with telemetry on").toBeGreaterThanOrEqual(3);
-  expect(result.snapshot.p95Ms).toBeGreaterThanOrEqual(0);
+  for (const metric of METRICS) {
+    expect(result.whileOff[metric], `${metric}: no sample while telemetry is off`).toBe(0);
+    expect(result.whileOn[metric], `${metric}: a sample for every frame rendered with telemetry on`).toBeGreaterThanOrEqual(3);
+    expect(result.snapshot[metric].p95Ms, `${metric}: p95`).toBeGreaterThanOrEqual(0);
+  }
 });
