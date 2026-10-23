@@ -58,6 +58,7 @@ test("identical applicable OHLC seed emits priceChanged:false without confusing 
     revision: series.revision, structure: series.structureRevision, epoch: series.resetEpoch,
     volume: actual.volume, delta: actual.delta, count: actual.count, length: series.length,
     identities: series.recentTrades,
+    numericIdentities: series.recentTradeIds,
   };
   const applied = apply(bar(start, {
     open: actual.open, high: actual.high, low: actual.low, close: actual.close,
@@ -75,6 +76,7 @@ test("identical applicable OHLC seed emits priceChanged:false without confusing 
   assert.equal(series.resetEpoch, before.epoch);
   assert.ok(series.revision > before.revision, "financial/freshness revision is NOT a price-only diff");
   assert.equal(series.recentTrades, before.identities, "live trade identity container survives");
+  assert.equal(series.recentTradeIds, before.numericIdentities, "and so does the one that holds the plain numeric IDs");
   series.addTrade(trade);
   assert.deepEqual([actual.volume, actual.delta, actual.count], [before.volume, before.delta, before.count],
     "the same live identity must remain deduplicated after the seed");

@@ -17,6 +17,7 @@
 // per chart and a 256 MiB module-wide realm. Any allocation or GL failure
 // throws to the caller, which falls back to the legacy annotation path.
 import { createProgram } from "../../../../core/engine/gl.js";
+import { isPerformanceTelemetryEnabled, recordPerformanceDuration } from "../../../../core/performanceTelemetry.js";
 import { HEATMAP_MIN_CEILING_RATIO } from "../../../orderbook/heatmapModel.js";
 import { HEATMAP_GPU_FRAG_SRC, HEATMAP_GPU_VERT_SRC } from "./heatmapGpuShaders.js";
 
@@ -117,6 +118,10 @@ export class HeatmapGpuRenderer {
    * flushed candle layers and strictly inside the plot area. Returns success;
    * on any failure the renderer's resources are disposed and the caller must
    * fall back to the legacy annotation path.
+   *
+   * With performance telemetry enabled, every call on a live renderer records
+   * its CPU time as `chart.gpu.heatmap.render.ms`: validation, uploads and
+   * draw submission, not the time the GPU takes to execute the commands.
    */
   renderFrame(gl: WebGL2RenderingContext, frame: HeatmapGpuCellFrame, plot: {
     left: number;
@@ -125,6 +130,23 @@ export class HeatmapGpuRenderer {
     height: number;
   }): boolean {
     if (this.disposed) return false;
+    // No closure, so the frame path allocates nothing extra; disabled
+    // telemetry costs one flag read.
+    const startedAt = isPerformanceTelemetryEnabled() ? performance.now() : null;
+    try {
+      return this.submitFrame(gl, frame, plot);
+    } finally {
+      if (startedAt !== null) recordPerformanceDuration("chart.gpu.heatmap.render.ms", performance.now() - startedAt);
+    }
+  }
+
+  /** Validates, uploads and draws one frame; `renderFrame` times it. */
+  private submitFrame(gl: WebGL2RenderingContext, frame: HeatmapGpuCellFrame, plot: {
+    left: number;
+    top: number;
+    width: number;
+    height: number;
+  }): boolean {
     const cells = frame.main.length + frame.extension.length;
     if (cells === 0) return true; // successful empty frame (e.g. acknowledged empty books)
     if (!Number.isFinite(cells) || cells > MAX_GRID_TEXELS) return false;

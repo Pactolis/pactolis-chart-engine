@@ -45,6 +45,12 @@ yeniden kurulur ([tests/chartNativeCapture.test.mjs](../tests/chartNativeCapture
 
 - `ChartRuntime` yalnız `mountChartRuntime(...)` üzerinden kurulur; `dispose()` tüm timer, listener,
   RAF ve host kaydını geri alır (`chartHost().unregisterRuntime`).
+- Host, grafikler arasında tek bir `DrawingManager` paylaşır ve manager en son çizen grafiğin view ile
+  zaman eşlemesini tutar; bu eşleme grafiğin serisine ulaşır. `dispose()` bu grafiğin bağlamını
+  `releaseHitTestContext(view)` ile bırakır, başka bir grafiğin bağlamına dokunmaz. Aksi halde en son
+  kapanan grafik, başka biri çizene kadar bellekte kalır
+  ([tests/drawingHitTestContextRelease.test.mjs](../tests/drawingHitTestContextRelease.test.mjs),
+  [tests/browser/chart-dispose-drawing-context.spec.ts](../tests/browser/chart-dispose-drawing-context.spec.ts)).
 - Port'lar mount'tan önce configure edilmelidir; configure edilmemiş port kullanımı açıkça hata verir
   (örn. `src/features/chart/chartDataSource.ts`).
 - Host, runtime lifecycle kaydını `src/features/chart/chartHost.ts` port'u üzerinden alır.
