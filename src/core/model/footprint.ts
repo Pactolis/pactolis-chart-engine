@@ -6,6 +6,7 @@ import { tradeFingerprint, validateBar, validateTrade } from "../dataContracts.j
 import { addDeltaBySize } from "../analysis/calc/ta.js";
 import { quantizeToStep } from "../priceStep.js";
 import { getFootprintSupport } from "../syncAllowlist.js";
+import { RecentTradeIds, payloadFlags } from "./recentTradeIds.js";
 
 export interface FootprintConfig {
   intervalMs: number;
@@ -126,11 +127,6 @@ export function identifiedPayload(trade: AggTrade): string {
   return `${trade.time}|${trade.price}|${trade.qty}|${trade.tradeCount ?? 1}|${trade.isBuy ? 1 : 0}|${trade.liquidation ? 1 : 0}`;
 }
 
-/** Side and liquidation flag of a trade, the two bits `identifiedPayload` ends with. */
-function payloadFlags(trade: AggTrade): number {
-  return (trade.isBuy ? 1 : 0) | (trade.liquidation ? 2 : 0);
-}
-
 /**
  * Whether `seen` holds the payload `identifiedPayload(trade)` spells out. Both come from
  * validated trades, whose time, price and quantity are finite, so two payloads are the same
@@ -145,23 +141,28 @@ function samePayload(seen: RecentTrade, trade: AggTrade): boolean {
     && seen.flags === payloadFlags(trade);
 }
 
-function exactTradeId(value: unknown): TradeId | null {
-  if (typeof value !== "string") return null;
+/** The number a canonical decimal trade ID of at most 15 digits stands for, or -1 for any other ID. */
+function plainTradeId(value: unknown): number {
+  if (typeof value !== "string") return -1;
   const length = value.length;
-  if (length === 0 || length > 20) return null;
-  if (length > MAX_NUMBER_ID_DIGITS) {
-    if (!DECIMAL_TRADE_ID.test(value)) return null;
-    const parsed = BigInt(value);
-    return parsed <= MAX_U64 ? parsed : null;
-  }
+  if (length === 0 || length > MAX_NUMBER_ID_DIGITS) return -1;
   let parsed = 0;
   for (let i = 0; i < length; i++) {
     const digit = value.charCodeAt(i) - 48;
-    if (digit < 0 || digit > 9) return null;
+    if (digit < 0 || digit > 9) return -1;
     parsed = parsed * 10 + digit;
   }
   // No leading zeros, as DECIMAL_TRADE_ID requires.
-  return length > 1 && value.charCodeAt(0) === 48 ? null : parsed;
+  return length > 1 && value.charCodeAt(0) === 48 ? -1 : parsed;
+}
+
+function exactTradeId(value: unknown): TradeId | null {
+  const plain = plainTradeId(value);
+  if (plain >= 0) return plain;
+  if (typeof value !== "string" || value.length <= MAX_NUMBER_ID_DIGITS || value.length > 20) return null;
+  if (!DECIMAL_TRADE_ID.test(value)) return null;
+  const parsed = BigInt(value);
+  return parsed <= MAX_U64 ? parsed : null;
 }
 
 /** Tail IDs are tracked per component (`c:` candle, `f:` footprint). */
@@ -211,10 +212,13 @@ export class FootprintSeries {
   private orderedSnapshotStructureRevision = -1;
   private orderedSnapshot: readonly FootprintBar[] = [];
   private pricePrecisionExplicit: boolean;
+  /** Applied trades by fingerprint: those without an ID, with an ID that is not a plain number, or from a market `recentTradeIds` does not keep. */
   private readonly recentTrades = new Map<string, RecentTrade>();
+  /** Applied trades whose ID is a plain number, by market and ID. */
+  private readonly recentTradeIds = new RecentTradeIds((market) => MONOTONIC_TRADE_ID_MARKET.test(market));
   private nextRecentTradesPruneAt = 0;
   /**
-   * Per monotonic-ID market, the highest aggTrade ID evicted from `recentTrades`. Those
+   * Per monotonic-ID market, the highest aggTrade ID evicted from the dedup memory. Those
    * IDs only grow, so a normal trade at or below it was already applied and is a late
    * re-delivery; without this floor it would be counted a second time. Other markets
    * keep the bounded-window dedup only.
@@ -304,6 +308,7 @@ export class FootprintSeries {
     this.refRejectStreak = 0;
     this.basis.clear();
     this.recentTrades.clear();
+    this.recentTradeIds.clear();
     this.prunedTradeIdFloor.clear();
     this.resetEpochValue++;
     this.repairOwnership.clear();
@@ -663,45 +668,68 @@ export class FootprintSeries {
     return (candle ? REMAINDER_CANDLE : 0) | (footprint ? REMAINDER_FOOTPRINT : 0);
   }
 
+  /** Forget the trades older than the dedup window, wherever they sit, and remember the IDs that fell out. */
+  private pruneRecentTrades(now: number): void {
+    const retentionMs = Math.max(this.cfg.intervalMs * 2, 60_000);
+    const cutoff = now - retentionMs;
+    for (const [key, entry] of this.recentTrades) {
+      if (entry.time >= cutoff) continue;
+      this.recentTrades.delete(key);
+      if (entry.market !== undefined && entry.id !== undefined) this.raisePrunedTradeIdFloor(entry.market, entry.id);
+    }
+    this.recentTradeIds.evictBefore(cutoff, (market, id) => this.raisePrunedTradeIdFloor(market, id));
+    this.nextRecentTradesPruneAt = now + Math.max(10_000, Math.floor(retentionMs / 4));
+  }
+
   private addTradeInternal(trade: AggTrade, dedupe: boolean, includeCandle: boolean, includeFootprint: boolean): void {
     validateTrade(trade);
     const start = bucketStart(trade.time, this.cfg.intervalMs);
-    const fingerprint = dedupe ? tradeFingerprint(trade) : "";
+    // A trade with a plain numeric ID is remembered by that number, anything else by its fingerprint.
+    const plainId = dedupe ? plainTradeId(trade.id) : -1;
+    const ids = plainId >= 0 ? this.recentTradeIds.idsFor(trade.market ?? "") : null;
+    const row = ids === null ? undefined : ids.rows.get(plainId);
+    const fingerprint = dedupe && ids === null ? tradeFingerprint(trade) : "";
     const identified = dedupe && Boolean(trade.id);
     if (dedupe) {
       // First delivery wins; a repeat with a different payload is still rejected below
       // but counted so the owner can stop reporting the data as healthy.
-      const seen = this.recentTrades.get(fingerprint);
-      if (seen?.price !== undefined && !(identified && samePayload(seen, trade))) this.identityConflictCountValue++;
+      if (ids !== null) {
+        if (row !== undefined && !this.recentTradeIds.matches(row, trade)) this.identityConflictCountValue++;
+      } else {
+        const seen = this.recentTrades.get(fingerprint);
+        if (seen?.price !== undefined && !(identified && samePayload(seen, trade))) this.identityConflictCountValue++;
+      }
     }
     const remainder = this.repairOwnedRemainder(trade, start, includeCandle, includeFootprint);
     if (remainder === 0) return;
     includeCandle = (remainder & REMAINDER_CANDLE) !== 0;
     includeFootprint = (remainder & REMAINDER_FOOTPRINT) !== 0;
     if (dedupe) {
-      if (this.recentTrades.has(fingerprint)) return;
-      const market = trade.market ?? "";
-      const id = identified && trade.liquidation !== true && MONOTONIC_TRADE_ID_MARKET.test(market)
-        ? exactTradeId(trade.id)
-        : null;
-      if (id !== null) {
-        const floor = this.prunedTradeIdFloor.get(market);
-        if (floor !== undefined && id <= floor) return;
-      }
-      this.recentTrades.set(fingerprint, !identified
-        ? { time: trade.time }
-        : id === null
-          ? { time: trade.time, price: trade.price, qty: trade.qty, tradeCount: trade.tradeCount ?? 1, flags: payloadFlags(trade) }
-          : { time: trade.time, price: trade.price, qty: trade.qty, tradeCount: trade.tradeCount ?? 1, flags: payloadFlags(trade), market, id });
-      if (this.recentTrades.size > 50_000 && trade.time >= this.nextRecentTradesPruneAt) {
-        const retentionMs = Math.max(this.cfg.intervalMs * 2, 60_000);
-        const cutoff = trade.time - retentionMs;
-        for (const [key, entry] of this.recentTrades) {
-          if (entry.time >= cutoff) continue;
-          this.recentTrades.delete(key);
-          if (entry.market !== undefined && entry.id !== undefined) this.raisePrunedTradeIdFloor(entry.market, entry.id);
+      if (ids !== null) {
+        if (row !== undefined) return;
+        if (ids.monotonic && trade.liquidation !== true) {
+          const floor = this.prunedTradeIdFloor.get(ids.market);
+          if (floor !== undefined && plainId <= floor) return;
         }
-        this.nextRecentTradesPruneAt = trade.time + Math.max(10_000, Math.floor(retentionMs / 4));
+        this.recentTradeIds.add(ids, plainId, trade);
+      } else {
+        if (this.recentTrades.has(fingerprint)) return;
+        const market = trade.market ?? "";
+        const id = identified && trade.liquidation !== true && MONOTONIC_TRADE_ID_MARKET.test(market)
+          ? exactTradeId(trade.id)
+          : null;
+        if (id !== null) {
+          const floor = this.prunedTradeIdFloor.get(market);
+          if (floor !== undefined && id <= floor) return;
+        }
+        this.recentTrades.set(fingerprint, !identified
+          ? { time: trade.time }
+          : id === null
+            ? { time: trade.time, price: trade.price, qty: trade.qty, tradeCount: trade.tradeCount ?? 1, flags: payloadFlags(trade) }
+            : { time: trade.time, price: trade.price, qty: trade.qty, tradeCount: trade.tradeCount ?? 1, flags: payloadFlags(trade), market, id });
+      }
+      if (this.recentTrades.size + this.recentTradeIds.size > 50_000 && trade.time >= this.nextRecentTradesPruneAt) {
+        this.pruneRecentTrades(trade.time);
       }
     }
 
@@ -868,7 +896,7 @@ export class FootprintSeries {
           done,
           total: trades.length,
           bars: this.order.length,
-          recentTrades: this.recentTrades.size,
+          recentTrades: this.recentTrades.size + this.recentTradeIds.size,
           elapsedMs: Date.now() - startedAt,
         });
       }
