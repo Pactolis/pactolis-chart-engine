@@ -45,6 +45,10 @@ interface RefTradeOrder {
   id: TradeId | null;
 }
 
+/**
+ * The earliest and the latest reference print of a bucket. `first` and `last` are two
+ * objects the bounds own and update in place, never shared with each other or with a trade.
+ */
 interface RefTradeBounds {
   first: RefTradeOrder;
   last: RefTradeOrder;
@@ -167,12 +171,22 @@ function markTailConsumed(seen: Set<string>, id: TradeId, candle: boolean, footp
   if (footprint) seen.add(`f:${key}`);
 }
 
-function orderForTrade(trade: AggTrade): RefTradeOrder {
-  return {
-    time: trade.time,
-    sequence: Number.isSafeInteger(trade.sourceSequence) ? trade.sourceSequence! : null,
-    id: exactTradeId(trade.id),
-  };
+/** Overwrite `target` with the order of `trade`: its time, then its source sequence, then its ID. */
+function fillTradeOrder(target: RefTradeOrder, trade: AggTrade): RefTradeOrder {
+  target.time = trade.time;
+  target.sequence = Number.isSafeInteger(trade.sourceSequence) ? trade.sourceSequence! : null;
+  target.id = exactTradeId(trade.id);
+  return target;
+}
+
+function copyTradeOrder(order: RefTradeOrder): RefTradeOrder {
+  return { time: order.time, sequence: order.sequence, id: order.id };
+}
+
+function assignTradeOrder(target: RefTradeOrder, order: RefTradeOrder): void {
+  target.time = order.time;
+  target.sequence = order.sequence;
+  target.id = order.id;
 }
 
 function compareTradeOrder(left: RefTradeOrder, right: RefTradeOrder): number {
@@ -212,6 +226,8 @@ export class FootprintSeries {
   private readonly repairFences = new Map<number, RepairOwnership>();
   private readonly repairBarriers = new Set<number>();
   private readonly refTradeBounds = new Map<number, RefTradeBounds>();
+  /** The order of the trade being applied; bounds copy from it, so a trade allocates no order object. */
+  private readonly tradeOrderScratch: RefTradeOrder = { time: 0, sequence: null, id: null };
 
   constructor(private readonly cfg: FootprintConfig) {
     this.referenceMarket = cfg.referenceMarket;
@@ -741,7 +757,7 @@ export class FootprintSeries {
     } else if (skipOHLC) {
       // Volume-only print.
     } else if (isRef) {
-      const tradeOrder = orderForTrade(trade);
+      const tradeOrder = fillTradeOrder(this.tradeOrderScratch, trade);
       const bounds = this.refTradeBounds.get(start);
       if (!bar.hasRef) {
         bar.open = price;
@@ -749,7 +765,7 @@ export class FootprintSeries {
         bar.low = price;
         bar.close = price;
         bar.hasRef = true;
-        this.refTradeBounds.set(start, { first: tradeOrder, last: tradeOrder, authoritativeOpen: false });
+        this.refTradeBounds.set(start, { first: copyTradeOrder(tradeOrder), last: copyTradeOrder(tradeOrder), authoritativeOpen: false });
       } else {
         bar.high = Math.max(bar.high, price);
         bar.low = Math.min(bar.low, price);
@@ -757,15 +773,15 @@ export class FootprintSeries {
           // The bar was seeded from history/snapshot data. Preserve its authoritative
           // open; use this first live reference print as the live close-order anchor.
           bar.close = price;
-          this.refTradeBounds.set(start, { first: tradeOrder, last: tradeOrder, authoritativeOpen: true });
+          this.refTradeBounds.set(start, { first: copyTradeOrder(tradeOrder), last: copyTradeOrder(tradeOrder), authoritativeOpen: true });
         } else {
           if (!bounds.authoritativeOpen && compareTradeOrder(tradeOrder, bounds.first) < 0) {
             bar.open = price;
-            bounds.first = tradeOrder;
+            assignTradeOrder(bounds.first, tradeOrder);
           }
           if (compareTradeOrder(tradeOrder, bounds.last) >= 0) {
             bar.close = price;
-            bounds.last = tradeOrder;
+            assignTradeOrder(bounds.last, tradeOrder);
           }
         }
       }
