@@ -21,7 +21,7 @@ Configure the ports once at startup, before the first chart mounts:
 | Port | Module | What the host supplies |
 | --- | --- | --- |
 | `configureChartDataSource` | `features/chart/chartDataSource` | History, live trades and repair reads for a market |
-| `configureChartHost` | `features/chart/chartHost` | Runtime registration, remembered chart types, degraded-data notices |
+| `configureChartHost` | `features/chart/chartHost` | Runtime registration, remembered chart types, degraded-data notices, and optionally how charts adapt to the screen (`displayOptions`: compact layout, default fit, pixel-ratio cap) |
 | `configureChartLocale` | `core/chartLocale` | Locale, time zone and translated text (`ChartMessageKey`) |
 | `configureIndicatorDataSource` | `features/indicators/indicatorDataSource` | Data for indicators that need more than candles |
 | `configureOrderbookHeatmapSettingsSource` | `features/orderbook/heatmapSettingsSource` | Order book heatmap settings |
