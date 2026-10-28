@@ -234,6 +234,42 @@ test("the live price label carries its caption on a regular chart and sits in th
   expect(compact.some((draw) => draw.surface === "annotation" && /^\d{5}(\.\d+)?$/.test(draw.text))).toBe(true);
 });
 
+test("a mount that gets no WebGL2 context is counted as a creation failure and leaves no canvases", async ({ page }) => {
+  await openHarness(page);
+  const result = await page.evaluate(async () => {
+    const [{ mountChart, createChartSurfaceModel }, { createHarnessServices }, telemetry] = await Promise.all([
+      import("/harness/chart.ts"),
+      import("/harness/services.ts"),
+      import("/src/core/performanceTelemetry.ts"),
+    ]);
+    // A phone at its WebGL context limit answers getContext("webgl2") with null.
+    const original = HTMLCanvasElement.prototype.getContext;
+    HTMLCanvasElement.prototype.getContext = function (this: HTMLCanvasElement, kind: string, ...rest: unknown[]) {
+      return kind === "webgl2" ? null : (original as (...args: unknown[]) => unknown).call(this, kind, ...rest);
+    } as typeof original;
+    const wasEnabled = telemetry.isPerformanceTelemetryEnabled();
+    telemetry.configurePerformanceTelemetry({ enabled: true });
+    const failures = () => telemetry.snapshotPerformanceTelemetry().counters["chart.gpu.contextCreateFailed"] ?? 0;
+    const before = failures();
+    try {
+      const surface = createChartSurfaceModel();
+      const root = document.createElement("div");
+      root.style.cssText = "position:fixed;inset:0;overflow:hidden;";
+      document.body.appendChild(root);
+      mountChart(root, {
+        type: "chart", market: "BINANCE_FUTURES:btcusdt", timeframe: "15m", scaleMode: "linear", chartType: "footprint", candles: true,
+      } as never, createHarnessServices() as never, "no-webgl2", surface);
+      const deadline = Date.now() + 10_000;
+      while (surface.status !== "failed" && Date.now() < deadline) await new Promise((resolve) => setTimeout(resolve, 20));
+      return { status: surface.status, failures: failures() - before, canvases: root.querySelectorAll("canvas").length };
+    } finally {
+      HTMLCanvasElement.prototype.getContext = original;
+      telemetry.configurePerformanceTelemetry({ enabled: wasEnabled });
+    }
+  });
+  expect(result).toEqual({ status: "failed", failures: 1, canvases: 0 });
+});
+
 test.describe("on a phone", () => {
   test.use({ hasTouch: true, isMobile: true, viewport: { width: 390, height: 844 }, deviceScaleFactor: 2 });
 

@@ -1807,6 +1807,8 @@ async function buildChartRuntime(
   const annotationCtx2d = annotationCanvas.getContext("2d");
   const interactionCtx2d = interactionCanvas.getContext("2d");
   if (!gl || !annotationCtx2d || !interactionCtx2d) {
+    // A phone at its WebGL context limit lands here; the counter tells that apart from a missing 2D context.
+    if (!gl) incrementPerformanceCounter("chart.gpu.contextCreateFailed");
     hook.remove();
     gpuCanvas.remove();
     annotationCanvas.remove();

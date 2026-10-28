@@ -570,6 +570,8 @@ export class ChartSession {
   private setupContextLossHandling(): void {
     const onLost = (e: Event): void => {
       e.preventDefault();
+      // Phones drop WebGL contexts under memory pressure; the counters are what a real-device run reads.
+      incrementPerformanceCounter("chart.gpu.contextLost");
       this.cancelRaf();
       this.pendingLiveUpdateStartedAt = null;
       this.gpuValid = false;
@@ -584,7 +586,11 @@ export class ChartSession {
     };
     const onRestored = (): void => {
       const freshGl = getChartWebGl2Context(this.gpuCanvas);
-      if (!freshGl) return;
+      if (!freshGl) {
+        incrementPerformanceCounter("chart.gpu.contextCreateFailed");
+        return;
+      }
+      incrementPerformanceCounter("chart.gpu.contextRestored");
       this.gl = freshGl;
       this.onRestoreContextCb(freshGl);
       this.gpuValid = true;

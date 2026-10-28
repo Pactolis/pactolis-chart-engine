@@ -1,6 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 
+import { configurePerformanceTelemetry, snapshotPerformanceTelemetry } from "../dist/core/performanceTelemetry.js";
 import { ChartChange, ChartSurfaceDirty } from "../dist/core/render/scene/chartScene.js";
 import { ChartSession } from "../dist/features/chart/ChartSession.js";
 
@@ -477,6 +478,31 @@ test("resize reports a layout change and context restore a full one", () => {
   win.runNextFrame();
   assert.deepEqual(frames.at(-1), { surfaces: ChartSurfaceDirty.All, changes: ChartChange.All });
   session.destroy();
+});
+
+test("context loss, restore and a failed restore are counted for real-device runs", () => {
+  configurePerformanceTelemetry({ enabled: true });
+  try {
+    const before = snapshotPerformanceTelemetry().counters;
+    const { session, win, gpuCanvas } = makeSession();
+    session.activate();
+    win.runNextFrame();
+
+    gpuCanvas.dispatch("webglcontextlost");
+    gpuCanvas.dispatch("webglcontextrestored");
+    gpuCanvas.dispatch("webglcontextlost");
+    gpuCanvas.getContext = () => null;
+    gpuCanvas.dispatch("webglcontextrestored");
+
+    const after = snapshotPerformanceTelemetry().counters;
+    const delta = name => (after[name] ?? 0) - (before[name] ?? 0);
+    assert.equal(delta("chart.gpu.contextLost"), 2);
+    assert.equal(delta("chart.gpu.contextRestored"), 1);
+    assert.equal(delta("chart.gpu.contextCreateFailed"), 1, "a restore that yields no context is a creation failure, not a restore");
+    session.destroy();
+  } finally {
+    configurePerformanceTelemetry({ enabled: false });
+  }
 });
 
 test("two-owner RAF isolation survives owner teardown", () => {
