@@ -1770,7 +1770,11 @@ async function buildChartRuntime(
   interactionCanvas.setAttribute("aria-keyshortcuts", "? ContextMenu Shift+F10");
   gpuCanvas.style.cssText = "position:absolute;inset:0;z-index:1;width:100%;height:100%;pointer-events:none;";
   annotationCanvas.style.cssText = "position:absolute;inset:0;z-index:2;width:100%;height:100%;pointer-events:none;";
-  interactionCanvas.style.cssText = "position:absolute;inset:0;width:100%;height:100%;pointer-events:auto;";
+  // touch-action:none hands every touch to the pointer handlers (pan, pinch, long press); without it
+  // the browser claims the gesture and cancels it, or zooms the whole page on a pinch.
+  interactionCanvas.style.cssText = "position:absolute;inset:0;width:100%;height:100%;pointer-events:auto;"
+    + "touch-action:none;user-select:none;-webkit-user-select:none;-webkit-touch-callout:none;"
+    + "-webkit-tap-highlight-color:transparent;";
   interactionCanvas.style.zIndex = String(Number(annotationCanvas.style.zIndex) + 1);
   panelRoot.append(gpuCanvas, annotationCanvas, interactionCanvas);
 
