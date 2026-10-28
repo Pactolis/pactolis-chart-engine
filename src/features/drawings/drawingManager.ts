@@ -34,26 +34,19 @@ export type {
 import {
   DEFAULT_DRAWING_TEMPLATE_STATE,
   DEFAULT_POSITION_RISK_SETTINGS,
-  annotationHitTest,
   applyLineStyle,
   applyStylePreset,
-  brushHitTest,
   clamp01,
   constrainDraftPoint,
   constrainPointEdit,
   defaultFibonacciExtensionPoint,
   defaultParallelChannelPoint,
   defaultPitchforkPoint,
-  distance,
   drawLine,
   drawObjectName,
   drawingDisplayName,
   drawingStylePresetFromDrawing,
   duplicateDrawing,
-  ellipseHitTest,
-  fibonacciHitTest,
-  gannFanHitTest,
-  gannGridHitTest,
   hasThreeAnchors,
   isAnnotationTool,
   isFibonacciTool,
@@ -64,21 +57,17 @@ import {
   isThreePointTool,
   isZoneTool,
   lastOf,
-  measurementHitTest,
   normalizeDrawing,
   normalizeDrawingPointsInPlace,
   normalizeDrawingStyleInPlace,
   normalizeDrawingTemplateState,
   normalizePositionRiskSettings,
-  parallelChannelHitTest,
-  pitchforkHitTest,
   pointDistance,
   queuePriceAxisLabel,
   queueTimeAxisLabel,
   queueTrendPriceLabels,
   queueZonePriceLabels,
   queueZoneTimeLabels,
-  regressionChannelHitTest,
   renderAnnotationTool,
   renderBrush,
   renderEllipse,
@@ -91,14 +80,19 @@ import {
   renderRegressionChannel,
   renderTriangle,
   screenPoint,
-  segmentDistance,
   simplifyBrushPoints,
   summarizeMarketDrawings,
   type DrawingMarketSummary,
   trendRenderLine,
-  triangleHitTest,
   zoneRenderBox,
 } from "./drawingPrimitives.js";
+import {
+  DRAWING_HANDLE_RADIUS_PX,
+  TOUCH_DRAWING_HANDLE_RADIUS_PX,
+  drawingHitTest,
+  positionLevelHitIndex,
+  type DrawingHitContext,
+} from "./drawingHitTest.js";
 
 export {
   DEFAULT_DRAWING_TEMPLATE_STATE,
@@ -132,6 +126,8 @@ export class DrawingManager {
   private currentMarket = "";
   private lastView: View | null = null;
   private lastTime: DrawingContext | null = null;
+  /** The last press came from a finger: hit tests pick wider and selected drawings draw bigger handles. */
+  private touchTargets = false;
 
   constructor(
     private readonly onChange: (drawings: Drawing[], transient: boolean) => void,
@@ -546,15 +542,30 @@ export class DrawingManager {
   releaseHitTestContext(view: View): void { if (this.lastView === view) { this.lastView = null; this.lastTime = null; } }
 
   hitTestAt(point: DrawingPoint, screen?: { x: number; y: number }): Drawing | null {
-    const selectable = [...this.drawings].reverse().find((drawing) =>
-      drawing.visible &&
-      drawing.market === this.currentMarket &&
-      this.hitTest(drawing, point, screen)
-    );
+    const selectable = this.drawingAt(point, screen, this.touchTargets);
     if (!selectable) return null;
     if (!this.selectedIds.has(selectable.id)) this.setSelection([selectable.id], selectable.id, false);
     else this.selectedId = selectable.id;
     return structuredClone(selectable);
+  }
+
+  /** The drawing under the pointer and whether it is already selected; unlike hitTestAt it selects nothing. */
+  peekAt(point: DrawingPoint, screen?: { x: number; y: number }, options: { touch?: boolean } = {}): { id: string; selected: boolean } | null {
+    const found = this.drawingAt(point, screen, options.touch === true);
+    return found ? { id: found.id, selected: this.selectedIds.has(found.id) } : null;
+  }
+
+  private drawingAt(point: DrawingPoint, screen: { x: number; y: number } | undefined, touch: boolean): Drawing | undefined {
+    const context = this.hitContext(touch);
+    return [...this.drawings].reverse().find((drawing) =>
+      drawing.visible &&
+      drawing.market === this.currentMarket &&
+      drawingHitTest(drawing, point, screen, context)
+    );
+  }
+
+  private hitContext(touch: boolean): DrawingHitContext {
+    return { view: this.lastView, time: this.lastTime, positionRisk: this.positionRiskSettings, touch };
   }
 
   setVisible(id: string, visible: boolean): void { this.updateWithHistory(id, { visible }); }
@@ -578,8 +589,9 @@ export class DrawingManager {
     this.deleteSelected();
   }
 
-  pointerDown(point: DrawingPoint, screen?: { x: number; y: number }, options: { additive?: boolean } = {}): boolean {
+  pointerDown(point: DrawingPoint, screen?: { x: number; y: number }, options: { additive?: boolean; touch?: boolean } = {}): boolean {
     this.placementCommitted = false;
+    this.touchTargets = options.touch === true;
     if (this.draft && this.draft.type !== "brush") {
       const tool = getDrawingTool(this.draft.type);
       if (tool.pointsRequired === 3 && this.draftStage === 1) {
@@ -606,11 +618,7 @@ export class DrawingManager {
       }
     }
     if (!this.tool) {
-      const selectable = [...this.drawings].reverse().find((drawing) =>
-        drawing.visible &&
-        drawing.market === this.currentMarket &&
-        this.hitTest(drawing, point, screen)
-      );
+      const selectable = this.drawingAt(point, screen, this.touchTargets);
       if (!selectable) {
         if (!options.additive && (this.selectedId !== null || this.selectedIds.size > 0)) {
           this.selectedId = null;
@@ -643,7 +651,7 @@ export class DrawingManager {
         return true;
       }
       if (isPositionTool(selectable.type)) {
-        const levelIndex = this.positionLevelHitIndex(selectable, point, screen);
+        const levelIndex = positionLevelHitIndex(selectable, point, screen, this.hitContext(this.touchTargets));
         if (levelIndex !== null) {
           this.editingPoint = levelIndex;
           return true;
@@ -999,82 +1007,6 @@ export class DrawingManager {
 
   private selectionKey(): string { return `${this.selectedId ?? ""}|${[...this.selectedIds].join(",")}`; }
 
-  private hitTest(
-    drawing: Drawing,
-    point: DrawingPoint,
-    screen?: { x: number; y: number }
-  ): boolean {
-    if (!screen || !this.lastView || !this.lastTime || drawing.points.length < 2) {
-      return drawing.points.some((item) => pointDistance(item, point) <= 1);
-    }
-    const a = screenPoint(drawing.points[0], this.lastView, this.lastTime);
-    const b = screenPoint(drawing.points[1], this.lastView, this.lastTime);
-    const p = screen;
-    const tolerance = 7;
-    if (drawing.type === "horizontal") return Math.abs(p.y - a.y) <= tolerance;
-    if (drawing.type === "horizontal-ray") {
-      return Math.abs(p.y - a.y) <= tolerance && p.x >= Math.max(a.x, this.lastView.area.left) - tolerance;
-    }
-    if (drawing.type === "vertical") return Math.abs(p.x - a.x) <= tolerance;
-    if (isAnnotationTool(drawing.type)) return annotationHitTest(drawing, a, b, p, this.lastView, tolerance);
-    if (drawing.type === "trend" || drawing.type === "trend-ray" || drawing.type === "extended-trend") {
-      const line = trendRenderLine(drawing, a, b, this.lastView);
-      return segmentDistance(p, line.a, line.b) <= tolerance;
-    }
-    if (drawing.type === "partial-price-line") {
-      const left = Math.min(a.x, b.x) - tolerance;
-      const right = Math.max(a.x, b.x) + tolerance;
-      return p.x >= left && p.x <= right && Math.abs(p.y - a.y) <= tolerance;
-    }
-    if (isFibonacciTool(drawing.type)) return fibonacciHitTest(drawing, a, b, p, this.lastView, this.lastTime, tolerance);
-    if (drawing.type === "parallel-channel") return parallelChannelHitTest(drawing, a, b, p, this.lastView, this.lastTime, tolerance);
-    if (drawing.type === "regression-channel") return regressionChannelHitTest(drawing, a, b, p, this.lastView, this.lastTime, tolerance);
-    if (drawing.type === "pitchfork") return pitchforkHitTest(drawing, a, b, p, this.lastView, this.lastTime, tolerance);
-    if (drawing.type === "gann-fan") return gannFanHitTest(drawing, a, b, p, this.lastView, tolerance);
-    if (drawing.type === "gann-grid") return gannGridHitTest(drawing, a, b, p, this.lastView, tolerance);
-    if (isMeasurementTool(drawing.type)) return measurementHitTest(drawing, a, b, p, this.lastView, this.lastTime, tolerance, this.positionRiskSettings);
-    if (drawing.type === "ellipse") return ellipseHitTest(a, b, p, tolerance);
-    if (drawing.type === "triangle") return triangleHitTest(a, b, p, tolerance);
-    if (drawing.type === "brush") return brushHitTest(drawing, p, this.lastView, this.lastTime, tolerance);
-    if (isZoneTool(drawing.type)) {
-      const box = zoneRenderBox(drawing, a, b, this.lastView);
-      return p.x >= box.left - tolerance && p.x <= box.right + tolerance && p.y >= box.top - tolerance && p.y <= box.bottom + tolerance;
-    }
-    if (drawing.type === "text") {
-      const width = Math.max(32, (drawing.text?.length ?? 3) * 8);
-      return p.x >= a.x && p.x <= a.x + width && p.y >= a.y - 20 && p.y <= a.y + 6;
-    }
-    if (drawing.type === "anchored-vwap") return distance(p, a) <= tolerance;
-    return distance(p, a) <= tolerance || distance(p, b) <= tolerance;
-  }
-
-  private positionLevelHitIndex(drawing: Drawing, point: DrawingPoint, screen?: { x: number; y: number }): number | null {
-    if (!isPositionTool(drawing.type) || drawing.points.length < 3) return null;
-    if (!screen || !this.lastView || !this.lastTime) {
-      const distances = drawing.points.slice(0, 3).map((item) => pointDistance(item, point));
-      const best = distances.reduce((bestIndex, value, index) => value < distances[bestIndex] ? index : bestIndex, 0);
-      return distances[best] <= 1 ? best : null;
-    }
-    const anchors = [drawing.points[0], drawing.points[1], drawing.points[2]];
-    const screenAnchors = anchors.map((item) => screenPoint(item, this.lastView!, this.lastTime!));
-    const left = Math.min(...screenAnchors.map((item) => item.x));
-    const right = Math.max(...screenAnchors.map((item) => item.x));
-    const tolerance = 9;
-    const minX = Math.max(this.lastView.area.left, left) - tolerance;
-    const maxX = Math.min(this.lastView.area.left + this.lastView.area.width, right) + tolerance;
-    if (screen.x < minX || screen.x > maxX) return null;
-    let bestIndex: number | null = null;
-    let bestDistance = tolerance + 1;
-    for (let index = 0; index < screenAnchors.length; index++) {
-      const distanceToLevel = Math.abs(screen.y - screenAnchors[index].y);
-      if (distanceToLevel <= tolerance && distanceToLevel < bestDistance) {
-        bestDistance = distanceToLevel;
-        bestIndex = index;
-      }
-    }
-    return bestIndex;
-  }
-
   private drawSelection(
     ctx: CanvasRenderingContext2D,
     drawing: Drawing,
@@ -1092,9 +1024,10 @@ export class DrawingManager {
       : hasThreeAnchors(drawing.type) && drawing.points[2]
         ? [a, b, screenPoint(drawing.points[2], view, time)]
         : [a, b];
+    const radius = this.touchTargets ? TOUCH_DRAWING_HANDLE_RADIUS_PX : DRAWING_HANDLE_RADIUS_PX;
     for (const point of anchors) {
       ctx.beginPath();
-      ctx.arc(point.x, point.y, 4, 0, Math.PI * 2);
+      ctx.arc(point.x, point.y, radius, 0, Math.PI * 2);
       ctx.fill();
       ctx.stroke();
     }

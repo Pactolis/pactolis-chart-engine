@@ -3,7 +3,12 @@ import { axisLayoutForView, type AxisRect } from "../../core/model/axisLayout.js
 
 export type ChartAxisTarget = "plot" | "price-axis" | "time-axis" | "corner-axis";
 
-export function hitTestChartAxis(view: View, x: number, y: number): ChartAxisTarget {
+export interface AxisHitOptions {
+  /** Pixels the time axis reaches above its top edge: a fingertip cannot hit a 22px strip squarely. */
+  timeAxisSlop?: number;
+}
+
+export function hitTestChartAxis(view: View, x: number, y: number, options: AxisHitOptions = {}): ChartAxisTarget {
   const layout = interactionAxisLayout(view);
   const inPriceAxisX = containsX(layout.priceAxisRect, x);
   const inMainPriceAxisY = y >= view.area.top && y <= view.area.top + view.area.height;
@@ -11,6 +16,10 @@ export function hitTestChartAxis(view: View, x: number, y: number): ChartAxisTar
   if (contains(layout.cornerRect, x, y)) return "corner-axis";
   if (inPriceAxisX && inMainPriceAxisY) return "price-axis";
   if (contains(layout.timeAxisRect, x, y)) return "time-axis";
+  const slop = options.timeAxisSlop ?? 0;
+  if (slop > 0 && containsX(layout.timeAxisRect, x) && y >= layout.timeAxisRect.top - slop && y < layout.timeAxisRect.top) {
+    return "time-axis";
+  }
   return "plot";
 }
 

@@ -32,6 +32,17 @@ test("chart axis hit testing uses chart layout options for time-axis height", ()
   assert.equal(hitTestChartAxis(view, 120, 601), "plot");
 });
 
+test("a touch may start a time-axis gesture a few pixels above the thin strip", () => {
+  const view = makeView();
+  const strip = view.area.top + view.area.height + view.subPanesH; // top edge of the time axis
+  assert.equal(hitTestChartAxis(view, 120, strip - 4), "plot");
+  assert.equal(hitTestChartAxis(view, 120, strip - 4, {}), "plot");
+  assert.equal(hitTestChartAxis(view, 120, strip - 4, { timeAxisSlop: 8 }), "time-axis");
+  assert.equal(hitTestChartAxis(view, 120, strip - 9, { timeAxisSlop: 8 }), "plot", "the slop is bounded");
+  assert.equal(hitTestChartAxis(view, 120, strip, { timeAxisSlop: 8 }), "time-axis");
+  assert.equal(hitTestChartAxis(view, 710, strip - 4, { timeAxisSlop: 8 }), "plot", "the price axis column keeps its own target");
+});
+
 test("dragScaleFactor keeps bounded wheel-style vertical scaling", () => {
   assert.ok(dragScaleFactor(-80) < 1);
   assert.ok(dragScaleFactor(80) > 1);

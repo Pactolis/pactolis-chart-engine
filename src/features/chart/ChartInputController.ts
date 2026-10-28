@@ -1,9 +1,14 @@
 /**
- * ChartInputController — per-panel mouse/keyboard input layer (TASK-036).
+ * ChartInputController — per-panel mouse/touch/keyboard input layer (TASK-036).
  *
  * DOM event wiring and gesture state live here. Command behaviour is owned by
  * chartCommands.ts so context menus, palette commands and input routes cannot
  * drift into separate implementations.
+ *
+ * Touch (pointerType "touch") follows the mouse paths with these differences: a press only
+ * becomes a drag past a larger dead zone, a second finger turns the pan into a pinch, a long
+ * press inspects with the crosshair, and the corner "⋯" button opens the context menu.
+ * Mouse, pen and synthetic events without a pointer type keep the mouse behavior.
  */
 
 import { resolveChartWheelAction } from "./wheelPolicy.js";
@@ -20,8 +25,20 @@ import type { TimeScaleViewportController } from "../controllers/timeScaleViewpo
 import type { ChartPanelState } from "../../core/chartPanelState.js";
 import { isDrawingMagnetTransientActive, setDrawingMagnetTransient } from "./drawingInteractionState.js";
 import { executeChartAction, type ChartCommandServices, type ChartCommandTarget } from "./chartCommands.js";
-import { ChartGestureController } from "./ChartGestureController.js";
+import { ChartGestureController, type ChartPanGesture } from "./ChartGestureController.js";
 import { requestChartPanelMaximize } from "./chartPanelFocus.js";
+import {
+  LONG_PRESS_MS,
+  TIME_AXIS_TOUCH_SLOP_PX,
+  TOUCH_CLICK_SLOP_PX,
+  TOUCH_CONTEXT_MENU_WINDOW_MS,
+  TouchPointers,
+  clickSlopPx,
+  isTouchPointer,
+  movedBeyondSlop,
+  pinchSample,
+  pinchStep,
+} from "./touchGestures.js";
 export { isDrawingMagnetTransientActive } from "./drawingInteractionState.js";
 
 /** Internal owner-document route from WindowOverlayRoot back to the originating canvas. */
@@ -29,6 +46,9 @@ export const CHART_OVERLAY_ACTION_EVENT = "footprint-internal-chart-overlay-acti
 export interface ChartOverlayActionEventDetail {
   action: ChartContextMenuAction;
 }
+
+/** A touch may start a time-axis scale from a little above the thin axis strip. */
+const TOUCH_AXIS_HIT = { timeAxisSlop: TIME_AXIS_TOUCH_SLOP_PX };
 
 const IS_CHROMIUM_WINDOWS = typeof navigator !== "undefined"
   && /Windows/.test(navigator.userAgent)
@@ -38,6 +58,14 @@ const IS_CHROMIUM_WINDOWS = typeof navigator !== "undefined"
 function wheelDeltaScale(): number {
   if (!IS_CHROMIUM_WINDOWS || typeof window === "undefined") return 1;
   return 1 / (window.devicePixelRatio || 1);
+}
+
+function prefersCoarsePointer(win: Window | null): boolean {
+  try {
+    return win?.matchMedia?.("(pointer: coarse)").matches === true;
+  } catch {
+    return false;
+  }
 }
 
 export function isDrawingMagnetEnabled(persistentMagnet: boolean, temporaryMagnet: boolean): boolean {
@@ -137,8 +165,27 @@ function attachChartInput(canvas: HTMLCanvasElement, crosshair: Crosshair, host:
   const ownerWindow = canvas.ownerDocument.defaultView;
   const interactionPolicy = DEFAULT_CHART_INTERACTION_POLICY;
   const gestures = new ChartGestureController(canvas);
+  const touches = new TouchPointers();
+  let longPress: { timer: ReturnType<typeof setTimeout>; pointerId: number } | null = null;
+  let lastTouchDownAt = Number.NEGATIVE_INFINITY;
+  /** True while the keyboard route dispatches its synthetic contextmenu, which must not be mistaken for a touch's. */
+  let keyboardContextMenu = false;
   let transientMagnetActive = false;
   const transientMagnetSource = {};
+
+  const nowMs = (): number => ownerWindow?.performance?.now() ?? Date.now();
+
+  // A touch screen as the primary pointer shows the touch controls before the first touch.
+  if (prefersCoarsePointer(ownerWindow)) {
+    crosshair.touch = true;
+    session?.invalidate(ChartChange.Interaction);
+  }
+
+  const setTouchMode = (on: boolean): void => {
+    if ((crosshair.touch === true) === on) return;
+    crosshair.touch = on;
+    session.invalidate(ChartChange.Interaction);
+  };
 
   const syncTransientMagnet = (modifiers: Pick<MouseEvent, "ctrlKey" | "metaKey">): void => {
     const drawings = host.svc.getAnalysisContext().drawings;
@@ -247,16 +294,21 @@ function attachChartInput(canvas: HTMLCanvasElement, crosshair: Crosshair, host:
     applyHorizontalViewportChange();
   };
 
+  const moveDrawing = (e: PointerEvent, cx: number, cy: number): void => {
+    const drawings = host.svc.getAnalysisContext().drawings;
+    syncTransientMagnet(e);
+    drawings.setMarket(host.state.market);
+    drawings.pointerMove(host.screenToDrawingPoint(cx, cy, shouldUseTemporaryDrawingMagnet(drawings.activeTool, e)));
+    session.invalidate();
+  };
+
   const onPointerMove = (e: PointerEvent) => {
     const rect = canvas.getBoundingClientRect();
     const cx = e.clientX - rect.left;
     const cy = e.clientY - rect.top;
     const drawings = host.svc.getAnalysisContext().drawings;
     if (gestures.drawingActive || drawings.hasDraft()) {
-      syncTransientMagnet(e);
-      drawings.setMarket(host.state.market);
-      drawings.pointerMove(host.screenToDrawingPoint(cx, cy, shouldUseTemporaryDrawingMagnet(drawings.activeTool, e)));
-      session.invalidate();
+      moveDrawing(e, cx, cy);
       if (gestures.drawingActive) return;
     }
     crosshair.x = cx;
@@ -279,7 +331,8 @@ function attachChartInput(canvas: HTMLCanvasElement, crosshair: Crosshair, host:
     }
   };
 
-  const endActiveGesture = (pointerId?: number): void => {
+  /** `keepCapture` leaves the finger captured when it goes on to drive another gesture (a pinch). */
+  const endActiveGesture = (pointerId?: number, keepCapture = false): void => {
     if (!gestures.pan) return;
     if (pointerId !== undefined && gestures.pan.pointerId !== pointerId) return;
     const target = gestures.pan.target;
@@ -288,7 +341,7 @@ function attachChartInput(canvas: HTMLCanvasElement, crosshair: Crosshair, host:
     if (target === "time-axis") host.timeViewport.endTimeAxisScale();
     if (target === "plot") host.timeViewport.endPlotPan();
     gestures.pan = null;
-    gestures.releasePointer(pointerId ?? capturedPointerId);
+    if (!keepCapture) gestures.releasePointer(pointerId ?? capturedPointerId);
     canvas.style.cursor = "default";
   };
 
@@ -296,15 +349,248 @@ function attachChartInput(canvas: HTMLCanvasElement, crosshair: Crosshair, host:
   const ownedByOtherPointer = (pointerId: number): boolean =>
     (gestures.pan !== null && gestures.pan.pointerId !== pointerId)
     || (gestures.indicatorScale !== null && gestures.indicatorScale.pointerId !== pointerId)
-    || (gestures.drawingActive && gestures.acceptedDrawingPointerId !== null && gestures.acceptedDrawingPointerId !== pointerId);
+    || (gestures.drawingActive && gestures.acceptedDrawingPointerId !== null && gestures.acceptedDrawingPointerId !== pointerId)
+    || (gestures.pinch !== null && gestures.pinch.firstId !== pointerId && gestures.pinch.secondId !== pointerId)
+    || (gestures.inspect !== null && gestures.inspect.pointerId !== pointerId)
+    || (gestures.menuPress !== null && gestures.menuPress.pointerId !== pointerId);
+
+  const gestureInProgress = (): boolean =>
+    gestures.pan !== null || gestures.pinch !== null || gestures.inspect !== null || gestures.menuPress !== null
+    || gestures.indicatorScale !== null || gestures.drawingActive;
+
+  // --- Touch ----------------------------------------------------------------------------------
+
+  const cancelLongPress = (pointerId?: number): void => {
+    if (!longPress || (pointerId !== undefined && longPress.pointerId !== pointerId)) return;
+    clearTimeout(longPress.timer);
+    longPress = null;
+  };
+
+  const armLongPress = (pointerId: number): void => {
+    cancelLongPress();
+    longPress = {
+      pointerId,
+      timer: setTimeout(() => {
+        longPress = null;
+        startInspect(pointerId);
+      }, LONG_PRESS_MS),
+    };
+  };
+
+  const hideCrosshair = (): void => {
+    crosshair.visible = false;
+    session.invalidate(ChartChange.Interaction);
+    if (!host.applyingExternal) host.notifyCrosshair({ time: null, price: null });
+  };
+
+  /** The inspecting finger moves the crosshair, kept inside the plot (and the panes under it). */
+  const moveInspect = (localX: number, localY: number): void => {
+    const area = view.area;
+    crosshair.x = Math.min(Math.max(localX, area.left), area.left + area.width);
+    crosshair.y = Math.min(Math.max(localY, area.top), area.top + area.height + view.subPanesH);
+    crosshair.visible = true;
+    session.invalidate(ChartChange.Interaction);
+    if (!host.applyingExternal) {
+      const pointer = host.resolveScreenCrosshair(crosshair.x, crosshair.y);
+      host.notifyCrosshair({ time: pointer.time, price: pointer.price });
+    }
+  };
+
+  /** A finger held still on the plot swaps its pan for the crosshair; lifting it closes the crosshair. */
+  const startInspect = (pointerId: number): void => {
+    const pan = gestures.pan;
+    const finger = touches.get(pointerId);
+    if (!pan || pan.pointerId !== pointerId || pan.target !== "plot" || pan.dragging || pan.wheeled || !finger) return;
+    host.timeViewport.endPlotPan();
+    gestures.pan = null;
+    gestures.inspect = { pointerId };
+    moveInspect(finger.x, finger.y);
+  };
+
+  const endInspect = (pointerId: number): void => {
+    if (gestures.clearInspect(pointerId)) hideCrosshair();
+  };
+
+  const startPinch = (firstId: number, secondId: number): void => {
+    const first = touches.get(firstId);
+    const second = touches.get(secondId);
+    if (!first || !second) return;
+    cancelLongPress();
+    endActiveGesture(firstId, true);
+    if (crosshair.visible) hideCrosshair();
+    gestures.pinch = { firstId, secondId, last: pinchSample(first.x, first.y, second.x, second.y) };
+    canvas.setPointerCapture(secondId);
+  };
+
+  /** The fingers' midpoint drags the chart and their spread zooms it around that midpoint. */
+  const stepPinch = (): void => {
+    const pinch = gestures.pinch;
+    const first = pinch && touches.get(pinch.firstId);
+    const second = pinch && touches.get(pinch.secondId);
+    if (!pinch || !first || !second) return;
+    const next = pinchSample(first.x, first.y, second.x, second.y);
+    const step = pinchStep(pinch.last, next);
+    pinch.last = next;
+    if (!step) return;
+    view.panX(step.dMidX);
+    if (!view.isPriceAutoScale()) view.priceTop += step.dMidY * view.pricePerPx;
+    host.timeViewport.applyWheelZoom(step.factor, next.midX, host.pipeline.series.length);
+    applyHorizontalViewportChange();
+  };
+
+  /** The finger left down after a pinch carries on as a plain plot pan. */
+  const resumePan = (pointerId: number): void => {
+    const finger = touches.get(pointerId);
+    if (!finger || gestures.pan) return;
+    const rect = canvas.getBoundingClientRect();
+    const clientX = finger.x + rect.left;
+    const clientY = finger.y + rect.top;
+    if (interactionPolicy.scroll.plotPressedMouseMove) host.timeViewport.beginPlotPan();
+    gestures.pan = {
+      x: clientX,
+      y: clientY,
+      startX: clientX,
+      startY: clientY,
+      wheeled: false,
+      priceTop: view.priceTop,
+      pricePerPx: view.pricePerPx,
+      target: "plot",
+      pointerId,
+    };
+  };
+
+  /**
+   * A second finger on a plot pan turns it into a pinch; against any other gesture the extra
+   * finger is ignored. Returns true when the pointer-down was consumed.
+   */
+  const onExtraFinger = (e: PointerEvent): boolean => {
+    const pan = gestures.pan;
+    if (gestures.pinch || gestures.inspect || gestures.menuPress || gestures.drawingActive || gestures.indicatorScale) return true;
+    // Fingers already down hold no gesture (a replay pick, say): this one starts its own.
+    if (!pan) return false;
+    if (pan.target === "plot") startPinch(pan.pointerId, e.pointerId);
+    return true;
+  };
+
+  /** Registers a finger that just landed; true when it was an extra finger the gestures in progress consume. */
+  const trackTouchDown = (e: PointerEvent): boolean => {
+    const rect = canvas.getBoundingClientRect();
+    // With no gesture in progress, fingers still on record are stale (a lift the canvas never saw).
+    if (!gestureInProgress()) touches.clear();
+    touches.down(e.pointerId, e.clientX - rect.left, e.clientY - rect.top);
+    lastTouchDownAt = nowMs();
+    setTouchMode(true);
+    return touches.size > 1 && onExtraFinger(e);
+  };
+
+  /** Ends the touch-only gesture a lifted or cancelled finger belonged to; true when it owned one. */
+  const endTouchGesture = (e: PointerEvent, cancelled: boolean): boolean => {
+    const pointerId = e.pointerId;
+    const pinch = gestures.pinch;
+    if (pinch && (pinch.firstId === pointerId || pinch.secondId === pointerId)) {
+      const remaining = pinch.firstId === pointerId ? pinch.secondId : pinch.firstId;
+      const stillDown = touches.has(remaining);
+      gestures.clearPinch(stillDown ? remaining : undefined);
+      if (stillDown) resumePan(remaining);
+      return true;
+    }
+    if (gestures.inspect?.pointerId === pointerId) {
+      endInspect(pointerId);
+      return true;
+    }
+    const press = gestures.clearMenuPress(pointerId);
+    if (press) {
+      if (!cancelled) openMenuFromButton(e, press);
+      return true;
+    }
+    return false;
+  };
+
+  /** A tap on the corner "⋯" button opens the same menu a right click would, anchored under the button. */
+  const openMenuFromButton = (release: PointerEvent, press: { startX: number; startY: number }): void => {
+    if (movedBeyondSlop(release.clientX - press.startX, release.clientY - press.startY, TOUCH_CLICK_SLOP_PX)) return;
+    const rect = canvas.getBoundingClientRect();
+    if (!host.overlay.getMenuButtonAt(release.clientX - rect.left, release.clientY - rect.top)) return;
+    const button = host.overlay.getMenuButtonRect();
+    if (!button) return;
+    openContextMenu(
+      button.x + button.w / 2,
+      button.y + button.h / 2,
+      rect.left + button.x,
+      rect.top + button.y + button.h + 4,
+      true,
+    );
+  };
+
+  /** The native contextmenu a long press fires: the touch UI has the crosshair and the "⋯" button instead. */
+  const isTouchContextMenu = (e: MouseEvent): boolean =>
+    (e as PointerEvent).pointerType === "touch" || nowMs() - lastTouchDownAt < TOUCH_CONTEXT_MENU_WINDOW_MS;
+
+  // --- Drawings -------------------------------------------------------------------------------
+
+  /** Hands a press to the drawing tools; true when DrawingManager took it (placing, editing or dragging). */
+  const pressDrawing = (e: PointerEvent, cx: number, cy: number, capture: boolean): boolean => {
+    const drawings = host.svc.getAnalysisContext().drawings;
+    syncTransientMagnet(e);
+    drawings.setMarket(host.state.market);
+    const point = host.screenToDrawingPoint(cx, cy, shouldUseTemporaryDrawingMagnet(drawings.activeTool, e));
+    if (!drawings.pointerDown(point, { x: cx, y: cy }, { additive: e.shiftKey || e.ctrlKey || e.metaKey, touch: isTouchPointer(e) })) return false;
+    gestures.acceptedDrawingPointerId = e.pointerId;
+    gestures.drawingActive = drawings.isPointerDragActive();
+    if (gestures.drawingActive && capture) canvas.setPointerCapture(e.pointerId);
+    session.invalidate();
+    return true;
+  };
+
+  const releaseDrawing = (e: PointerEvent): void => {
+    const drawings = host.svc.getAnalysisContext().drawings;
+    gestures.acceptedDrawingPointerId = null;
+    // Multi-point tools use click-to-place anchors: pointer release only
+    // completes drag-native gestures (brush/editing), never a 2nd/3rd anchor.
+    if (!drawings.hasDraft() || drawings.activeTool === "brush") drawings.pointerUp();
+    gestures.drawingActive = false;
+    syncTransientMagnet(e);
+    gestures.releasePointer(e.pointerId);
+    canvas.style.cursor = "default";
+    session.invalidate();
+  };
+
+  /**
+   * Touch: a press that would place or select a drawing waits for the release, so dragging still pans
+   * the chart and a second finger can still pinch. Drag-native tools (brush) and the drawings already
+   * selected take the press at once, as with a mouse.
+   */
+  const defersDrawingPress = (cx: number, cy: number): boolean => {
+    const drawings = host.svc.getAnalysisContext().drawings;
+    if (drawings.activeTool !== null || drawings.hasDraft()) return drawings.activeTool !== "brush";
+    drawings.setMarket(host.state.market);
+    const hit = drawings.peekAt(host.screenToDrawingPoint(cx, cy), { x: cx, y: cy }, { touch: true });
+    return hit !== null && !hit.selected;
+  };
+
+  const tapDrawing = (release: PointerEvent): void => {
+    const rect = canvas.getBoundingClientRect();
+    if (pressDrawing(release, release.clientX - rect.left, release.clientY - rect.top, false)) releaseDrawing(release);
+  };
 
   const onPointerDown = (e: PointerEvent) => {
+    const touch = isTouchPointer(e);
+    if (touch) {
+      if (trackTouchDown(e)) return;
+    } else if (crosshair.touch) {
+      setTouchMode(false);
+    }
     if (e.button !== 0) return;
     if (ownedByOtherPointer(e.pointerId)) return;
     canvas.focus({ preventScroll: true });
     const rect = canvas.getBoundingClientRect();
     const cx = e.clientX - rect.left;
     const cy = e.clientY - rect.top;
+    if (touch && host.overlay.getMenuButtonAt(cx, cy)) {
+      gestures.menuPress = { pointerId: e.pointerId, startX: e.clientX, startY: e.clientY };
+      canvas.setPointerCapture(e.pointerId);
+      return;
+    }
     const indicatorPaneId = host.overlay.getIndicatorAxisPaneAt(cx, cy);
     if (indicatorPaneId) {
       gestures.indicatorScale = { paneId: indicatorPaneId, pointerId: e.pointerId, startX: e.clientX, startY: e.clientY, lastY: e.clientY };
@@ -312,23 +598,16 @@ function attachChartInput(canvas: HTMLCanvasElement, crosshair: Crosshair, host:
       canvas.setPointerCapture(e.pointerId);
       return;
     }
-    const target = hitTestChartAxis(view, cx, cy);
+    const target = hitTestChartAxis(view, cx, cy, touch ? TOUCH_AXIS_HIT : undefined);
     if (target === "plot" && host.isReplaySelecting()) {
       host.selectReplayStart(host.screenToDrawingPoint(cx, cy).time);
       canvas.style.cursor = "default";
       return;
     }
+    let tap: ChartPanGesture["tap"];
     if (target === "plot") {
-      const drawings = host.svc.getAnalysisContext().drawings;
-      syncTransientMagnet(e);
-      drawings.setMarket(host.state.market);
-      if (drawings.pointerDown(host.screenToDrawingPoint(cx, cy, shouldUseTemporaryDrawingMagnet(drawings.activeTool, e)), { x: cx, y: cy }, { additive: e.shiftKey || e.ctrlKey || e.metaKey })) {
-        gestures.acceptedDrawingPointerId = e.pointerId;
-        gestures.drawingActive = drawings.isPointerDragActive();
-        if (gestures.drawingActive) canvas.setPointerCapture(e.pointerId);
-        session.invalidate();
-        return;
-      }
+      if (touch && defersDrawingPress(cx, cy)) tap = tapDrawing;
+      else if (pressDrawing(e, cx, cy, true)) return;
     }
     canvas.style.cursor = cursorForTarget(target);
     if (target === "price-axis" && interactionPolicy.scale.axisPressedMouseMove.price) {
@@ -348,8 +627,10 @@ function attachChartInput(canvas: HTMLCanvasElement, crosshair: Crosshair, host:
       pricePerPx: view.pricePerPx,
       target,
       pointerId: e.pointerId,
+      tap,
     };
     canvas.setPointerCapture(e.pointerId);
+    if (touch && target === "plot") armLongPress(e.pointerId);
   };
 
   const onPointerDrag = (e: PointerEvent) => {
@@ -362,6 +643,12 @@ function attachChartInput(canvas: HTMLCanvasElement, crosshair: Crosshair, host:
       return;
     }
     if (!gestures.pan || gestures.pan.pointerId !== e.pointerId) return;
+    if (isTouchPointer(e) && !gestures.pan.dragging) {
+      // A finger is never perfectly still: nothing moves until it has clearly left the spot it landed on.
+      if (!movedBeyondSlop(e.clientX - gestures.pan.startX, e.clientY - gestures.pan.startY, TOUCH_CLICK_SLOP_PX)) return;
+      gestures.pan.dragging = true;
+      cancelLongPress(e.pointerId);
+    }
     const dx = e.clientX - gestures.pan.x;
     const dy = e.clientY - gestures.pan.y;
 
@@ -394,17 +681,13 @@ function attachChartInput(canvas: HTMLCanvasElement, crosshair: Crosshair, host:
   };
 
   const onPointerUp = (e: PointerEvent) => {
+    if (isTouchPointer(e)) {
+      touches.up(e.pointerId);
+      cancelLongPress(e.pointerId);
+      if (endTouchGesture(e, false)) return;
+    }
     if (gestures.acceptedDrawingPointerId === e.pointerId) {
-      const drawings = host.svc.getAnalysisContext().drawings;
-      gestures.acceptedDrawingPointerId = null;
-      // Multi-point tools use click-to-place anchors: pointer release only
-      // completes drag-native gestures (brush/editing), never a 2nd/3rd anchor.
-      if (!drawings.hasDraft() || drawings.activeTool === "brush") drawings.pointerUp();
-      gestures.drawingActive = false;
-      syncTransientMagnet(e);
-      gestures.releasePointer(e.pointerId);
-      canvas.style.cursor = "default";
-      session.invalidate();
+      releaseDrawing(e);
       return;
     }
     if (gestures.indicatorScale) {
@@ -413,7 +696,7 @@ function attachChartInput(canvas: HTMLCanvasElement, crosshair: Crosshair, host:
       gestures.indicatorScale = null;
       gestures.releasePointer(e.pointerId);
       canvas.style.cursor = "default";
-      const wasDragging = Math.abs(e.clientX - drag.startX) > 3 || Math.abs(e.clientY - drag.startY) > 3;
+      const wasDragging = movedBeyondSlop(e.clientX - drag.startX, e.clientY - drag.startY, clickSlopPx(e));
       if (!wasDragging) {
         const rect = canvas.getBoundingClientRect();
         const control = host.overlay.getIndicatorScaleControlAt(e.clientX - rect.left, e.clientY - rect.top);
@@ -424,11 +707,16 @@ function attachChartInput(canvas: HTMLCanvasElement, crosshair: Crosshair, host:
     }
     if (!gestures.pan || gestures.pan.pointerId !== e.pointerId) return;
     const wasDragging = gestures.pan.wheeled
-      || Math.abs(e.clientX - gestures.pan.startX) > 3
-      || Math.abs(e.clientY - gestures.pan.startY) > 3;
+      || gestures.pan.dragging === true
+      || movedBeyondSlop(e.clientX - gestures.pan.startX, e.clientY - gestures.pan.startY, clickSlopPx(e));
+    const tap = gestures.pan.tap;
     endActiveGesture(e.pointerId);
 
     if (!wasDragging) {
+      if (tap) {
+        tap(e);
+        return;
+      }
       const rect = canvas.getBoundingClientRect();
       const cx = e.clientX - rect.left;
       const cy = e.clientY - rect.top;
@@ -462,8 +750,16 @@ function attachChartInput(canvas: HTMLCanvasElement, crosshair: Crosshair, host:
     gestures.drawingActive = false;
   };
 
+  const dropTouchPointer = (e: PointerEvent): void => {
+    if (!isTouchPointer(e)) return;
+    touches.up(e.pointerId);
+    cancelLongPress(e.pointerId);
+    endTouchGesture(e, true);
+  };
+
   const onPointerCancel = (e: PointerEvent) => {
     clearTransientMagnet();
+    dropTouchPointer(e);
     if (gestures.indicatorScale?.pointerId === e.pointerId) gestures.indicatorScale = null;
     cancelDrawingPointer(e.pointerId);
     endActiveGesture(e.pointerId);
@@ -473,6 +769,7 @@ function attachChartInput(canvas: HTMLCanvasElement, crosshair: Crosshair, host:
 
   const onLostPointerCapture = (e: PointerEvent) => {
     clearTransientMagnet();
+    dropTouchPointer(e);
     if (gestures.indicatorScale?.pointerId === e.pointerId) gestures.indicatorScale = null;
     cancelDrawingPointer(e.pointerId);
     endActiveGesture(e.pointerId);
@@ -480,6 +777,7 @@ function attachChartInput(canvas: HTMLCanvasElement, crosshair: Crosshair, host:
 
   const onContextMenu = (e: MouseEvent) => {
     e.preventDefault();
+    if (!keyboardContextMenu && isTouchContextMenu(e)) return;
     const activeDrawings = host.svc.getAnalysisContext().drawings;
     if (gestures.acceptedDrawingPointerId !== null) {
       const pointerId = gestures.acceptedDrawingPointerId;
@@ -492,8 +790,11 @@ function attachChartInput(canvas: HTMLCanvasElement, crosshair: Crosshair, host:
     gestures.drawingActive = false;
     endActiveGesture();
     const rect = canvas.getBoundingClientRect();
-    const localX = e.clientX - rect.left;
-    const localY = e.clientY - rect.top;
+    openContextMenu(e.clientX - rect.left, e.clientY - rect.top, e.clientX, e.clientY);
+  };
+
+  /** `fromMenuButton`: the touch "⋯" button has no pointer position to hit-test, so it acts on the selected drawings. */
+  const openContextMenu = (localX: number, localY: number, clientX: number, clientY: number, fromMenuButton = false): void => {
     const target = hitTestChartAxis(view, localX, localY);
     const indicatorAxisPaneId = host.overlay.getIndicatorAxisPaneAt(localX, localY);
     const indicatorPaneId = indicatorAxisPaneId ?? host.overlay.getIndicatorPaneAt(localX, localY);
@@ -502,15 +803,17 @@ function attachChartInput(canvas: HTMLCanvasElement, crosshair: Crosshair, host:
     let drawingHit = false;
     if (target === "plot") {
       drawings.setMarket(host.state.market);
-      drawingHit = drawings.hitTestAt(host.screenToDrawingPoint(localX, localY), { x: localX, y: localY }) !== null;
+      drawingHit = fromMenuButton
+        ? drawings.getSelectedIds().length > 0
+        : drawings.hitTestAt(host.screenToDrawingPoint(localX, localY), { x: localX, y: localY }) !== null;
       session.invalidate();
     }
     const detail: ChartContextMenuDetail = {
       target,
       x: localX,
       y: localY,
-      clientX: e.clientX,
-      clientY: e.clientY,
+      clientX,
+      clientY,
       panelId: host.panelId,
       market: host.state.market,
       timeframe: host.state.timeframe,
@@ -539,12 +842,17 @@ function attachChartInput(canvas: HTMLCanvasElement, crosshair: Crosshair, host:
     e.preventDefault();
     const rect = canvas.getBoundingClientRect();
     const MouseEventCtor = canvas.ownerDocument.defaultView?.MouseEvent ?? MouseEvent;
-    canvas.dispatchEvent(new MouseEventCtor("contextmenu", {
-      bubbles: true,
-      cancelable: true,
-      clientX: rect.left + Math.max(1, rect.width / 2),
-      clientY: rect.top + Math.max(1, rect.height / 2),
-    }));
+    keyboardContextMenu = true;
+    try {
+      canvas.dispatchEvent(new MouseEventCtor("contextmenu", {
+        bubbles: true,
+        cancelable: true,
+        clientX: rect.left + Math.max(1, rect.width / 2),
+        clientY: rect.top + Math.max(1, rect.height / 2),
+      }));
+    } finally {
+      keyboardContextMenu = false;
+    }
   };
 
   const onOverlayAction = (event: Event): void => {
@@ -709,7 +1017,34 @@ function attachChartInput(canvas: HTMLCanvasElement, crosshair: Crosshair, host:
     }
   };
 
+  /** A finger moves one gesture at a time (pinch, inspect, drawing drag, pan) and never shows a hover crosshair. */
+  const onTouchMove = (e: PointerEvent): void => {
+    const rect = canvas.getBoundingClientRect();
+    const cx = e.clientX - rect.left;
+    const cy = e.clientY - rect.top;
+    touches.move(e.pointerId, cx, cy);
+    if (gestures.pinch) {
+      if (e.pointerId === gestures.pinch.firstId || e.pointerId === gestures.pinch.secondId) stepPinch();
+      return;
+    }
+    if (gestures.inspect) {
+      if (gestures.inspect.pointerId === e.pointerId) moveInspect(cx, cy);
+      return;
+    }
+    if (gestures.menuPress) return;
+    if (gestures.drawingActive) {
+      if (gestures.acceptedDrawingPointerId === e.pointerId) moveDrawing(e, cx, cy);
+      return;
+    }
+    if (gestures.pan || gestures.indicatorScale) onPointerDrag(e);
+  };
+
   const onPointerMoveMain = (e: PointerEvent) => {
+    if (isTouchPointer(e)) {
+      onTouchMove(e);
+      return;
+    }
+    if (crosshair.touch) setTouchMode(false);
     onPointerMove(e);
     if (host.isReplaySelecting()) {
       const rect = canvas.getBoundingClientRect();
@@ -745,6 +1080,9 @@ function attachChartInput(canvas: HTMLCanvasElement, crosshair: Crosshair, host:
 
   return () => {
     clearTransientMagnet();
+    cancelLongPress();
+    if (gestures.inspect) crosshair.visible = false;
+    touches.clear();
     if (gestures.acceptedDrawingPointerId !== null) {
       const activeDrawings = host.svc.getAnalysisContext().drawings;
       const pointerId = gestures.acceptedDrawingPointerId;

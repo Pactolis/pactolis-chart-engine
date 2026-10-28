@@ -6,6 +6,7 @@ import { settings, type ChartViewConfig } from "../settings.js";
 import { cellTextModeFor } from "./chartLod.js";
 import type { IndicatorPaneRender } from "../indicatorTypes.js";
 import { drawIndicatorScaleControls, drawPriceScaleControls, type IndicatorScaleControlRect, type PriceScaleControlId, type PriceScaleControlRect } from "./axisControlsRenderer.js";
+import { drawTouchMenuButton, pointInTouchControl, touchMenuButtonRect, type TouchMenuButtonRect } from "./touchControlsRenderer.js";
 import { configDecimals, placeVerticalLabels } from "../axisLabelUtils.js";
 import { drawCrosshairPriceLabel, drawPriceAxis, drawPriceMarkers, type PriceMarker } from "./priceAxisRenderer.js";
 import { drawCrosshairTimeLabel, drawTimeAxis, type TimeMarker } from "./timeAxisRenderer.js";
@@ -37,6 +38,8 @@ export interface Crosshair {
   x: number;
   y: number;
   visible: boolean;
+  /** The user is on a touch screen: the overlay shows finger-sized scale buttons and the corner menu button. */
+  touch?: boolean;
 }
 
 export interface TpoProfileHit {
@@ -115,6 +118,7 @@ export class Overlay {
   private lineLabels: { price: number; text: string; color: string; priority: number }[] = [];
   private priceScaleControlRects: PriceScaleControlRect[] = [];
   private indicatorScaleControlRects: IndicatorScaleControlRect[] = [];
+  private touchMenuButton: TouchMenuButtonRect | null = null;
   private indicatorAxisRects: Array<{ paneId: string; plotX: number; x: number; y: number; w: number; h: number }> = [];
   private tpoMergeLeftSessionStarts: ReadonlySet<number> = new Set();
   private tpoProfileHitZones: TpoProfileHitZone[] = [];
@@ -126,6 +130,16 @@ export class Overlay {
       x >= rect.x && x <= rect.x + rect.w && y >= rect.y && y <= rect.y + rect.h
     );
     return hit?.id ?? null;
+  }
+
+  /** True over the touch corner menu button drawn by the last interaction frame. */
+  getMenuButtonAt(x: number, y: number): boolean {
+    return this.touchMenuButton !== null && pointInTouchControl(this.touchMenuButton, x, y);
+  }
+
+  /** Screen rect of that button, for anchoring the menu it opens. */
+  getMenuButtonRect(): Readonly<TouchMenuButtonRect> | null {
+    return this.touchMenuButton;
   }
 
   getIndicatorScaleControlAt(x: number, y: number): { paneId: string; id: PriceScaleControlId } | null {
@@ -346,6 +360,7 @@ export class Overlay {
     ctx.clearRect(0, 0, ctx.canvas.width, ctx.canvas.height);
     this.priceScaleControlRects = [];
     this.indicatorScaleControlRects = [];
+    this.touchMenuButton = null;
 
     if (series.length === 0) {
       this.onHudText?.(null);
@@ -387,6 +402,11 @@ export class Overlay {
           if (!mainSuppressed) this.drawInteractionForeground?.(ctx, view, series);
           if (!mainSuppressed) this.priceScaleControlRects = drawPriceScaleControls(ctx, view, crosshair);
           this.drawIndicatorInteractionControls(ctx, view, crosshair);
+          // The crosshair has the plot to itself while the finger inspects.
+          if (crosshair.touch && !crosshair.visible) {
+            this.touchMenuButton = touchMenuButtonRect(view);
+            if (this.touchMenuButton) drawTouchMenuButton(ctx, this.touchMenuButton);
+          }
           break;
       }
     }
