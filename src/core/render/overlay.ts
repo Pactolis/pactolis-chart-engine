@@ -5,10 +5,24 @@ import { cellAverageTradeSize, cellAverageTradeSizes, cellDeltaPercent, cellTrad
 import { settings, type ChartViewConfig } from "../settings.js";
 import { cellTextModeFor } from "./chartLod.js";
 import type { IndicatorPaneRender } from "../indicatorTypes.js";
-import { drawIndicatorScaleControls, drawPriceScaleControls, type IndicatorScaleControlRect, type PriceScaleControlId, type PriceScaleControlRect } from "./axisControlsRenderer.js";
-import { drawTouchMenuButton, pointInTouchControl, touchMenuButtonRect, type TouchMenuButtonRect } from "./touchControlsRenderer.js";
+import {
+  drawIndicatorScaleControls,
+  drawPriceScaleControls,
+  touchPriceScaleControlSpan,
+  type IndicatorScaleControlRect,
+  type PriceScaleControlId,
+  type PriceScaleControlRect,
+} from "./axisControlsRenderer.js";
+import {
+  drawTouchMenuButton,
+  pointInTouchControl,
+  touchMenuButtonRect,
+  TOUCH_MENU_BUTTON_RESERVE,
+  type TouchMenuButtonRect,
+} from "./touchControlsRenderer.js";
+import { HUD_ROW_HEIGHT, hudMaxRows, layoutHud, type HudPart } from "./hudLayout.js";
 import { configDecimals, placeVerticalLabels } from "../axisLabelUtils.js";
-import { drawCrosshairPriceLabel, drawPriceAxis, drawPriceMarkers, type PriceMarker } from "./priceAxisRenderer.js";
+import { drawCrosshairPriceLabel, drawPriceAxis, drawPriceMarkers, type PriceAxisKeepOut, type PriceMarker } from "./priceAxisRenderer.js";
 import { drawCrosshairTimeLabel, drawTimeAxis, type TimeMarker } from "./timeAxisRenderer.js";
 import {
   calculateVolumeProfile,
@@ -299,7 +313,7 @@ export class Overlay {
         if (layerId === "axis") {
           if (!mainSuppressed && !empty) {
             this.drawLineLabels(view);
-            drawPriceAxis(ctx, view, series.config.priceStep, series.config.pricePrecision);
+            drawPriceAxis(ctx, view, series.config.priceStep, series.config.pricePrecision, this.priceAxisKeepOut(view, crosshair));
             drawPriceMarkers(ctx, view, this.priceMarkers, series.config.priceStep, series.config.pricePrecision);
           }
           drawTimeAxis(ctx, view, series, undefined, this.timeMarkers);
@@ -500,7 +514,7 @@ export class Overlay {
     this.drawInteractionForeground?.(ctx, view, series);
     this.drawLineLabels(view);
     // Axes drawn last — chart content never overlaps axis labels
-    drawPriceAxis(ctx, view, series.config.priceStep, series.config.pricePrecision);
+    drawPriceAxis(ctx, view, series.config.priceStep, series.config.pricePrecision, this.priceAxisKeepOut(view, crosshair));
     drawPriceMarkers(ctx, view, this.priceMarkers, series.config.priceStep, series.config.pricePrecision);
     if (crosshair.visible) drawCrosshairPriceLabel(ctx, view, series, crosshair);
     drawTimeAxis(ctx, view, series, crosshair, this.timeMarkers);
@@ -1241,6 +1255,28 @@ export class Overlay {
 
     const chgPart = `Chg ${changePct >= 0 ? "+" : ""}${changePct.toFixed(2)}%`;
     const chgWidth = ctx.measureText(chgPart).width;
+
+    // A plot too narrow for one line (a phone, a small pane) gets the readout in rows instead of
+    // running over the price axis. The corner menu button keeps its column in touch mode.
+    const reserved = crosshair.touch && touchMenuButtonRect(view) !== null ? TOUCH_MENU_BUTTON_RESERVE : 0;
+    const maxWidth = view.area.width - 16 - reserved;
+    if (prefixWidth + deltaWidth + tradesWidth + rangeWidth + chgWidth > maxWidth) {
+      const hover = hovered ? "◆ " : "";
+      const parts: HudPart[] = [
+        { text: `${hover}O ${bar.open.toFixed(pd)}`, color: uiColor.textHeading, dropOrder: 0 },
+        { text: `H ${bar.high.toFixed(pd)}`, color: uiColor.textHeading, dropOrder: 0 },
+        { text: `L ${bar.low.toFixed(pd)}`, color: uiColor.textHeading, dropOrder: 0 },
+        { text: `C ${bar.close.toFixed(pd)}`, color: uiColor.textHeading, dropOrder: 0 },
+        { text: `Vol ${unit}${volTxt}`, color: uiColor.textHeading, dropOrder: 2 },
+        { text: deltaPart, color: bar.delta >= 0 ? uiColor.buy : uiColor.sell, dropOrder: 3 },
+        { text: tradesPart, color: uiColor.textSecondary, dropOrder: 4 },
+        { text: rangePart, color: uiColor.textSecondary, dropOrder: 5 },
+        { text: chgPart, color: changePct >= 0 ? uiColor.buy : uiColor.sell, dropOrder: 1 },
+      ];
+      this.drawHudRows(ctx, view, x, maxWidth, parts);
+      return;
+    }
+
     const pillW = Math.min(
       Math.max(0, view.area.width - 8),
       prefixWidth + deltaWidth + tradesWidth + rangeWidth + chgWidth + 12,
@@ -1256,6 +1292,27 @@ export class Overlay {
     ctx.fillText(rangePart, rangeX, 8);
     ctx.fillStyle = changePct >= 0 ? uiColor.buy : uiColor.sell;
     ctx.fillText(chgPart, rangeX + rangeWidth, 8);
+  }
+
+  /** Price tick labels keep clear of the finger-sized scale buttons, which stand in the gutter in touch mode. */
+  private priceAxisKeepOut(view: View, crosshair: Crosshair): PriceAxisKeepOut[] {
+    if (!crosshair.touch) return [];
+    const span = touchPriceScaleControlSpan(view);
+    return span ? [span] : [];
+  }
+
+  /** The readout as rows of `parts`, widest row no wider than `maxWidth`; see layoutHud for what gives way. */
+  private drawHudRows(ctx: CanvasRenderingContext2D, view: View, x: number, maxWidth: number, parts: readonly HudPart[]): void {
+    if (maxWidth < 60) return;
+    const layout = layoutHud(parts, (text) => ctx.measureText(text).width, maxWidth, hudMaxRows(view.area.height), ctx.measureText("  ").width);
+    const pillW = Math.min(Math.max(0, view.area.width - 8), layout.width + 12);
+    drawOverlayPill(ctx, x - 6, 4, pillW, 20 + (layout.rows.length - 1) * HUD_ROW_HEIGHT, 5, "rgba(11, 16, 24, 0.78)", "rgba(148, 163, 184, 0.16)");
+    layout.rows.forEach((row, index) => {
+      for (const part of row.parts) {
+        ctx.fillStyle = part.color;
+        ctx.fillText(part.text, x + part.x, 8 + index * HUD_ROW_HEIGHT);
+      }
+    });
   }
 }
 

@@ -227,7 +227,7 @@ test("holding a finger still opens the crosshair, which closes when the finger l
 
 test("the corner button opens the chart menu", async ({ page }) => {
   const { area } = await chartState(page);
-  const at = { x: area.left + area.width - 36 - 8 + 18, y: area.top + 30 + 18 };
+  const at = { x: area.left + area.width - 36 - 8 + 18, y: area.top + 4 + 18 };
   await tap(cdp, at);
   const events = await touchEvents(page);
   expect(events.chartcontextmenu).toHaveLength(1);

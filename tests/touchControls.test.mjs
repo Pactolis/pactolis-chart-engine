@@ -6,6 +6,7 @@ import { drawPriceScaleControls } from "../dist/core/render/axisControlsRenderer
 import { Overlay } from "../dist/core/render/overlay.js";
 import {
   TOUCH_CONTROL_HIT_SLOP,
+  TOUCH_MENU_BUTTON_RESERVE,
   TOUCH_MENU_BUTTON_SIZE,
   pointInTouchControl,
   touchMenuButtonRect,
@@ -75,7 +76,7 @@ test("touch mode leaves a pane too short for the buttons without any", () => {
   assert.deepEqual(drawPriceScaleControls(makeContext(), view, { x: 0, y: 0, visible: false, touch: true }), []);
 });
 
-test("the corner menu button sits top-right under the HUD and is a fingertip big", () => {
+test("the corner menu button sits top-right beside the HUD's first row and is a fingertip big", () => {
   const view = makeView();
   const rect = touchMenuButtonRect(view);
   assert.ok(rect);
@@ -83,7 +84,8 @@ test("the corner menu button sits top-right under the HUD and is a fingertip big
   assert.ok(TOUCH_MENU_BUTTON_SIZE >= 36);
   assert.ok(rect.x + rect.w <= view.area.left + view.area.width, "inside the plot");
   assert.ok(view.area.left + view.area.width - (rect.x + rect.w) <= 16, "hugging the right edge");
-  assert.ok(rect.y >= 24, "below the HUD pill, which owns the first 24px");
+  assert.ok(rect.y <= 8, "level with the HUD pill, which keeps clear of this column");
+  assert.ok(TOUCH_MENU_BUTTON_RESERVE >= TOUCH_MENU_BUTTON_SIZE + 8, "the readout leaves the button and its edge offset free");
 });
 
 test("a plot too small for the corner button gets none", () => {

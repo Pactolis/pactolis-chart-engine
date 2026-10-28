@@ -8,9 +8,11 @@ export const TOUCH_CONTROL_HIT_SLOP = 4;
 /** A plot smaller than this has no room for the corner menu button. */
 const MENU_BUTTON_MIN_PLOT_WIDTH = 160;
 const MENU_BUTTON_MIN_PLOT_HEIGHT = 120;
-/** Below the HUD pill, which owns the top row of the plot. */
-const MENU_BUTTON_TOP_OFFSET = 30;
+/** Level with the first row of the HUD pill. The readout stays clear of this corner column (TOUCH_MENU_BUTTON_RESERVE). */
+const MENU_BUTTON_TOP_OFFSET = 4;
 const MENU_BUTTON_EDGE_OFFSET = 8;
+/** Width at the plot's right edge the bar readout leaves to the corner button: the button, its offset and a gap. */
+export const TOUCH_MENU_BUTTON_RESERVE = TOUCH_MENU_BUTTON_SIZE + MENU_BUTTON_EDGE_OFFSET + 6;
 
 export interface TouchMenuButtonRect {
   x: number;

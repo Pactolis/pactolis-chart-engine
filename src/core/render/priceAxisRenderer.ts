@@ -17,11 +17,18 @@ export interface PriceMarker {
   text?: string;
 }
 
+/** A rectangle price tick labels keep out of, in canvas px (the touch scale buttons sit in the gutter). */
+export interface PriceAxisKeepOut {
+  y: number;
+  h: number;
+}
+
 export function drawPriceAxis(
   ctx: CanvasRenderingContext2D,
   view: View,
   priceStep: number,
-  pricePrecision?: number
+  pricePrecision?: number,
+  keepOut: readonly PriceAxisKeepOut[] = [],
 ): void {
   const dec = pricePrecision ?? priceDecimals(priceStep);
   const layout = axisLayoutForChartView(view);
@@ -60,6 +67,7 @@ export function drawPriceAxis(
     const label = mark.label;
     const boxH = 16;
     const labelY = clampLabelY(view, y, boxH);
+    if (keepOut.some((zone) => labelY + boxH / 2 > zone.y && labelY - boxH / 2 < zone.y + zone.h)) continue;
     ctx.fillStyle = axisMajorLabelColor;
     ctx.textAlign = "right";
     ctx.fillText(label, axisX + axisW - 6, labelY);
@@ -88,15 +96,19 @@ export function drawPriceMarkers(
   if (!labels.length) return;
   const axisX = view.area.left + view.area.width;
   const axisW = view.priceAxisW;
+  // Compact charts keep the live price inside the gutter: the "Price" caption would cover a third of a phone's plot.
+  const compact = view.chartLayoutOptions.density === "compact";
   ctx.save();
   ctx.font = PRICE_LABEL_FONT;
   ctx.textBaseline = "middle";
   for (const label of labels) {
     const livePrice = label.priority >= 100 && !label.text;
-    const text = label.text ?? (livePrice ? `Price ${label.price.toFixed(dec)}` : label.price.toFixed(dec));
+    const text = label.text ?? (livePrice && !compact ? `Price ${label.price.toFixed(dec)}` : label.price.toFixed(dec));
     const padX = 3;
-    const maxBoxW = label.text || livePrice ? Math.max(axisW - 2, 180) : axisW - 2;
-    const boxW = Math.min(maxBoxW, Math.ceil(ctx.measureText(text).width) + padX * 2);
+    const maxBoxW = label.text || (livePrice && !compact) ? Math.max(axisW - 2, 180) : axisW - 2;
+    // The compact live price spans the gutter, so a tick label at the same height is covered whole, not left peeking out.
+    const minBoxW = livePrice && compact ? axisW - 2 : 0;
+    const boxW = Math.min(maxBoxW, Math.max(minBoxW, Math.ceil(ctx.measureText(text).width) + padX * 2));
     const boxX = axisX + axisW - boxW - 1;
     const boxY = label.y - boxH / 2;
     ctx.fillStyle = label.color;

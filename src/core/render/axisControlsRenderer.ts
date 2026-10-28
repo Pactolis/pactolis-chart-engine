@@ -47,18 +47,34 @@ export function drawPriceScaleControls(
   return controls;
 }
 
-function drawTouchPriceScaleControls(ctx: CanvasRenderingContext2D, view: View): PriceScaleControlRect[] {
+/** Where the two finger-sized buttons sit, or null when the gutter or the pane has no room for them. */
+function touchPriceScaleControlRects(view: View): { auto: PriceScaleControlRect; log: PriceScaleControlRect } | null {
   const layout = axisLayoutForChartView(view);
   const axisX = layout.priceAxisRect.left;
   const axisW = layout.priceAxisRect.width;
   const size = TOUCH_CONTROL_SIZE;
-  if (axisW < size + 4 || view.area.height < size * 2 + TOUCH_CONTROL_GAP + TOUCH_CONTROL_MIN_EXTRA_HEIGHT) return [];
+  if (axisW < size + 4 || view.area.height < size * 2 + TOUCH_CONTROL_GAP + TOUCH_CONTROL_MIN_EXTRA_HEIGHT) return null;
 
   const x = axisX + Math.floor((axisW - size) / 2);
   const lowerY = view.area.top + view.area.height - size - 4;
   const upperY = lowerY - size - TOUCH_CONTROL_GAP;
-  const auto: PriceScaleControlRect = { id: "autoScale", x, y: upperY, w: size, h: size };
-  const log: PriceScaleControlRect = { id: "logarithmic", x, y: lowerY, w: size, h: size };
+  return {
+    auto: { id: "autoScale", x, y: upperY, w: size, h: size },
+    log: { id: "logarithmic", x, y: lowerY, w: size, h: size },
+  };
+}
+
+/** The vertical span the touch buttons cover in the price gutter; tick labels there would sit under them. */
+export function touchPriceScaleControlSpan(view: View): { y: number; h: number } | null {
+  const rects = touchPriceScaleControlRects(view);
+  if (!rects) return null;
+  return { y: rects.auto.y, h: rects.log.y + rects.log.h - rects.auto.y };
+}
+
+function drawTouchPriceScaleControls(ctx: CanvasRenderingContext2D, view: View): PriceScaleControlRect[] {
+  const rects = touchPriceScaleControlRects(view);
+  if (!rects) return [];
+  const { auto, log } = rects;
   drawPriceScaleControlButton(ctx, auto, "O", view.isPriceAutoScale(), false, TOUCH_CONTROL_FONT_PX);
   drawPriceScaleControlButton(ctx, log, "L", view.isLogScale(), false, TOUCH_CONTROL_FONT_PX);
 
