@@ -106,11 +106,16 @@ export class FootprintRenderer {
     this.batch.dispose();
   }
 
-  /** DPR of the window that owns the canvas: a popout can differ from the main window. */
-  private devicePixelRatio(): number {
+  /**
+   * Pixel ratio the canvas was sized at: the session's measurement when the view carries one (it may sit
+   * below the window's ratio under a host cap), else the DPR of the window that owns the canvas (a popout
+   * can differ from the main window).
+   */
+  private devicePixelRatio(view: View): number {
+    if (view.pixelRatio !== null && view.pixelRatio > 0) return view.pixelRatio;
     const canvas = this.gl.canvas as Partial<HTMLCanvasElement>;
-    const view = canvas.ownerDocument?.defaultView ?? (typeof window !== "undefined" ? window : null);
-    return view?.devicePixelRatio || 1;
+    const owner = canvas.ownerDocument?.defaultView ?? (typeof window !== "undefined" ? window : null);
+    return owner?.devicePixelRatio || 1;
   }
 
   clear(): void {
@@ -154,7 +159,7 @@ export class FootprintRenderer {
    */
   renderLayers(view: View, series: FootprintSeries, activeLayers: ReadonlySet<string>): void {
     const gl = this.gl;
-    const dpr = this.devicePixelRatio();
+    const dpr = this.devicePixelRatio(view);
     if (view.area.width <= 0 || view.area.height <= 0) return;
     measurePerformance("chart.gpu.clear.ms", () => this.clear());
 

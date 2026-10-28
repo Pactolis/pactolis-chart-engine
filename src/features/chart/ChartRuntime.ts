@@ -44,6 +44,11 @@ import { TimeScaleModel } from "../../core/model/timeScale.js";
 import type { ChartCaptureReadiness } from "./captureReadiness.js";
 import { evaluateChartDataState, type ChartDataState } from "./chartDataState.js";
 import { getChartWebGl2Context, type NativeChartCapture } from "./nativeCapture.js";
+import {
+  resolveChartDisplayOptions,
+  sameChartDisplayOptions,
+  type ResolvedChartDisplayOptions,
+} from "../../core/model/chartDisplayOptions.js";
 import { ChartReplayCoordinator } from "./ChartReplayCoordinator.js";
 import { ChartCaptureCoordinator } from "./ChartCaptureCoordinator.js";
 import { ChartAnalysisBridge } from "./ChartAnalysisBridge.js";
@@ -66,6 +71,8 @@ export interface ChartRuntime {
   activate(): void;
   deactivate(): void;
   refreshHostLifecycle(): void;
+  /** Re-read `ChartHost.displayOptions()` and re-lay the chart out when the answer changed. */
+  refreshDisplayOptions(): void;
   dispose(): void;
   onStateChange?: (next: ChartPanelState) => void;
 
@@ -167,6 +174,8 @@ class ChartRuntimeImpl implements ChartRuntime, ChartInputHost {
   private readonly _hook: HTMLElement;
   private readonly interactionCanvas: HTMLCanvasElement;
   private readonly crosshair: Crosshair;
+  /** What `ChartHost.displayOptions()` last answered, resolved; WebGL attributes only apply at mount. */
+  private displayOptions: ResolvedChartDisplayOptions;
   private disposeInput: () => void = () => undefined;
   private disposeDebugGlobals: (() => void) | null = null;
   private disposed = false;
@@ -265,6 +274,7 @@ class ChartRuntimeImpl implements ChartRuntime, ChartInputHost {
     pipeline: ChartDataPipeline,
     panelId: string,
     hook: HTMLElement,
+    display: ResolvedChartDisplayOptions,
   ) {
     this.requestedChartType = initialState.chartType ?? settings.chartType;
     this.state = {
@@ -291,7 +301,8 @@ class ChartRuntimeImpl implements ChartRuntime, ChartInputHost {
     const crosshair: Crosshair = { x: 0, y: 0, visible: false };
     this.interactionCanvas = interactionCanvas;
     this.crosshair = crosshair;
-    this.view = new View();
+    this.displayOptions = display;
+    this.view = new View(display.timeScale, display.layout);
     this.view.setScaleMode(initialState.scaleMode);
     this.timeViewport = new TimeScaleViewportController(this.view);
     this.renderer = new FootprintRenderer(gl);
@@ -507,7 +518,9 @@ class ChartRuntimeImpl implements ChartRuntime, ChartInputHost {
         // next enabled frame once the context is restored.
         this.heatmapGpuFailureLatched = false;
       },
-      onResize: (w, h) => {
+      maxDevicePixelRatio: display.maxDevicePixelRatio,
+      onResize: (w, h, dpr) => {
+        this.view.pixelRatio = dpr;
         this._lastKnownSize = { width: w, height: h };
         this._applyLayout(w, h);
         this.timeViewport.applyResize(series.length, "resize-observer");
@@ -1115,6 +1128,16 @@ class ChartRuntimeImpl implements ChartRuntime, ChartInputHost {
     this.session.invalidate();
   }
 
+  refreshDisplayOptions(): void {
+    if (this.disposed) return;
+    const next = resolveChartDisplayOptions(chartHost().displayOptions?.());
+    if (sameChartDisplayOptions(next, this.displayOptions)) return;
+    this.displayOptions = next;
+    // antialias and powerPreference belong to the WebGL context, which exists already; they apply to charts mounted later.
+    this.session.setMaxDevicePixelRatio(next.maxDevicePixelRatio);
+    if (this.view.setDisplayOptions(next.timeScale, next.layout)) this._layoutFromCurrentSize();
+  }
+
   /** Tracks opt-in transitions so a re-enable retries the GPU prototype after a one-shot legacy fallback. */
   private trackHeatmapPrototypeOptIn(): void {
     if (this.heatmapTexturePrototypeLastEnabled !== this.heatmapTexturePrototypeEnabled) {
@@ -1164,6 +1187,7 @@ class ChartRuntimeImpl implements ChartRuntime, ChartInputHost {
         top: v.area.top,
         width: v.area.width,
         height: v.area.height,
+        ...(v.pixelRatio !== null && v.pixelRatio > 0 ? { pixelRatio: v.pixelRatio } : {}),
       });
     } catch (error) {
       if (error instanceof Error && error.message === "Heatmap GPU prototype budget exceeded") {
@@ -1778,7 +1802,8 @@ async function buildChartRuntime(
   interactionCanvas.style.zIndex = String(Number(annotationCanvas.style.zIndex) + 1);
   panelRoot.append(gpuCanvas, annotationCanvas, interactionCanvas);
 
-  const gl = getChartWebGl2Context(gpuCanvas);
+  const display = resolveChartDisplayOptions(chartHost().displayOptions?.());
+  const gl = getChartWebGl2Context(gpuCanvas, display.webgl);
   const annotationCtx2d = annotationCanvas.getContext("2d");
   const interactionCtx2d = interactionCanvas.getContext("2d");
   if (!gl || !annotationCtx2d || !interactionCtx2d) {
@@ -1820,7 +1845,7 @@ async function buildChartRuntime(
   const runtime = new ChartRuntimeImpl(
     initialState, services,
     gpuCanvas, annotationCanvas, interactionCanvas, gl, annotationCtx2d, interactionCtx2d,
-    panelRoot, surface, pipeline, panelId, hook,
+    panelRoot, surface, pipeline, panelId, hook, display,
   );
   runtime.installDebugGlobals();
   if (onStateChange) {

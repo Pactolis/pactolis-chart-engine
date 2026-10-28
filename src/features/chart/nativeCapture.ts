@@ -1,3 +1,4 @@
+import type { ChartWebGlOptions } from "../../core/model/chartDisplayOptions.js";
 import type { ChartCaptureReadiness } from "./captureReadiness.js";
 
 export const MAX_CAPTURE_WIDTH = 4096;
@@ -16,8 +17,22 @@ export const CHART_WEBGL_CONTEXT_ATTRIBUTES: WebGLContextAttributes = Object.fre
   preserveDrawingBuffer: false,
 });
 
-export function getChartWebGl2Context(canvas: HTMLCanvasElement): WebGL2RenderingContext | null {
-  return canvas.getContext("webgl2", CHART_WEBGL_CONTEXT_ATTRIBUTES);
+/** The production attributes with the two a host may choose (see ChartDisplayOptions). */
+export function chartWebGlContextAttributes(options: ChartWebGlOptions): WebGLContextAttributes {
+  return Object.freeze({
+    ...CHART_WEBGL_CONTEXT_ATTRIBUTES,
+    antialias: options.antialias,
+    powerPreference: options.powerPreference,
+  });
+}
+
+/**
+ * A canvas keeps the attributes of its first `getContext` call; a later call (a context restore)
+ * returns the same context, so only the first one needs the host's `options`.
+ */
+export function getChartWebGl2Context(canvas: HTMLCanvasElement, options?: ChartWebGlOptions): WebGL2RenderingContext | null {
+  if (options === undefined) return canvas.getContext("webgl2", CHART_WEBGL_CONTEXT_ATTRIBUTES);
+  return canvas.getContext("webgl2", chartWebGlContextAttributes(options));
 }
 
 export type ChartCaptureErrorCode =

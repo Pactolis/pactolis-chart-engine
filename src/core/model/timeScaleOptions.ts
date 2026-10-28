@@ -25,6 +25,8 @@ export interface TimeScaleOptions {
   readonly visibleRangeEdgePaddingBars: number;
   /** Minimum visible bars retained by viewport clamping. */
   readonly minVisibleBars: number;
+  /** Columns the default and reset horizontal fit aims for; a shorter series fits whole. */
+  readonly defaultFitColumns: number;
   /** Edge padding used by viewport clamping. */
   readonly clampEdgePaddingBars: number;
   /** Maximum time tick label length in characters. */
@@ -59,6 +61,9 @@ export const DEFAULT_TIME_SCALE_OPTIONS: TimeScaleOptions = Object.freeze({
   resetRightPaddingBars: 2,
   visibleRangeEdgePaddingBars: 1,
   minVisibleBars: 3,
+  // Sized for a desktop plot: 250 columns of at least 6px each. Hosts with a narrow
+  // plot lower it so the default view keeps readable candles.
+  defaultFitColumns: 250,
   clampEdgePaddingBars: 1,
   tickMarkMaxCharacterLength: 8,
   tickMarkFontSize: 11,
@@ -100,6 +105,10 @@ export function normalizeTimeScaleOptions(options: Partial<TimeScaleOptions> = {
     minVisibleBars: Math.max(1, Math.floor(positiveFinite(
       merged.minVisibleBars,
       DEFAULT_TIME_SCALE_OPTIONS.minVisibleBars,
+    ))),
+    defaultFitColumns: Math.max(1, Math.floor(positiveFinite(
+      merged.defaultFitColumns,
+      DEFAULT_TIME_SCALE_OPTIONS.defaultFitColumns,
     ))),
     clampEdgePaddingBars: nonNegativeFinite(
       merged.clampEdgePaddingBars,

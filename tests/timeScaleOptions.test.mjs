@@ -97,3 +97,56 @@ test("derived time tick label width follows reference-style character and font b
   const wider = normalizeTimeScaleOptions({ tickMarkMaxCharacterLength: 10, tickMarkFontSize: 11 });
   assert.ok(timeTickMaxLabelWidth(wider) > timeTickMaxLabelWidth(options));
 });
+
+test("the default fit aims for the host's column count and for 250 when it names none", () => {
+  const desktop = new View();
+  desktop.area = { left: 0, top: 0, width: 500, height: 300 };
+  desktop.resetTimeScale(1000);
+  const padding = desktop.timeScaleOptions.resetRightPaddingBars;
+  assert.equal(DEFAULT_TIME_SCALE_OPTIONS.defaultFitColumns, 250);
+  assert.equal(desktop.colWidth, 500 / (250 + padding - 1));
+
+  const phone = new View({ defaultFitColumns: 60 });
+  phone.area = { left: 0, top: 0, width: 500, height: 300 };
+  phone.resetTimeScale(1000);
+  assert.equal(phone.colWidth, 500 / (60 + padding - 1));
+  assert.ok(phone.colWidth > desktop.colWidth * 3, "fewer columns, wider candles");
+
+  phone.resetTimeScale(20);
+  assert.equal(phone.colWidth, 500 / (20 + padding - 1), "a series shorter than the fit still fits whole");
+});
+
+test("default fit columns normalize to a whole number of at least one", () => {
+  assert.equal(normalizeTimeScaleOptions({ defaultFitColumns: 80.9 }).defaultFitColumns, 80);
+  assert.equal(normalizeTimeScaleOptions({ defaultFitColumns: 0.4 }).defaultFitColumns, 1, "a fraction still means one column");
+  assert.equal(normalizeTimeScaleOptions({ defaultFitColumns: Number.NaN }).defaultFitColumns, 250);
+  assert.equal(normalizeTimeScaleOptions({ defaultFitColumns: -5 }).defaultFitColumns, 250);
+  assert.equal(normalizeTimeScaleOptions({ defaultFitColumns: 1 }).defaultFitColumns, 1);
+});
+
+test("a live view takes new display options in place and says whether anything changed", () => {
+  const view = new View();
+  view.area = { left: 0, top: 0, width: 330, height: 420 };
+  view.colWidth = 9;
+  view.offsetX = -123;
+
+  assert.equal(view.setDisplayOptions({}, {}), false, "the same defaults change nothing");
+  assert.equal(view.chartLayoutOptions.density, "regular");
+
+  assert.equal(view.setDisplayOptions({ defaultFitColumns: 70 }, { density: "compact" }), true);
+  assert.equal(view.timeScaleOptions.defaultFitColumns, 70);
+  assert.equal(view.chartLayoutOptions.density, "compact");
+  assert.equal(view.chartLayoutOptions.timeAxisHeight, 32);
+  assert.equal(view.colWidth, 9, "nothing moves; laying out again is the caller's job");
+  assert.equal(view.offsetX, -123);
+  assert.deepEqual({ ...view.area }, { left: 0, top: 0, width: 330, height: 420 });
+
+  assert.equal(view.setDisplayOptions({ defaultFitColumns: 70 }, { density: "compact" }), false);
+  assert.equal(view.setDisplayOptions({ defaultFitColumns: 70 }, { density: "compact", timeAxisHeight: 36 }), true);
+  assert.equal(view.chartLayoutOptions.timeAxisHeight, 36);
+
+  assert.equal(view.setDisplayOptions({}, {}), true, "back to the desktop defaults");
+  assert.equal(view.timeScaleOptions.defaultFitColumns, 250);
+  assert.equal(view.chartLayoutOptions.density, "regular");
+  assert.equal(view.chartLayoutOptions.timeAxisHeight, 22);
+});

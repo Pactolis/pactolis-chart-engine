@@ -7,7 +7,8 @@
  *    below it: GPU resources, RAF, resize, DPR.
  *  - chart/viewport/frame state never enters Svelte stores — needsRender stays here.
  *  - resize source is the panel container, NOT window.innerWidth/innerHeight.
- *  - DPR is read from ownerDocument.defaultView on every resize/activate/restore.
+ *  - DPR is read from ownerDocument.defaultView on every resize/activate/restore, and held
+ *    down to the host's `maxDevicePixelRatio` when it set one.
  *  - 0×0 measurements are never applied to canvases; last valid size is kept.
  *  - webglcontextlost → RAF cancelled, GPU invalidated, CPU state preserved.
  *  - webglcontextrestored → GPU rebuilt from scratch, one new RAF started.
@@ -15,6 +16,7 @@
  */
 
 import type { View } from "../../core/engine/view.js";
+import { effectivePixelRatio } from "../../core/model/chartDisplayOptions.js";
 import type { FootprintSeries } from "../../core/model/footprint.js";
 import type { Crosshair } from "../../core/render/overlay.js";
 import {
@@ -86,6 +88,8 @@ export interface ChartSessionOptions {
   onRendered?: (surfaces: ChartSurfaceDirty, changes: ChartChange) => void;
   /** Called after every `invalidate()` with the semantic changes it carried. */
   onInvalidate?: (changes: ChartChange) => void;
+  /** Highest pixel ratio the canvases render at; null (default) follows the window's devicePixelRatio. */
+  maxDevicePixelRatio?: number | null;
 }
 
 export class ChartSession {
@@ -117,6 +121,7 @@ export class ChartSession {
   private readonly onRenderedCb?: (surfaces: ChartSurfaceDirty, changes: ChartChange) => void;
   private readonly onInvalidateCb?: (changes: ChartChange) => void;
   private disposeDprWatcher: (() => void) | null = null;
+  private maxDevicePixelRatio: number | null;
 
   private dirtySurfaces = ChartSurfaceDirty.All;
   /** Semantic changes waiting for the next frame; travels with `dirtySurfaces`, never narrows it. */
@@ -179,6 +184,7 @@ export class ChartSession {
     this.onResizeCb = opts.onResize;
     this.onRenderedCb = opts.onRendered;
     this.onInvalidateCb = opts.onInvalidate;
+    this.maxDevicePixelRatio = opts.maxDevicePixelRatio ?? null;
 
     this.lifecycle.start();
     this.setupContextLossHandling();
@@ -402,7 +408,14 @@ export class ChartSession {
   }
 
   private dpr(): number {
-    return this.ownerDocument.defaultView?.devicePixelRatio ?? 1;
+    return effectivePixelRatio(this.ownerDocument.defaultView?.devicePixelRatio ?? 1, this.maxDevicePixelRatio);
+  }
+
+  /** Change the pixel-ratio cap on a live session; the canvases resize on the next frame if it moves them. */
+  setMaxDevicePixelRatio(max: number | null): void {
+    if (max === this.maxDevicePixelRatio) return;
+    this.maxDevicePixelRatio = max;
+    this.requestContainerResize();
   }
 
   /** Latest valid measured container target; `null` for non-positive bounds (never applied). */
