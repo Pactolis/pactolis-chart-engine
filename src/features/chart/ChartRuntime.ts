@@ -287,7 +287,7 @@ class ChartRuntimeImpl implements ChartRuntime, ChartInputHost {
     gpuCanvas: HTMLCanvasElement,
     annotationCanvas: HTMLCanvasElement,
     interactionCanvas: HTMLCanvasElement,
-    gl: WebGL2RenderingContext,
+    gl: WebGL2RenderingContext | null,
     annotationCtx2d: CanvasRenderingContext2D,
     interactionCtx2d: CanvasRenderingContext2D,
     panelRoot: HTMLElement,
@@ -296,6 +296,7 @@ class ChartRuntimeImpl implements ChartRuntime, ChartInputHost {
     panelId: string,
     hook: HTMLElement,
     display: ResolvedChartDisplayOptions,
+    gpuSurface?: GpuSurface,
   ) {
     this.requestedChartType = initialState.chartType ?? settings.chartType;
     this.state = {
@@ -326,7 +327,7 @@ class ChartRuntimeImpl implements ChartRuntime, ChartInputHost {
     this.view = new View(display.timeScale, display.layout);
     this.view.setScaleMode(initialState.scaleMode);
     this.timeViewport = new TimeScaleViewportController(this.view);
-    this.renderer = new FootprintRenderer(gl);
+    this.renderer = new FootprintRenderer(gpuSurface ?? (gl as WebGL2RenderingContext));
     // Tracked separately from the private FootprintRenderer context so the
     // prototype can detect a context swap without touching ChartSession state.
     this.heatmapGpuRendererGl = gl;
@@ -487,6 +488,7 @@ class ChartRuntimeImpl implements ChartRuntime, ChartInputHost {
     this.session = new ChartSession({
       container: panelRoot,
       gpuCanvas,
+      gpuSurface,
       annotationCanvas,
       interactionCanvas,
       ownerDocument: panelRoot.ownerDocument,
@@ -1823,6 +1825,7 @@ function createChartTestHook(doc: Document, panelId: string): HTMLElement {
   hook.setAttribute("data-replay-state", "");
   hook.setAttribute("data-replay-visible", "");
   hook.setAttribute("data-replay-total", "");
+  hook.setAttribute("data-gpu-backend", "webgl2");
   hook.style.cssText = "position:absolute;width:0;height:0;overflow:hidden;opacity:0;pointer-events:none;";
   return hook;
 }
@@ -1894,18 +1897,21 @@ async function buildChartRuntime(
   panelRoot.append(gpuCanvas, annotationCanvas, interactionCanvas);
 
   const display = resolveChartDisplayOptions(chartHost().displayOptions?.());
-  const gl = getChartWebGl2Context(gpuCanvas, display.webgl);
+  const gpuSettings = readGpuSettings(doc.defaultView);
+  const gpuSurface = createGpuSurface(gpuCanvas, gpuSettings.backend, display.webgl);
+  const gl = gpuSurface.kind === "webgl2" && typeof (gpuSurface as any).getGlContext === "function"
+    ? (gpuSurface as any).getGlContext()
+    : null;
   const annotationCtx2d = annotationCanvas.getContext("2d");
   const interactionCtx2d = interactionCanvas.getContext("2d");
-  if (!gl || !annotationCtx2d || !interactionCtx2d) {
-    // A phone at its WebGL context limit lands here; the counter tells that apart from a missing 2D context.
-    if (!gl) incrementPerformanceCounter("chart.gpu.contextCreateFailed");
+  if (!annotationCtx2d || !interactionCtx2d) {
     hook.remove();
     gpuCanvas.remove();
     annotationCanvas.remove();
     interactionCanvas.remove();
     throw new Error("ChartRuntime: canvas contexts unavailable");
   }
+  hook.setAttribute("data-gpu-backend", gpuSurface.kind);
 
   const priceStepPromise = services.fetchPriceStepResult
     ? services.fetchPriceStepResult(initialState.market)
@@ -1939,7 +1945,20 @@ async function buildChartRuntime(
     initialState, services,
     gpuCanvas, annotationCanvas, interactionCanvas, gl, annotationCtx2d, interactionCtx2d,
     panelRoot, surface, pipeline, panelId, hook, display,
+    gpuSurface,
   );
+
+  const unbindGpuSettings = onGpuSettingsChange(() => {
+    if (runtime.getDiagnostics().disposed) return;
+    const nextSettings = readGpuSettings(doc.defaultView);
+    const nextCanvas = doc.createElement("canvas");
+    const nextSurface = createGpuSurface(nextCanvas, nextSettings.backend, display.webgl);
+    runtime.session.replaceSurface(nextSurface, (canvasNext, canvasPrev) => {
+      canvasPrev.replaceWith(canvasNext);
+      hook.setAttribute("data-gpu-backend", nextSurface.kind);
+    });
+  });
+  runtime.disposalSignal.addEventListener("abort", unbindGpuSettings, { once: true });
   runtime.installDebugGlobals();
   if (onStateChange) {
     runtime.onStateChange = onStateChange;

@@ -40,6 +40,12 @@ import {
   validateCaptureDimensions,
   type NativeCaptureFrame,
 } from "./nativeCapture.js";
+import type { GpuSurface } from "../../core/gpu/gpuBackend.js";
+import { Canvas2dSurface } from "../../core/gpu/canvas2d/canvas2dSurface.js";
+import { WebGl2Surface } from "../../core/gpu/webgl2/webgl2Surface.js";
+import { recordGpuFallback, recordGpuFrame } from "../../core/gpu/gpuDiagnostics.js";
+
+const CONTEXT_RESTORE_TIMEOUT_MS = 5000;
 
 export interface ChartSessionRenderer {
   render(view: View, series: FootprintSeries): void;
@@ -65,8 +71,10 @@ export interface ChartSessionOptions {
   interactionCanvas: HTMLCanvasElement;
   /** document that owns the canvases — used for DPR, events, popout support. */
   ownerDocument: Document;
-  /** Current production GPU context. WebGPU qualification is separate from this runtime path. */
-  gl: WebGL2RenderingContext;
+  /** Current production GPU context. Optional when gpuSurface is provided. */
+  gl?: WebGL2RenderingContext | null;
+  /** GPU surface abstraction (WebGL2, Canvas2D, or WebGPU). */
+  gpuSurface?: GpuSurface;
   annotationCtx2d: CanvasRenderingContext2D;
   interactionCtx2d: CanvasRenderingContext2D;
   renderer: ChartSessionRenderer;
@@ -100,10 +108,14 @@ export class ChartSession {
 
   // Mutable reference — replaced on context restore.
   private gl: WebGL2RenderingContext;
+  private gpuSurface: GpuSurface;
   private ro: ResizeObserver | null = null;
 
   private container: HTMLElement;
-  private readonly gpuCanvas: HTMLCanvasElement;
+  private gpuCanvas: HTMLCanvasElement;
+  private restoreTimeoutId: ReturnType<typeof setTimeout> | null = null;
+  private cleanupContextListeners: (() => void) | null = null;
+  private lastRenderTimestamp: number | null = null;
   private readonly annotationCanvas: HTMLCanvasElement;
   private readonly interactionCanvas: HTMLCanvasElement;
   private ownerDocument: Document;
@@ -170,7 +182,13 @@ export class ChartSession {
     this.annotationCanvas = opts.annotationCanvas;
     this.interactionCanvas = opts.interactionCanvas;
     this.ownerDocument = opts.ownerDocument;
-    this.gl = opts.gl;
+    if (opts.gpuSurface) {
+      this.gpuSurface = opts.gpuSurface;
+      this.gl = (opts.gl ?? (opts.gpuSurface.kind === "webgl2" && typeof (opts.gpuSurface as any).getGlContext === "function" ? (opts.gpuSurface as any).getGlContext() : null)) as WebGL2RenderingContext;
+    } else {
+      this.gpuSurface = new WebGl2Surface(opts.gpuCanvas, opts.gl as WebGL2RenderingContext);
+      this.gl = opts.gl as WebGL2RenderingContext;
+    }
     this.annotationCtx2d = opts.annotationCtx2d;
     this.interactionCtx2d = opts.interactionCtx2d;
     this.renderer = opts.renderer;
@@ -354,9 +372,16 @@ export class ChartSession {
             this.annotationCanvas.width,
             this.annotationCanvas.height,
           );
-          const raw = new Uint8Array(captureSize.width * captureSize.height * 4);
-          this.gl.readPixels(0, 0, captureSize.width, captureSize.height, this.gl.RGBA, this.gl.UNSIGNED_BYTE, raw);
-          capturePixels = flipRgbaRows(raw, captureSize.width, captureSize.height);
+          if (this.gpuSurface.kind === "canvas2d") {
+            const ctx2d = this.gpuCanvas.getContext("2d");
+            if (!ctx2d) throw new ChartCaptureError("CAPTURE_FAILED", "Canvas2D context unavailable for capture");
+            const imgData = ctx2d.getImageData(0, 0, captureSize.width, captureSize.height);
+            capturePixels = imgData.data;
+          } else {
+            const raw = new Uint8Array(captureSize.width * captureSize.height * 4);
+            this.gl.readPixels(0, 0, captureSize.width, captureSize.height, this.gl.RGBA, this.gl.UNSIGNED_BYTE, raw);
+            capturePixels = flipRgbaRows(raw, captureSize.width, captureSize.height);
+          }
         } catch (error) {
           const pending = this.pendingCapture;
           this.pendingCapture = null;
@@ -568,9 +593,16 @@ export class ChartSession {
   }
 
   private setupContextLossHandling(): void {
+    if (this.cleanupContextListeners) {
+      this.cleanupContextListeners();
+      this.cleanupContextListeners = null;
+    }
+
+    const canvas = this.gpuCanvas;
+    if (!canvas.addEventListener) return;
+
     const onLost = (e: Event): void => {
       e.preventDefault();
-      // Phones drop WebGL contexts under memory pressure; the counters are what a real-device run reads.
       incrementPerformanceCounter("chart.gpu.contextLost");
       this.cancelRaf();
       this.pendingLiveUpdateStartedAt = null;
@@ -578,13 +610,23 @@ export class ChartSession {
       this.dirtySurfaces = ChartSurfaceDirty.None;
       this.pendingChanges = ChartChange.None;
       this.rejectPendingCapture("WebGL context was lost during capture");
-      // Owner epoch cleanup runs after the loss guards are already in place:
-      // the pending capture was rejected above and GPU validity is already
-      // false, so a cleanup failure can never leave a capture hanging or drop
-      // the loss guard.
       this.onLostContextCb?.();
+
+      if (this.restoreTimeoutId) clearTimeout(this.restoreTimeoutId);
+      this.restoreTimeoutId = setTimeout(() => {
+        this.restoreTimeoutId = null;
+        recordGpuFallback("webgl2", "canvas2d", "restore_timeout");
+        const fallbackCanvas = this.ownerDocument.createElement("canvas");
+        const fallbackSurface = new Canvas2dSurface(fallbackCanvas);
+        this.replaceSurface(fallbackSurface);
+      }, CONTEXT_RESTORE_TIMEOUT_MS);
     };
+
     const onRestored = (): void => {
+      if (this.restoreTimeoutId) {
+        clearTimeout(this.restoreTimeoutId);
+        this.restoreTimeoutId = null;
+      }
       const freshGl = getChartWebGl2Context(this.gpuCanvas);
       if (!freshGl) {
         incrementPerformanceCounter("chart.gpu.contextCreateFailed");
@@ -592,6 +634,9 @@ export class ChartSession {
       }
       incrementPerformanceCounter("chart.gpu.contextRestored");
       this.gl = freshGl;
+      if (typeof (this.gpuSurface as any).updateGl === "function") {
+        (this.gpuSurface as any).updateGl(freshGl);
+      }
       this.onRestoreContextCb(freshGl);
       this.gpuValid = true;
       this.applyContainerSize();
@@ -600,12 +645,19 @@ export class ChartSession {
       if (this.active) this.startRaf();
     };
 
-    this.gpuCanvas.addEventListener("webglcontextlost", onLost);
-    this.gpuCanvas.addEventListener("webglcontextrestored", onRestored);
-    this.lifecycle.add(() => {
-      this.gpuCanvas.removeEventListener("webglcontextlost", onLost);
-      this.gpuCanvas.removeEventListener("webglcontextrestored", onRestored);
-    });
+    canvas.addEventListener("webglcontextlost", onLost);
+    canvas.addEventListener("webglcontextrestored", onRestored);
+
+    const cleanup = () => {
+      if (this.restoreTimeoutId) {
+        clearTimeout(this.restoreTimeoutId);
+        this.restoreTimeoutId = null;
+      }
+      canvas.removeEventListener?.("webglcontextlost", onLost);
+      canvas.removeEventListener?.("webglcontextrestored", onRestored);
+    };
+    this.cleanupContextListeners = cleanup;
+    this.lifecycle.add(cleanup);
   }
 }
 
