@@ -285,6 +285,27 @@ function makeFakeWebGpuDevice(format = "rgba8unorm") {
   return { device, buffers, textures, passes, writtenBuffers, writtenTextures };
 }
 
+function makeFakeWebGpuContext(device, format = "rgba8unorm") {
+  let configuredDesc = null;
+  const currentTexture = {
+    format,
+    createView() {
+      return { texture: this };
+    },
+  };
+  return {
+    configure(desc) {
+      configuredDesc = desc;
+    },
+    getCurrentTexture() {
+      return currentTexture;
+    },
+    getConfiguredDesc() {
+      return configuredDesc;
+    },
+  };
+}
+
 function makeFakeCanvas(contextMap = {}) {
   const listeners = new Map();
   return {
@@ -409,7 +430,8 @@ test("Surface and Heatmap integration: WebGl2Surface and WebGpuSurface expose ac
   assert.equal(webglSurface.heatmap.kind, "webgl2");
 
   const { device } = makeFakeWebGpuDevice("rgba8unorm");
-  const gpuCanvas = makeFakeCanvas();
+  const ctx = makeFakeWebGpuContext(device, "rgba8unorm");
+  const gpuCanvas = makeFakeCanvas({ webgpu: ctx });
   const handle = {
     adapter: {},
     device,
@@ -464,7 +486,8 @@ test("Pixel capture parity across WebGpuSurface, WebGl2Surface and Canvas2dSurfa
 
   // 3. WebGPU surface
   const { device } = makeFakeWebGpuDevice("rgba8unorm");
-  const gpuCanvas = makeFakeCanvas();
+  const ctx = makeFakeWebGpuContext(device, "rgba8unorm");
+  const gpuCanvas = makeFakeCanvas({ webgpu: ctx });
   gpuCanvas.width = width;
   gpuCanvas.height = height;
   const handle = {
@@ -560,7 +583,8 @@ test("Full fallback cascade: WebGPU loss -> WebGL2 -> 5s context-restore timeout
       dispose: () => {},
     };
 
-    const initialCanvas = makeFakeCanvas({ webgl2: fakeGl, "2d": fake2d });
+    const ctx = makeFakeWebGpuContext(device, "rgba8unorm");
+    const initialCanvas = makeFakeCanvas({ webgpu: ctx, webgl2: fakeGl, "2d": fake2d });
     initialCanvas.dataset.chartSurface = "gpu-scene";
     const webgpuSurface = new WebGpuSurface(initialCanvas, handle);
 
