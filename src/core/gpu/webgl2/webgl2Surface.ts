@@ -24,7 +24,11 @@ function makeNoopBatch(): QuadSink & { begin(): void; flush(): void; dispose(): 
 
 export class WebGl2Surface implements GpuSurface {
   readonly kind = "webgl2" as const;
-  readonly heatmap: HeatmapLayer | null;
+  private _heatmap: HeatmapLayer | null = null;
+
+  get heatmap(): HeatmapLayer | null {
+    return this._heatmap;
+  }
 
   private batch: QuadSink & { begin(): void; flush(w: number, h: number): void; dispose(): void };
   private dpr = 1;
@@ -54,7 +58,7 @@ export class WebGl2Surface implements GpuSurface {
       && typeof gl.createProgram === "function"
     );
     this.batch = batch ?? (canCreateBatch ? new QuadBatch(gl) : makeNoopBatch());
-    this.heatmap = new WebGl2HeatmapLayer(gl);
+    this._heatmap = new WebGl2HeatmapLayer(gl);
   }
 
   getGlContext(): WebGL2RenderingContext {
@@ -69,8 +73,8 @@ export class WebGl2Surface implements GpuSurface {
     if (this.disposed) return;
     this.gl = nextGl;
     this.batch.dispose();
-    this.heatmap?.dispose();
-    this.heatmap = new WebGl2HeatmapLayer(nextGl);
+    this._heatmap?.dispose();
+    this._heatmap = new WebGl2HeatmapLayer(nextGl);
     const canCreateBatch = Boolean(
       nextGl
       && typeof nextGl.createVertexArray === "function"
