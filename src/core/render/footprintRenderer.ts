@@ -161,12 +161,15 @@ export class FootprintRenderer {
   }
 
   private flushCurrent(dpr: number): void {
+    const gl = this.gl;
+    const w = gl ? gl.drawingBufferWidth / dpr : (this.surface?.canvas.width ?? 0) / dpr;
+    const h = gl ? gl.drawingBufferHeight / dpr : (this.surface?.canvas.height ?? 0) / dpr;
     if (this.currentFrame) {
-      this.currentFrame.flushQuads();
+      this.currentFrame.flushQuads(w, h);
       this.currentFrame.end();
       this.currentFrame = null;
-    } else if (this.gl) {
-      (this.batch as any).flush?.(this.gl.drawingBufferWidth / dpr, this.gl.drawingBufferHeight / dpr);
+    } else if (gl) {
+      (this.batch as any).flush?.(w, h);
     }
   }
 

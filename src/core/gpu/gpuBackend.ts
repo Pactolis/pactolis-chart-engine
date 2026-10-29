@@ -10,7 +10,7 @@ export interface QuadSink {
 
 export interface GpuFrame {
   readonly quads: QuadSink;
-  flushQuads(): void;
+  flushQuads(logicalWidth?: number, logicalHeight?: number): void;
   end(): void;
 }
 

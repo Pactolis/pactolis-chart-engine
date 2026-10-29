@@ -558,6 +558,7 @@ export class ChartSession {
         if (c.width !== bitmapWidth) c.width = bitmapWidth;
         if (c.height !== bitmapHeight) c.height = bitmapHeight;
       }
+      this.gpuSurface.resize(bitmapWidth, bitmapHeight, target.dpr);
     } else if (this.unfinishedResize === null) {
       return false;
     }

@@ -1902,16 +1902,17 @@ async function buildChartRuntime(
   const display = resolveChartDisplayOptions(chartHost().displayOptions?.());
   const gl = getChartWebGl2Context(gpuCanvas, display.webgl);
   const gpuSettings = readGpuSettings(doc.defaultView);
-  const gpuSurface = createGpuSurface(gpuCanvas, gpuSettings.backend, gl);
   const annotationCtx2d = annotationCanvas.getContext("2d");
   const interactionCtx2d = interactionCanvas.getContext("2d");
-  if (!annotationCtx2d || !interactionCtx2d) {
+  if ((gpuSettings.backend !== "canvas2d" && !gl) || !annotationCtx2d || !interactionCtx2d) {
+    if (!gl) incrementPerformanceCounter("chart.gpu.contextCreateFailed");
     hook.remove();
     gpuCanvas.remove();
     annotationCanvas.remove();
     interactionCanvas.remove();
     throw new Error("ChartRuntime: canvas contexts unavailable");
   }
+  const gpuSurface = createGpuSurface(gpuCanvas, gpuSettings.backend, gl);
   hook.setAttribute("data-gpu-backend", gpuSurface.kind);
 
   const priceStepPromise = services.fetchPriceStepResult

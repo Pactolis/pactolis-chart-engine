@@ -103,9 +103,11 @@ export class WebGl2Surface implements GpuSurface {
 
     return {
       quads: this.batch,
-      flushQuads: () => {
+      flushQuads: (logicalWidth?: number, logicalHeight?: number) => {
         if (this.disposed) return;
-        this.batch.flush(this.canvas.width / this.dpr, this.canvas.height / this.dpr);
+        const w = logicalWidth ?? (this.canvas.width / this.dpr);
+        const h = logicalHeight ?? (this.canvas.height / this.dpr);
+        this.batch.flush(w, h);
       },
       end: () => {},
     };
