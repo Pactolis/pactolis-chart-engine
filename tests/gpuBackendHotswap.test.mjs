@@ -363,7 +363,7 @@ test("backend hotswap (webgl2 -> canvas2d -> webgpu) updates renderer surface an
   mockRenderer.render(null, null);
   assert.equal(quadsRendered, 3);
 
-  session.dispose();
+  session.destroy();
   webgpuSurface.dispose();
 });
 
