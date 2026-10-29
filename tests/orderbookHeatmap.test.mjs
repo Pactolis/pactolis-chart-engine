@@ -1,3 +1,7 @@
+import { OrderbookHeatmapOverlay } from "../dist/features/orderbook/heatmapOverlay.js";
+import { orderbookHeatmapSettingsSource } from "../dist/features/orderbook/heatmapSettingsSource.js";
+import { View } from "../dist/core/engine/view.js";
+import { FootprintSeries } from "../dist/core/model/footprint.js";
 // Orderbook heatmap model: tiers, chunking, sub-bar selection, units and colors.
 import test from "node:test";
 import assert from "node:assert/strict";
@@ -77,4 +81,142 @@ test("cells deepen with size relative to the largest visible wall", () => {
   assert.equal(heatmapCellColor(0), "rgba(125, 211, 252, 0.280)");
   assert.equal(heatmapCellColor(1), "rgba(29, 78, 216, 0.950)");
   assert.equal(heatmapCellColor(1, 0.5), "rgba(29, 78, 216, 0.475)");
+});
+
+function makeTestView(width = 800) {
+  const view = new View();
+  view.area = { left: 0, top: 0, width, height: 400 };
+  view.colWidth = 10;
+  return view;
+}
+
+const mockCtx = {
+  save() {},
+  restore() {},
+  beginPath() {},
+  rect() {},
+  clip() {},
+  fillRect() {},
+  strokeRect() {},
+  fillText() {},
+  moveTo() {},
+  lineTo() {},
+  stroke() {},
+  fill() {},
+  fillStyle: "",
+  strokeStyle: "",
+  lineWidth: 1,
+  font: "",
+  textAlign: "",
+  textBaseline: "",
+};
+
+test("preserves historical chunks while live-tail invalidation updates only the live tail", async () => {
+  orderbookHeatmapSettingsSource().updateFor("BINANCE_FUTURES:btcusdt", {
+    mode: "single",
+    bucketStep: 50,
+  });
+
+  const series = new FootprintSeries({ intervalMs: 60_000, priceStep: 1 });
+  series.loadBars(Array.from({ length: 1050 }, (_, i) => ({
+    startTime: i * 60_000,
+    open: 100, high: 105, low: 95, close: 102, volume: 10, delta: 0, count: 0, cells: new Map(), hasRef: true,
+  })));
+
+  const fetchedRequests = [];
+  let currentTime = 1050 * 60_000;
+
+  const overlay = new OrderbookHeatmapOverlay({
+    fetch: async (req) => {
+      fetchedRequests.push(req);
+      return {
+        schemaVersion: 1,
+        generatedAt: currentTime,
+        base: "BTC",
+        source: req.source,
+        resolution: req.resolution,
+        bucketStep: req.bucketStep,
+        from: req.from,
+        to: req.to,
+        bars: [{ t: req.from, cells: [[50000, 1000, 1000]] }],
+      };
+    },
+    invalidate: () => {},
+    getMarket: () => "BINANCE_FUTURES:btcusdt",
+    now: () => currentTime,
+    liveDebounceMs: 10,
+  });
+
+  const view = makeTestView();
+  overlay.draw(mockCtx, view, series, [0, 1049]);
+
+  // Wait for initial REST chunks
+  await new Promise((resolve) => setTimeout(resolve, 50));
+  assert.equal(fetchedRequests.length, 2);
+  assert.equal(fetchedRequests[0].from, 0); // historical chunk
+  assert.equal(fetchedRequests[1].from, 1000 * 60_000); // live chunk
+  assert.equal(overlay.chunkStatus(0), "ready");
+  assert.equal(overlay.chunkStatus(1000 * 60_000), "ready");
+
+  // Clear request log to track live-tail invalidation
+  fetchedRequests.length = 0;
+
+  // Trigger live tail invalidation signal
+  overlay.invalidateLiveTail();
+
+  // Wait for bounded debounce
+  await new Promise((resolve) => setTimeout(resolve, 50));
+
+  // Historical chunk (from: 0) is NEVER requested again!
+  assert.ok(fetchedRequests.every((req) => req.from >= 1000 * 60_000), "historical chunks are never re-fetched");
+  assert.equal(overlay.chunkStatus(0), "ready", "historical chunk remains ready");
+
+  // Direct live-tail push merges bars without REST fetch
+  const beforePushCount = fetchedRequests.length;
+  overlay.applyLiveTailBars([{ t: 1050 * 60_000, cells: [[50050, 5000, 5000]] }]);
+  assert.equal(fetchedRequests.length, beforePushCount, "direct push does not issue REST requests");
+
+  overlay.dispose();
+});
+
+test("falls back to timer refresh when no live-tail source is provided or when idle", () => {
+  let currentTime = 1_000_000;
+  const overlay = new OrderbookHeatmapOverlay({
+    fetch: async () => ({
+      schemaVersion: 1, generatedAt: currentTime, base: "BTC", source: "single", resolution: "1m",
+      bucketStep: 50, from: 0, to: 0, bars: [],
+    }),
+    invalidate: () => {},
+    getMarket: () => "BINANCE_FUTURES:btcusdt",
+    now: () => currentTime,
+  });
+
+  // Without subscribeLiveTail, isLiveTailHealthy is false (timer fallback active)
+  assert.equal(overlay.isLiveTailHealthyForTest(), false);
+
+  overlay.dispose();
+});
+
+test("subscribes to live-tail and performs proper cleanup on dispose", () => {
+  let unsubscribed = false;
+  let eventListener = null;
+
+  const overlay = new OrderbookHeatmapOverlay({
+    fetch: async () => ({
+      schemaVersion: 1, generatedAt: 0, base: "BTC", source: "single", resolution: "1m",
+      bucketStep: 50, from: 0, to: 0, bars: [],
+    }),
+    invalidate: () => {},
+    getMarket: () => "BINANCE_FUTURES:btcusdt",
+    subscribeLiveTail: (listener) => {
+      eventListener = listener;
+      return () => { unsubscribed = true; };
+    },
+  });
+
+  assert.equal(typeof eventListener, "function");
+  assert.equal(unsubscribed, false);
+
+  overlay.dispose();
+  assert.equal(unsubscribed, true, "unsubscribe was called on dispose");
 });
