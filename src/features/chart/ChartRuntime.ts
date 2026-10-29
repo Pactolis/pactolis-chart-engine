@@ -1953,7 +1953,8 @@ async function buildChartRuntime(
     if (runtime.getDiagnostics().disposed) return;
     const nextSettings = readGpuSettings(doc.defaultView);
     const nextCanvas = doc.createElement("canvas");
-    const nextSurface = createGpuSurface(nextCanvas, nextSettings.backend, display.webgl);
+    const nextGl = nextSettings.backend !== "canvas2d" ? getChartWebGl2Context(nextCanvas, display.webgl) : null;
+    const nextSurface = createGpuSurface(nextCanvas, nextSettings.backend, nextGl);
     runtime.session.replaceSurface(nextSurface, (canvasNext: HTMLCanvasElement, canvasPrev: HTMLCanvasElement) => {
       canvasPrev.replaceWith(canvasNext);
       hook.setAttribute("data-gpu-backend", nextSurface.kind);
