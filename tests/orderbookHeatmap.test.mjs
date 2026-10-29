@@ -1,5 +1,5 @@
 import { OrderbookHeatmapOverlay } from "../dist/features/orderbook/heatmapOverlay.js";
-import { orderbookHeatmapSettingsSource } from "../dist/features/orderbook/heatmapSettingsSource.js";
+import { configureOrderbookHeatmapSettingsSource } from "../dist/features/orderbook/heatmapSettingsSource.js";
 import { View } from "../dist/core/engine/view.js";
 import { FootprintSeries } from "../dist/core/model/footprint.js";
 // Orderbook heatmap model: tiers, chunking, sub-bar selection, units and colors.
@@ -112,9 +112,12 @@ const mockCtx = {
 };
 
 test("preserves historical chunks while live-tail invalidation updates only the live tail", async () => {
-  orderbookHeatmapSettingsSource().updateFor("BINANCE_FUTURES:btcusdt", {
-    mode: "single",
-    bucketStep: 50,
+  configureOrderbookHeatmapSettingsSource({
+    settingsFor: () => ({
+      mode: "single", unit: "usd", bucketStep: 50,
+      single: { usd: 1, btc: 1 }, aggregated: { usd: 1, btc: 1 },
+    }),
+    onChange: () => () => {},
   });
 
   const series = new FootprintSeries({ intervalMs: 60_000, priceStep: 1 });
