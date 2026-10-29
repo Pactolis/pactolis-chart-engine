@@ -457,6 +457,28 @@ test("explicit reset fits 250 columns with reset padding", () => {
   assert250ColumnFit(view, 500, 3);
 });
 
+test("a host that lowers the default fit gets its column count on the initial fit and on reset", () => {
+  const view = new View({ defaultFitColumns: 70, latestBarRightPaddingBars: 2, resetRightPaddingBars: 3 });
+  view.area = { left: 0, top: 0, width: 333, height: 300 };
+  const viewport = new TimeScaleViewportController(view);
+
+  // 100 bars is far short of the desktop 250 but past the 70 this host wants, so the initial fit runs on load.
+  assert.equal(viewport.applyDataUpdate(dataEvent("history-loaded", 0, 100, "history")), true);
+  assertNear(view.colWidth, 333 / (70 + 2 - 1), "70-column initial spacing");
+  assertNear(latestX(view, 100), 333 - 2 * view.colWidth, "latest column placement");
+
+  view.colWidth = 9;
+  viewport.markUserViewportChange(100);
+  assert.equal(viewport.resetToDefault(100), true);
+  assertNear(view.colWidth, 333 / (70 + 3 - 1), "70-column spacing after a reset");
+
+  // A history shorter than the host's count fits whole, as it does on desktop.
+  const short = new View({ defaultFitColumns: 70, resetRightPaddingBars: 3 });
+  short.area = { left: 0, top: 0, width: 333, height: 300 };
+  assert.equal(new TimeScaleViewportController(short).resetToDefault(40), true);
+  assertNear(short.colWidth, 333 / (40 + 3 - 1), "a 40-bar history fits all 40");
+});
+
 test("deferred explicit reset retains reset padding when geometry arrives", () => {
   const view = makeDefaultFitView(0);
   const viewport = new TimeScaleViewportController(view);

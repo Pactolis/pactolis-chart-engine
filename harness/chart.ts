@@ -11,7 +11,7 @@ import {
 } from "../src/core/orderbookHeatmap/settings.js";
 import type { ChartPanelState, ChartType } from "../src/core/chartPanelState.js";
 import { configureChartDataSource } from "../src/features/chart/chartDataSource.js";
-import { configureChartHost } from "../src/features/chart/chartHost.js";
+import { configureChartHost, type ChartDisplayOptions, type ChartPowerPreference } from "../src/features/chart/chartHost.js";
 import { mountChartRuntime, type ChartMountHandle, type ChartRuntime } from "../src/features/chart/ChartRuntime.js";
 import type { ChartRuntimeServices } from "../src/features/chart/ChartServicePorts.js";
 import type { ChartSurfaceModel } from "../src/features/chart/chartSurfaceModel.js";
@@ -44,6 +44,40 @@ export function listChartRuntimeEntries(): Array<readonly [panelId: string, runt
 /** Data-degraded flags the engine raised, by key. */
 export function dataDegradedFlags(): Record<string, string | undefined> {
   return Object.fromEntries(degraded);
+}
+
+// --- Display options -------------------------------------------------------------
+
+// A host adapts charts to its screen through ChartHost.displayOptions. The harness answers from the
+// URL (`density=compact&dprcap=2&antialias=0&power=low-power&fit=80&axisw=62&axish=22`) and lets a
+// spec change the answer while charts are mounted.
+function displayOptionsFromSearch(search: string): ChartDisplayOptions {
+  const params = new URLSearchParams(search);
+  const number = (name: string): number | undefined => {
+    const raw = params.get(name);
+    return raw === null || raw === "" ? undefined : Number(raw);
+  };
+  const density = params.get("density");
+  const power = params.get("power");
+  return {
+    ...(density === "compact" || density === "regular" ? { density } : {}),
+    ...(number("axisw") !== undefined ? { priceAxisWidth: number("axisw") } : {}),
+    ...(number("axish") !== undefined ? { timeAxisHeight: number("axish") } : {}),
+    ...(number("fit") !== undefined ? { defaultFitColumns: number("fit") } : {}),
+    ...(number("dprcap") !== undefined ? { maxDevicePixelRatio: number("dprcap") } : {}),
+    ...(params.has("antialias") ? { antialias: params.get("antialias") !== "0" } : {}),
+    ...(power === "default" || power === "low-power" || power === "high-performance"
+      ? { powerPreference: power as ChartPowerPreference }
+      : {}),
+  };
+}
+
+let displayOptions: ChartDisplayOptions = displayOptionsFromSearch(location.search);
+
+/** Change the answer `displayOptions` gives and tell every mounted chart to re-read it. */
+export function setDisplayOptions(next: ChartDisplayOptions): void {
+  displayOptions = next;
+  for (const runtime of runtimes.values()) runtime.refreshDisplayOptions();
 }
 
 // --- Orderbook heatmap settings ------------------------------------------------
@@ -91,6 +125,7 @@ configureChartHost({
   getPairChartType: (market) => pairChartTypes.get(market),
   setPairChartType: (market, type) => { pairChartTypes.set(market, type); },
   exposeDebugGlobals: () => true,
+  displayOptions: () => displayOptions,
 });
 
 configureChartLocale({

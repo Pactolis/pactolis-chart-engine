@@ -53,6 +53,16 @@ export interface HeatmapGpuCellFrame {
   preparedLease?: { release(): void };
 }
 
+/** The plot rectangle in CSS pixels the density is clipped to. */
+export interface HeatmapGpuPlot {
+  left: number;
+  top: number;
+  width: number;
+  height: number;
+  /** Pixel ratio the canvas was sized at; omitted, the owner window's devicePixelRatio. */
+  pixelRatio?: number;
+}
+
 /** Hard per-chart prototype budget: GPU + CPU staging + retained copies. */
 export const HEATMAP_GPU_CHART_BUDGET_BYTES = 64 * 1024 * 1024;
 /** Hard module-wide realm budget across every live prototype renderer. */
@@ -123,12 +133,7 @@ export class HeatmapGpuRenderer {
    * its CPU time as `chart.gpu.heatmap.render.ms`: validation, uploads and
    * draw submission, not the time the GPU takes to execute the commands.
    */
-  renderFrame(gl: WebGL2RenderingContext, frame: HeatmapGpuCellFrame, plot: {
-    left: number;
-    top: number;
-    width: number;
-    height: number;
-  }): boolean {
+  renderFrame(gl: WebGL2RenderingContext, frame: HeatmapGpuCellFrame, plot: HeatmapGpuPlot): boolean {
     if (this.disposed) return false;
     // No closure, so the frame path allocates nothing extra; disabled
     // telemetry costs one flag read.
@@ -141,12 +146,7 @@ export class HeatmapGpuRenderer {
   }
 
   /** Validates, uploads and draws one frame; `renderFrame` times it. */
-  private submitFrame(gl: WebGL2RenderingContext, frame: HeatmapGpuCellFrame, plot: {
-    left: number;
-    top: number;
-    width: number;
-    height: number;
-  }): boolean {
+  private submitFrame(gl: WebGL2RenderingContext, frame: HeatmapGpuCellFrame, plot: HeatmapGpuPlot): boolean {
     const cells = frame.main.length + frame.extension.length;
     if (cells === 0) return true; // successful empty frame (e.g. acknowledged empty books)
     if (!Number.isFinite(cells) || cells > MAX_GRID_TEXELS) return false;
@@ -617,15 +617,10 @@ export class HeatmapGpuRenderer {
     this.uploadedInstances.set(view);
   }
 
-  private draw(gl: WebGL2RenderingContext, frame: HeatmapGpuCellFrame, plot: {
-    left: number;
-    top: number;
-    width: number;
-    height: number;
-  }): void {
+  private draw(gl: WebGL2RenderingContext, frame: HeatmapGpuCellFrame, plot: HeatmapGpuPlot): void {
     const canvas = gl.canvas as HTMLCanvasElement;
     const ownerWindow = canvas.ownerDocument?.defaultView;
-    const dpr = ownerWindow?.devicePixelRatio || 1;
+    const dpr = plot.pixelRatio ?? (ownerWindow?.devicePixelRatio || 1);
     const bufferWidth = gl.drawingBufferWidth;
     const bufferHeight = gl.drawingBufferHeight;
     if (!(bufferWidth > 0) || !(bufferHeight > 0) || !(dpr > 0)) throw new Error("Heatmap GPU draw: invalid buffer");

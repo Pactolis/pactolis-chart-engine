@@ -33,19 +33,42 @@ export interface ChartArea {
 export const DEFAULT_COL_WIDTH = DEFAULT_TIME_SCALE_OPTIONS.barSpacing;
 export const MAX_VISIBLE_BARS = 4000;
 /** Target full candle columns for the default/reset horizontal fit (Settings/250). */
-export const DEFAULT_FIT_COLUMNS = 250;
+export const DEFAULT_FIT_COLUMNS = DEFAULT_TIME_SCALE_OPTIONS.defaultFitColumns;
 
 export class View {
-  readonly timeScaleOptions: TimeScaleOptions;
-  readonly chartLayoutOptions: ChartLayoutOptions;
+  private _timeScaleOptions: TimeScaleOptions;
+  private _chartLayoutOptions: ChartLayoutOptions;
   /** Pixel width of one bar column. */
   colWidth: number;
 
   constructor(timeScaleOptions: Partial<TimeScaleOptions> = {}, chartLayoutOptions: Partial<ChartLayoutOptions> = {}) {
-    this.timeScaleOptions = normalizeTimeScaleOptions(timeScaleOptions);
-    this.chartLayoutOptions = normalizeChartLayoutOptions(chartLayoutOptions);
-    this.colWidth = this.timeScaleOptions.barSpacing;
-    this.priceAxisW = this.chartLayoutOptions.priceAxisWidth;
+    this._timeScaleOptions = normalizeTimeScaleOptions(timeScaleOptions);
+    this._chartLayoutOptions = normalizeChartLayoutOptions(chartLayoutOptions);
+    this.colWidth = this._timeScaleOptions.barSpacing;
+    this.priceAxisW = this._chartLayoutOptions.priceAxisWidth;
+  }
+
+  get timeScaleOptions(): TimeScaleOptions {
+    return this._timeScaleOptions;
+  }
+
+  get chartLayoutOptions(): ChartLayoutOptions {
+    return this._chartLayoutOptions;
+  }
+
+  /**
+   * Replace the host-chosen time-scale and layout options on a live view. The caller owns
+   * laying the chart out again; nothing moves here. Returns whether anything changed.
+   */
+  setDisplayOptions(timeScaleOptions: Partial<TimeScaleOptions>, chartLayoutOptions: Partial<ChartLayoutOptions>): boolean {
+    const nextTimeScale = normalizeTimeScaleOptions(timeScaleOptions);
+    const nextLayout = normalizeChartLayoutOptions(chartLayoutOptions);
+    const timeScaleChanged = !sameOptions(this._timeScaleOptions, nextTimeScale);
+    const layoutChanged = !sameOptions(this._chartLayoutOptions, nextLayout);
+    if (!timeScaleChanged && !layoutChanged) return false;
+    this._timeScaleOptions = nextTimeScale;
+    this._chartLayoutOptions = nextLayout;
+    return true;
   }
   /** Pixel x of the left edge of bar index 0. */
   offsetX = 0;
@@ -61,6 +84,11 @@ export class View {
   subPanesH = 0;
   /** Width of the price-axis gutter. Kept separate from right-side docks. */
   priceAxisW = DEFAULT_CHART_LAYOUT_OPTIONS.priceAxisWidth;
+  /**
+   * Device pixels per CSS pixel the canvases render at (the window's devicePixelRatio, or the host's cap
+   * when that is lower). Null until the session has measured the first size; renderers then ask the window.
+   */
+  pixelRatio: number | null = null;
 
   area: ChartArea = { left: 0, top: 0, width: 0, height: 0 };
 
@@ -235,8 +263,8 @@ export class View {
   }
 
   /**
-   * Restore the default horizontal scale: fit min(total, 250) full candle columns
-   * into the usable CSS plot width, keeping the latest columns near the right edge.
+   * Restore the default horizontal scale: fit min(total, defaultFitColumns, 250 unless the host
+   * lowered it) full candle columns into the usable CSS plot width, keeping the latest columns near the right edge.
    *
    * Spacing is fractional: plotW / (N + rightPadCols - 1), bounded only by the
    * existing min/max bar spacing and the dynamic 4000-bar floor. With no data the
@@ -250,7 +278,7 @@ export class View {
       return;
     }
     if (!(this.area.width > 1)) return;
-    const fitColumns = Math.min(total, DEFAULT_FIT_COLUMNS);
+    const fitColumns = Math.min(total, this.timeScaleOptions.defaultFitColumns);
     const spacingDivisor = fitColumns + Math.max(0, rightPadCols) - 1;
     const spacing = spacingDivisor > 0 ? this.area.width / spacingDivisor : this.area.width;
     if (!Number.isFinite(spacing) || spacing <= 0) return;
@@ -388,4 +416,12 @@ export class View {
 
 function clamp(v: number, lo: number, hi: number): number {
   return Math.max(lo, Math.min(hi, v));
+}
+
+/** Two frozen option records hold the same values. */
+function sameOptions<T extends object>(a: T, b: T): boolean {
+  for (const key of Object.keys(a) as Array<keyof T>) {
+    if (a[key] !== b[key]) return false;
+  }
+  return true;
 }

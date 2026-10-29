@@ -1,4 +1,4 @@
-import { DEFAULT_FIT_COLUMNS, View } from "../../core/engine/view.js";
+import { View } from "../../core/engine/view.js";
 import type { ChartDataUpdateEvent } from "../../core/dataUpdateEvent.js";
 
 export interface TimeScaleViewportState {
@@ -167,7 +167,7 @@ export class TimeScaleViewportController {
     this._timeAxisScaleGesture = null;
   }
 
-  /** Explicit time-scale reset: fit min(total, 250) columns with reset padding. */
+  /** Explicit time-scale reset: fit min(total, defaultFitColumns) columns (250 unless the host lowered it) with reset padding. */
   resetToDefault(total: number): boolean {
     const nextTotal = Math.max(0, total);
     this._setFollowLatest(true, "reset-default");
@@ -202,7 +202,7 @@ export class TimeScaleViewportController {
     this._setFollowLatest(true, "history-loaded");
     this._followRightOffsetBars = null;
     this._lastDataLength = nextTotal;
-    if (this._initialFitPending && nextTotal >= DEFAULT_FIT_COLUMNS) {
+    if (this._initialFitPending && nextTotal >= this.view.timeScaleOptions.defaultFitColumns) {
       return this._applyInitialFit(nextTotal, "history-loaded");
     }
     this._latestPlacementPending = nextTotal > 0;
@@ -334,7 +334,7 @@ export class TimeScaleViewportController {
       case "same-bar-update":
         return false;
       case "history-patched":
-        if (this._initialFitPending && this._followLatest && nextTotal >= DEFAULT_FIT_COLUMNS) {
+        if (this._initialFitPending && this._followLatest && nextTotal >= this.view.timeScaleOptions.defaultFitColumns) {
           return this._applyInitialFit(nextTotal, "history-patched");
         }
         return this._followLatest && nextTotal > 0 ? this._placeLatest(nextTotal, "history-patched") : false;

@@ -1,5 +1,8 @@
 import type { ChartType } from "../../core/chartPanelState.js";
+import type { ChartDisplayOptions } from "../../core/model/chartDisplayOptions.js";
 import type { ChartRuntime } from "./ChartRuntime.js";
+
+export type { ChartDensity, ChartDisplayOptions, ChartPowerPreference } from "../../core/model/chartDisplayOptions.js";
 
 /**
  * Application state the chart engine reports to or reads from. The engine does
@@ -23,6 +26,12 @@ export interface ChartHost {
   setPairChartType(market: string, type: ChartType): void;
   /** Whether mounted runtimes install their `window` debug helpers (load tracing installs them regardless). */
   exposeDebugGlobals(): boolean;
+  /**
+   * How charts should adapt to the screen they run on (compact layout on a phone, a pixel-ratio cap).
+   * Read when a chart mounts and again on `ChartRuntime.refreshDisplayOptions()`. Leave it out, or leave
+   * fields unset, for the desktop defaults.
+   */
+  displayOptions?(): ChartDisplayOptions;
 }
 
 let configured: ChartHost | null = null;

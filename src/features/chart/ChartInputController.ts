@@ -178,13 +178,14 @@ function attachChartInput(canvas: HTMLCanvasElement, crosshair: Crosshair, host:
   // A touch screen as the primary pointer shows the touch controls before the first touch.
   if (prefersCoarsePointer(ownerWindow)) {
     crosshair.touch = true;
-    session?.invalidate(ChartChange.Interaction);
+    session?.invalidate(ChartChange.Interaction | ChartChange.Style);
   }
 
   const setTouchMode = (on: boolean): void => {
     if ((crosshair.touch === true) === on) return;
     crosshair.touch = on;
-    session.invalidate(ChartChange.Interaction);
+    // The price gutter's tick labels make room for the touch buttons, so the annotation surface repaints too.
+    session.invalidate(ChartChange.Interaction | ChartChange.Style);
   };
 
   const syncTransientMagnet = (modifiers: Pick<MouseEvent, "ctrlKey" | "metaKey">): void => {

@@ -147,7 +147,7 @@ test("production WebGL2 contexts explicitly disable preserveDrawingBuffer", asyn
 
   assert.match(nativeSource, /preserveDrawingBuffer:\s*false/);
   assert.match(nativeSource, /canvas\.getContext\("webgl2", CHART_WEBGL_CONTEXT_ATTRIBUTES\)/);
-  assert.match(runtimeSource, /getChartWebGl2Context\(gpuCanvas\)/);
+  assert.match(runtimeSource, /getChartWebGl2Context\(gpuCanvas, display\.webgl\)/);
   assert.equal((sessionSource.match(/getChartWebGl2Context\(this\.gpuCanvas\)/g) ?? []).length, 2);
   assert.doesNotMatch(runtimeSource, /gpuCanvas\.getContext\("webgl2"/);
   assert.doesNotMatch(sessionSource, /this\.gpuCanvas\.getContext\("webgl2"/);

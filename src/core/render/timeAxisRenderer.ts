@@ -6,6 +6,12 @@ import { tzDateTimeHud, tzDay, tzHM, tzMonth, tzYear } from "../tzFormat.js";
 import type { Crosshair } from "./overlay.js";
 import { uiColor, axisMajorLabelColor, axisLabelBorderColor, axisMajorTickColor, timeAxisCrosshairLabelBg } from "../ui/seriesPalette.js";
 
+/** The strip is designed for 22px; a taller one (compact density) moves its labels down to stay centered. */
+const DESIGNED_AXIS_HEIGHT = 22;
+function labelInset(axis: { height: number }): number {
+  return axis.height > DESIGNED_AXIS_HEIGHT + 2 ? Math.round((axis.height - DESIGNED_AXIS_HEIGHT) / 2) : 0;
+}
+
 export interface TimeMarker {
   time: number;
   text: string;
@@ -40,6 +46,7 @@ export function drawTimeAxis(
   const timeScale = TimeScaleModel.fromSeries(series);
   const marks = timeScale.marks(view, { formatLabel: formatTimeAxisTick });
   const tickH = 3;
+  const inset = labelInset(axis);
 
   ctx.save();
   ctx.beginPath();
@@ -61,7 +68,7 @@ export function drawTimeAxis(
     ctx.lineTo(tickX, axisY + tickH + (isMajor ? 1 : 0));
     ctx.stroke();
     ctx.fillStyle = isMajor ? axisMajorLabelColor : uiColor.textSecondary;
-    ctx.fillText(mark.label, alignLabelCenter(x, labelW, axis), axisY + tickH + 2);
+    ctx.fillText(mark.label, alignLabelCenter(x, labelW, axis), axisY + inset + tickH + 2);
   }
 
   drawTimeMarkers(ctx, view, series, axis, timeMarkers);
@@ -91,7 +98,7 @@ export function drawCrosshairTimeLabel(
   ctx.font = `${view.timeScaleOptions.tickMarkFontSize}px ui-monospace, monospace`;
   const labelW = ctx.measureText(timeLabel).width + 10;
   const labelX = alignLabelCenter(hx, labelW, axis);
-  const labelY = axis.top + 1;
+  const labelY = axis.top + 1 + labelInset(axis);
   const boxLeft = labelX - labelW / 2;
   ctx.fillStyle = timeAxisCrosshairLabelBg;
   if (typeof ctx.roundRect === "function" && typeof ctx.fill === "function") {
@@ -124,6 +131,7 @@ function drawTimeMarkers(
   if (!markers.length) return;
   const intervalMs = series.config.intervalMs;
   const axisY = axis.top;
+  const inset = labelInset(axis);
   const sorted = [...markers]
     .filter((marker) => Number.isFinite(marker.time))
     .sort((a, b) => b.priority - a.priority);
@@ -152,13 +160,13 @@ function drawTimeMarkers(
     ctx.fillStyle = marker.color;
     if (typeof ctx.roundRect === "function" && typeof ctx.fill === "function") {
       ctx.beginPath();
-      ctx.roundRect(left, axisY + 1, boxW, 16, 3.5);
+      ctx.roundRect(left, axisY + 1 + inset, boxW, 16, 3.5);
       ctx.fill();
     } else {
-      ctx.fillRect(left, axisY + 1, boxW, 16);
+      ctx.fillRect(left, axisY + 1 + inset, boxW, 16);
     }
     ctx.fillStyle = uiColor.bgApp;
-    ctx.fillText(label, labelX, axisY + 4);
+    ctx.fillText(label, labelX, axisY + 4 + inset);
   }
   ctx.restore();
 }

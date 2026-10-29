@@ -1,6 +1,6 @@
 {
   "name": "@pactolis/chart-engine",
-  "version": "0.1.3",
+  "version": "0.1.4",
   "description": "Canvas chart engine behind Pactolis: footprint and candlestick rendering, scales, indicators, order book heatmaps and drawing tools.",
   "license": "Apache-2.0",
   "author": "Pactolis",

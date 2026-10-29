@@ -10,7 +10,8 @@ sabitleri ve saf yardımcılar), [src/features/chart/interactionPolicy.ts](../sr
 
 Testler: `tests/chartAxisInteraction.test.mjs`, `tests/chartInteractionPolicy.test.mjs`,
 `tests/chartWheelPolicy.test.mjs`, `tests/chartDrawingMagnet.test.mjs`, `tests/touchGestures.test.mjs`,
-`tests/touchControls.test.mjs`, `tests/drawingTouchTargets.test.mjs`,
+`tests/touchControls.test.mjs`, `tests/drawingTouchTargets.test.mjs`, `tests/hudLayout.test.mjs`,
+`tests/compactChartRender.test.mjs`,
 `tests/browser/chart-pointer-ownership.spec.ts`, `tests/browser/chart-keyboard-ownership.spec.ts`,
 `tests/browser/chart-touch-input.spec.ts` (sentetik pointer event'leri, kayıt tutan host),
 `tests/browser/chart-touch-e2e.spec.ts` (Chromium dokunma emülasyonu, gerçek `touch-action`).
@@ -66,12 +67,12 @@ cihaz).
 | Plot | Tek parmak sürükleme | X/time pan; auto-scale kapalıysa manuel Y pan korunur. Parmak düştüğü yerden 10 px açılana kadar hiçbir şey kımıldamaz (ölü bölge); pan düşülen noktadan sayılır, yani eşik aşılınca grafik parmağın altına oturur ve geride kalmaz |
 | Plot | `LONG_PRESS_MS` (400 ms) kıpırdamadan basılı tutma | İnceleme modu: crosshair ve HUD parmağı izler (plot ve altındaki panellerle sınırlı), grafik kaymaz. Parmak kalkınca (veya `pointercancel`) crosshair kapanır. Tarayıcının uzun basma context menu'sü bastırılır ve `chartcontextmenu` dispatch edilmez |
 | Plot | İki parmak (pinch) | Yalnız zaman ekseni: parmak aralığı oranında X zoom (parmakların orta noktası yerinde kalır), orta noktanın hareketi pan'dır; auto-scale kapalıysa dikey hareket manuel Y pan'dır. Parmaklar `PINCH_MIN_DISTANCE_PX` (24 px) altındaysa o adım atlanır. Pinch crosshair'i kapatır. Bir parmak kalkınca kalan parmak plot pan'ına devam eder; üçüncü ve sonraki parmaklar yok sayılır |
-| Plot, sağ üst köşe | `⋯` düğmesine dokunma | Sağ tık menüsünün aynısı: `chartcontextmenu` (`target: "plot"`), menü düğmenin altına demirlenir (`clientX/clientY`). Konumdan çizim aranmaz; seçili çizim varsa `drawingHit` true olur. Düğme (36×36 px, üstten 30 px, sağdan 8 px, 4 px hit payı) yalnız dokunma modunda ve crosshair kapalıyken çizilir; küçük plotta (160×120 altı) yoktur |
+| Plot, sağ üst köşe | `⋯` düğmesine dokunma | Sağ tık menüsünün aynısı: `chartcontextmenu` (`target: "plot"`), menü düğmenin altına demirlenir (`clientX/clientY`). Konumdan çizim aranmaz; seçili çizim varsa `drawingHit` true olur. Düğme (36×36 px, üstten 4 px yani bar özetinin ilk satırıyla aynı hizada, sağdan 8 px, 4 px hit payı) yalnız dokunma modunda ve crosshair kapalıyken çizilir; küçük plotta (160×120 altı) yoktur. Bar özeti bu köşe sütununu (`TOUCH_MENU_BUTTON_RESERVE`, 50 px) boş bırakır ve gerekirse satırlara sarılır |
 | Plot | Çizim aracı aktif veya taslak var | Dokunma noktayı parmağın kalktığı yere koyar; sürükleme grafiği kaydırır, ikinci parmak pinch yapar (mouse'taki bas-sürükle-bırak yerleştirme dokunmada yok). Fırça (`brush`) istisnadır: basar basmaz çizer |
 | Plot | Araç yok, çizime dokunma | Seçili olmayan çizim parmak kalkınca seçilir; seçili çizim basar basmaz düzenlenir/sürüklenir (mouse gibi); boş yere basmak seçimi kaldırır ve parmak grafiği kaydırır |
 | Çizimler | Hit toleransı | Gövde 7 → 16 px, seviye çizgisi 9 → 18 px, tutamaç yarıçapı 4 → 8 px ([drawingHitTest.ts](../src/features/drawings/drawingHitTest.ts)) |
 | Price axis | Sürükleme | Y scale (mouse ile aynı) |
-| Price axis | `O` / `L` düğmelerine dokunma | Mouse'taki gibi auto-scale / linear-log toggle. Dokunma modunda eksen boyunca hep görünür, 32×32 px, ana panelin alt ucunda üst üste (üstte `O`, altta `L`), hit alanları aradaki boşluğun yarısı (3 px) kadar büyütülmüş; ana panel 130 px'ten kısaysa çizilmez |
+| Price axis | `O` / `L` düğmelerine dokunma | Mouse'taki gibi auto-scale / linear-log toggle. Dokunma modunda eksen boyunca hep görünür, 32×32 px, ana panelin alt ucunda üst üste (üstte `O`, altta `L`), hit alanları aradaki boşluğun yarısı (3 px) kadar büyütülmüş; ana panel 130 px'ten kısaysa çizilmez. İki düğmenin kapladığı aralıktaki fiyat etiketleri çizilmez |
 | Time axis | Sürükleme | X scale; ince eksen şeridine üstten `TIME_AXIS_TOUCH_SLOP_PX` (8 px) hit payı verilir |
 
 Dokunmadan sonra `TOUCH_CONTEXT_MENU_WINDOW_MS` (2,5 sn) içinde gelen native `contextmenu` (uzun
@@ -82,9 +83,10 @@ Bir parmak aynı anda tek hareketin parçasıdır (pan, pinch, inceleme, çizim 
 gösterge ölçeği); sürerken gelen fazladan parmaklar yok sayılır, yalnız plot pan'ı ikinci parmakla
 pinch'e döner.
 
+Dar plotta bar özeti satırlara sarılır, sığmayanlar sırayla bırakılır (bkz. [INTEGRATION.md](INTEGRATION.md) "Ekrana uyarlama").
+
 Henüz kapsanmayanlar: gösterge (indicator) panellerindeki `O`/`L` düğmeleri hâlâ hover'a bağlıdır;
-dar ekranda HUD plotun üstüne sığmayabilir; çift dokunma davranışları, çizim mıknatısının dokunma
-eşiği ve hassas yerleştirme (büyüteç) yoktur.
+çift dokunma davranışları, çizim mıknatısının dokunma eşiği ve hassas yerleştirme (büyüteç) yoktur.
 
 ## Keyboard matrisi
 

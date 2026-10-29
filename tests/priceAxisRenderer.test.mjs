@@ -145,3 +145,61 @@ test("price scale controls render rounded active and hover button states when ro
   assert.equal(roundRects[0].r, 4);
   assert.equal(ctx.calls.some((call) => call.op === "fill" && call.fillStyle === "rgba(56, 189, 248, 0.16)"), true);
 });
+
+function viewWithDensity(density) {
+  const view = new View({}, { density });
+  view.area = { left: 0, top: 0, width: 300, height: 500 };
+  view.priceAxisW = view.chartLayoutOptions.priceAxisWidth;
+  view.fitPriceRange(62100, 62300);
+  return view;
+}
+
+test("the live price label keeps its caption on a regular chart and drops it, staying in the gutter, on a compact one", () => {
+  const live = [{ price: 62200, color: "#00ff00", priority: 100 }];
+  const draw = (density) => {
+    const view = viewWithDensity(density);
+    const ctx = makeContext();
+    drawPriceMarkers(ctx, view, live, 0.1, 1);
+    const text = ctx.calls.find((call) => call.op === "fillText").text;
+    const box = ctx.calls.find((call) => call.op === "fillRect");
+    return { view, text, box };
+  };
+
+  const regular = draw("regular");
+  assert.equal(regular.text, "Price 62200.0");
+  assert.ok(regular.box.w > regular.view.priceAxisW, "the caption lets the label reach back over the plot, as on a desktop");
+
+  const compact = draw("compact");
+  assert.equal(compact.text, "62200.0");
+  const axisLeft = compact.view.area.left + compact.view.area.width;
+  assert.ok(compact.box.x >= axisLeft, "the label starts inside the price gutter");
+  assert.ok(compact.box.x + compact.box.w <= axisLeft + compact.view.priceAxisW);
+  assert.equal(compact.box.w, compact.view.priceAxisW - 2, "and spans it, so a tick label at the same height is covered whole");
+});
+
+test("other markers keep their own text on a compact chart", () => {
+  const view = viewWithDensity("compact");
+  const ctx = makeContext();
+  drawPriceMarkers(ctx, view, [{ price: 62200, color: "#00ff00", priority: 1, text: "Mon H" }], 0.1, 1);
+  assert.equal(ctx.calls.find((call) => call.op === "fillText").text, "Mon H");
+});
+
+test("price ticks skip the zone the touch buttons cover and keep the rest", () => {
+  const view = viewWithDensity("regular");
+  const labelYs = (keepOut) => {
+    const ctx = makeContext();
+    drawPriceAxis(ctx, view, 0.1, 1, keepOut);
+    return ctx.calls.filter((call) => call.op === "fillText").map((call) => call.y);
+  };
+  const all = labelYs([]);
+  assert.ok(all.length >= 4, "the fixture draws several ticks");
+
+  const zone = { y: all[1] - 4, h: all[2] - all[1] + 8 };
+  const kept = labelYs([zone]);
+  assert.deepEqual(kept, all.filter((y) => y + 8 <= zone.y || y - 8 >= zone.y + zone.h));
+  assert.ok(kept.length < all.length, "at least one tick sat under the zone");
+  assert.ok(kept.includes(all[0]), "ticks outside the zone stay");
+
+  assert.deepEqual(labelYs([]), all, "no zone, no change");
+  assert.deepEqual(labelYs(undefined), all, "the argument is optional");
+});

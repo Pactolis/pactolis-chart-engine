@@ -21,6 +21,38 @@ interface'indedir: `streamHistory`/`collectHistory`/`fetchHistory`, open-bar see
 `startRefresh`/`fetchRefreshStatus`, candle-only market bildirimi `isDirectCandleMarket` ve açılış
 geçmişi uzunluğu `initialHistoryBars`. Sorgu/yanıt şekilleri [src/features/chart/historyContracts.ts](../src/features/chart/historyContracts.ts)'tedir.
 
+## Ekrana uyarlama: `ChartHost.displayOptions`
+
+Host isteğe bağlı olarak `displayOptions(): ChartDisplayOptions` ile grafiğin çalıştığı ekrana uyarlanmasını ister
+([chartDisplayOptions.ts](../src/core/model/chartDisplayOptions.ts); alanlar yazılmadıkça masaüstü varsayılanları
+geçerlidir, yani bu üye hiç tanımlanmayan bir host seçenekler eklenmeden önceki davranışın aynısını alır).
+Seçenekler grafik mount olurken okunur; host durumu değiştirdiğinde (telefon döndü, pencere sınıf değiştirdi)
+mount edilmiş her runtime'da `runtime.refreshDisplayOptions()` çağrılır. Geçersiz bir alan yalnız kendi
+varsayılanına döner, diğer alanlar korunur.
+
+| Alan | Varsayılan | Etkisi | Mount edilmiş grafikte |
+|---|---|---|---|
+| `density` | `regular` | `compact`: zaman ekseni şeridi 22 → 32 px (etiketler şeritte ortalı kalır), canlı fiyat etiketi "Price" başlığını bırakıp fiyat eksenini kaplar | `refreshDisplayOptions()` yeniden yerleşim yapar; zoom ve konum oynamaz |
+| `priceAxisWidth`, `timeAxisHeight` | 62 / 22 (`compact`: 62 / 32) | Eksen boyutları (CSS px); yoğunluğun değerini tek tek ezer | aynı |
+| `defaultFitColumns` | 250 | İlk ve reset yatay sığdırmanın hedeflediği sütun sayısı (dar plotta daha az sütun, daha okunur mum) | Yalnız sonraki sığdırma/reset'i etkiler; açık grafiğin zoom'u kendiliğinden değişmez |
+| `maxDevicePixelRatio` | yok (pencerenin `devicePixelRatio`'su) | Üç canvas'ın, footprint ve heatmap çizicilerinin kullandığı en yüksek piksel oranı (≥ 1); düşük sınır keskinlik yerine GPU belleği ve dolgu hızı kazandırır | Sonraki frame'de canvas'lar yeniden boyutlanır |
+| `antialias`, `powerPreference` | `true`, `default` | WebGL2 context özniteliği | Yalnız mount: context ilk `getContext` çağrısında sabitlenir, açık grafik değişmez; sonradan mount edilenler yeni değeri alır |
+
+Bar özeti (O/H/L/C, Vol, Δ, Trades, Range, Chg) plotun genişliğine sığmıyorsa yoğunluktan bağımsız olarak
+satırlara sarılır ([hudLayout.ts](../src/core/render/hudLayout.ts); plot ≥ 400 px yüksekse en çok 3 satır,
+≥ 220 px ise 2, daha kısa panelde 1). Satırlara da sığmıyorsa sırayla Range, Trades, Δ, Vol, Chg bırakılır;
+O/H/L/C hiç bırakılmaz. Dokunma modunda `⋯` düğmesinin sütunu (`TOUCH_MENU_BUTTON_RESERVE`, 50 px) özetin
+genişliğinden düşülür. Dokunma modunda `O`/`L` düğmelerinin kapladığı aralıktaki fiyat etiketleri çizilmez.
+
+Telemetri açıkken (`configurePerformanceTelemetry({ enabled: true })`) WebGL bağlamı için üç sayaç tutulur:
+`chart.gpu.contextLost` (bağlam kaybı), `chart.gpu.contextRestored` (geri gelip kullanılabilir oldu) ve
+`chart.gpu.contextCreateFailed` (`getContext("webgl2")` mount'ta ya da geri gelirken null döndü; telefonun bağlam
+sınırına çarpan bir mount `canvas contexts unavailable` ile başarısız olur ve yüzey modeli `failed` olur).
+Davranışı değiştirmezler; telefonda `?perf` ile gerçek cihaz ölçümünün okuduğu değerlerdir.
+
+Harness bu seçenekleri URL'den okur: `?density=compact&fit=70&axisw=62&axish=32&dprcap=2&antialias=0&power=low-power`
+([harness/chart.ts](../harness/chart.ts)); `setDisplayOptions(...)` aynı cevabı çalışırken değiştirir.
+
 ## Generic host mount/dispose wiring (minimal)
 
 ```ts

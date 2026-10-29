@@ -19,14 +19,16 @@ Komut kaynakları: [package.json](../package.json) scripts, [scripts/run-tests.m
 `tests/*.test.mjs` Node `--test` ile çalışır; chart pipeline/history/repair invariants
 (`chartHistoryContractGuards`, `chartRepairBoundaries`, `chartHistoryFlushInvariant`), interaction
 policy (`chartInteractionPolicy`, `chartWheelPolicy`), render/scene (`chartScene`, `chartSessionSurfaces`)
-ve analiz/indikatör hesaplarını kapsar.
+ve analiz/indikatör hesaplarını kapsar. Ekrana uyarlama seçenekleri `chartDisplayOptions`, `hudLayout`,
+`compactChartRender` ve `chartSessionPixelRatioCap` testlerindedir.
 
 ## Browser testler ve census/endurance
 
 `tests/browser/` spec'leri harness sayfası üzerinden gerçek Chromium'da chart mount, pointer/keyboard
 ownership, dokunma (kayıt tutan hostla sentetik pointer event'leri ve Chromium dokunma emülasyonuyla
-gerçek `touch-action`/pinch/uzun basma), dispose timer, hidden-tab recovery ve native capture
-davranışlarını sınar.
+gerçek `touch-action`/pinch/uzun basma), ekrana uyarlama seçenekleri (`chart-display-options.spec.ts`: compact
+yerleşim, piksel oranı sınırı, WebGL öznitelikleri, WebGL2 alınamayan mount'un sayacı, telefonda bar özetinin sarılması), dispose timer,
+hidden-tab recovery ve native capture davranışlarını sınar.
 `chart-multi-market-census.spec.ts` çoklu-market census ve endurance profillerini içerir; endurance
 `CHART_ENDURANCE_MINUTES`/`CHART_ENDURANCE_PROFILE` ile koşar.
 
