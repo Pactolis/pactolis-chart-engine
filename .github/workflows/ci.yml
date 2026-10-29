@@ -20,7 +20,7 @@ jobs:
       matrix:
         node: [22, 24, 26]
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
         with:
           persist-credentials: false
       - uses: actions/setup-node@v7
@@ -36,7 +36,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
         with:
           persist-credentials: false
       - uses: actions/setup-node@v7
@@ -47,7 +47,7 @@ jobs:
       - run: npx --no-install playwright install --with-deps chromium
       - run: npm run test:browser -- --project=default
       - if: failure()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: playwright-results
           path: test-results/
@@ -61,7 +61,7 @@ jobs:
       matrix:
         shard: [1, 2]
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
         with:
           persist-credentials: false
       - uses: actions/setup-node@v7
@@ -71,7 +71,7 @@ jobs:
       - run: npx --no-install playwright install --with-deps chromium
       - run: npm run test:browser -- --project=census --fully-parallel --workers=1 --shard=${{ matrix.shard }}/2
       - if: failure()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: census-results-${{ matrix.shard }}
           path: test-results/
