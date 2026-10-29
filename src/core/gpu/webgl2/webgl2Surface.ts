@@ -1,3 +1,4 @@
+import { WebGl2HeatmapLayer } from "./webgl2Heatmap.js";
 import { QuadBatch } from "../../engine/quadBatch.js";
 import type { GpuFrame, GpuLossReason, GpuSurface, HeatmapLayer, QuadSink, RGBA, RgbaFrame } from "../gpuBackend.js";
 
@@ -23,7 +24,11 @@ function makeNoopBatch(): QuadSink & { begin(): void; flush(): void; dispose(): 
 
 export class WebGl2Surface implements GpuSurface {
   readonly kind = "webgl2" as const;
-  readonly heatmap: HeatmapLayer | null = null;
+  private _heatmap: HeatmapLayer | null = null;
+
+  get heatmap(): HeatmapLayer | null {
+    return this._heatmap;
+  }
 
   private batch: QuadSink & { begin(): void; flush(w: number, h: number): void; dispose(): void };
   private dpr = 1;
@@ -53,6 +58,14 @@ export class WebGl2Surface implements GpuSurface {
       && typeof gl.createProgram === "function"
     );
     this.batch = batch ?? (canCreateBatch ? new QuadBatch(gl) : makeNoopBatch());
+    const canCreateHeatmap = Boolean(
+      gl
+      && typeof gl.createShader === "function"
+      && typeof gl.createProgram === "function"
+      && typeof gl.getShaderParameter === "function"
+      && typeof gl.createTexture === "function"
+    );
+    this._heatmap = canCreateHeatmap ? new WebGl2HeatmapLayer(gl) : null;
   }
 
   getGlContext(): WebGL2RenderingContext {
@@ -67,6 +80,15 @@ export class WebGl2Surface implements GpuSurface {
     if (this.disposed) return;
     this.gl = nextGl;
     this.batch.dispose();
+    this._heatmap?.dispose();
+    const canCreateHeatmap = Boolean(
+      nextGl
+      && typeof nextGl.createShader === "function"
+      && typeof nextGl.createProgram === "function"
+      && typeof nextGl.getShaderParameter === "function"
+      && typeof nextGl.createTexture === "function"
+    );
+    this._heatmap = canCreateHeatmap ? new WebGl2HeatmapLayer(nextGl) : null;
     const canCreateBatch = Boolean(
       nextGl
       && typeof nextGl.createVertexArray === "function"
@@ -159,5 +181,7 @@ export class WebGl2Surface implements GpuSurface {
     }
     this.lostListeners.clear();
     this.batch.dispose();
+    this._heatmap?.dispose();
+    this._heatmap = null;
   }
 }

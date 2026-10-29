@@ -1,3 +1,4 @@
+import { WebGpuHeatmapLayer } from "./webgpuHeatmap.js";
 import type {
   GpuFrame,
   GpuLossReason,
@@ -44,7 +45,7 @@ export class WebGpuQuadSink implements QuadSink {
 
 export class WebGpuSurface implements GpuSurface {
   readonly kind = "webgpu" as const;
-  readonly heatmap: HeatmapLayer | null = null;
+  readonly heatmap: HeatmapLayer | null;
 
   private readonly ctx: any;
   private readonly pipeline: WebGpuQuadPipeline;
@@ -71,6 +72,12 @@ export class WebGpuSurface implements GpuSurface {
     }
 
     this.pipeline = pipeline ?? new WebGpuQuadPipeline(handle.device, handle.format);
+    const canCreateHeatmap = Boolean(
+      handle.device
+      && typeof handle.device.createShaderModule === "function"
+      && typeof handle.device.createSampler === "function"
+    );
+    this.heatmap = canCreateHeatmap ? new WebGpuHeatmapLayer(handle.device, handle.format) : null;
 
     this.unbindDeviceLoss = handle.onLost((reason) => {
       const mappedReason: GpuLossReason = reason === "validation-failed" ? "validation-failed" : "device-lost";
@@ -139,6 +146,10 @@ export class WebGpuSurface implements GpuSurface {
             },
           ],
         });
+
+        if (this.heatmap instanceof WebGpuHeatmapLayer) {
+          this.heatmap.recordPass(passEncoder, w, h);
+        }
 
         if (count > 0) {
           this.pipeline.updateResolution(w, h);
@@ -254,5 +265,6 @@ export class WebGpuSurface implements GpuSurface {
     this.unbindDeviceLoss();
     this.lostListeners.clear();
     this.pipeline.dispose();
+    this.heatmap?.dispose();
   }
 }
