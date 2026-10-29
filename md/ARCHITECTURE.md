@@ -54,3 +54,16 @@ yeniden kurulur ([tests/chartNativeCapture.test.mjs](../tests/chartNativeCapture
 - Port'lar mount'tan önce configure edilmelidir; configure edilmemiş port kullanımı açıkça hata verir
   (örn. `src/features/chart/chartDataSource.ts`).
 - Host, runtime lifecycle kaydını `src/features/chart/chartHost.ts` port'u üzerinden alır.
+
+## GPU Arka Uç Mimarisi ve Fallback Zinciri (Issue #20)
+
+Motorun fiziksel GPU sahnesi tek bir arayüzün (`GpuSurface`) arkasında soyutlanmıştır:
+- `webgpu` — `WebGpuSurface`: WGSL shader'ları, instanced quad boru hattı (`WebGpuQuadPipeline`), paylaşımlı tekil cihaz (`WebGpuDeviceHandle`) ve dokulu ısı haritası (`WebGpuHeatmapLayer`).
+- `webgl2` — `WebGl2Surface`: GLSL ES 3.0 tabanlı instanced `QuadBatch` ve `WebGl2HeatmapLayer`.
+- `canvas2d` — `Canvas2dSurface`: Başsız veya WebGL/WebGPU desteklemeyen ortamlarda tam işlevsel CPU yedek arka ucu.
+
+### Seçim ve Otomatik Düşüş (Fallback) Zinciri:
+Arka uç tercihi yapılandırma veya `?gpu=webgpu|webgl2|canvas2d` URL parametresi ile belirlenir:
+1. `webgpu` seçildiğinde sistem `requestWebGpuDevice()` ile cihaz edinmeyi dener; cihaz edinilemezse veya cihaz kaybı (`device.lost`, `uncapturederror`) gerçekleşirse otomatik olarak `webgl2` arka ucuna düşer.
+2. `webgl2` kullanılamazsa veya bağlam geri yükleme zaman aşımına uğrarsa (5 saniye) `Canvas2dSurface` yüzeyine düşüş sağlanır (`replaceSurface`).
+3. Tüm geçişler, tanılamalar (`GpuDiagnostics`: sayaçlar, p50/p95 kare süreleri, düşüş nedenleri) üzerinden izlenir ve `copyGpuDiagnosticsJson()` ile dışa aktarılabilir.

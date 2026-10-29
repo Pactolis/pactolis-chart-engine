@@ -27,8 +27,17 @@ export type GpuLossReason =
   | "create-failed"
   | "validation-failed";
 
+export interface HeatmapRect {
+  readonly x: number;
+  readonly y: number;
+  readonly w: number;
+  readonly h: number;
+}
+
 export interface HeatmapLayer {
   readonly kind: GpuBackendKind;
+  upload(width: number, height: number, data: Uint8Array | Float32Array): void;
+  draw(rect: { x: number; y: number; w: number; h: number }, opacity?: number): void;
   dispose(): void;
 }
 

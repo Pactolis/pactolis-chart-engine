@@ -1,3 +1,4 @@
+import { WebGl2HeatmapLayer } from "./webgl2Heatmap.js";
 import { QuadBatch } from "../../engine/quadBatch.js";
 import type { GpuFrame, GpuLossReason, GpuSurface, HeatmapLayer, QuadSink, RGBA, RgbaFrame } from "../gpuBackend.js";
 
@@ -23,7 +24,7 @@ function makeNoopBatch(): QuadSink & { begin(): void; flush(): void; dispose(): 
 
 export class WebGl2Surface implements GpuSurface {
   readonly kind = "webgl2" as const;
-  readonly heatmap: HeatmapLayer | null = null;
+  readonly heatmap: HeatmapLayer | null;
 
   private batch: QuadSink & { begin(): void; flush(w: number, h: number): void; dispose(): void };
   private dpr = 1;
@@ -53,6 +54,7 @@ export class WebGl2Surface implements GpuSurface {
       && typeof gl.createProgram === "function"
     );
     this.batch = batch ?? (canCreateBatch ? new QuadBatch(gl) : makeNoopBatch());
+    this.heatmap = new WebGl2HeatmapLayer(gl);
   }
 
   getGlContext(): WebGL2RenderingContext {
@@ -67,6 +69,8 @@ export class WebGl2Surface implements GpuSurface {
     if (this.disposed) return;
     this.gl = nextGl;
     this.batch.dispose();
+    this.heatmap?.dispose();
+    this.heatmap = new WebGl2HeatmapLayer(nextGl);
     const canCreateBatch = Boolean(
       nextGl
       && typeof nextGl.createVertexArray === "function"

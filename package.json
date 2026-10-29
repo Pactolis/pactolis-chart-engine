@@ -126,6 +126,14 @@
       "types": "./dist/core/gpu/selectBackend.d.ts",
       "default": "./dist/core/gpu/selectBackend.js"
     },
+    "./core/gpu/webgl2/webgl2Heatmap": {
+      "types": "./dist/core/gpu/webgl2/webgl2Heatmap.d.ts",
+      "default": "./dist/core/gpu/webgl2/webgl2Heatmap.js"
+    },
+    "./core/gpu/webgpu/webgpuHeatmap": {
+      "types": "./dist/core/gpu/webgpu/webgpuHeatmap.d.ts",
+      "default": "./dist/core/gpu/webgpu/webgpuHeatmap.js"
+    },
     "./core/gpu/webgpu/webgpuDevice": {
       "types": "./dist/core/gpu/webgpu/webgpuDevice.d.ts",
       "default": "./dist/core/gpu/webgpu/webgpuDevice.js"
