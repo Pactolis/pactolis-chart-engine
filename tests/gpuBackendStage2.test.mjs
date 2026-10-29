@@ -27,6 +27,20 @@ import { WebGl2Surface } from "../dist/core/gpu/webgl2/webgl2Surface.js";
 import { Canvas2dSurface } from "../dist/core/gpu/canvas2d/canvas2dSurface.js";
 import { ChartSession } from "../dist/features/chart/ChartSession.js";
 
+function setMockNavigator(navObj) {
+  Object.defineProperty(globalThis, "navigator", {
+    value: navObj,
+    configurable: true,
+    writable: true,
+  });
+}
+
+function restoreNavigator(descriptor) {
+  if (descriptor) {
+    Object.defineProperty(globalThis, "navigator", descriptor);
+  }
+}
+
 function makeFakeGpuBuffer(size, usage) {
   const mappedData = new Uint8Array(size);
   return {
@@ -249,58 +263,69 @@ test("WebGPU support detection and requestWebGpuDevice lifecycle", async () => {
   resetGpuDiagnosticsForTest();
   resetSharedWebGpuDevice();
 
-  const originalNavigator = globalThis.navigator;
+  const originalDescriptor = Object.getOwnPropertyDescriptor(globalThis, "navigator");
 
-  // When navigator.gpu is absent
-  globalThis.navigator = {};
-  assert.equal(isWebGpuSupported(), false);
-  const nullDevice = await requestWebGpuDevice();
-  assert.equal(nullDevice, null);
+  try {
+    // When navigator.gpu is absent
+    setMockNavigator({});
+    assert.equal(isWebGpuSupported(), false);
+    const nullDevice = await requestWebGpuDevice();
+    assert.equal(nullDevice, null);
 
-  // When navigator.gpu is available
-  const { device } = makeFakeWebGpuDevice("rgba8unorm");
-  const fakeAdapter = {
-    async requestDevice() {
-      return device;
-    },
-  };
-
-  globalThis.navigator = {
-    gpu: {
-      async requestAdapter() {
-        return fakeAdapter;
+    // When navigator.gpu is available
+    const { device } = makeFakeWebGpuDevice("rgba8unorm");
+    const fakeAdapter = {
+      async requestDevice() {
+        return device;
       },
-      getPreferredCanvasFormat() {
-        return "bgra8unorm";
+    };
+
+    setMockNavigator({
+      gpu: {
+        async requestAdapter() {
+          return fakeAdapter;
+        },
+        getPreferredCanvasFormat() {
+          return "bgra8unorm";
+        },
       },
-    },
-  };
+    });
 
-  assert.equal(isWebGpuSupported(), true);
-  const handle = await requestWebGpuDevice();
-  assert.ok(handle);
-  assert.equal(handle.format, "bgra8unorm");
-  assert.equal(handle.isLost(), false);
-  assert.equal(handle.device, device);
+    assert.equal(isWebGpuSupported(), true);
+    const handle = await requestWebGpuDevice();
+    assert.ok(handle);
+    assert.equal(handle.format, "bgra8unorm");
+    assert.equal(handle.isLost(), false);
+    assert.equal(handle.device, device);
 
-  // Singleton caching: subsequent request returns same handle
-  const handle2 = await requestWebGpuDevice();
-  assert.equal(handle2, handle);
+    // Singleton caching: subsequent request returns same handle
+    const handle2 = await requestWebGpuDevice();
+    assert.equal(handle2, handle);
 
-  // Adapter request failure triggers fallback
-  resetSharedWebGpuDevice();
-  globalThis.navigator.gpu.requestAdapter = async () => null;
-  const failedAdapterHandle = await requestWebGpuDevice();
-  assert.equal(failedAdapterHandle, null);
-  const diag = getGpuDiagnostics();
-  assert.equal(diag.fallbacks.length, 1);
-  assert.equal(diag.fallbacks[0].from, "webgpu");
-  assert.equal(diag.fallbacks[0].to, "webgl2");
-  assert.equal(diag.fallbacks[0].reason, "adapter_request_failed");
+    // Adapter request failure triggers fallback
+    resetSharedWebGpuDevice();
+    setMockNavigator({
+      gpu: {
+        async requestAdapter() {
+          return null;
+        },
+        getPreferredCanvasFormat() {
+          return "bgra8unorm";
+        },
+      },
+    });
 
-  // Restore navigator
-  globalThis.navigator = originalNavigator;
-  resetSharedWebGpuDevice();
+    const failedAdapterHandle = await requestWebGpuDevice();
+    assert.equal(failedAdapterHandle, null);
+    const diag = getGpuDiagnostics();
+    assert.equal(diag.fallbacks.length, 1);
+    assert.equal(diag.fallbacks[0].from, "webgpu");
+    assert.equal(diag.fallbacks[0].to, "webgl2");
+    assert.equal(diag.fallbacks[0].reason, "adapter_request_failed");
+  } finally {
+    restoreNavigator(originalDescriptor);
+    resetSharedWebGpuDevice();
+  }
 });
 
 test("WebGpuQuadPipeline compiles shaders, writes uniforms, dynamic buffer growth and records draws", () => {
@@ -478,41 +503,43 @@ test("Device loss and uncapturederror triggers onLost and updates GpuDiagnostics
   resetGpuDiagnosticsForTest();
   const { device } = makeFakeWebGpuDevice("rgba8unorm");
 
-  const originalNavigator = globalThis.navigator;
-  globalThis.navigator = {
-    gpu: {
-      async requestAdapter() {
-        return {
-          async requestDevice() {
-            return device;
-          },
-        };
+  const originalDescriptor = Object.getOwnPropertyDescriptor(globalThis, "navigator");
+  try {
+    setMockNavigator({
+      gpu: {
+        async requestAdapter() {
+          return {
+            async requestDevice() {
+              return device;
+            },
+          };
+        },
+        getPreferredCanvasFormat() {
+          return "rgba8unorm";
+        },
       },
-      getPreferredCanvasFormat() {
-        return "rgba8unorm";
-      },
-    },
-  };
+    });
 
-  resetSharedWebGpuDevice();
-  const handle = await requestWebGpuDevice();
-  assert.ok(handle);
+    resetSharedWebGpuDevice();
+    const handle = await requestWebGpuDevice();
+    assert.ok(handle);
 
-  let lossReason = null;
-  handle.onLost((reason) => {
-    lossReason = reason;
-  });
+    let lossReason = null;
+    handle.onLost((reason) => {
+      lossReason = reason;
+    });
 
-  // Trigger uncapturederror -> validation failure
-  device._triggerUncapturedError(new Error("Shader parse failed"));
-  assert.equal(lossReason, "validation-failed");
-  assert.equal(handle.isLost(), true);
+    // Trigger uncapturederror -> validation failure
+    device._triggerUncapturedError(new Error("Shader parse failed"));
+    assert.equal(lossReason, "validation-failed");
+    assert.equal(handle.isLost(), true);
 
-  const diag = getGpuDiagnostics();
-  assert.ok(diag.counters["chart.gpu.contextLost"] >= 1);
-
-  globalThis.navigator = originalNavigator;
-  resetSharedWebGpuDevice();
+    const diag = getGpuDiagnostics();
+    assert.ok(diag.counters["chart.gpu.contextLost"] >= 1);
+  } finally {
+    restoreNavigator(originalDescriptor);
+    resetSharedWebGpuDevice();
+  }
 });
 
 test("createGpuSurface and createGpuSurfaceAsync backend selection & fallback", async () => {
@@ -557,28 +584,30 @@ test("createGpuSurface and createGpuSurfaceAsync backend selection & fallback", 
   assert.equal(lastFallback.to, "webgl2");
 
   // 3. createGpuSurfaceAsync with WebGPU success
-  const originalNavigator = globalThis.navigator;
-  globalThis.navigator = {
-    gpu: {
-      async requestAdapter() {
-        return {
-          async requestDevice() {
-            return device;
-          },
-        };
+  const originalDescriptor = Object.getOwnPropertyDescriptor(globalThis, "navigator");
+  try {
+    setMockNavigator({
+      gpu: {
+        async requestAdapter() {
+          return {
+            async requestDevice() {
+              return device;
+            },
+          };
+        },
+        getPreferredCanvasFormat() {
+          return "rgba8unorm";
+        },
       },
-      getPreferredCanvasFormat() {
-        return "rgba8unorm";
-      },
-    },
-  };
+    });
 
-  resetSharedWebGpuDevice();
-  const asyncSurface = await createGpuSurfaceAsync(canvas, "webgpu", fakeGl);
-  assert.equal(asyncSurface.kind, "webgpu");
-
-  globalThis.navigator = originalNavigator;
-  resetSharedWebGpuDevice();
+    resetSharedWebGpuDevice();
+    const asyncSurface = await createGpuSurfaceAsync(canvas, "webgpu", fakeGl);
+    assert.equal(asyncSurface.kind, "webgpu");
+  } finally {
+    restoreNavigator(originalDescriptor);
+    resetSharedWebGpuDevice();
+  }
 });
 
 test("ChartSession automatically falls back to WebGl2 or Canvas2d when WebGPU device is lost", () => {
