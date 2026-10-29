@@ -58,7 +58,7 @@ import { ChartRenderCoordinator } from "./ChartRenderCoordinator.js";
 import { ChartIndicatorController } from "./ChartIndicatorController.js";
 import { buildChartAnalysisSnapshot, countClosedBars } from "./analysisSnapshot.js";
 import { decideLiveSameBarAutoFit, type LiveAutoFitSnapshot } from "./liveAutoFit.js";
-import { OrderbookHeatmapOverlay } from "../orderbook/heatmapOverlay.js";
+import { OrderbookHeatmapOverlay, type LiveHeatmapTailEvent } from "../orderbook/heatmapOverlay.js";
 import { HeatmapGpuRenderer, type HeatmapGpuCellFrame } from "./heatmap/gpu/heatmapGpuRenderer.js";
 import type { FootprintSeries } from "../../core/model/footprint.js";
 import { abortableDelay } from "./abortableDelay.js";
@@ -68,6 +68,8 @@ export interface ChartRuntime {
   updateState(next: ChartPanelState): void;
   getState(): ChartPanelState;
   getAnalysisSnapshot(options?: AnalysisSnapshotOptions): ChartAnalysisSnapshot;
+  /** Invalidate or push live tail orderbook heatmap data. */
+  invalidateOrderbookHeatmapLiveTail?(event?: LiveHeatmapTailEvent): void;
   activate(): void;
   deactivate(): void;
   refreshHostLifecycle(): void;
@@ -353,6 +355,7 @@ class ChartRuntimeImpl implements ChartRuntime, ChartInputHost {
     });
 
     const fetchOrderbookHeatmap = services.fetchOrderbookHeatmap?.bind(services);
+    const subscribeHeatmapLiveTail = services.subscribeOrderbookHeatmapLiveTail?.bind(services);
     this.orderbookHeatmap = fetchOrderbookHeatmap
       ? new OrderbookHeatmapOverlay({
         fetch: fetchOrderbookHeatmap,
@@ -360,6 +363,7 @@ class ChartRuntimeImpl implements ChartRuntime, ChartInputHost {
           if (!this.disposed) this.session?.invalidate();
         },
         getMarket: () => this.state.market,
+        subscribeLiveTail: subscribeHeatmapLiveTail,
       })
       : null;
 
@@ -730,6 +734,10 @@ class ChartRuntimeImpl implements ChartRuntime, ChartInputHost {
 
   private emitStateChange(): void {
     this.onStateChange?.(this.getPersistableState());
+  }
+
+  invalidateOrderbookHeatmapLiveTail(event?: LiveHeatmapTailEvent): void {
+    this.orderbookHeatmap?.invalidateLiveTail(event);
   }
 
   getAnalysisSnapshot(options: AnalysisSnapshotOptions = {}): ChartAnalysisSnapshot {

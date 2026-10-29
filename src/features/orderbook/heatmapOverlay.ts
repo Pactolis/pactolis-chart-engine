@@ -10,13 +10,19 @@ import {
 } from "../../core/orderbookHeatmap/settings.js";
 import { isPerformanceTelemetryEnabled, recordPerformanceDuration } from "../../core/performanceTelemetry.js";
 import { orderbookHeatmapSettingsSource } from "./heatmapSettingsSource.js";
-import type { OrderbookHeatmapBar, OrderbookHeatmapRequest, OrderbookHeatmapResponse } from "./heatmapContracts.js";
+import type {
+  LiveHeatmapTailEvent,
+  OrderbookHeatmapBar,
+  OrderbookHeatmapRequest,
+  OrderbookHeatmapResponse,
+} from "./heatmapContracts.js";
 import {
   HEATMAP_HOVER_SPAN,
   HEATMAP_WINDOW_MAX_BARS,
   formatHeatmapValue,
   heatmapCellUsd,
   heatmapChunkEnd,
+  heatmapChunkStart,
   heatmapCellColor,
   heatmapChunksFor,
   heatmapIntensity,
@@ -28,6 +34,8 @@ import {
   type HeatmapTier,
 } from "./heatmapModel.js";
 import type { HeatmapGpuCellFrame } from "../chart/heatmap/gpu/heatmapGpuRenderer.js";
+
+export type { LiveHeatmapTailEvent } from "./heatmapContracts.js";
 
 export type OrderbookHeatmapFetch = (
   request: OrderbookHeatmapRequest,
@@ -44,6 +52,11 @@ const RETRY_MS = 30_000;
 const MAX_PARALLEL_CHUNKS = 2;
 const HOVER_DEBOUNCE_MS = 120;
 const HOVER_CACHE_LIMIT = 40;
+/** Bounded live tail invalidation coalescing window (ms). */
+const DEFAULT_LIVE_DEBOUNCE_MS = 200;
+/** Timeout after which an idle/silent live-tail subscription falls back to timer refreshes (ms). */
+const LIVE_TAIL_IDLE_FALLBACK_MS = 45_000;
+
 /**
  * Known CPU payload per prepared GPU cell (visible entry + main/extension
  * rect objects + their instance floats), charged against the per-chart
@@ -98,6 +111,14 @@ export interface OrderbookHeatmapOverlayOptions {
   /** The chart's current market; the overlay only draws on the BTCUSDT perp chart. */
   getMarket: () => string;
   now?: () => number;
+  /**
+   * Optional live-tail invalidation or push subscription.
+   * Transport-agnostic: frontend WS service or data pipeline delivers events.
+   * Returns an unsubscribe function.
+   */
+  subscribeLiveTail?: (listener: (event?: LiveHeatmapTailEvent) => void) => () => void;
+  /** Bounded coalescing / debounce for live tail invalidations (default 200ms). */
+  liveDebounceMs?: number;
 }
 
 export class OrderbookHeatmapOverlay {
@@ -105,6 +126,13 @@ export class OrderbookHeatmapOverlay {
   private readonly invalidate: () => void;
   private readonly now: () => number;
   private readonly getMarket: () => string;
+  private readonly subscribeLiveTail?: (listener: (event?: LiveHeatmapTailEvent) => void) => () => void;
+  private readonly liveDebounceMs: number;
+  private unsubscribeLiveTail: (() => void) | null = null;
+  private liveDebounceTimer: ReturnType<typeof setTimeout> | null = null;
+  private lastLiveEventAt = 0;
+  private currentTier: HeatmapTier | null = null;
+
   /** Identifies what the cached bars were fetched for; any change drops the cache. */
   private dataKey = "";
   private bars = new Map<number, OrderbookHeatmapBar>();
@@ -123,10 +151,23 @@ export class OrderbookHeatmapOverlay {
     this.invalidate = options.invalidate;
     this.getMarket = options.getMarket;
     this.now = options.now ?? Date.now;
+    this.subscribeLiveTail = options.subscribeLiveTail;
+    this.liveDebounceMs = Math.max(50, options.liveDebounceMs ?? DEFAULT_LIVE_DEBOUNCE_MS);
     this.unsubscribe = orderbookHeatmapSettingsSource().onChange(() => this.invalidate());
-    // Redraws pull the live tail; this keeps it moving on a quiet chart.
+
+    if (this.subscribeLiveTail) {
+      this.unsubscribeLiveTail = this.subscribeLiveTail((event) => {
+        this.handleLiveTailEvent(event);
+      });
+    }
+
+    // Redraws pull the live tail; this keeps it moving on a quiet chart when live tail subscription is inactive/idle.
     this.liveTimer = setInterval(() => {
-      if (this.active()) this.invalidate();
+      if (!this.active()) return;
+      const now = this.now();
+      // If live-tail push/invalidation is active and healthy, suppress unconditional timer redraws
+      if (this.isLiveTailHealthy(now)) return;
+      this.invalidate();
     }, LIVE_TICK_MS);
   }
 
@@ -135,10 +176,103 @@ export class OrderbookHeatmapOverlay {
     return orderbookHeatmapSettingsSource().settingsFor(this.getMarket());
   }
 
+  /** Whether the live-tail subscription is actively receiving events. */
+  private isLiveTailHealthy(now: number): boolean {
+    return Boolean(this.subscribeLiveTail && this.lastLiveEventAt > 0 && now - this.lastLiveEventAt < LIVE_TAIL_IDLE_FALLBACK_MS);
+  }
+
+  /** Handles incoming transport-agnostic live-tail invalidation or bars push. */
+  handleLiveTailEvent(event?: LiveHeatmapTailEvent): void {
+    if (!this.active()) return;
+    const currentMarket = this.getMarket();
+    if (event?.market && event.market !== currentMarket) return;
+    this.lastLiveEventAt = this.now();
+
+    // Direct push: merge provided bars immediately without hitting REST
+    if (event?.bars && event.bars.length > 0) {
+      mergeHeatmapBars(this.bars, event.bars);
+      this.barsRevision++;
+      // Mark current live chunk as refreshed if loaded
+      if (this.currentTier) {
+        const now = this.now();
+        const liveChunkStart = heatmapChunkStart(now, this.currentTier);
+        const existing = this.chunks.get(liveChunkStart);
+        if (existing && existing.status === "ready") {
+          existing.fetchedAt = now;
+        }
+      }
+      this.invalidate();
+      return;
+    }
+
+    // Invalidation signal without bars: coalesce and refresh only the live tail
+    this.scheduleLiveTailRefresh();
+  }
+
+  /** Public seam: triggers a live-tail invalidation or push. */
+  invalidateLiveTail(event?: LiveHeatmapTailEvent): void {
+    this.handleLiveTailEvent(event);
+  }
+
+  /** Public seam: directly merges live-tail bars. */
+  applyLiveTailBars(bars: OrderbookHeatmapBar[], market?: string): void {
+    this.handleLiveTailEvent({ market, bars });
+  }
+
+  private scheduleLiveTailRefresh(): void {
+    if (this.liveDebounceTimer) return;
+    this.liveDebounceTimer = setTimeout(() => {
+      this.liveDebounceTimer = null;
+      if (!this.active()) return;
+      this.refreshLiveTailOnly();
+    }, this.liveDebounceMs);
+  }
+
+  /** Re-fetches only the newest tail of the live chunk holding "now"; never drops or re-reads historical chunks. */
+  private refreshLiveTailOnly(): void {
+    if (!this.active() || !this.currentTier) return;
+    const tier = this.currentTier;
+    const now = this.now();
+    const chunkStart = heatmapChunkStart(now, tier);
+    const chunkEnd = heatmapChunkEnd(chunkStart, tier);
+    const state = this.chunks.get(chunkStart);
+    if (state?.status === "loading") return;
+    if (this.inFlight.size >= MAX_PARALLEL_CHUNKS) return;
+
+    const refreshFrom = state?.status === "ready"
+      ? Math.max(chunkStart, Math.floor(now / tier.periodMs) * tier.periodMs - 2 * tier.periodMs)
+      : chunkStart;
+
+    const key = this.dataKey;
+    this.chunks.set(chunkStart, { status: "loading", fetchedAt: state?.fetchedAt ?? 0 });
+    const controller = new AbortController();
+    this.inFlight.add(controller);
+    this.fetchHeatmap({
+      ...this.baseRequest(tier),
+      ...this.thresholdParams(),
+      from: refreshFrom,
+      to: chunkEnd,
+    }, controller.signal).then((response) => {
+      if (key !== this.dataKey || controller.signal.aborted) return;
+      mergeHeatmapBars(this.bars, response.bars);
+      this.barsRevision++;
+      this.chunks.set(chunkStart, { status: "ready", fetchedAt: this.now() });
+      this.invalidate();
+    }, () => {
+      if (key !== this.dataKey || controller.signal.aborted) return;
+      this.chunks.set(chunkStart, { status: state?.status === "ready" ? "ready" : "error", fetchedAt: this.now() });
+    }).finally(() => {
+      this.inFlight.delete(controller);
+    });
+  }
+
   dispose(): void {
     clearInterval(this.liveTimer);
     if (this.hoverTimer) clearTimeout(this.hoverTimer);
+    if (this.liveDebounceTimer) clearTimeout(this.liveDebounceTimer);
     this.unsubscribe();
+    this.unsubscribeLiveTail?.();
+    this.unsubscribeLiveTail = null;
     this.reset("");
   }
 
@@ -147,6 +281,10 @@ export class OrderbookHeatmapOverlay {
   }
 
   private reset(key: string): void {
+    if (this.liveDebounceTimer) {
+      clearTimeout(this.liveDebounceTimer);
+      this.liveDebounceTimer = null;
+    }
     for (const controller of this.inFlight) controller.abort();
     this.inFlight.clear();
     this.dataKey = key;
@@ -213,6 +351,7 @@ export class OrderbookHeatmapOverlay {
   ): HeatmapFramePreamble | null {
     if (!this.active() || series.length === 0) return null;
     const tier = heatmapTierFor(series.config.intervalMs);
+    this.currentTier = tier;
     const settings = this.settings;
     const threshold = activeOrderbookHeatmapThreshold(settings);
     const key = `${settings.mode}|${tier.name}|${settings.bucketStep}|${settings.unit}:${threshold}`;
@@ -262,22 +401,12 @@ export class OrderbookHeatmapOverlay {
     }
     return ceiling;
   }
+
   /**
    * CPU prepare for the private GPU density prototype: the exact cells, values
    * and ceiling the canvas path would draw, as GPU instance geometry (main
    * columns plus the live bar's extension). No new fetch: it reuses the same
    * acknowledged cache and chunk scheduling as `draw`.
-   *
-   * Legacy three-argument form (no `reserve`): bounded collection first and
-   * no lease; the renderer charges the prepared lists transiently around its
-   * draw. Production four-argument form: a primitive precount (O(1) held
-   * payload, no collected list, no emitted cell objects) runs BEFORE the
-   * single reservation; a denial returns null without building any prepared
-   * payload or cache allocation, and the returned frame carries the lease
-   * until its owner drops the last reference.
-   *
-   * With performance telemetry enabled, the production form records its time
-   * as `chart.gpu.heatmap.prepare.ms`; the legacy form is not timed.
    */
   prepareGpuCells(
     view: View,
@@ -287,18 +416,11 @@ export class OrderbookHeatmapOverlay {
   ): HeatmapGpuCellFrame | null {
     if (!reserve) {
       const visible = this.collectVisibleCells(view, series, range, GPU_MAX_PREPARED_CELLS);
-      // Bounded known-payload prepare: a frame at or past the cap (or an
-      // incomplete bounded collection) streams the legacy annotation path
-      // instead of staging GPU lists the budgets cannot cover.
       if (!visible || visible.length >= GPU_MAX_PREPARED_CELLS) return null;
       return this.buildGpuFrame(visible, view);
     }
     const preamble = this.beginFrame(series, range);
     if (!preamble) return null;
-    // Timed once the heatmap is active: an inactive chart records nothing, while
-    // a frame that ends at the cell cap or in a denied reservation did pay for
-    // its precount and is recorded. No closure, so the frame path allocates
-    // nothing extra; disabled telemetry costs one flag read.
     const startedAt = isPerformanceTelemetryEnabled() ? performance.now() : null;
     try {
       return this.prepareReservedGpuCells(preamble, view, series, range, reserve);
@@ -318,8 +440,6 @@ export class OrderbookHeatmapOverlay {
     const right = view.area.left + view.area.width;
     const { top, height } = view.area;
     const step = preamble.settings.bucketStep;
-    // Primitive precount only: no list allocation, no emitted cell objects,
-    // identical visibility/live/extension predicates as the real scan below.
     let mainCount = 0;
     let extCount = 0;
     let ceiling = 0;
@@ -342,8 +462,6 @@ export class OrderbookHeatmapOverlay {
     this.visibleCeiling = ceiling;
     this.visibleThreshold = preamble.threshold;
     if (mainCount === 0) {
-      // Successful empty frame (e.g. acknowledged empty books): nothing is
-      // allocated, so no reservation is taken.
       return {
         main: [],
         extension: [],
@@ -359,11 +477,6 @@ export class OrderbookHeatmapOverlay {
     if (!Number.isSafeInteger(logicalBytes) || logicalBytes <= 0) return null;
     const lease = reserve(logicalBytes);
     if (!lease) return null;
-    // Reserved: build the exact same geometry/values the legacy path builds.
-    // The lease is adopted onto the returned frame only; a throw from the
-    // bounded collection or the frame build after the grant must drop the
-    // owned references and release the idempotent lease exactly once,
-    // rethrowing the original error instead of leaking the reservation.
     try {
       const visible = this.collectVisibleCells(view, series, range, GPU_MAX_PREPARED_CELLS);
       if (!visible || visible.length !== mainCount || visible.length >= GPU_MAX_PREPARED_CELLS) {
@@ -389,8 +502,6 @@ export class OrderbookHeatmapOverlay {
     const main: HeatmapGpuCellFrame["main"] = [];
     const extension: HeatmapGpuCellFrame["extension"] = [];
     for (const cell of visible) {
-      // Explicit source index: the extension repaints its own main cell's
-      // scalar into its own EXT texel; MAIN scalars are never overwritten.
       const sourceMainIndex = main.length;
       main.push({ x: cell.x, yTop: cell.yTop, width: mainWidth, height: cell.cellHeight, value: cell.value });
       if (cell.live && cell.x + view.colWidth < right) {
@@ -435,12 +546,6 @@ export class OrderbookHeatmapOverlay {
   ): Array<{ x: number; yTop: number; cellHeight: number; value: number; live: boolean }> | null {
     const frame = this.beginFrame(series, range);
     if (!frame) return null;
-    // Same-frame memo: only the unbounded legacy collection is memoized; a
-    // bounded request is always a fresh pure scan, so the cap applies even
-    // after a previous unbounded collection in the same frame.
-    // The memo key includes the full price projection (priceTop/pricePerPx/
-    // scaleMode): a Y pan, price zoom or scale-mode flip must not reuse the
-    // previous frame's cell rows.
     const collectKey = `${this.dataKey}|${this.barsRevision}|${series.length}|${frame.first}|${frame.last}|${view.colWidth}|${view.offsetX}|${view.area.left}|${view.area.top}|${view.area.width}|${view.area.height}|${view.priceTop}|${view.pricePerPx}|${view.priceScaleMode}`;
     if (cellLimit === null && this.lastCollectedKey === collectKey && this.lastCollected) return this.lastCollected;
     const visible: Array<{ x: number; yTop: number; cellHeight: number; value: number; live: boolean }> = [];
@@ -453,6 +558,7 @@ export class OrderbookHeatmapOverlay {
     }
     return visible;
   }
+
   private ensureChunks(from: number, to: number, tier: HeatmapTier): void {
     const now = this.now();
     const key = this.dataKey;
@@ -462,7 +568,12 @@ export class OrderbookHeatmapOverlay {
       const live = now <= chunkEnd + tier.periodMs;
       if (state?.status === "loading") continue;
       if (state?.status === "error" && now - state.fetchedAt < RETRY_MS) continue;
-      if (state?.status === "ready" && (!live || now - state.fetchedAt < LIVE_REFRESH_MS)) continue;
+      // Live chunk: when live-tail subscription is healthy, suppress blind 20s REST refresh; otherwise refresh every 20s
+      if (state?.status === "ready") {
+        if (!live) continue;
+        if (this.isLiveTailHealthy(now)) continue;
+        if (now - state.fetchedAt < LIVE_REFRESH_MS) continue;
+      }
       if (this.inFlight.size >= MAX_PARALLEL_CHUNKS) return;
       // A live chunk that is already loaded only re-reads its last few bars.
       const refreshFrom = state?.status === "ready"
@@ -509,7 +620,6 @@ export class OrderbookHeatmapOverlay {
     const rows = Array.from({ length: HEATMAP_HOVER_SPAN }, (_, offset) => bucket + (half - offset) * step);
     const windowFrom = series.timeOfIndex(columns[0]);
     const windowTo = series.timeOfIndex(columns[columns.length - 1] + 1);
-    // The live bar's book keeps changing, so a window over it expires with each live refresh.
     const liveSlot = columns[columns.length - 1] === series.length - 1 ? Math.floor(this.now() / LIVE_REFRESH_MS) : 0;
     const hoverKey = `${this.dataKey}|${windowFrom}|${windowTo}|${bucket}|${liveSlot}`;
     const hover = this.hoverWindows.get(hoverKey);
@@ -576,6 +686,21 @@ export class OrderbookHeatmapOverlay {
       if (oldest === undefined) break;
       this.hoverWindows.delete(oldest);
     }
+  }
+
+  /** Read-only test seam: returns cached bars count. */
+  cachedBarsCount(): number {
+    return this.bars.size;
+  }
+
+  /** Read-only test seam: returns chunk status for a chunk start time. */
+  chunkStatus(chunkStart: number): "loading" | "ready" | "error" | undefined {
+    return this.chunks.get(chunkStart)?.status;
+  }
+
+  /** Read-only test seam: returns whether live tail is considered healthy. */
+  isLiveTailHealthyForTest(): boolean {
+    return this.isLiveTailHealthy(this.now());
   }
 }
 

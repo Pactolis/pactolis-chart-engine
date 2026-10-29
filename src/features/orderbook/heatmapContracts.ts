@@ -40,3 +40,10 @@ export interface OrderbookHeatmapResponse {
   to: number;
   bars: OrderbookHeatmapBar[];
 }
+
+/** Live-tail invalidation or push event payload from an external transport (e.g. WebSocket). */
+export interface LiveHeatmapTailEvent {
+  market?: string;
+  timestamp?: number;
+  bars?: OrderbookHeatmapBar[];
+}

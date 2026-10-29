@@ -1,5 +1,5 @@
 import type { NpocResponse } from "./historyContracts.js";
-import type { OrderbookHeatmapFetch } from "../orderbook/heatmapOverlay.js";
+import type { LiveHeatmapTailEvent, OrderbookHeatmapFetch } from "../orderbook/heatmapOverlay.js";
 import type { AnalysisRevisionSnapshot } from "../../core/analysisRevision.js";
 import type { AutomaticLevelsAsOf } from "../../core/analysisContext.js";
 import type { FootprintSeries } from "../../core/model/footprint.js";
@@ -56,4 +56,6 @@ export interface ChartRuntimeServices
   notifyBarClose(market: string, bar: FootprintBar, priceStep: number): void;
   /** Stored orderbook heatmap for the BTCUSDT perp chart overlay; absent in hosts without it. */
   fetchOrderbookHeatmap?: OrderbookHeatmapFetch;
+  /** Optional live tail subscription for orderbook heatmap live-tail invalidation / push. */
+  subscribeOrderbookHeatmapLiveTail?: (listener: (event?: LiveHeatmapTailEvent) => void) => () => void;
 }
