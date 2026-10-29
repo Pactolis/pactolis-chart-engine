@@ -67,7 +67,7 @@ export async function requestWebGpuDevice(options?: {
       const handleLoss = (reason: string): void => {
         if (lost) return;
         lost = true;
-        recordGpuContextEvent("device-lost");
+        recordGpuContextEvent("lost");
         for (const listener of [...lostListeners]) {
           try {
             listener(reason);
