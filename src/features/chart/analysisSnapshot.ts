@@ -381,6 +381,24 @@ function levelIntersectsPriceRange(level: AnalysisLevelSnapshot, range: { low: n
   return true;
 }
 
+export function countClosedBars(bars: readonly FootprintBar[], intervalMs: number, now: number): number {
+  const len = bars.length;
+  if (len === 0) return 0;
+  if (bucketEnd(bars[len - 1].startTime, intervalMs) <= now) return len;
+  if (len >= 2 && bucketEnd(bars[len - 2].startTime, intervalMs) <= now) return len - 1;
+  let low = 0;
+  let high = len - 2;
+  while (low < high) {
+    const mid = (low + high) >>> 1;
+    if (bucketEnd(bars[mid].startTime, intervalMs) <= now) {
+      low = mid + 1;
+    } else {
+      high = mid;
+    }
+  }
+  return low;
+}
+
 export function buildChartAnalysisSnapshot(args: {
   panelId: string;
   market: string;
@@ -401,11 +419,42 @@ export function buildChartAnalysisSnapshot(args: {
   const excluded = args.options?.excludedSourceIds ?? new Set<string>();
   const includeHidden = args.options?.includeHiddenSources === true;
   const allBars = args.series.listReadonly();
-  const closedBars = allBars.filter((bar) => bucketEnd(bar.startTime, args.intervalMs) <= now);
-  const scopedBars = timeRange
-    ? closedBars.filter((bar) => bucketEnd(bar.startTime, args.intervalMs) > timeRange.from && bar.startTime <= timeRange.to)
-    : closedBars;
-  const selectedBars = scopedBars.slice(-maxCandles);
+  const closedCount = countClosedBars(allBars, args.intervalMs, now);
+
+  let scopedCount = 0;
+  let selectedBars: readonly FootprintBar[] = [];
+
+  if (!timeRange) {
+    scopedCount = closedCount;
+    selectedBars = allBars.slice(Math.max(0, closedCount - maxCandles), closedCount);
+  } else {
+    let lowStart = 0;
+    let highStart = closedCount;
+    while (lowStart < highStart) {
+      const mid = (lowStart + highStart) >>> 1;
+      if (bucketEnd(allBars[mid].startTime, args.intervalMs) <= timeRange.from) {
+        lowStart = mid + 1;
+      } else {
+        highStart = mid;
+      }
+    }
+    const rangeStart = lowStart;
+
+    let lowEnd = rangeStart;
+    let highEnd = closedCount;
+    while (lowEnd < highEnd) {
+      const mid = (lowEnd + highEnd) >>> 1;
+      if (allBars[mid].startTime <= timeRange.to) {
+        lowEnd = mid + 1;
+      } else {
+        highEnd = mid;
+      }
+    }
+    const rangeEnd = Math.max(rangeStart, lowEnd);
+    scopedCount = rangeEnd - rangeStart;
+    selectedBars = allBars.slice(Math.max(rangeStart, rangeEnd - maxCandles), rangeEnd);
+  }
+
   const warnings: string[] = [];
   let detailedFootprintBars = 0;
   const candles = selectedBars.map((bar, index) => {
@@ -433,7 +482,7 @@ export function buildChartAnalysisSnapshot(args: {
   });
   const measuredFootprintBars = selectedBars.filter((bar) => bar.cells.size > 0).length;
   if (measuredFootprintBars > detailedFootprintBars) warnings.push(`Detailed footprint cells are limited to the latest ${AI_ANALYSIS_POLICY.fullFootprintBars} contiguous candles`);
-  if (scopedBars.length > selectedBars.length) warnings.push(`Candle context is limited to the latest ${selectedBars.length} contiguous bars`);
+  if (scopedCount > selectedBars.length) warnings.push(`Candle context is limited to the latest ${selectedBars.length} contiguous bars`);
   if (timeRange && !selectedBars.length) warnings.push("No closed candles intersect the visible time range");
 
   let levels = automaticLevels(args.analysis)
