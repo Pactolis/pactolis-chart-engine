@@ -1,7 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { FootprintSeries } from "../dist/core/model/footprint.js";
-import { buildChartAnalysisSnapshot } from "../dist/features/chart/analysisSnapshot.js";
+import { buildChartAnalysisSnapshot, countClosedBars } from "../dist/features/chart/analysisSnapshot.js";
 
 const BASE_TIME = Date.UTC(2024, 0, 1);
 
@@ -127,4 +127,191 @@ test("Fibonacci, anchored VWAP and Fixed Range Order Flow Profile carry calculat
   assert.ok(Number.isFinite(profile.profile.vah));
   assert.ok(Number.isFinite(profile.profile.val));
   assert.ok(profile.profile.bins.length > 0);
+});
+
+test("countClosedBars correctly computes closed count across fast paths and binary search", () => {
+  const intervalMs = 60_000;
+  assert.equal(countClosedBars([], intervalMs, 100_000), 0);
+
+  const singleBar = [{ startTime: 0, open: 1, high: 2, low: 0, close: 1, volume: 1, cells: new Map() }];
+  assert.equal(countClosedBars(singleBar, intervalMs, 59_999), 0);
+  assert.equal(countClosedBars(singleBar, intervalMs, 60_000), 1);
+  assert.equal(countClosedBars(singleBar, intervalMs, 100_000), 1);
+
+  const tenBars = Array.from({ length: 10 }, (_, index) => ({
+    startTime: index * intervalMs,
+    open: 1, high: 2, low: 0, close: 1, volume: 1, cells: new Map()
+  }));
+
+  // All closed: now >= last bar bucketEnd (10 * 60_000)
+  assert.equal(countClosedBars(tenBars, intervalMs, 10 * intervalMs), 10);
+  assert.equal(countClosedBars(tenBars, intervalMs, 11 * intervalMs), 10);
+
+  // Last bar open: now < last bar bucketEnd but >= 9th bar bucketEnd (9 * 60_000)
+  assert.equal(countClosedBars(tenBars, intervalMs, 10 * intervalMs - 1), 9);
+  assert.equal(countClosedBars(tenBars, intervalMs, 9 * intervalMs), 9);
+
+  // Bisect path: 5 bars closed
+  assert.equal(countClosedBars(tenBars, intervalMs, 5 * intervalMs), 5);
+  assert.equal(countClosedBars(tenBars, intervalMs, 5 * intervalMs + 30_000), 5);
+
+  // Bisect path: 1 bar closed
+  assert.equal(countClosedBars(tenBars, intervalMs, 1 * intervalMs), 1);
+
+  // None closed: now < 1st bar bucketEnd
+  assert.equal(countClosedBars(tenBars, intervalMs, intervalMs - 1), 0);
+  assert.equal(countClosedBars(tenBars, intervalMs, -1), 0);
+});
+
+test("equivalence: binary search buildChartAnalysisSnapshot matches linear reference on 5000+ bars", () => {
+  const intervalMs = 60_000;
+  const barCount = 5_000;
+  const series = new FootprintSeries({ intervalMs, priceStep: 1 });
+  const bars = Array.from({ length: barCount }, (_, index) => ({
+    startTime: BASE_TIME + index * intervalMs,
+    open: 100 + (index % 10),
+    high: 110 + (index % 10),
+    low: 90 + (index % 10),
+    close: 105 + (index % 10),
+    volume: 100 + index,
+    delta: 10,
+    count: 20,
+    deltaBySize: [5, -5],
+    cells: new Map(),
+    hasRef: true,
+  }));
+  series.loadBars(bars);
+
+  function linearReference(allBars, now, timeRange, maxCandles) {
+    const closedBars = allBars.filter((b) => (b.startTime + intervalMs) <= now);
+    const scopedBars = timeRange
+      ? closedBars.filter((b) => (b.startTime + intervalMs) > timeRange.from && b.startTime <= timeRange.to)
+      : closedBars;
+    const selectedBars = scopedBars.slice(-maxCandles);
+    const warnings = [];
+    if (scopedBars.length > selectedBars.length) warnings.push(`Candle context is limited to the latest ${selectedBars.length} contiguous bars`);
+    if (timeRange && !selectedBars.length) warnings.push("No closed candles intersect the visible time range");
+    return {
+      candleTimes: selectedBars.map((b) => b.startTime),
+      warnings,
+    };
+  }
+
+  const analysisCtx = context();
+
+  // Case 1: No visibleTimeRange, last bar is still open
+  {
+    const now = BASE_TIME + (barCount - 1) * intervalMs + 30_000;
+    const ref = linearReference(bars, now, null, 100);
+    const snap = buildChartAnalysisSnapshot({
+      panelId: "p",
+      market: "BINANCE_FUTURES:btcusdt",
+      timeframe: "1m",
+      intervalMs,
+      selectionGeneration: 1,
+      series,
+      analysis: analysisCtx,
+      analysisRevision: revision,
+      indicators: [],
+      options: { now, maxCandles: 100 },
+    });
+    assert.deepEqual(snap.candles.map((c) => c.time), ref.candleTimes);
+    assert.equal(snap.candles.length, 100);
+    assert.deepEqual(snap.warnings, ref.warnings);
+    assert.equal(snap.lastClosedBarEnd, BASE_TIME + (barCount - 1) * intervalMs);
+  }
+
+  // Case 2: No visibleTimeRange, all bars closed
+  {
+    const now = BASE_TIME + barCount * intervalMs + 10_000;
+    const ref = linearReference(bars, now, null, 100);
+    const snap = buildChartAnalysisSnapshot({
+      panelId: "p",
+      market: "BINANCE_FUTURES:btcusdt",
+      timeframe: "1m",
+      intervalMs,
+      selectionGeneration: 1,
+      series,
+      analysis: analysisCtx,
+      analysisRevision: revision,
+      indicators: [],
+      options: { now, maxCandles: 100 },
+    });
+    assert.deepEqual(snap.candles.map((c) => c.time), ref.candleTimes);
+    assert.deepEqual(snap.warnings, ref.warnings);
+    assert.equal(snap.lastClosedBarEnd, BASE_TIME + barCount * intervalMs);
+  }
+
+  // Case 3: visibleTimeRange covering slice (index 1000..1500), last bar open
+  {
+    const now = BASE_TIME + (barCount - 1) * intervalMs + 10_000;
+    const timeRange = {
+      from: BASE_TIME + 1000 * intervalMs + 1,
+      to: BASE_TIME + 1500 * intervalMs,
+    };
+    const ref = linearReference(bars, now, timeRange, 100);
+    const snap = buildChartAnalysisSnapshot({
+      panelId: "p",
+      market: "BINANCE_FUTURES:btcusdt",
+      timeframe: "1m",
+      intervalMs,
+      selectionGeneration: 1,
+      series,
+      analysis: analysisCtx,
+      analysisRevision: revision,
+      indicators: [],
+      options: { now, visibleTimeRange: timeRange, maxCandles: 100 },
+    });
+    assert.deepEqual(snap.candles.map((c) => c.time), ref.candleTimes);
+    assert.deepEqual(snap.warnings, ref.warnings);
+  }
+
+  // Case 4: visibleTimeRange covering slice (index 4500..5000), all bars closed
+  {
+    const now = BASE_TIME + barCount * intervalMs + 60_000;
+    const timeRange = {
+      from: BASE_TIME + 4500 * intervalMs,
+      to: BASE_TIME + 5000 * intervalMs,
+    };
+    const ref = linearReference(bars, now, timeRange, 100);
+    const snap = buildChartAnalysisSnapshot({
+      panelId: "p",
+      market: "BINANCE_FUTURES:btcusdt",
+      timeframe: "1m",
+      intervalMs,
+      selectionGeneration: 1,
+      series,
+      analysis: analysisCtx,
+      analysisRevision: revision,
+      indicators: [],
+      options: { now, visibleTimeRange: timeRange, maxCandles: 100 },
+    });
+    assert.deepEqual(snap.candles.map((c) => c.time), ref.candleTimes);
+    assert.deepEqual(snap.warnings, ref.warnings);
+  }
+
+  // Case 5: visibleTimeRange outside closed bars range (no intersection)
+  {
+    const now = BASE_TIME + 1000 * intervalMs;
+    const timeRange = {
+      from: BASE_TIME + 2000 * intervalMs,
+      to: BASE_TIME + 3000 * intervalMs,
+    };
+    const ref = linearReference(bars, now, timeRange, 100);
+    const snap = buildChartAnalysisSnapshot({
+      panelId: "p",
+      market: "BINANCE_FUTURES:btcusdt",
+      timeframe: "1m",
+      intervalMs,
+      selectionGeneration: 1,
+      series,
+      analysis: analysisCtx,
+      analysisRevision: revision,
+      indicators: [],
+      options: { now, visibleTimeRange: timeRange, maxCandles: 100 },
+    });
+    assert.deepEqual(snap.candles.map((c) => c.time), ref.candleTimes);
+    assert.equal(snap.candles.length, 0);
+    assert.deepEqual(snap.warnings, ref.warnings);
+  }
 });

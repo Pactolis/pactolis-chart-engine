@@ -56,7 +56,7 @@ import { ChartHistoryController } from "./ChartHistoryController.js";
 import { ChartSyncController } from "./ChartSyncController.js";
 import { ChartRenderCoordinator } from "./ChartRenderCoordinator.js";
 import { ChartIndicatorController } from "./ChartIndicatorController.js";
-import { buildChartAnalysisSnapshot } from "./analysisSnapshot.js";
+import { buildChartAnalysisSnapshot, countClosedBars } from "./analysisSnapshot.js";
 import { decideLiveSameBarAutoFit, type LiveAutoFitSnapshot } from "./liveAutoFit.js";
 import { OrderbookHeatmapOverlay } from "../orderbook/heatmapOverlay.js";
 import { HeatmapGpuRenderer, type HeatmapGpuCellFrame } from "./heatmap/gpu/heatmapGpuRenderer.js";
@@ -242,6 +242,25 @@ class ChartRuntimeImpl implements ChartRuntime, ChartInputHost {
   private npocHistoryReady = false;
   private readonly npocListeners = new Set<() => void>();
 
+  private lastAnalysisSnapshotCache: {
+    readonly snapshot: ChartAnalysisSnapshot;
+    readonly market: string;
+    readonly timeframe: string;
+    readonly intervalMs: number;
+    readonly seriesRevision: number;
+    readonly seriesResetEpoch: number;
+    readonly closedCount: number;
+    readonly selectionGeneration: number;
+    readonly canonicalRevision: number | null;
+    readonly canonicalStatus: string;
+    readonly drawingsSignature: string;
+    readonly indicatorsSignature: string;
+    readonly timeRangeFrom: number | undefined;
+    readonly timeRangeTo: number | undefined;
+    readonly priceRangeLow: number | undefined;
+    readonly priceRangeHigh: number | undefined;
+    readonly optionsSignature: string;
+  } | null = null;
   private readonly replayCoordinator: ChartReplayCoordinator;
   private replayLevelsCache: {
     key: {
@@ -717,12 +736,7 @@ class ChartRuntimeImpl implements ChartRuntime, ChartInputHost {
     if (this.replayCoordinator.isActive()) throw new Error("AI analysis is unavailable during replay");
     const now = options.now ?? Date.now();
     const series = this.pipeline.series;
-    let closedCount = 0;
-    for (let index = 0; index < series.length; index++) {
-      const bar = series.at(index);
-      if (!bar || bucketEnd(bar.startTime, this.pipeline.intervalMs) > now) break;
-      closedCount = index + 1;
-    }
+    const closedCount = countClosedBars(series.listReadonly(), this.pipeline.intervalMs, now);
 
     const runtimeTimeRange = options.visibleTimeRange ?? this.syncController.getVisibleTimeRange() ?? undefined;
     const priceRange = this.view.area.height > 1 ? this.view.priceRange() : null;
@@ -730,6 +744,53 @@ class ChartRuntimeImpl implements ChartRuntime, ChartInputHost {
       low: priceRange.minValue(),
       high: priceRange.maxValue(),
     } : undefined);
+
+    const analysisCtx = this.analysisContextForChart();
+    const analysisRevision = this.svc.getAnalysisRevisionSnapshot(this.state.market);
+
+    const excludedIdsKey = options.excludedSourceIds ? Array.from(options.excludedSourceIds).sort().join(",") : "";
+    const optionsSignature = `${options.maxCandles ?? ""}:${options.maxLevelsAndDrawings ?? ""}:${options.maxIndicatorSamples ?? ""}:${options.maxBytes ?? ""}:${options.includeHiddenSources ?? false}:${excludedIdsKey}`;
+
+    const rawDrawings = analysisCtx.drawings?.listForMarket ? analysisCtx.drawings.listForMarket(this.state.market) : [];
+    const drawingsSignature = rawDrawings.length === 0
+      ? "0"
+      : rawDrawings.map((d) => `${d.id}:${d.type}:${d.visible ?? true}:${d.points?.map((p) => `${p.time},${p.price}`).join(",") ?? ""}`).join(";");
+
+    const indicatorInstances = this.indicatorController.listInstances();
+    const indicatorsSignature = indicatorInstances.length === 0
+      ? "0"
+      : indicatorInstances.map((inst) => `${inst.id}:${inst.type}:${inst.visible ?? true}`).join(";");
+
+    const cached = this.lastAnalysisSnapshotCache;
+    if (
+      cached
+      && cached.market === this.state.market
+      && cached.timeframe === this.state.timeframe
+      && cached.intervalMs === this.pipeline.intervalMs
+      && cached.seriesRevision === series.revision
+      && cached.seriesResetEpoch === series.resetEpoch
+      && cached.closedCount === closedCount
+      && cached.selectionGeneration === this.analysisSelectionGeneration
+      && cached.canonicalRevision === analysisRevision.canonical.revision
+      && cached.canonicalStatus === analysisRevision.canonical.status
+      && cached.timeRangeFrom === runtimeTimeRange?.from
+      && cached.timeRangeTo === runtimeTimeRange?.to
+      && cached.priceRangeLow === runtimePriceRange?.low
+      && cached.priceRangeHigh === runtimePriceRange?.high
+      && cached.optionsSignature === optionsSignature
+      && cached.drawingsSignature === drawingsSignature
+      && cached.indicatorsSignature === indicatorsSignature
+    ) {
+      return {
+        ...cached.snapshot,
+        capturedAt: now,
+        candles: cached.snapshot.candles.slice(),
+        levels: cached.snapshot.levels.slice(),
+        drawings: cached.snapshot.drawings.slice(),
+        indicators: cached.snapshot.indicators.slice(),
+        warnings: cached.snapshot.warnings.slice(),
+      };
+    }
 
     let analysisRange: [number, number] = [Math.max(0, closedCount - 100), closedCount];
     if (runtimeTimeRange && closedCount > 0) {
@@ -745,15 +806,15 @@ class ChartRuntimeImpl implements ChartRuntime, ChartInputHost {
       analysisRange,
       options.maxIndicatorSamples ?? visibleSampleCount,
     );
-    return buildChartAnalysisSnapshot({
+    const snapshot = buildChartAnalysisSnapshot({
       panelId: this.panelId,
       market: this.state.market,
       timeframe: this.state.timeframe,
       intervalMs: this.pipeline.intervalMs,
       selectionGeneration: this.analysisSelectionGeneration,
       series,
-      analysis: this.analysisContextForChart(),
-      analysisRevision: this.svc.getAnalysisRevisionSnapshot(this.state.market),
+      analysis: analysisCtx,
+      analysisRevision,
       indicators,
       options: {
         ...options,
@@ -762,6 +823,28 @@ class ChartRuntimeImpl implements ChartRuntime, ChartInputHost {
         ...(runtimePriceRange ? { visiblePriceRange: runtimePriceRange } : {}),
       },
     });
+
+    this.lastAnalysisSnapshotCache = {
+      snapshot,
+      market: this.state.market,
+      timeframe: this.state.timeframe,
+      intervalMs: this.pipeline.intervalMs,
+      seriesRevision: series.revision,
+      seriesResetEpoch: series.resetEpoch,
+      closedCount,
+      selectionGeneration: this.analysisSelectionGeneration,
+      canonicalRevision: analysisRevision.canonical.revision,
+      canonicalStatus: analysisRevision.canonical.status,
+      drawingsSignature,
+      indicatorsSignature,
+      timeRangeFrom: runtimeTimeRange?.from,
+      timeRangeTo: runtimeTimeRange?.to,
+      priceRangeLow: runtimePriceRange?.low,
+      priceRangeHigh: runtimePriceRange?.high,
+      optionsSignature,
+    };
+
+    return snapshot;
   }
 
   activate(): void {
