@@ -3,11 +3,14 @@ import { recordGpuBackendSelection, recordGpuContextEvent, recordGpuFallback } f
 import type { GpuBackendPreference } from "./gpuSettings.js";
 import type { GpuSurface } from "./gpuBackend.js";
 import { WebGl2Surface } from "./webgl2/webgl2Surface.js";
+import { requestWebGpuDevice, type WebGpuDeviceHandle } from "./webgpu/webgpuDevice.js";
+import { WebGpuSurface } from "./webgpu/webgpuSurface.js";
 
 export function createGpuSurface(
   canvas: HTMLCanvasElement,
   preference: GpuBackendPreference = "webgl2",
   providedGl?: WebGL2RenderingContext | null,
+  webgpuHandle?: WebGpuDeviceHandle | null,
 ): GpuSurface {
   if (preference === "canvas2d") {
     const ctx = canvas.getContext("2d");
@@ -18,7 +21,16 @@ export function createGpuSurface(
     return new Canvas2dSurface(canvas, ctx);
   }
 
-  // "auto", "webgl2", or experimental "webgpu" (Stage 1 uses WebGL2 first)
+  if (preference === "webgpu" && webgpuHandle && !webgpuHandle.isLost()) {
+    recordGpuBackendSelection(preference, "webgpu");
+    return new WebGpuSurface(canvas, webgpuHandle);
+  }
+
+  if (preference === "webgpu" && (!webgpuHandle || webgpuHandle.isLost())) {
+    recordGpuFallback("webgpu", "webgl2", "device_unavailable");
+  }
+
+  // "auto", "webgl2", or fallback from webgpu
   let gl = providedGl;
   if (gl === undefined) {
     try {
@@ -39,9 +51,29 @@ export function createGpuSurface(
 
   const ctx2d = canvas.getContext("2d");
   if (!ctx2d) {
-    throw new Error("selectBackend: failed to acquire both WebGL2 and Canvas2D contexts");
+    throw new Error("selectBackend: failed to acquire WebGPU, WebGL2 and Canvas2D contexts");
   }
 
   recordGpuBackendSelection(preference, "canvas2d");
   return new Canvas2dSurface(canvas, ctx2d);
+}
+
+export async function createGpuSurfaceAsync(
+  canvas: HTMLCanvasElement,
+  preference: GpuBackendPreference = "webgl2",
+  providedGl?: WebGL2RenderingContext | null,
+): Promise<GpuSurface> {
+  if (preference === "canvas2d") {
+    return createGpuSurface(canvas, "canvas2d");
+  }
+
+  if (preference === "webgpu") {
+    const handle = await requestWebGpuDevice();
+    if (handle && !handle.isLost()) {
+      return createGpuSurface(canvas, "webgpu", providedGl, handle);
+    }
+    recordGpuFallback("webgpu", "webgl2", "device_request_failed");
+  }
+
+  return createGpuSurface(canvas, preference === "webgpu" ? "webgl2" : preference, providedGl);
 }

@@ -126,6 +126,18 @@
       "types": "./dist/core/gpu/selectBackend.d.ts",
       "default": "./dist/core/gpu/selectBackend.js"
     },
+    "./core/gpu/webgpu/webgpuDevice": {
+      "types": "./dist/core/gpu/webgpu/webgpuDevice.d.ts",
+      "default": "./dist/core/gpu/webgpu/webgpuDevice.js"
+    },
+    "./core/gpu/webgpu/webgpuQuadPipeline": {
+      "types": "./dist/core/gpu/webgpu/webgpuQuadPipeline.d.ts",
+      "default": "./dist/core/gpu/webgpu/webgpuQuadPipeline.js"
+    },
+    "./core/gpu/webgpu/webgpuSurface": {
+      "types": "./dist/core/gpu/webgpu/webgpuSurface.d.ts",
+      "default": "./dist/core/gpu/webgpu/webgpuSurface.js"
+    },
     "./core/indicatorTypes": {
       "types": "./dist/core/indicatorTypes.d.ts",
       "default": "./dist/core/indicatorTypes.js"
