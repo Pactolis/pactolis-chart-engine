@@ -1921,10 +1921,24 @@ async function buildChartRuntime(
   let gl: WebGL2RenderingContext | null = null;
 
   if (gpuSettings.backend === "canvas2d") {
+    if (!annotationCtx2d || !interactionCtx2d) {
+      hook.remove();
+      gpuCanvas.remove();
+      annotationCanvas.remove();
+      interactionCanvas.remove();
+      throw new Error("ChartRuntime: canvas contexts unavailable");
+    }
     gpuSurface = createGpuSurface(gpuCanvas, "canvas2d");
   } else if (gpuSettings.backend === "webgl2" || (gpuSettings.backend === "auto" && !isWebGpuSupported())) {
     gl = getChartWebGl2Context(gpuCanvas, display.webgl);
-    if (!gl) incrementPerformanceCounter("chart.gpu.contextCreateFailed");
+    if (!gl || !annotationCtx2d || !interactionCtx2d) {
+      if (!gl) incrementPerformanceCounter("chart.gpu.contextCreateFailed");
+      hook.remove();
+      gpuCanvas.remove();
+      annotationCanvas.remove();
+      interactionCanvas.remove();
+      throw new Error("ChartRuntime: canvas contexts unavailable");
+    }
     gpuSurface = createGpuSurface(gpuCanvas, "webgl2", gl);
   } else {
     gpuSurface = await createGpuSurfaceAsync(
@@ -1936,15 +1950,14 @@ async function buildChartRuntime(
     if (gpuSurface.kind === "webgl2" && typeof (gpuSurface as any).getGlContext === "function") {
       gl = (gpuSurface as any).getGlContext();
     }
-  }
-
-  if (!annotationCtx2d || !interactionCtx2d || (!gl && gpuSurface.kind === "webgl2")) {
-    if (!gl && gpuSurface.kind === "webgl2") incrementPerformanceCounter("chart.gpu.contextCreateFailed");
-    hook.remove();
-    gpuCanvas.remove();
-    annotationCanvas.remove();
-    interactionCanvas.remove();
-    throw new Error("ChartRuntime: canvas contexts unavailable");
+    if (!annotationCtx2d || !interactionCtx2d || (!gl && gpuSurface.kind === "webgl2")) {
+      if (!gl && gpuSurface.kind === "webgl2") incrementPerformanceCounter("chart.gpu.contextCreateFailed");
+      hook.remove();
+      gpuCanvas.remove();
+      annotationCanvas.remove();
+      interactionCanvas.remove();
+      throw new Error("ChartRuntime: canvas contexts unavailable");
+    }
   }
   hook.setAttribute("data-gpu-backend", gpuSurface.kind);
 

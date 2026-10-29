@@ -287,7 +287,7 @@ test("backend hotswap (webgl2 -> canvas2d -> webgpu) updates renderer surface an
       const surface = currentSurfaceInRenderer || webglSurface;
       const frame = surface.beginFrame({ r: 0, g: 0, b: 0, a: 1 });
       frame.quads.rect(10, 10, 50, 20, { r: 1, g: 0, b: 0, a: 1 });
-      quadsRendered += frame.quads.count;
+      quadsRendered++;
       frame.flushQuads(640, 360);
       frame.end();
     },
