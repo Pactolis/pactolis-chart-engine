@@ -77,8 +77,8 @@ export class WebGl2Surface implements GpuSurface {
 
   resize(bitmapWidth: number, bitmapHeight: number, dpr = 1): void {
     if (this.disposed) return;
-    this.canvas.width = bitmapWidth;
-    this.canvas.height = bitmapHeight;
+    if (this.canvas.width !== bitmapWidth) this.canvas.width = bitmapWidth;
+    if (this.canvas.height !== bitmapHeight) this.canvas.height = bitmapHeight;
     this.dpr = dpr > 0 ? dpr : 1;
     this.gl.viewport?.(0, 0, bitmapWidth, bitmapHeight);
   }
