@@ -1,5 +1,5 @@
 import { QuadBatch } from "../../engine/quadBatch.js";
-import type { GpuFrame, GpuLossReason, GpuSurface, HeatmapLayer, QuadSink, RGBA, RgbaFrame } from "../gpuBackend.js";
+import type { GpuFrame, GpuLossReason, GpuSurface, HeatmapLayer, RGBA, RgbaFrame } from "../gpuBackend.js";
 
 function flipRgba(source: Uint8Array, width: number, height: number): Uint8ClampedArray {
   const rowBytes = width * 4;

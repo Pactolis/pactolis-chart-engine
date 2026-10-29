@@ -43,7 +43,10 @@ import { settings, type ChartViewConfig, type FootprintCellData, type TpoProfile
 import { TimeScaleModel } from "../../core/model/timeScale.js";
 import type { ChartCaptureReadiness } from "./captureReadiness.js";
 import { evaluateChartDataState, type ChartDataState } from "./chartDataState.js";
-import { getChartWebGl2Context, type NativeChartCapture } from "./nativeCapture.js";
+import type { NativeChartCapture } from "./nativeCapture.js";
+import { createGpuSurface } from "../../core/gpu/selectBackend.js";
+import { onGpuSettingsChange, readGpuSettings } from "../../core/gpu/gpuSettings.js";
+import type { GpuSurface } from "../../core/gpu/gpuBackend.js";
 import {
   resolveChartDisplayOptions,
   sameChartDisplayOptions,
