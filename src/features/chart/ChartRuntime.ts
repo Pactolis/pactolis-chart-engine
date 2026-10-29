@@ -43,7 +43,7 @@ import { settings, type ChartViewConfig, type FootprintCellData, type TpoProfile
 import { TimeScaleModel } from "../../core/model/timeScale.js";
 import type { ChartCaptureReadiness } from "./captureReadiness.js";
 import { evaluateChartDataState, type ChartDataState } from "./chartDataState.js";
-import type { NativeChartCapture } from "./nativeCapture.js";
+import { getChartWebGl2Context, type NativeChartCapture } from "./nativeCapture.js";
 import { createGpuSurface } from "../../core/gpu/selectBackend.js";
 import { onGpuSettingsChange, readGpuSettings } from "../../core/gpu/gpuSettings.js";
 import type { GpuSurface } from "../../core/gpu/gpuBackend.js";
@@ -1900,11 +1900,9 @@ async function buildChartRuntime(
   panelRoot.append(gpuCanvas, annotationCanvas, interactionCanvas);
 
   const display = resolveChartDisplayOptions(chartHost().displayOptions?.());
+  const gl = getChartWebGl2Context(gpuCanvas, display.webgl);
   const gpuSettings = readGpuSettings(doc.defaultView);
-  const gpuSurface = createGpuSurface(gpuCanvas, gpuSettings.backend, display.webgl);
-  const gl = gpuSurface.kind === "webgl2" && typeof (gpuSurface as any).getGlContext === "function"
-    ? (gpuSurface as any).getGlContext()
-    : null;
+  const gpuSurface = createGpuSurface(gpuCanvas, gpuSettings.backend, gl);
   const annotationCtx2d = annotationCanvas.getContext("2d");
   const interactionCtx2d = interactionCanvas.getContext("2d");
   if (!annotationCtx2d || !interactionCtx2d) {

@@ -91,14 +91,7 @@ test("selectBackend creates WebGl2Surface when WebGL2 context is available", () 
   const fakeGl = makeFakeGl();
   const canvas = makeFakeCanvas({ webgl2: fakeGl });
 
-  // Use a fake batch to avoid running shader compilation in plain Node
-  const fakeBatch = {
-    begin() {},
-    rect() {},
-    flush() {},
-    dispose() {},
-  };
-  const surface = new WebGl2Surface(canvas, fakeGl, fakeBatch);
+  const surface = createGpuSurface(canvas, "webgl2", fakeGl);
   assert.equal(surface.kind, "webgl2");
   assert.equal(surface.canvas, canvas);
   assert.equal(surface.heatmap, null);
@@ -112,7 +105,7 @@ test("selectBackend falls back to Canvas2dSurface when WebGL2 context is unavail
   const ctx2d = makeFake2dContext();
   const canvas = makeFakeCanvas({ webgl2: null, "2d": ctx2d });
 
-  const surface = createGpuSurface(canvas, "webgl2");
+  const surface = createGpuSurface(canvas, "webgl2", null);
   assert.equal(surface.kind, "canvas2d");
   assert.equal(surface.canvas, canvas);
 
@@ -230,6 +223,7 @@ test("ChartSession.replaceSurface transfers surface attributes and updates canva
   resetGpuDiagnosticsForTest();
   const win = {
     devicePixelRatio: 2,
+    ResizeObserver: class { observe() {} disconnect() {} },
     requestAnimationFrame: () => 1,
     cancelAnimationFrame: () => {},
     matchMedia: () => ({ addEventListener() {}, removeEventListener() {} }),

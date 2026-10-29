@@ -10,7 +10,7 @@ function formatCssRgba(c: RGBA): string {
   const key = `${r255},${g255},${b255},${aNorm}`;
   let css = colorCache.get(key);
   if (!css) {
-    css = `rgba(${r255},${g255},${b255},${aNorm})`;
+    css = `rgba(${r255}, ${g255}, ${b255}, ${aNorm})`;
     if (colorCache.size > 2048) colorCache.clear();
     colorCache.set(key, css);
   }

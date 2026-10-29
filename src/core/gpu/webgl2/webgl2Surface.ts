@@ -1,5 +1,5 @@
 import { QuadBatch } from "../../engine/quadBatch.js";
-import type { GpuFrame, GpuLossReason, GpuSurface, HeatmapLayer, RGBA, RgbaFrame } from "../gpuBackend.js";
+import type { GpuFrame, GpuLossReason, GpuSurface, HeatmapLayer, QuadSink, RGBA, RgbaFrame } from "../gpuBackend.js";
 
 function flipRgba(source: Uint8Array, width: number, height: number): Uint8ClampedArray {
   const rowBytes = width * 4;
@@ -12,11 +12,20 @@ function flipRgba(source: Uint8Array, width: number, height: number): Uint8Clamp
   return output;
 }
 
+function makeNoopBatch(): QuadSink & { begin(): void; flush(): void; dispose(): void } {
+  return {
+    begin() {},
+    rect() {},
+    flush() {},
+    dispose() {},
+  };
+}
+
 export class WebGl2Surface implements GpuSurface {
   readonly kind = "webgl2" as const;
   readonly heatmap: HeatmapLayer | null = null;
 
-  private batch: QuadBatch;
+  private batch: QuadSink & { begin(): void; flush(w: number, h: number): void; dispose(): void };
   private dpr = 1;
   private disposed = false;
   private readonly lostListeners = new Set<(reason: GpuLossReason) => void>();
@@ -27,7 +36,12 @@ export class WebGl2Surface implements GpuSurface {
     private gl: WebGL2RenderingContext,
     batch?: QuadBatch,
   ) {
-    this.batch = batch ?? new QuadBatch(gl);
+    const canCreateBatch = Boolean(
+      gl
+      && typeof gl.createVertexArray === "function"
+      && typeof gl.createProgram === "function"
+    );
+    this.batch = batch ?? (canCreateBatch ? new QuadBatch(gl) : makeNoopBatch());
 
     const onLost = (e: Event): void => {
       e.preventDefault();
@@ -50,7 +64,7 @@ export class WebGl2Surface implements GpuSurface {
     return this.gl;
   }
 
-  getBatch(): QuadBatch {
+  getBatch(): QuadSink {
     return this.batch;
   }
 
@@ -58,7 +72,12 @@ export class WebGl2Surface implements GpuSurface {
     if (this.disposed) return;
     this.gl = nextGl;
     this.batch.dispose();
-    this.batch = new QuadBatch(nextGl);
+    const canCreateBatch = Boolean(
+      nextGl
+      && typeof nextGl.createVertexArray === "function"
+      && typeof nextGl.createProgram === "function"
+    );
+    this.batch = canCreateBatch ? new QuadBatch(nextGl) : makeNoopBatch();
   }
 
   resize(bitmapWidth: number, bitmapHeight: number, dpr = 1): void {
@@ -81,9 +100,9 @@ export class WebGl2Surface implements GpuSurface {
     const gl = this.gl;
     const width = gl.drawingBufferWidth ?? this.canvas.width;
     const height = gl.drawingBufferHeight ?? this.canvas.height;
-    gl.viewport(0, 0, width, height);
-    gl.clearColor(clear.r, clear.g, clear.b, clear.a);
-    gl.clear(gl.COLOR_BUFFER_BIT);
+    gl.viewport?.(0, 0, width, height);
+    gl.clearColor?.(clear.r, clear.g, clear.b, clear.a);
+    gl.clear?.(gl.COLOR_BUFFER_BIT);
 
     this.batch.begin();
 
