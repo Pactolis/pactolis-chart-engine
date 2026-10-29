@@ -46,6 +46,7 @@ function makeFakeGl() {
     FRAGMENT_SHADER: 35632,
     ARRAY_BUFFER: 34962,
     STATIC_DRAW: 35044,
+    DYNAMIC_DRAW: 35048,
     FLOAT: 5126,
     TEXTURE_2D: 3553,
     TEXTURE_MIN_FILTER: 10241,
@@ -99,6 +100,9 @@ function makeFakeGl() {
       return { name };
     },
     getAttribLocation(_p, name) {
+      if (name === "a_unit") return 0;
+      if (name === "a_rect") return 1;
+      if (name === "a_color") return 2;
       return name === "a_position" ? 0 : 1;
     },
     createVertexArray() {
@@ -116,10 +120,13 @@ function makeFakeGl() {
     bindVertexArray() {},
     bindBuffer() {},
     bufferData(_target, data) {
-      operations.push({ op: "bufferData", length: data.length });
+      const length = typeof data === "number" ? data : (data?.length ?? 0);
+      operations.push({ op: "bufferData", length });
     },
+    bufferSubData(_target, _offset, _data) {},
     enableVertexAttribArray() {},
     vertexAttribPointer() {},
+    vertexAttribDivisor(_index, _divisor) {},
     createTexture() {
       const tex = { deleted: false, width: 0, height: 0, format: 0, data: null };
       textures.push(tex);
@@ -149,6 +156,9 @@ function makeFakeGl() {
     activeTexture() {},
     drawArrays(_mode, first, count) {
       operations.push({ op: "drawArrays", first, count });
+    },
+    drawArraysInstanced(_mode, _first, _count, _instanceCount) {
+      operations.push({ op: "drawArraysInstanced", _first, _count, _instanceCount });
     },
     readPixels(_x, _y, w, h, _format, _type, buffer) {
       // Mock deterministic RGBA values
