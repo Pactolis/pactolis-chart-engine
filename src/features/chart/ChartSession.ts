@@ -267,6 +267,60 @@ export class ChartSession {
     this.startRaf();
   }
 
+  getSurface(): GpuSurface {
+    return this.gpuSurface;
+  }
+
+  replaceSurface(
+    nextSurface: GpuSurface,
+    onCanvasReplaced?: (nextCanvas: HTMLCanvasElement, prevCanvas: HTMLCanvasElement) => void,
+  ): void {
+    const startedAt = isPerformanceTelemetryEnabled() ? performance.now() : null;
+    this.cancelRaf();
+    if (this.restoreTimeoutId) {
+      clearTimeout(this.restoreTimeoutId);
+      this.restoreTimeoutId = null;
+    }
+
+    const prevCanvas = this.gpuCanvas;
+    const nextCanvas = nextSurface.canvas;
+
+    nextCanvas.dataset.chartSurface = "gpu-scene";
+    if (prevCanvas.style && prevCanvas.style.cssText) {
+      nextCanvas.style.cssText = prevCanvas.style.cssText;
+    }
+
+    if (onCanvasReplaced) {
+      onCanvasReplaced(nextCanvas, prevCanvas);
+    } else if (prevCanvas.parentNode) {
+      prevCanvas.replaceWith(nextCanvas);
+    }
+
+    this.gpuSurface.dispose();
+    this.gpuSurface = nextSurface;
+    this.gpuCanvas = nextCanvas;
+    if (nextSurface.kind === "webgl2" && typeof (nextSurface as any).getGlContext === "function") {
+      this.gl = (nextSurface as any).getGlContext();
+    }
+    this.gpuValid = true;
+
+    if (typeof (this.renderer as any).setSurface === "function") {
+      (this.renderer as any).setSurface(nextSurface);
+    }
+
+    this.applyContainerSize();
+    this.dirtySurfaces = ChartSurfaceDirty.All;
+    this.pendingChanges = ChartChange.All;
+
+    this.setupContextLossHandling();
+
+    if (startedAt !== null) {
+      recordPerformanceDuration("gpu.surface.swap.ms", performance.now() - startedAt);
+    }
+
+    if (this.active) this.startRaf();
+  }
+
   invalidateSurface(surfaces: ChartSurfaceDirty): void {
     this.dirtySurfaces |= surfaces;
     this.startRaf();
@@ -404,13 +458,19 @@ export class ChartSession {
     }
     this.hasRenderedFrame = true;
     this.onRenderedCb?.(dirty, changes);
+    const frameEndedAt = performance.now();
+    const renderMs = frameStartedAt !== null ? frameEndedAt - frameStartedAt : undefined;
     if (frameStartedAt !== null) {
-      const frameEndedAt = performance.now();
       recordPerformanceDuration("chart.frame.render.ms", frameEndedAt - frameStartedAt);
       if (liveUpdateStartedAt !== null) {
         recordPerformanceDuration("chart.liveUpdate.toRenderEnd.ms", frameEndedAt - liveUpdateStartedAt);
       }
     }
+    const intervalMs = this.lastRenderTimestamp !== null && frameEndedAt - this.lastRenderTimestamp < 100
+      ? frameEndedAt - this.lastRenderTimestamp
+      : undefined;
+    this.lastRenderTimestamp = frameEndedAt;
+    recordGpuFrame(this.gpuSurface.kind, renderMs, intervalMs);
 
     if (this.pendingCapture && capturePixels && captureSize && (dirty & ChartSurfaceDirty.Annotation)) {
       const pending = this.pendingCapture;

@@ -1956,7 +1956,7 @@ async function buildChartRuntime(
     const nextSettings = readGpuSettings(doc.defaultView);
     const nextCanvas = doc.createElement("canvas");
     const nextSurface = createGpuSurface(nextCanvas, nextSettings.backend, display.webgl);
-    runtime.session.replaceSurface(nextSurface, (canvasNext, canvasPrev) => {
+    runtime.session.replaceSurface(nextSurface, (canvasNext: HTMLCanvasElement, canvasPrev: HTMLCanvasElement) => {
       canvasPrev.replaceWith(canvasNext);
       hook.setAttribute("data-gpu-backend", nextSurface.kind);
     });
