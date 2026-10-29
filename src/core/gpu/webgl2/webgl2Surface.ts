@@ -29,7 +29,18 @@ export class WebGl2Surface implements GpuSurface {
   private dpr = 1;
   private disposed = false;
   private readonly lostListeners = new Set<(reason: GpuLossReason) => void>();
-  private readonly unbindLoss: () => void;
+  private contextLostBound = false;
+
+  private readonly handleContextLost = (e: Event): void => {
+    e.preventDefault();
+    for (const listener of [...this.lostListeners]) {
+      try {
+        listener("context-lost");
+      } catch (err) {
+        console.error("[WebGl2Surface] onLost listener error", err);
+      }
+    }
+  };
 
   constructor(
     public readonly canvas: HTMLCanvasElement,
@@ -42,22 +53,6 @@ export class WebGl2Surface implements GpuSurface {
       && typeof gl.createProgram === "function"
     );
     this.batch = batch ?? (canCreateBatch ? new QuadBatch(gl) : makeNoopBatch());
-
-    const onLost = (e: Event): void => {
-      e.preventDefault();
-      for (const listener of [...this.lostListeners]) {
-        try {
-          listener("context-lost");
-        } catch (err) {
-          console.error("[WebGl2Surface] onLost listener error", err);
-        }
-      }
-    };
-
-    canvas.addEventListener?.("webglcontextlost", onLost);
-    this.unbindLoss = () => {
-      canvas.removeEventListener?.("webglcontextlost", onLost);
-    };
   }
 
   getGlContext(): WebGL2RenderingContext {
@@ -138,16 +133,28 @@ export class WebGl2Surface implements GpuSurface {
   }
 
   onLost(listener: (reason: GpuLossReason) => void): () => void {
+    if (this.disposed) return () => {};
+    if (!this.contextLostBound && this.canvas.addEventListener) {
+      this.canvas.addEventListener("webglcontextlost", this.handleContextLost);
+      this.contextLostBound = true;
+    }
     this.lostListeners.add(listener);
     return () => {
       this.lostListeners.delete(listener);
+      if (this.lostListeners.size === 0 && this.contextLostBound && this.canvas.removeEventListener) {
+        this.canvas.removeEventListener("webglcontextlost", this.handleContextLost);
+        this.contextLostBound = false;
+      }
     };
   }
 
   dispose(): void {
     if (this.disposed) return;
     this.disposed = true;
-    this.unbindLoss();
+    if (this.contextLostBound && this.canvas.removeEventListener) {
+      this.canvas.removeEventListener("webglcontextlost", this.handleContextLost);
+      this.contextLostBound = false;
+    }
     this.lostListeners.clear();
     this.batch.dispose();
   }

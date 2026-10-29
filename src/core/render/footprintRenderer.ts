@@ -6,8 +6,9 @@ function isGpuSurface(value: unknown): value is GpuSurface {
   return Boolean(
     value
     && typeof value === "object"
+    && "kind" in (value as object)
+    && ((value as any).kind === "webgl2" || (value as any).kind === "canvas2d" || (value as any).kind === "webgpu")
     && typeof (value as GpuSurface).beginFrame === "function"
-    && (value as GpuSurface).canvas
   );
 }
 import type { RGBA } from "../engine/gl.js";
@@ -134,7 +135,7 @@ export class FootprintRenderer {
   }
 
   dispose(): void {
-    this.rawBatch?.dispose();
+    (this.batch as any).dispose?.();
     this.currentFrame = null;
   }
 
@@ -164,8 +165,8 @@ export class FootprintRenderer {
       this.currentFrame.flushQuads();
       this.currentFrame.end();
       this.currentFrame = null;
-    } else if (this.rawBatch && this.gl) {
-      this.rawBatch.flush(this.gl.drawingBufferWidth / dpr, this.gl.drawingBufferHeight / dpr);
+    } else if (this.gl) {
+      (this.batch as any).flush?.(this.gl.drawingBufferWidth / dpr, this.gl.drawingBufferHeight / dpr);
     }
   }
 
@@ -211,8 +212,7 @@ export class FootprintRenderer {
       this.batch = frame.quads;
     } else {
       measurePerformance("chart.gpu.clear.ms", () => this.clear());
-      this.rawBatch?.begin();
-      if (this.rawBatch) this.batch = this.rawBatch;
+      (this.batch as any).begin?.();
     }
 
     const step = series.config.priceStep;

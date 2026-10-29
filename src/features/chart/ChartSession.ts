@@ -358,6 +358,7 @@ export class ChartSession {
     this.lifecycle.dispose();
     this.disposeDprWatcher?.();
     this.disposeDprWatcher = null;
+    this.gpuSurface.dispose();
     this.gpuValid = false;
   }
 
