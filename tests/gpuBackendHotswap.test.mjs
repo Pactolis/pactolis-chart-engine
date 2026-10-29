@@ -91,6 +91,12 @@ function makeFakeWebGpuDevice(format = "rgba8unorm") {
         uncapturedListeners.delete(cb);
       }
     },
+    createShaderModule(desc) {
+      return { label: desc?.label, code: desc?.code };
+    },
+    createSampler(desc) {
+      return { label: desc?.label };
+    },
     createBuffer(desc) {
       const buf = makeFakeGpuBuffer(desc.size, desc.usage);
       buf.label = desc.label;
@@ -98,22 +104,22 @@ function makeFakeWebGpuDevice(format = "rgba8unorm") {
       return buf;
     },
     createBindGroupLayout(desc) {
-      return { label: desc.label, entries: desc.entries };
+      return { label: desc?.label, entries: desc?.entries };
     },
     createBindGroup(desc) {
-      return { label: desc.label, layout: desc.layout, entries: desc.entries };
+      return { label: desc?.label, layout: desc?.layout, entries: desc?.entries };
     },
     createPipelineLayout(desc) {
-      return { label: desc.label, bindGroupLayouts: desc.bindGroupLayouts };
+      return { label: desc?.label, bindGroupLayouts: desc?.bindGroupLayouts };
     },
     createRenderPipeline(desc) {
-      return { label: desc.label, layout: desc.layout, vertex: desc.vertex, fragment: desc.fragment };
+      return { label: desc?.label, layout: desc?.layout, vertex: desc?.vertex, fragment: desc?.fragment };
     },
     createCommandEncoder(desc) {
       const recordedDraws = [];
       const copies = [];
       return {
-        label: desc.label,
+        label: desc?.label,
         beginRenderPass(passDesc) {
           const pass = {
             desc: passDesc,
@@ -272,13 +278,26 @@ test("backend hotswap (webgl2 -> canvas2d -> webgpu) updates renderer surface an
     setSurface(nextSurface) {
       currentSurfaceInRenderer = nextSurface;
     },
-    render(surface) {
+    visibleRange() {
+      return [0, 10];
+    },
+    render(view, series) {
+      void view;
+      void series;
+      const surface = currentSurfaceInRenderer || webglSurface;
       const frame = surface.beginFrame({ r: 0, g: 0, b: 0, a: 1 });
       frame.quads.rect(10, 10, 50, 20, { r: 1, g: 0, b: 0, a: 1 });
       quadsRendered += frame.quads.count;
       frame.flushQuads(640, 360);
       frame.end();
     },
+  };
+
+  const container = {
+    style: {},
+    appendChild() {},
+    removeChild() {},
+    getBoundingClientRect: () => ({ width: 640, height: 360 }),
   };
 
   const win = {
@@ -288,26 +307,34 @@ test("backend hotswap (webgl2 -> canvas2d -> webgpu) updates renderer surface an
     cancelAnimationFrame: () => {},
     matchMedia: () => ({ addEventListener() {}, removeEventListener() {} }),
   };
-  const doc = { defaultView: win };
+  const doc = { defaultView: win, createElement: () => makeFakeCanvas({ "2d": fake2d, webgl2: fakeGl }) };
 
   const session = new ChartSession({
-    doc,
-    canvas: canvasGl,
+    container,
+    gpuCanvas: canvasGl,
+    gpuSurface: webglSurface,
     annotationCanvas: makeFakeCanvas({ "2d": fake2d }),
     interactionCanvas: makeFakeCanvas({ "2d": fake2d }),
-    gpuSurface: webglSurface,
+    ownerDocument: doc,
+    annotationCtx2d: fake2d,
+    interactionCtx2d: fake2d,
     renderer: mockRenderer,
-    renderAnnotations: () => {},
-    measureContainerSize: () => ({ width: 640, height: 360 }),
-    renderInteraction: () => {},
+    annotation: { render() {} },
+    interaction: { render() {} },
+    view: {},
+    series: [],
+    crosshair: {},
+    onLostContext: () => {},
+    onRestoreContext: () => {},
+    onResize: () => {},
   });
 
-  // Verify initial surface in renderer
-  assert.equal(session.getGpuSurface().kind, "webgl2");
+  // Verify initial surface in session
+  assert.equal(session.getSurface().kind, "webgl2");
   assert.equal(getGpuDiagnostics().active, "webgl2");
 
   // Initial draw
-  mockRenderer.render(session.getGpuSurface());
+  mockRenderer.render(null, null);
   assert.equal(quadsRendered, 1);
 
   // 1. Swap WebGL2 -> Canvas2D
@@ -315,12 +342,12 @@ test("backend hotswap (webgl2 -> canvas2d -> webgpu) updates renderer surface an
   recordGpuBackendSelection("canvas2d", "canvas2d");
   session.replaceSurface(surface2d, (next, prev) => prev.replaceWith(next));
 
-  assert.equal(session.getGpuSurface().kind, "canvas2d");
+  assert.equal(session.getSurface().kind, "canvas2d");
   assert.equal(currentSurfaceInRenderer, surface2d);
   assert.equal(getGpuDiagnostics().active, "canvas2d");
 
   // Draw on Canvas2D surface
-  mockRenderer.render(session.getGpuSurface());
+  mockRenderer.render(null, null);
   assert.equal(quadsRendered, 2);
 
   // 2. Swap Canvas2D -> WebGPU
@@ -328,12 +355,12 @@ test("backend hotswap (webgl2 -> canvas2d -> webgpu) updates renderer surface an
   recordGpuBackendSelection("webgpu", "webgpu");
   session.replaceSurface(webgpuSurface, (next, prev) => prev.replaceWith(next));
 
-  assert.equal(session.getGpuSurface().kind, "webgpu");
+  assert.equal(session.getSurface().kind, "webgpu");
   assert.equal(currentSurfaceInRenderer, webgpuSurface);
   assert.equal(getGpuDiagnostics().active, "webgpu");
 
   // Draw on WebGPU surface
-  mockRenderer.render(session.getGpuSurface());
+  mockRenderer.render(null, null);
   assert.equal(quadsRendered, 3);
 
   session.dispose();
@@ -349,6 +376,7 @@ test("residentHeatmap and asyncCapture settings changes do not trigger replaceSu
       replaceSurfaceCalls++;
     },
     invalidateSurface(mask) {
+      void mask;
       invalidateSurfaceCalls++;
     },
   };

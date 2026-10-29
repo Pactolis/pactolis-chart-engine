@@ -206,7 +206,7 @@ test("GpuDiagnostics snapshot records frames and exports valid JSON", () => {
   recordGpuContextEvent("restored");
 
   const snapshot = getGpuDiagnostics();
-  assert.equal(snapshot.engine, "0.2.0");
+  assert.equal(snapshot.engine, "0.2.1");
   assert.equal(snapshot.counters["gpu.backend.webgl2.frames"], 2);
   assert.equal(snapshot.counters["chart.gpu.contextLost"], 1);
   assert.equal(snapshot.counters["chart.gpu.contextRestored"], 1);
@@ -215,7 +215,7 @@ test("GpuDiagnostics snapshot records frames and exports valid JSON", () => {
 
   const jsonStr = copyGpuDiagnosticsJson();
   const parsed = JSON.parse(jsonStr);
-  assert.equal(parsed.engine, "0.2.0");
+  assert.equal(parsed.engine, "0.2.1");
   assert.equal(parsed.counters["gpu.backend.webgl2.frames"], 2);
 });
 
