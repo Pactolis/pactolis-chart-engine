@@ -432,10 +432,12 @@ export class ChartSession {
             if (!ctx2d) throw new ChartCaptureError("CAPTURE_FAILED", "Canvas2D context unavailable for capture");
             const imgData = ctx2d.getImageData(0, 0, captureSize.width, captureSize.height);
             capturePixels = imgData.data;
-          } else {
+          } else if (this.gl && typeof this.gl.readPixels === "function") {
             const raw = new Uint8Array(captureSize.width * captureSize.height * 4);
             this.gl.readPixels(0, 0, captureSize.width, captureSize.height, this.gl.RGBA, this.gl.UNSIGNED_BYTE, raw);
             capturePixels = flipRgbaRows(raw, captureSize.width, captureSize.height);
+          } else {
+            throw new ChartCaptureError("CAPTURE_FAILED", `Synchronous capture unsupported for ${this.gpuSurface.kind} surface`);
           }
         } catch (error) {
           const pending = this.pendingCapture;
@@ -658,6 +660,37 @@ export class ChartSession {
     if (this.cleanupContextListeners) {
       this.cleanupContextListeners();
       this.cleanupContextListeners = null;
+    }
+
+    if (this.gpuSurface.kind === "webgpu") {
+      const unbind = this.gpuSurface.onLost((reason) => {
+        incrementPerformanceCounter("chart.gpu.contextLost");
+        this.cancelRaf();
+        this.pendingLiveUpdateStartedAt = null;
+        this.gpuValid = false;
+        this.dirtySurfaces = ChartSurfaceDirty.None;
+        this.pendingChanges = ChartChange.None;
+        this.rejectPendingCapture("WebGPU device was lost during capture");
+        this.onLostContextCb?.();
+
+        recordGpuFallback("webgpu", "webgl2", reason);
+        try {
+          const fallbackCanvas = this.ownerDocument.createElement("canvas");
+          const fallbackGl = fallbackCanvas.getContext("webgl2") as WebGL2RenderingContext | null;
+          if (fallbackGl) {
+            this.replaceSurface(new WebGl2Surface(fallbackCanvas, fallbackGl));
+          } else {
+            recordGpuFallback("webgl2", "canvas2d", "fallback_context_unavailable");
+            this.replaceSurface(new Canvas2dSurface(fallbackCanvas));
+          }
+        } catch (err) {
+          console.error("[ChartSession] WebGPU fallback failed", err);
+        }
+      });
+
+      this.cleanupContextListeners = unbind;
+      this.lifecycle.add(unbind);
+      return;
     }
 
     const canvas = this.gpuCanvas;
