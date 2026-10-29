@@ -72,7 +72,12 @@ export class WebGpuSurface implements GpuSurface {
     }
 
     this.pipeline = pipeline ?? new WebGpuQuadPipeline(handle.device, handle.format);
-    this.heatmap = new WebGpuHeatmapLayer(handle.device, handle.format);
+    const canCreateHeatmap = Boolean(
+      handle.device
+      && typeof handle.device.createShaderModule === "function"
+      && typeof handle.device.createSampler === "function"
+    );
+    this.heatmap = canCreateHeatmap ? new WebGpuHeatmapLayer(handle.device, handle.format) : null;
 
     this.unbindDeviceLoss = handle.onLost((reason) => {
       const mappedReason: GpuLossReason = reason === "validation-failed" ? "validation-failed" : "device-lost";

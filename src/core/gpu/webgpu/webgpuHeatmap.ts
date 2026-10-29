@@ -63,12 +63,16 @@ export class WebGpuHeatmapLayer implements HeatmapLayer {
   constructor(
     private readonly device: any,
     public readonly format: string,
-  ) {
-    if (!device || typeof device.createShaderModule !== "function") {
-      return;
-    }
+  ) {}
+
+  private ensureInitialized(): boolean {
+    if (this.disposed || !this.device) return false;
+    if (this.pipeline && this.sampler && this.uniformBuffer) return true;
 
     try {
+      const device = this.device;
+      if (typeof device.createShaderModule !== "function") return false;
+
       const shaderModule = device.createShaderModule({
         label: "HeatmapShaderModule",
         code: HEATMAP_WGSL,
@@ -124,7 +128,7 @@ export class WebGpuHeatmapLayer implements HeatmapLayer {
           entryPoint: "fs_main",
           targets: [
             {
-              format,
+              format: this.format,
               blend: {
                 color: {
                   srcFactor: "src-alpha",
@@ -144,13 +148,17 @@ export class WebGpuHeatmapLayer implements HeatmapLayer {
           topology: "triangle-list",
         },
       });
+
+      return Boolean(this.pipeline && this.sampler && this.uniformBuffer);
     } catch (err) {
-      console.warn("[WebGpuHeatmapLayer] initialization error:", err);
+      console.warn("[WebGpuHeatmapLayer] lazy initialization error:", err);
+      return false;
     }
   }
 
   upload(width: number, height: number, data: Uint8Array | Float32Array): void {
     if (this.disposed || !this.device) return;
+    if (!this.ensureInitialized()) return;
     this.width = width;
     this.height = height;
 
@@ -259,7 +267,9 @@ export class WebGpuHeatmapLayer implements HeatmapLayer {
     rect?: { x: number; y: number; w: number; h: number },
     opacity = 1.0,
   ): void {
-    if (this.disposed || !this.pipeline || !this.bindGroup || !passEncoder) return;
+    if (this.disposed || !passEncoder) return;
+    if (!this.ensureInitialized()) return;
+    if (!this.pipeline || !this.bindGroup) return;
 
     const targetRect = rect ?? this.lastDrawParams?.rect;
     if (!targetRect) return;
@@ -308,5 +318,9 @@ export class WebGpuHeatmapLayer implements HeatmapLayer {
     this.texture = null;
     this.textureView = null;
     this.bindGroup = null;
+    this.pipeline = null;
+    this.sampler = null;
+    this.uniformBuffer = null;
+    this.bindGroupLayout = null;
   }
 }

@@ -58,7 +58,14 @@ export class WebGl2Surface implements GpuSurface {
       && typeof gl.createProgram === "function"
     );
     this.batch = batch ?? (canCreateBatch ? new QuadBatch(gl) : makeNoopBatch());
-    this._heatmap = new WebGl2HeatmapLayer(gl);
+    const canCreateHeatmap = Boolean(
+      gl
+      && typeof gl.createShader === "function"
+      && typeof gl.createProgram === "function"
+      && typeof gl.getShaderParameter === "function"
+      && typeof gl.createTexture === "function"
+    );
+    this._heatmap = canCreateHeatmap ? new WebGl2HeatmapLayer(gl) : null;
   }
 
   getGlContext(): WebGL2RenderingContext {
@@ -74,7 +81,14 @@ export class WebGl2Surface implements GpuSurface {
     this.gl = nextGl;
     this.batch.dispose();
     this._heatmap?.dispose();
-    this._heatmap = new WebGl2HeatmapLayer(nextGl);
+    const canCreateHeatmap = Boolean(
+      nextGl
+      && typeof nextGl.createShader === "function"
+      && typeof nextGl.createProgram === "function"
+      && typeof nextGl.getShaderParameter === "function"
+      && typeof nextGl.createTexture === "function"
+    );
+    this._heatmap = canCreateHeatmap ? new WebGl2HeatmapLayer(nextGl) : null;
     const canCreateBatch = Boolean(
       nextGl
       && typeof nextGl.createVertexArray === "function"
@@ -167,5 +181,7 @@ export class WebGl2Surface implements GpuSurface {
     }
     this.lostListeners.clear();
     this.batch.dispose();
+    this._heatmap?.dispose();
+    this._heatmap = null;
   }
 }

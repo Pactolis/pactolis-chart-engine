@@ -72,6 +72,12 @@ function makeFakeGl() {
       shader.source = src;
     },
     compileShader() {},
+    getShaderParameter(_shader, _pname) {
+      return true;
+    },
+    getShaderInfoLog() {
+      return "";
+    },
     createProgram() {
       const prog = { attached: [], linked: true };
       programs.push(prog);
@@ -81,6 +87,12 @@ function makeFakeGl() {
       prog.attached.push(shader);
     },
     linkProgram() {},
+    getProgramParameter(_program, _pname) {
+      return true;
+    },
+    getProgramInfoLog() {
+      return "";
+    },
     deleteShader() {},
     deleteProgram(p) { p.deleted = true; },
     getUniformLocation(_p, name) {

@@ -42,17 +42,19 @@ export class WebGl2HeatmapLayer implements HeatmapLayer {
   private uTexture: WebGLUniformLocation | null = null;
   private disposed = false;
 
-  constructor(private readonly gl: WebGL2RenderingContext) {
-    if (!gl || typeof gl.createShader !== "function") {
-      return;
-    }
+  constructor(private readonly gl: WebGL2RenderingContext) {}
+
+  private ensureInitialized(): boolean {
+    if (this.disposed || !this.gl) return false;
+    if (this.program && this.vao) return true;
 
     try {
       this.initShaders();
       this.initBuffers();
-      this.texture = gl.createTexture();
+      return Boolean(this.program && this.vao);
     } catch (err) {
-      console.warn("[WebGl2HeatmapLayer] initialization error:", err);
+      console.warn("[WebGl2HeatmapLayer] lazy initialization error:", err);
+      return false;
     }
   }
 
@@ -116,6 +118,7 @@ export class WebGl2HeatmapLayer implements HeatmapLayer {
 
   upload(width: number, height: number, data: Uint8Array | Float32Array): void {
     if (this.disposed || !this.gl) return;
+    if (!this.ensureInitialized()) return;
     this.width = width;
     this.height = height;
 
@@ -174,6 +177,7 @@ export class WebGl2HeatmapLayer implements HeatmapLayer {
 
   draw(rect: { x: number; y: number; w: number; h: number }, opacity = 1.0): void {
     if (this.disposed || !this.gl || !this.texture) return;
+    if (!this.ensureInitialized()) return;
 
     const gl = this.gl;
     if (!this.program || !this.vao) return;
