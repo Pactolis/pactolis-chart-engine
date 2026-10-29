@@ -44,12 +44,14 @@ import type { GpuSurface } from "../../core/gpu/gpuBackend.js";
 import { Canvas2dSurface } from "../../core/gpu/canvas2d/canvas2dSurface.js";
 import { WebGl2Surface } from "../../core/gpu/webgl2/webgl2Surface.js";
 import { recordGpuFallback, recordGpuFrame } from "../../core/gpu/gpuDiagnostics.js";
+import { readGpuSettings } from "../../core/gpu/gpuSettings.js";
 
 const CONTEXT_RESTORE_TIMEOUT_MS = 5000;
 
 export interface ChartSessionRenderer {
   render(view: View, series: FootprintSeries): void;
   visibleRange(view: View, total: number): [number, number];
+  setSurface?(surface: GpuSurface): void;
 }
 
 export interface ChartSessionAnnotation {
@@ -308,7 +310,18 @@ export class ChartSession {
       (this.renderer as any).setSurface(nextSurface);
     }
 
-    this.applyContainerSize();
+    const target = this.measureContainerSize();
+    if (target) {
+      nextCanvas.style.width = target.cssWidth;
+      nextCanvas.style.height = target.cssHeight;
+      nextCanvas.width = target.bitmapWidth;
+      nextCanvas.height = target.bitmapHeight;
+      nextSurface.resize(target.bitmapWidth, target.bitmapHeight, target.dpr);
+      this.unfinishedResize = { w: target.w, h: target.h, dpr: target.dpr };
+      this.finishPendingResize();
+    } else {
+      this.applyContainerSize();
+    }
     this.dirtySurfaces = ChartSurfaceDirty.All;
     this.pendingChanges = ChartChange.All;
 
@@ -416,10 +429,12 @@ export class ChartSession {
     this.pendingChanges = ChartChange.None;
     let capturePixels: Uint8ClampedArray | null = null;
     let captureSize: { width: number; height: number } | null = null;
+    const gpuSettings = readGpuSettings(this.ownerDocument.defaultView);
+    const useAsyncCapture = Boolean(gpuSettings.asyncCapture || this.gpuSurface.kind === "webgpu");
     if (dirty & ChartSurfaceDirty.GpuScene) {
       incrementPerformanceCounter("chart.surface.gpu.draw");
       measurePerformance("chart.surface.gpu.draw.ms", () => this.renderer.render(this.view, this.series));
-      if (this.pendingCapture) {
+      if (this.pendingCapture && !useAsyncCapture) {
         try {
           captureSize = validateCaptureDimensions(
             this.gpuCanvas.width,
@@ -475,16 +490,40 @@ export class ChartSession {
     this.lastRenderTimestamp = frameEndedAt;
     recordGpuFrame(this.gpuSurface.kind, renderMs, intervalMs);
 
-    if (this.pendingCapture && capturePixels && captureSize && (dirty & ChartSurfaceDirty.Annotation)) {
+    if (this.pendingCapture && (dirty & ChartSurfaceDirty.Annotation)) {
       const pending = this.pendingCapture;
       this.pendingCapture = null;
-      void encodeGpuAndAnnotationPng(
-        this.ownerDocument,
-        capturePixels,
-        captureSize.width,
-        captureSize.height,
-        this.annotationCanvas,
-      ).then(pending.resolve, pending.reject);
+      if (useAsyncCapture) {
+        (async () => {
+          try {
+            validateCaptureDimensions(
+              this.gpuCanvas.width,
+              this.gpuCanvas.height,
+              this.annotationCanvas.width,
+              this.annotationCanvas.height,
+            );
+            const frame = await this.gpuSurface.requestCapture();
+            const captureFrame = await encodeGpuAndAnnotationPng(
+              this.ownerDocument,
+              frame.data,
+              frame.width,
+              frame.height,
+              this.annotationCanvas,
+            );
+            pending.resolve(captureFrame);
+          } catch (err) {
+            pending.reject(err);
+          }
+        })();
+      } else if (capturePixels && captureSize) {
+        void encodeGpuAndAnnotationPng(
+          this.ownerDocument,
+          capturePixels,
+          captureSize.width,
+          captureSize.height,
+          this.annotationCanvas,
+        ).then(pending.resolve, pending.reject);
+      }
     }
   }
 

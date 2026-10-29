@@ -1,5 +1,10 @@
 import { Canvas2dSurface } from "./canvas2d/canvas2dSurface.js";
-import { recordGpuBackendSelection, recordGpuContextEvent, recordGpuFallback } from "./gpuDiagnostics.js";
+import {
+  recordGpuBackendSelection,
+  recordGpuContextEvent,
+  recordGpuFallback,
+  setGpuLimits,
+} from "./gpuDiagnostics.js";
 import type { GpuBackendPreference } from "./gpuSettings.js";
 import type { GpuSurface } from "./gpuBackend.js";
 import { WebGl2Surface } from "./webgl2/webgl2Surface.js";
@@ -22,11 +27,26 @@ export function createGpuSurface(
   }
 
   if (preference === "webgpu" && webgpuHandle && !webgpuHandle.isLost()) {
-    recordGpuBackendSelection(preference, "webgpu");
-    return new WebGpuSurface(canvas, webgpuHandle);
+    let hasWebgpuContext = false;
+    try {
+      hasWebgpuContext = Boolean(canvas.getContext && canvas.getContext("webgpu"));
+    } catch {
+      hasWebgpuContext = false;
+    }
+
+    if (hasWebgpuContext) {
+      if (webgpuHandle.limits) {
+        setGpuLimits({
+          maxBufferSize: webgpuHandle.limits.maxBufferSize,
+          maxTextureDimension2D: webgpuHandle.limits.maxTextureDimension2D,
+        });
+      }
+      recordGpuBackendSelection(preference, "webgpu");
+      return new WebGpuSurface(canvas, webgpuHandle);
+    }
   }
 
-  if (preference === "webgpu" && (!webgpuHandle || webgpuHandle.isLost())) {
+  if (preference === "webgpu") {
     recordGpuFallback("webgpu", "webgl2", "device_unavailable");
   }
 
@@ -62,18 +82,66 @@ export async function createGpuSurfaceAsync(
   canvas: HTMLCanvasElement,
   preference: GpuBackendPreference = "webgl2",
   providedGl?: WebGL2RenderingContext | null,
+  getWebGl2Context?: (canvas: HTMLCanvasElement) => WebGL2RenderingContext | null,
 ): Promise<GpuSurface> {
   if (preference === "canvas2d") {
     return createGpuSurface(canvas, "canvas2d");
   }
 
-  if (preference === "webgpu") {
-    const handle = await requestWebGpuDevice();
-    if (handle && !handle.isLost()) {
-      return createGpuSurface(canvas, "webgpu", providedGl, handle);
+  if (preference === "webgpu" || preference === "auto") {
+    try {
+      const handle = await requestWebGpuDevice();
+      if (handle && !handle.isLost()) {
+        const hasWebGpuContext = Boolean(canvas.getContext && canvas.getContext("webgpu"));
+        if (hasWebGpuContext) {
+          if (handle.limits) {
+            setGpuLimits({
+              maxBufferSize: handle.limits.maxBufferSize,
+              maxTextureDimension2D: handle.limits.maxTextureDimension2D,
+            });
+          }
+          recordGpuBackendSelection(preference, "webgpu");
+          return new WebGpuSurface(canvas, handle);
+        }
+      }
+    } catch {
+      // ignore and proceed to WebGL2 fallback
     }
-    recordGpuFallback("webgpu", "webgl2", "device_request_failed");
+    if (preference === "webgpu") {
+      recordGpuFallback("webgpu", "webgl2", "device_unavailable");
+    }
   }
 
-  return createGpuSurface(canvas, preference === "webgpu" ? "webgl2" : preference, providedGl);
+  let gl = providedGl;
+  if (gl === undefined) {
+    if (getWebGl2Context) {
+      try {
+        gl = getWebGl2Context(canvas);
+      } catch {
+        gl = null;
+      }
+    } else {
+      try {
+        gl = canvas.getContext("webgl2") as WebGL2RenderingContext | null;
+      } catch {
+        gl = null;
+      }
+    }
+  }
+
+  if (gl) {
+    recordGpuBackendSelection(preference, "webgl2");
+    return new WebGl2Surface(canvas, gl);
+  }
+
+  recordGpuFallback("webgl2", "canvas2d", "context_unavailable");
+  recordGpuContextEvent("createFailed");
+
+  const ctx2d = canvas.getContext("2d");
+  if (!ctx2d) {
+    throw new Error("selectBackend: failed to acquire WebGPU, WebGL2 and Canvas2D contexts");
+  }
+
+  recordGpuBackendSelection(preference, "canvas2d");
+  return new Canvas2dSurface(canvas, ctx2d);
 }

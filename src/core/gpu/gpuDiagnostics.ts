@@ -31,7 +31,7 @@ export interface GpuDiagnosticsSnapshot {
   readonly frame?: GpuFrameMetrics;
 }
 
-const ENGINE_VERSION = "0.2.0";
+const ENGINE_VERSION = "0.2.1";
 const MAX_SAMPLES = 120;
 
 let requestedBackend = "webgl2";
