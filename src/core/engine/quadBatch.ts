@@ -2,6 +2,7 @@ import { incrementPerformanceCounter } from "../performanceTelemetry.js";
 // Batched colored-quad renderer. Accepts rectangles in CSS-pixel space
 // (origin top-left) and draws them in one instanced draw call per flush.
 import { createProgram, type RGBA } from "./gl.js";
+import type { QuadSink } from "../gpu/gpuBackend.js";
 
 const VERT_SRC = `#version 300 es
 in vec2 a_unit;       // static unit-quad corner (0..1)
@@ -27,7 +28,7 @@ void main() {
 const FLOATS_PER_INSTANCE = 8; // rect.x, rect.y, rect.w, rect.h, r, g, b, a
 const UNIT_QUAD = new Float32Array([0, 0, 1, 0, 1, 1, 0, 0, 1, 1, 0, 1]); // two triangles
 
-export class QuadBatch {
+export class QuadBatch implements QuadSink {
   private readonly program: WebGLProgram;
   private readonly vao: WebGLVertexArrayObject;
   private readonly unitBuffer: WebGLBuffer;

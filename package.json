@@ -110,6 +110,22 @@
       "types": "./dist/core/footprintPolicy.d.ts",
       "default": "./dist/core/footprintPolicy.js"
     },
+    "./core/gpu/gpuBackend": {
+      "types": "./dist/core/gpu/gpuBackend.d.ts",
+      "default": "./dist/core/gpu/gpuBackend.js"
+    },
+    "./core/gpu/gpuDiagnostics": {
+      "types": "./dist/core/gpu/gpuDiagnostics.d.ts",
+      "default": "./dist/core/gpu/gpuDiagnostics.js"
+    },
+    "./core/gpu/gpuSettings": {
+      "types": "./dist/core/gpu/gpuSettings.d.ts",
+      "default": "./dist/core/gpu/gpuSettings.js"
+    },
+    "./core/gpu/selectBackend": {
+      "types": "./dist/core/gpu/selectBackend.d.ts",
+      "default": "./dist/core/gpu/selectBackend.js"
+    },
     "./core/indicatorTypes": {
       "types": "./dist/core/indicatorTypes.d.ts",
       "default": "./dist/core/indicatorTypes.js"
