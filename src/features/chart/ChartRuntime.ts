@@ -251,7 +251,7 @@ class ChartRuntimeImpl implements ChartRuntime, ChartInputHost {
     readonly seriesResetEpoch: number;
     readonly closedCount: number;
     readonly selectionGeneration: number;
-    readonly canonicalRevision: number;
+    readonly canonicalRevision: number | null;
     readonly canonicalStatus: string;
     readonly drawingsSignature: string;
     readonly indicatorsSignature: string;
