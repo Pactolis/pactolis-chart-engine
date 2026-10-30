@@ -26,7 +26,7 @@ import {
   chartLodForSpacing,
   type OhlcBarLike,
 } from "./chartLod.js";
-import { resolveBuiltInLayerPreset } from "./scene/chartLayerPreset.js";
+import { resolveBuiltInLayerPreset, type BuiltInChartType } from "./scene/chartLayerPreset.js";
 import { measurePerformance } from "../performanceTelemetry.js";
 import {
   cellAverageTradeSize,
@@ -101,9 +101,9 @@ export class FootprintRenderer {
   private readonly imbalanceCache = new WeakMap<FootprintBar, BarImbalanceCache>();
   private readonly scratchCellRect = { yTop: 0, height: 0 };
   private readonly scratchClipRect = { yTop: 0, height: 0 };
-  private static readonly LAYER_PRESET_CACHE = new Map<ChartType, ReadonlySet<string>>();
+  private static readonly LAYER_PRESET_CACHE = new Map<BuiltInChartType, ReadonlySet<string>>();
 
-  private static getLayerPreset(chartType: ChartType): ReadonlySet<string> {
+  private static getLayerPreset(chartType: BuiltInChartType): ReadonlySet<string> {
     let cached = FootprintRenderer.LAYER_PRESET_CACHE.get(chartType);
     if (!cached) {
       cached = new Set(resolveBuiltInLayerPreset(chartType).gpu);
