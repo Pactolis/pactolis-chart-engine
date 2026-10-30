@@ -10,6 +10,8 @@ import type {
   IndicatorCrosshair,
   IndicatorDrawContext,
   IndicatorInstance,
+  IndicatorPaneRect,
+  IndicatorPaneRender,
   IndicatorPreparedData,
   IndicatorSettings,
 } from "../indicators/types.js";
@@ -60,8 +62,8 @@ export class ChartIndicatorController {
   private cachedPaneRendersRevision = -1;
   private cachedPaneRendersTimeframe = "";
   private cachedPaneRendersMaximized: boolean | null = null;
-  private cachedBasePanesRef: ReturnType<IndicatorManager["getPaneRenders"]> | null = null;
-  private cachedControllerPaneRenders: ReturnType<IndicatorManager["getPaneRenders"]> = [];
+  private cachedBasePanesRef: readonly IndicatorPaneRender[] | null = null;
+  private cachedControllerPaneRenders: IndicatorPaneRender[] = [];
   private cachedRequiresInteractionRedraw = false;
 
   clearInteractionCache(): void {
@@ -108,11 +110,11 @@ export class ChartIndicatorController {
   isChartPaneMaximized(): boolean { return this.manager.isChartPaneMaximized(); }
   toggleChartPaneMaximized(): void { this.manager.toggleChartPaneMaximized(); }
   hasSeparatePanes(): boolean { return this.manager.hasSeparatePanes(); }
-  getPaneRenders(): ReturnType<IndicatorManager["getPaneRenders"]> {
+  getPaneRenders(): IndicatorPaneRender[] {
     const basePanes = this.manager.getPaneRenders();
     const revision = this.manager.getRenderRevision();
     const timeframe = this.options.getChartContext().timeframe;
-    const isMaximized = this.manager.isPaneMaximized();
+    const isMaximized = this.manager.isIndicatorPaneMaximized();
 
     if (
       this.cachedBasePanesRef === basePanes
@@ -124,7 +126,7 @@ export class ChartIndicatorController {
     }
 
     const instances = new Map(this.manager.peekInstances().map((instance) => [instance.id, instance]));
-    const result = basePanes.map((pane) => {
+    const result: IndicatorPaneRender[] = basePanes.map((pane) => {
       const instance = instances.get(pane.id);
       const definition = instance ? getIndicatorDefinition(instance.type) : undefined;
       const drawInteraction = definition?.drawInteraction
@@ -137,7 +139,14 @@ export class ChartIndicatorController {
       }
       return {
         ...pane,
-        drawInteraction: (ctx, view, series, rect, range, crosshair) => {
+        drawInteraction: (
+          ctx: CanvasRenderingContext2D,
+          view: View,
+          series: FootprintSeries,
+          rect: IndicatorPaneRect,
+          range: [number, number],
+          crosshair: IndicatorCrosshair,
+        ) => {
           if (definition.inputSource === "view") return;
           const drawContext: IndicatorDrawContext<IndicatorSettings> = {
             ctx,
