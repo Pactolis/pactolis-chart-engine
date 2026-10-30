@@ -6,6 +6,7 @@ globalThis.$state ??= (value) => value;
 const { ChartHistoryController } = await import("../dist/features/chart/ChartHistoryController.js");
 const { FootprintSeries } = await import("../dist/core/model/footprint.js");
 const { bucketStart, WEEK_MS } = await import("../dist/core/time.js");
+const { useFakeChartDataSource } = await import("./support/fakeChartDataSource.mjs");
 
 function deferred() {
   let resolve;
@@ -89,7 +90,8 @@ test("bucketStart at unix epoch zero rounds backward to previous Monday", () => 
   assert.equal(Math.max(0, bucketStart(0, 2 * WEEK_MS)), 0);
 });
 
-test("ChartHistoryController.loadHistory clamps from to non-negative timestamp on 1w timeframe", async () => {
+test("ChartHistoryController.loadHistory clamps from to non-negative timestamp on 1w timeframe", async (t) => {
+  useFakeChartDataSource(t);
   const { controller, historyCalls, dispose } = createFixture("1w", WEEK_MS);
   try {
     await controller.loadHistory();
@@ -104,7 +106,8 @@ test("ChartHistoryController.loadHistory clamps from to non-negative timestamp o
   }
 });
 
-test("ChartHistoryController.loadHistory clamps from to non-negative timestamp on 2w timeframe", async () => {
+test("ChartHistoryController.loadHistory clamps from to non-negative timestamp on 2w timeframe", async (t) => {
+  useFakeChartDataSource(t);
   const { controller, historyCalls, dispose } = createFixture("2w", 2 * WEEK_MS);
   try {
     await controller.loadHistory();
