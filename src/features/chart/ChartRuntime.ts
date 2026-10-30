@@ -287,6 +287,9 @@ class ChartRuntimeImpl implements ChartRuntime, ChartInputHost {
   private lastSeriesTailJson: string = "[]";
 
   private cachedAnalysisServiceRaw: AnalysisContext | null = null;
+  private cachedAnalysisRevision = 0;
+  private cachedAnalysisPwSettings: unknown = null;
+  private cachedAnalysisMrSettings: unknown = null;
   private cachedAnalysisStateRef: ChartPanelState | null = null;
   private cachedAnalysisNpocLevels: readonly NakedPocLevel[] | null = null;
   private cachedAnalysisNpocMarket: string | null = null;
@@ -963,6 +966,7 @@ class ChartRuntimeImpl implements ChartRuntime, ChartInputHost {
     if (market !== this.state.market || timeframe !== this.state.timeframe) return;
     this.npocHistoryReady = true;
     this._maybeApplyNpoc();
+    this._updateHook();
   }
 
   private _maybeApplyNpoc(): void {
@@ -1030,11 +1034,17 @@ class ChartRuntimeImpl implements ChartRuntime, ChartInputHost {
 
   private analysisContextForChart(): AnalysisContext {
     const serviceRaw = this.svc.getAnalysisContext(this.state.market, true);
+    const revision = this.svc.getAnalysisRevisionSnapshot(this.state.market).revision;
+    const pwSettings = serviceRaw.previousWeekStrategySettings;
+    const mrSettings = serviceRaw.mondayRangeSettings;
     const replayTime = this.replayCoordinator.isActive() ? this.replayCoordinator.getSnapshot()?.virtualTime : undefined;
 
     if (
       this.cachedAnalysisContext !== null
       && this.cachedAnalysisServiceRaw === serviceRaw
+      && this.cachedAnalysisRevision === revision
+      && this.cachedAnalysisPwSettings === pwSettings
+      && this.cachedAnalysisMrSettings === mrSettings
       && this.cachedAnalysisStateRef === this.state
       && this.cachedAnalysisNpocLevels === this.npocLevels
       && this.cachedAnalysisNpocMarket === this.npocMarket
@@ -1093,6 +1103,9 @@ class ChartRuntimeImpl implements ChartRuntime, ChartInputHost {
     }
 
     this.cachedAnalysisServiceRaw = serviceRaw;
+    this.cachedAnalysisRevision = revision;
+    this.cachedAnalysisPwSettings = pwSettings;
+    this.cachedAnalysisMrSettings = mrSettings;
     this.cachedAnalysisStateRef = this.state;
     this.cachedAnalysisNpocLevels = this.npocLevels;
     this.cachedAnalysisNpocMarket = this.npocMarket;
