@@ -888,6 +888,13 @@ export class Overlay {
     // where cells were shaded but never labelled. There, one centred value per cell is
     // readable where two are not.
     const compact = textMode === "compact";
+    const pTop = view.priceOfY(view.area.top);
+    const pBot = view.priceOfY(view.area.top + view.area.height);
+    const minVisPrice = Math.min(pTop, pBot) - step;
+    const maxVisPrice = Math.max(pTop, pBot) + step;
+    const showNotional = this.showNotional;
+    const fmtCell = (v: number, bp: number): string =>
+      showNotional ? fmtNotional(v * bp) : fmtVol(v);
 
     ctx.font = `${Math.min(12, cellH - 2)}px ui-monospace, Menlo, monospace`;
     ctx.textBaseline = "middle";
@@ -899,12 +906,12 @@ export class Overlay {
       const half = fpW / 2;
 
       for (const cell of bar.cells.values()) {
+        if (cell.priceBin + step < minVisPrice || cell.priceBin > maxVisPrice) continue;
         const yMid = view.yOfPrice(cell.priceBin + step / 2);
         if (yMid < view.area.top || yMid > view.area.top + view.area.height) continue;
 
         const binPrice = cell.priceBin + step / 2;
-        const fmt = (v: number): string =>
-          this.showNotional ? fmtNotional(v * binPrice) : fmtVol(v);
+        const fmt = (v: number): string => fmtCell(v, binPrice);
 
         if (mode === "bidask") {
           const imb = cellImbalance(cell);

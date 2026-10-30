@@ -429,8 +429,7 @@ export class ChartSession {
     this.pendingChanges = ChartChange.None;
     let capturePixels: Uint8ClampedArray | null = null;
     let captureSize: { width: number; height: number } | null = null;
-    const gpuSettings = readGpuSettings(this.ownerDocument.defaultView);
-    const useAsyncCapture = Boolean(gpuSettings.asyncCapture || this.gpuSurface.kind === "webgpu");
+    const useAsyncCapture = this.pendingCapture !== null && Boolean(readGpuSettings(this.ownerDocument.defaultView).asyncCapture || this.gpuSurface.kind === "webgpu");
     if (dirty & ChartSurfaceDirty.GpuScene) {
       incrementPerformanceCounter("chart.surface.gpu.draw");
       measurePerformance("chart.surface.gpu.draw.ms", () => this.renderer.render(this.view, this.series));

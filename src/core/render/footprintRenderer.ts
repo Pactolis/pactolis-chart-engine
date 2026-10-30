@@ -99,6 +99,18 @@ export class FootprintRenderer {
   private gl?: WebGL2RenderingContext;
   private readonly heatCache = new WeakMap<FootprintBar, BarHeatCache>();
   private readonly imbalanceCache = new WeakMap<FootprintBar, BarImbalanceCache>();
+  private readonly scratchCellRect = { yTop: 0, height: 0 };
+  private readonly scratchClipRect = { yTop: 0, height: 0 };
+  private static readonly LAYER_PRESET_CACHE = new Map<ChartType, ReadonlySet<string>>();
+
+  private static getLayerPreset(chartType: ChartType): ReadonlySet<string> {
+    let cached = FootprintRenderer.LAYER_PRESET_CACHE.get(chartType);
+    if (!cached) {
+      cached = new Set(resolveBuiltInLayerPreset(chartType).gpu);
+      FootprintRenderer.LAYER_PRESET_CACHE.set(chartType, cached);
+    }
+    return cached;
+  }
   private readonly profileCache = new WeakMap<FootprintBar, BarProfileCache>();
   /** Per-chart görünüm config'i (runtime set eder); null ise global settings. */
   private chartConfig: ChartViewConfig | null = null;
@@ -197,7 +209,7 @@ export class FootprintRenderer {
 
   render(view: View, series: FootprintSeries): void {
     const chartType = this.cfg().chartType;
-    this.renderLayers(view, series, new Set(resolveBuiltInLayerPreset(chartType).gpu));
+    this.renderLayers(view, series, FootprintRenderer.getLayerPreset(chartType));
   }
 
   /**
@@ -320,7 +332,13 @@ export class FootprintRenderer {
       return;
     }
 
+    const pTop = view.priceOfY(view.area.top);
+    const pBot = view.priceOfY(view.area.top + view.area.height);
+    const minVisPrice = Math.min(pTop, pBot) - step;
+    const maxVisPrice = Math.max(pTop, pBot) + step;
+
     for (const cell of bar.cells.values()) {
+      if (cell.priceBin + step < minVisPrice || cell.priceBin > maxVisPrice) continue;
       const rect = this.clippedCellRect(view, bar, cell.priceBin, step);
       if (!rect) continue;
       const { yTop, height: h } = rect;
@@ -369,7 +387,10 @@ export class FootprintRenderer {
     const yLow = view.yOfPrice(low);
     const yTop = Math.min(yHigh, yLow);
     const height = Math.abs(yLow - yHigh);
-    return height > 0 ? { yTop, height } : null;
+    if (!(height > 0)) return null;
+    this.scratchCellRect.yTop = yTop;
+    this.scratchCellRect.height = height;
+    return this.scratchCellRect;
   }
 
   /** Clip an already pixel-merged row to the candle wick without changing its totals. */
@@ -386,7 +407,10 @@ export class FootprintRenderer {
     const barBottom = Math.max(yHigh, yLow, barTop + 1);
     const top = Math.max(yTop, barTop);
     const bottom = Math.min(yTop + height, barBottom);
-    return bottom > top ? { yTop: top, height: bottom - top } : null;
+    if (!(bottom > top)) return null;
+    this.scratchClipRect.yTop = top;
+    this.scratchClipRect.height = bottom - top;
+    return this.scratchClipRect;
   }
 
   /** Heat path for sub-pixel rows: one shaded rect per screen pixel. */
@@ -478,17 +502,14 @@ export class FootprintRenderer {
     this.imbalanceCache.set(bar, entry);
     if (cells.length < IMB_STACK) return null;
 
-    const at = new Map<number, { buy: number; sell: number }>();
-    for (const c of cells) at.set(c.priceBin, { buy: c.buyVol, sell: c.sellVol });
-
     for (const c of cells) {
       // neighbourBin (not raw +/- step) -- fractional steps miss the quantized Map key on
       // ~20-30% of lookups with plain arithmetic, wrongly zeroing the neighbour and
       // producing spurious/mispositioned imbalance highlighting. See its doc comment.
-      const below = at.get(neighbourBin(c.priceBin, step, -1));
-      const above = at.get(neighbourBin(c.priceBin, step, 1));
-      entry.buyImb.push(c.buyVol >= IMB_RATIO * (below ? below.sell : 0) && c.buyVol > 0);
-      entry.sellImb.push(c.sellVol >= IMB_RATIO * (above ? above.buy : 0) && c.sellVol > 0);
+      const below = bar.cells.get(neighbourBin(c.priceBin, step, -1));
+      const above = bar.cells.get(neighbourBin(c.priceBin, step, 1));
+      entry.buyImb.push(c.buyVol >= IMB_RATIO * (below ? below.sellVol : 0) && c.buyVol > 0);
+      entry.sellImb.push(c.sellVol >= IMB_RATIO * (above ? above.buyVol : 0) && c.sellVol > 0);
     }
     return entry;
   }
@@ -570,7 +591,13 @@ export class FootprintRenderer {
     const { pocBin, maxMetric } = this.profileStats(bar, mode);
 
     if (maxMetric > 0 && fpW > 0) {
+      const pTop = view.priceOfY(view.area.top);
+      const pBot = view.priceOfY(view.area.top + view.area.height);
+      const minVisPrice = Math.min(pTop, pBot) - step;
+      const maxVisPrice = Math.max(pTop, pBot) + step;
+
       for (const cell of bar.cells.values()) {
+        if (cell.priceBin + step < minVisPrice || cell.priceBin > maxVisPrice) continue;
         const rect = this.clippedCellRect(view, bar, cell.priceBin, step);
         if (!rect) continue;
         const { yTop, height: h } = rect;

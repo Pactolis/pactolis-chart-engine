@@ -31,8 +31,14 @@ export interface GpuDiagnosticsSnapshot {
   readonly frame?: GpuFrameMetrics;
 }
 
-const ENGINE_VERSION = "0.2.1";
+const ENGINE_VERSION = "0.2.2";
 const MAX_SAMPLES = 120;
+
+const FRAME_COUNTER_KEYS: Record<string, string> = {
+  webgpu: "gpu.backend.webgpu.frames",
+  webgl2: "gpu.backend.webgl2.frames",
+  canvas2d: "gpu.backend.canvas2d.frames",
+};
 
 let requestedBackend = "webgl2";
 let activeBackend = "webgl2";
@@ -55,7 +61,7 @@ export function recordGpuBackendSelection(requested: string, active: string): vo
 }
 
 export function recordGpuFrame(kind: string, renderMs?: number, intervalMs?: number): void {
-  const counterKey = `gpu.backend.${kind}.frames`;
+  const counterKey = FRAME_COUNTER_KEYS[kind] ?? `gpu.backend.${kind}.frames`;
   counters[counterKey] = (counters[counterKey] ?? 0) + 1;
   incrementPerformanceCounter(counterKey);
 
