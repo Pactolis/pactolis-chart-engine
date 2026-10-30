@@ -279,6 +279,17 @@ export class IndicatorManager {
     disposed: boolean;
   } | null = null;
 
+  private renderRevision = 0;
+  private cachedPaneRenderRevision = -1;
+  private cachedPaneRenderMaximized: "chart" | string | null = null;
+  private cachedPaneRenderSubPanesH = -1;
+  private cachedPaneRenderTimeframe = "";
+  private cachedPaneRenders: IndicatorPaneRender[] = [];
+
+  private cachedPriceOverlayRevision = -1;
+  private cachedPriceOverlayTimeframe = "";
+  private cachedPriceOverlayRenders: IndicatorPaneRender[] = [];
+
   constructor(options: IndicatorManagerOptions) {
     this.ownerDocument = options.ownerDocument;
     this.root = options.root;
@@ -325,10 +336,19 @@ export class IndicatorManager {
     this.renderHeaders();
   }
 
+  peekInstances(): readonly IndicatorInstance[] {
+    return this.instances;
+  }
+
+  getRenderRevision(): number {
+    return this.renderRevision;
+  }
+
   restore(instances?: IndicatorInstance[]): void {
     if (this.lastRemovedSnapshot) this.dismissRemoveUndo();
     this.preparedDataCache.clear();
     this.instances = cloneInstances(instances);
+    this.renderRevision++;
     this.renderHeaders();
     if (this.latestView) this.layout(this.latestView);
     this.onLayoutChange();
@@ -408,7 +428,9 @@ export class IndicatorManager {
   }
 
   private setMaximizedPane(target: "chart" | string | null): void {
+    if (this.maximizedPane === target) return;
     this.maximizedPane = target;
+    this.renderRevision++;
     this.renderHeaders();
     this.onLayoutChange();
     this.onInvalidate(ChartChange.Layout);
@@ -466,7 +488,19 @@ export class IndicatorManager {
   }
 
   getPaneRenders(): IndicatorPaneRender[] {
-    return this.renderedSeparateInstances().map((instance) => {
+    const subPanesH = this.latestView?.subPanesH ?? 0;
+    const timeframe = this.getChartContext?.()?.timeframe ?? "";
+
+    if (
+      this.cachedPaneRenderRevision === this.renderRevision
+      && this.cachedPaneRenderMaximized === this.maximizedPane
+      && this.cachedPaneRenderSubPanesH === subPanesH
+      && this.cachedPaneRenderTimeframe === timeframe
+    ) {
+      return this.cachedPaneRenders;
+    }
+
+    const result = this.renderedSeparateInstances().map((instance) => {
       const definition = getIndicatorDefinition(instance.type);
       const height = this.maximizedPane === instance.id
         ? Math.max(1, this.latestView?.subPanesH ?? paneHeightForInstance(instance))
@@ -508,11 +542,27 @@ export class IndicatorManager {
         },
       } satisfies IndicatorPaneRender;
     });
+
+    this.cachedPaneRenderRevision = this.renderRevision;
+    this.cachedPaneRenderMaximized = this.maximizedPane;
+    this.cachedPaneRenderSubPanesH = subPanesH;
+    this.cachedPaneRenderTimeframe = timeframe;
+    this.cachedPaneRenders = result;
+    return result;
   }
 
   getPriceOverlayRenders(): IndicatorPaneRender[] {
     const chart = this.getChartContext?.();
-    return this.instances.filter((instance) =>
+    const timeframe = chart?.timeframe ?? "";
+
+    if (
+      this.cachedPriceOverlayRevision === this.renderRevision
+      && this.cachedPriceOverlayTimeframe === timeframe
+    ) {
+      return this.cachedPriceOverlayRenders;
+    }
+
+    const result = this.instances.filter((instance) =>
       instancePlacement(instance) === "price-overlay" && visibleAtTimeframe(instance.settings, chart)).map((instance) => {
       const definition = getIndicatorDefinition(instance.type);
       return {
@@ -545,6 +595,11 @@ export class IndicatorManager {
         },
       } satisfies IndicatorPaneRender;
     });
+
+    this.cachedPriceOverlayRevision = this.renderRevision;
+    this.cachedPriceOverlayTimeframe = timeframe;
+    this.cachedPriceOverlayRenders = result;
+    return result;
   }
 
   layout(view: View): void {
@@ -552,6 +607,7 @@ export class IndicatorManager {
     const visibilityTimeframe = this.getChartContext?.().timeframe ?? "";
     if (visibilityTimeframe !== this.lastVisibilityTimeframe) {
       this.lastVisibilityTimeframe = visibilityTimeframe;
+      this.renderRevision++;
       this.renderHeaders();
       queueMicrotask(() => {
         this.onLayoutChange();
@@ -695,6 +751,7 @@ export class IndicatorManager {
     this.instances = this.instances.map((item) => item.id === id
       ? { ...item, collapsed: false, paneHeight: normalizePaneHeight(height, paneHeightForInstance(item)) }
       : item);
+    this.renderRevision++;
     if (this.latestView) this.layout(this.latestView);
     this.onLayoutChange();
     this.onInvalidate(ChartChange.Layout);
@@ -712,6 +769,7 @@ export class IndicatorManager {
 
   /** `changes` names what the caller changed; a layout change is added when panes were re-laid out. */
   private emit(layoutChanged: boolean, changes: ChartChange = ChartChange.All): void {
+    this.renderRevision++;
     this.renderHeaders();
     if (this.latestView) this.layout(this.latestView);
     this.onChange(this.serialize());
