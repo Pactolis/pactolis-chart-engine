@@ -57,6 +57,23 @@ export class ChartIndicatorController {
   private readonly interactionPreparedCache = new Map<string, InteractionPreparedCacheEntry>();
   private latestView: View | null = null;
 
+  private cachedPaneRendersRevision = -1;
+  private cachedPaneRendersTimeframe = "";
+  private cachedPaneRendersMaximized: boolean | null = null;
+  private cachedBasePanesRef: ReturnType<IndicatorManager["getPaneRenders"]> | null = null;
+  private cachedControllerPaneRenders: ReturnType<IndicatorManager["getPaneRenders"]> = [];
+  private cachedRequiresInteractionRedraw = false;
+
+  clearInteractionCache(): void {
+    this.interactionPreparedCache.clear();
+    this.cachedPaneRendersRevision = -1;
+    this.cachedPaneRendersTimeframe = "";
+    this.cachedPaneRendersMaximized = null;
+    this.cachedBasePanesRef = null;
+    this.cachedControllerPaneRenders = [];
+    this.cachedRequiresInteractionRedraw = false;
+  }
+
   constructor(options: IndicatorControllerOptions) {
     this.options = options;
     this.manager = new IndicatorManager(options);
@@ -76,12 +93,13 @@ export class ChartIndicatorController {
     return closed.map((item, index) => item.scope === "visible-range" ? visible[index] : item);
   }
   restore(instances: IndicatorInstance[] | undefined): void {
-    this.interactionPreparedCache.clear();
+    this.clearInteractionCache();
     this.manager.restore(instances);
   }
   setVisible(id: string, visible: boolean): void { this.manager.setIndicatorVisible(id, visible); }
   remove(id: string): void {
     this.interactionPreparedCache.delete(id);
+    this.clearInteractionCache();
     this.manager.deleteIndicator(id);
   }
   openSettings(id: string): void { this.manager.openIndicatorSettings(id); }
@@ -91,8 +109,22 @@ export class ChartIndicatorController {
   toggleChartPaneMaximized(): void { this.manager.toggleChartPaneMaximized(); }
   hasSeparatePanes(): boolean { return this.manager.hasSeparatePanes(); }
   getPaneRenders(): ReturnType<IndicatorManager["getPaneRenders"]> {
-    const instances = new Map(this.manager.listInstances().map((instance) => [instance.id, instance]));
-    return this.manager.getPaneRenders().map((pane) => {
+    const basePanes = this.manager.getPaneRenders();
+    const revision = this.manager.getRenderRevision();
+    const timeframe = this.options.getChartContext().timeframe;
+    const isMaximized = this.manager.isPaneMaximized();
+
+    if (
+      this.cachedBasePanesRef === basePanes
+      && this.cachedPaneRendersRevision === revision
+      && this.cachedPaneRendersTimeframe === timeframe
+      && this.cachedPaneRendersMaximized === isMaximized
+    ) {
+      return this.cachedControllerPaneRenders;
+    }
+
+    const instances = new Map(this.manager.peekInstances().map((instance) => [instance.id, instance]));
+    const result = basePanes.map((pane) => {
       const instance = instances.get(pane.id);
       const definition = instance ? getIndicatorDefinition(instance.type) : undefined;
       const drawInteraction = definition?.drawInteraction
@@ -125,6 +157,14 @@ export class ChartIndicatorController {
         },
       };
     });
+
+    this.cachedBasePanesRef = basePanes;
+    this.cachedPaneRendersRevision = revision;
+    this.cachedPaneRendersTimeframe = timeframe;
+    this.cachedPaneRendersMaximized = isMaximized;
+    this.cachedControllerPaneRenders = result;
+    this.cachedRequiresInteractionRedraw = result.some((pane) => !pane.collapsed && pane.requiresInteractionRedraw === true);
+    return result;
   }
   getPriceOverlayRenders(): ReturnType<IndicatorManager["getPriceOverlayRenders"]> { return this.manager.getPriceOverlayRenders(); }
 
@@ -144,7 +184,8 @@ export class ChartIndicatorController {
   }
 
   requiresAnnotationInteractionRedraw(): boolean {
-    return this.getPaneRenders().some((pane) => !pane.collapsed && pane.requiresInteractionRedraw === true);
+    this.getPaneRenders();
+    return this.cachedRequiresInteractionRedraw;
   }
 
   private prepareInteractionData(
@@ -203,7 +244,7 @@ export class ChartIndicatorController {
   }
   dispose(): void {
     this.latestView = null;
-    this.interactionPreparedCache.clear();
+    this.clearInteractionCache();
     this.manager.dispose();
   }
 }
