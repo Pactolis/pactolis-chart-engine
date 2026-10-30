@@ -20,13 +20,18 @@ test("history requests start on a bucket boundary", async () => {
   // leaves the oldest visible bar with partial cells (or none on the base interval).
   assert.match(
     source,
-    /const from = bucketStart\(\s*Math\.max\(0, to - resolvedIntervalMs \* chartDataSource\(\)\.initialHistoryBars\),\s*resolvedIntervalMs,\s*\);/,
+    /const from = Math\.max\(\s*0,\s*bucketStart\(\s*Math\.max\(0, to - resolvedIntervalMs \* chartDataSource\(\)\.initialHistoryBars\),\s*resolvedIntervalMs,\s*\),\s*\);/,
   );
 
   const { bucketStart } = await import("../dist/core/time.js");
   const now = Date.UTC(2024, 5, 13, 9, 41, 17);
   for (const interval of [60_000, 300_000, 3_600_000, 86_400_000, 7 * 86_400_000]) {
-    const from = bucketStart(Math.max(0, now - interval * 4000), interval);
-    assert.equal(bucketStart(from, interval), from, `interval ${interval} is not idempotent`);
+    const rawFrom = bucketStart(Math.max(0, now - interval * 4000), interval);
+    const from = Math.max(0, rawFrom);
+    if (from > 0) {
+      assert.equal(bucketStart(from, interval), from, `interval ${interval} is not idempotent`);
+    } else {
+      assert.equal(from, 0);
+    }
   }
 });

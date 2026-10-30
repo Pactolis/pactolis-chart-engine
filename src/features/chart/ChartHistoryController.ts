@@ -229,9 +229,12 @@ export class ChartHistoryController {
       const resolvedIntervalMs = intervalMs
         ?? TIMEFRAMES.find((item) => item.label === this.host.getState().timeframe)?.ms
         ?? this.host.pipeline.intervalMs;
-      const from = bucketStart(
-        Math.max(0, to - resolvedIntervalMs * chartDataSource().initialHistoryBars),
-        resolvedIntervalMs,
+      const from = Math.max(
+        0,
+        bucketStart(
+          Math.max(0, to - resolvedIntervalMs * chartDataSource().initialHistoryBars),
+          resolvedIntervalMs,
+        ),
       );
 
       this.host.svc.notifyActiveMarket(this.host.getState().market, this.host.pipeline.series.config.priceStep);
@@ -532,7 +535,7 @@ export class ChartHistoryController {
     if (typeof document !== "undefined" && document.visibilityState === "hidden") return "hidden";
 
     const cutoff = Date.now();
-    const from = bucketStart(Math.max(0, cutoff - RECENT_FOOTPRINT_RETRY_LOOKBACK_MS), intervalMs);
+    const from = Math.max(0, bucketStart(Math.max(0, cutoff - RECENT_FOOTPRINT_RETRY_LOOKBACK_MS), intervalMs));
     if (cutoff - from > RECENT_FOOTPRINT_RETRY_MAX_WINDOW_MS) return "stop";
 
     const outcome = await this.host.pipeline.repairRecentFootprintCoverage(from, cutoff);
