@@ -20,6 +20,7 @@ export const DEFAULT_GPU_SETTINGS: GpuSettings = Object.freeze({
 let configuredSource: GpuSettingsSource | null = null;
 let sourceUnsubscribe: (() => void) | null = null;
 const listeners = new Set<() => void>();
+let cachedBaseSettings: GpuSettings | null = null;
 
 function notifyListeners(): void {
   for (const listener of [...listeners]) {
@@ -36,9 +37,11 @@ export function configureGpuSettingsSource(source: GpuSettingsSource | null): vo
     sourceUnsubscribe();
     sourceUnsubscribe = null;
   }
+  cachedBaseSettings = null;
   configuredSource = source;
   if (configuredSource) {
     sourceUnsubscribe = configuredSource.onChange(() => {
+      cachedBaseSettings = null;
       notifyListeners();
     });
   }
@@ -57,7 +60,10 @@ function parseUrlGpuParam(search?: string): GpuBackendPreference | null {
 }
 
 export function readGpuSettings(win?: { location?: { search?: string } } | null): GpuSettings {
-  const base = configuredSource ? configuredSource.read() : DEFAULT_GPU_SETTINGS;
+  if (!cachedBaseSettings) {
+    cachedBaseSettings = configuredSource ? configuredSource.read() : DEFAULT_GPU_SETTINGS;
+  }
+  const base = cachedBaseSettings;
 
   let search: string | undefined;
   if (win && win.location && typeof win.location.search === "string") {
@@ -89,6 +95,7 @@ export function resetGpuSettingsForTest(): void {
     sourceUnsubscribe();
     sourceUnsubscribe = null;
   }
+  cachedBaseSettings = null;
   configuredSource = null;
   listeners.clear();
 }

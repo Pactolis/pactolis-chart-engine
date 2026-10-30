@@ -143,6 +143,46 @@ test("readGpuSettings respects ?gpu= URL parameter override", () => {
   assert.equal(readGpuSettings(autoWin).backend, "auto");
 });
 
+test("readGpuSettings caches source.read() results and invalidates on onChange", () => {
+  resetGpuSettingsForTest();
+  let readCount = 0;
+  let listenerCb = null;
+  const mockSource = {
+    read() {
+      readCount++;
+      return { ...DEFAULT_GPU_SETTINGS, backend: readCount > 1 ? "canvas2d" : "webgl2" };
+    },
+    onChange(cb) {
+      listenerCb = cb;
+      return () => { listenerCb = null; };
+    },
+  };
+
+  configureGpuSettingsSource(mockSource);
+  assert.equal(readCount, 0);
+
+  // First read queries source
+  const first = readGpuSettings(null);
+  assert.equal(first.backend, "webgl2");
+  assert.equal(readCount, 1);
+
+  // Subsequent reads use cache without calling source.read()
+  const second = readGpuSettings(null);
+  assert.equal(second.backend, "webgl2");
+  assert.equal(readCount, 1);
+
+  // Triggering onChange invalidates cache
+  assert.ok(typeof listenerCb === "function");
+  listenerCb({ ...DEFAULT_GPU_SETTINGS, backend: "canvas2d" });
+
+  // Next read after onChange queries source again
+  const third = readGpuSettings(null);
+  assert.equal(third.backend, "canvas2d");
+  assert.equal(readCount, 2);
+
+  resetGpuSettingsForTest();
+});
+
 test("Canvas2dQuadSink queues and paints rects in order with cached CSS color", () => {
   const ctx2d = makeFake2dContext();
   const sink = new Canvas2dQuadSink(ctx2d);
@@ -206,7 +246,7 @@ test("GpuDiagnostics snapshot records frames and exports valid JSON", () => {
   recordGpuContextEvent("restored");
 
   const snapshot = getGpuDiagnostics();
-  assert.equal(snapshot.engine, "0.2.1");
+  assert.equal(snapshot.engine, "0.2.2");
   assert.equal(snapshot.counters["gpu.backend.webgl2.frames"], 2);
   assert.equal(snapshot.counters["chart.gpu.contextLost"], 1);
   assert.equal(snapshot.counters["chart.gpu.contextRestored"], 1);
@@ -215,7 +255,7 @@ test("GpuDiagnostics snapshot records frames and exports valid JSON", () => {
 
   const jsonStr = copyGpuDiagnosticsJson();
   const parsed = JSON.parse(jsonStr);
-  assert.equal(parsed.engine, "0.2.1");
+  assert.equal(parsed.engine, "0.2.2");
   assert.equal(parsed.counters["gpu.backend.webgl2.frames"], 2);
 });
 

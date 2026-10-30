@@ -1791,7 +1791,13 @@ export class ChartDataPipeline {
     this.subscribedMarket = market;
   }
 
-  private _enqueuePendingTrade(trade: AggTrade): boolean { return this._enqueuePendingTrades([trade]); }
+  private _enqueuePendingTrade(trade: AggTrade): boolean {
+    if (!this.scheduler.isThrottled?.() && this.pendingTrades.length < PENDING_TRADE_BUFFER_CAP - 1) {
+      this.pendingTrades.push(trade);
+      return false;
+    }
+    return this._enqueuePendingTrades([trade]);
+  }
 
   private _enqueuePendingTrades(trades: readonly AggTrade[]): boolean {
     if (trades.length === 0) return false;

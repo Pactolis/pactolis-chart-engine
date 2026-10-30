@@ -128,6 +128,8 @@ export class DrawingManager {
   private lastTime: DrawingContext | null = null;
   /** The last press came from a finger: hit tests pick wider and selected drawings draw bigger handles. */
   private touchTargets = false;
+  private summaryRevision = 0;
+  private readonly summaryCache = new Map<string, { revision: number; summary: DrawingMarketSummary }>();
 
   constructor(
     private readonly onChange: (drawings: Drawing[], transient: boolean) => void,
@@ -319,6 +321,7 @@ export class DrawingManager {
     this.gestureBefore = null;
     this.undoStack = [];
     this.redoStack = [];
+    this.summaryRevision++;
   }
 
   list(): Drawing[] {
@@ -335,7 +338,13 @@ export class DrawingManager {
 
   /** Read-only test-hook seam: summarizes one market's drawings without cloning them. */
   marketSummary(market: string): DrawingMarketSummary {
-    return summarizeMarketDrawings(this.drawings, market, this.selectedId, this.selectedIds, this.draft?.id ?? null);
+    const cached = this.summaryCache.get(market);
+    if (cached && cached.revision === this.summaryRevision) {
+      return cached.summary;
+    }
+    const summary = summarizeMarketDrawings(this.drawings, market, this.selectedId, this.selectedIds, this.draft?.id ?? null);
+    this.summaryCache.set(market, { revision: this.summaryRevision, summary });
+    return summary;
   }
 
   /** Read-only render seam: avoids cloning the full drawing graph on every frame. */
@@ -704,6 +713,7 @@ export class DrawingManager {
     this.placementPointerDown = true;
     this.placementMoved = false;
     this.drawings.push(this.draft);
+    this.summaryRevision++;
     if (tool.pointsRequired > 1 && this.tool !== "brush") this.onToolChange?.(this.tool);
     if (tool.pointsRequired === 1) this.commitDraft();
     return true;
@@ -951,6 +961,7 @@ export class DrawingManager {
     const valid = ids.filter((id) => this.drawings.some((drawing) => drawing.id === id));
     this.selectedIds = new Set(valid);
     this.selectedId = primary && this.selectedIds.has(primary) ? primary : (lastOf(valid) ?? null);
+    this.summaryRevision++;
     if (emit) this.changed();
   }
 
@@ -963,6 +974,7 @@ export class DrawingManager {
       this.selectedIds.add(id);
       this.selectedId = id;
     }
+    this.summaryRevision++;
   }
 
   private pruneSelection(): void {
@@ -1002,6 +1014,7 @@ export class DrawingManager {
   }
 
   private changed(transient = false): void {
+    this.summaryRevision++;
     this.onChange(structuredClone(this.drawings.filter((drawing) => drawing.id !== this.draft?.id)), transient);
   }
 

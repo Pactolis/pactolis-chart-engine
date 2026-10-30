@@ -282,6 +282,25 @@ class ChartRuntimeImpl implements ChartRuntime, ChartInputHost {
   private readonly analysisBridge: ChartAnalysisBridge;
   private readonly historyController: ChartHistoryController;
   private readonly syncController: ChartSyncController;
+  private readonly hookAttrCache = new Map<string, string>();
+  private lastSeriesTailSig: string | null = null;
+  private lastSeriesTailJson: string = "[]";
+
+  private cachedAnalysisServiceRaw: AnalysisContext | null = null;
+  private cachedAnalysisRevision = 0;
+  private cachedAnalysisPwSettings: unknown = null;
+  private cachedAnalysisMrSettings: unknown = null;
+  private cachedAnalysisStateRef: ChartPanelState | null = null;
+  private cachedAnalysisNpocLevels: readonly NakedPocLevel[] | null = null;
+  private cachedAnalysisNpocMarket: string | null = null;
+  private cachedAnalysisReplayTime: number | undefined = undefined;
+  private cachedAnalysisContext: AnalysisContext | null = null;
+
+  private setHookAttr(name: string, value: string): void {
+    if (this.hookAttrCache.get(name) === value) return;
+    this.hookAttrCache.set(name, value);
+    this._hook.setAttribute(name, value);
+  }
 
   onStateChange?: (next: ChartPanelState) => void;
 
@@ -421,9 +440,7 @@ class ChartRuntimeImpl implements ChartRuntime, ChartInputHost {
       () => this.indicatorController.getPriceOverlayRenders(),
       () => this.syncController?.ghostCrosshairTime ?? null,
       (text) => {
-        this._hook.setAttribute("data-hud", text ?? "");
-        // HUD text changes on every crosshair move; coalesce the full hook rewrite.
-        this._queueHookUpdate();
+        this.setHookAttr("data-hud", text ?? "");
       },
       drawIndicatorPaneBackground,
       () => this.indicatorController.isPaneMaximized(),
@@ -949,6 +966,7 @@ class ChartRuntimeImpl implements ChartRuntime, ChartInputHost {
     if (market !== this.state.market || timeframe !== this.state.timeframe) return;
     this.npocHistoryReady = true;
     this._maybeApplyNpoc();
+    this._updateHook();
   }
 
   private _maybeApplyNpoc(): void {
@@ -1016,51 +1034,84 @@ class ChartRuntimeImpl implements ChartRuntime, ChartInputHost {
 
   private analysisContextForChart(): AnalysisContext {
     const serviceRaw = this.svc.getAnalysisContext(this.state.market, true);
+    const revision = this.svc.getAnalysisRevisionSnapshot(this.state.market).revision;
+    const pwSettings = serviceRaw.previousWeekStrategySettings;
+    const mrSettings = serviceRaw.mondayRangeSettings;
+    const replayTime = this.replayCoordinator.isActive() ? this.replayCoordinator.getSnapshot()?.virtualTime : undefined;
+
+    if (
+      this.cachedAnalysisContext !== null
+      && this.cachedAnalysisServiceRaw === serviceRaw
+      && this.cachedAnalysisRevision === revision
+      && this.cachedAnalysisPwSettings === pwSettings
+      && this.cachedAnalysisMrSettings === mrSettings
+      && this.cachedAnalysisStateRef === this.state
+      && this.cachedAnalysisNpocLevels === this.npocLevels
+      && this.cachedAnalysisNpocMarket === this.npocMarket
+      && this.cachedAnalysisReplayTime === replayTime
+    ) {
+      return this.cachedAnalysisContext;
+    }
+
     // The market context is computed up to now and shared with live charts, so a replaying
     // chart takes its own levels as of the replay time. nPOC has no historical state: hidden.
     const replayLevels = this.replayAutomaticLevels(serviceRaw);
     const raw: AnalysisContext = replayLevels === null
       ? { ...serviceRaw, nakedPocs: this.npocMarket === this.state.market ? this.npocLevels : [] }
       : { ...serviceRaw, ...replayLevels, nakedPocs: [] };
-    if (!hasChartAutomaticVisibility(this.state)) {
-      return raw;
-    }
-    const previousWeekStrategySettings = {
-      ...raw.previousWeekStrategySettings,
-      visible: {
-        ...raw.previousWeekStrategySettings.visible,
-        ...(this.state.previousWeekStrategyVisibility ?? {}),
-      },
-    };
-    const mondayRangeSettings = {
-      ...raw.mondayRangeSettings,
-      visible: {
-        ...raw.mondayRangeSettings.visible,
-        ...(this.state.mondayRangeVisibility ?? {}),
-      },
-    };
-    const hiddenNakedPocIds = new Set(this.state.hiddenNakedPocIds ?? []);
-    const hiddenReferenceLevelIds = new Set(this.state.hiddenReferenceLevelIds ?? []);
 
-    return {
-      ...raw,
-      previousWeekStrategySettings,
-      previousWeekStrategyLevels: raw.previousWeekStrategyLevels.filter(
-        (level) => previousWeekStrategySettings.visible[level.id] !== false,
-      ),
-      mondayRangeSettings,
-      mondayRangeLevels: raw.mondayRangeLevels.filter(
-        (level) => mondayRangeSettings.visible[level.id] !== false,
-      ),
-      nakedPocs: raw.nakedPocs.filter(
-        (level) => (this.state.nakedPocVisibility?.[level.period] ?? false) !== false
-          && !hiddenNakedPocIds.has(level.id),
-      ),
-      referenceLevels: raw.referenceLevels.filter(
-        (level) => (this.state.referenceVisibility?.[level.family]?.[level.period] ?? true) !== false
-          && !hiddenReferenceLevelIds.has(level.id),
-      ),
-    };
+    let result: AnalysisContext;
+    if (!hasChartAutomaticVisibility(this.state)) {
+      result = raw;
+    } else {
+      const previousWeekStrategySettings = {
+        ...raw.previousWeekStrategySettings,
+        visible: {
+          ...raw.previousWeekStrategySettings.visible,
+          ...(this.state.previousWeekStrategyVisibility ?? {}),
+        },
+      };
+      const mondayRangeSettings = {
+        ...raw.mondayRangeSettings,
+        visible: {
+          ...raw.mondayRangeSettings.visible,
+          ...(this.state.mondayRangeVisibility ?? {}),
+        },
+      };
+      const hiddenNakedPocIds = new Set(this.state.hiddenNakedPocIds ?? []);
+      const hiddenReferenceLevelIds = new Set(this.state.hiddenReferenceLevelIds ?? []);
+
+      result = {
+        ...raw,
+        previousWeekStrategySettings,
+        previousWeekStrategyLevels: raw.previousWeekStrategyLevels.filter(
+          (level) => previousWeekStrategySettings.visible[level.id] !== false,
+        ),
+        mondayRangeSettings,
+        mondayRangeLevels: raw.mondayRangeLevels.filter(
+          (level) => mondayRangeSettings.visible[level.id] !== false,
+        ),
+        nakedPocs: raw.nakedPocs.filter(
+          (level) => (this.state.nakedPocVisibility?.[level.period] ?? false) !== false
+            && !hiddenNakedPocIds.has(level.id),
+        ),
+        referenceLevels: raw.referenceLevels.filter(
+          (level) => (this.state.referenceVisibility?.[level.family]?.[level.period] ?? true) !== false
+            && !hiddenReferenceLevelIds.has(level.id),
+        ),
+      };
+    }
+
+    this.cachedAnalysisServiceRaw = serviceRaw;
+    this.cachedAnalysisRevision = revision;
+    this.cachedAnalysisPwSettings = pwSettings;
+    this.cachedAnalysisMrSettings = mrSettings;
+    this.cachedAnalysisStateRef = this.state;
+    this.cachedAnalysisNpocLevels = this.npocLevels;
+    this.cachedAnalysisNpocMarket = this.npocMarket;
+    this.cachedAnalysisReplayTime = replayTime;
+    this.cachedAnalysisContext = result;
+    return result;
   }
 
   private chartViewConfig(): ChartViewConfig {
@@ -1583,17 +1634,16 @@ class ChartRuntimeImpl implements ChartRuntime, ChartInputHost {
   }
 
   private _updateHook(): void {
-    const hook = this._hook;
     const analysis = this.analysisContextForChart();
     const drawings = analysis.drawings;
     const drawingSummary = drawings.marketSummary(this.state.market);
     const range = this.syncController?.getVisibleTimeRange() ?? null;
     const replay = this.replayCoordinator?.getSnapshot() ?? null;
 
-    hook.setAttribute("data-series-len", String(this.pipeline.series.length));
-    hook.setAttribute("data-series-first", String(this.pipeline.series.at(0)?.startTime ?? ""));
-    hook.setAttribute("data-series-last", String(this.pipeline.series.at(this.pipeline.series.length - 1)?.startTime ?? ""));
-    hook.setAttribute("data-series-interval", String(this.pipeline.series.config.intervalMs));
+    this.setHookAttr("data-series-len", String(this.pipeline.series.length));
+    this.setHookAttr("data-series-first", String(this.pipeline.series.at(0)?.startTime ?? ""));
+    this.setHookAttr("data-series-last", String(this.pipeline.series.at(this.pipeline.series.length - 1)?.startTime ?? ""));
+    this.setHookAttr("data-series-interval", String(this.pipeline.series.config.intervalMs));
     if (isLoadTraceEnabled()) {
       let seriesCellCount = 0;
       let barsWithCells = 0;
@@ -1602,82 +1652,96 @@ class ChartRuntimeImpl implements ChartRuntime, ChartInputHost {
         seriesCellCount += cells;
         if (cells > 0) barsWithCells++;
       }
-      hook.setAttribute("data-series-cells", String(seriesCellCount));
-      hook.setAttribute("data-bars-with-cells", String(barsWithCells));
+      this.setHookAttr("data-series-cells", String(seriesCellCount));
+      this.setHookAttr("data-bars-with-cells", String(barsWithCells));
       const timeMarks = TimeScaleModel.fromSeries(this.pipeline.series).marks(this.view);
-      hook.setAttribute("data-time-mark-count", String(timeMarks.length));
-      hook.setAttribute("data-time-mark-coords", JSON.stringify(timeMarks.map((mark) => ({
+      this.setHookAttr("data-time-mark-count", String(timeMarks.length));
+      this.setHookAttr("data-time-mark-coords", JSON.stringify(timeMarks.map((mark) => ({
         x: Math.round(mark.coord * 10) / 10,
         label: mark.label,
         weight: mark.weight,
       }))));
-      hook.setAttribute("data-col-width", String(this.view.colWidth));
-      hook.setAttribute("data-plot-width", String(this.view.area.width));
+      this.setHookAttr("data-col-width", String(this.view.colWidth));
+      this.setHookAttr("data-plot-width", String(this.view.area.width));
       const traceMidPrice = this.view.priceOfY(this.view.area.top + this.view.area.height / 2);
-      hook.setAttribute("data-price-step", String(this.pipeline.series.config.priceStep));
-      hook.setAttribute("data-cell-height", String(Math.abs(
+      this.setHookAttr("data-price-step", String(this.pipeline.series.config.priceStep));
+      this.setHookAttr("data-cell-height", String(Math.abs(
         this.view.yOfPrice(traceMidPrice)
           - this.view.yOfPrice(traceMidPrice + this.pipeline.series.config.priceStep),
       )));
     }
 
-    hook.setAttribute("data-series-tail", JSON.stringify(
-      Array.from({ length: Math.min(5, this.pipeline.series.length) }, (_, offset) => {
-        const bar = this.pipeline.series.at(this.pipeline.series.length - 1 - offset);
-        return bar ? {
-          time: bar.startTime,
-          open: bar.open,
-          high: bar.high,
-          low: bar.low,
-          close: bar.close,
-          volume: bar.volume,
-          count: bar.count,
-        } : null;
-      }),
-    ));
+    const seriesLen = this.pipeline.series.length;
+    let tailSig = String(seriesLen);
+    const tailCount = Math.min(5, seriesLen);
+    for (let i = 0; i < tailCount; i++) {
+      const b = this.pipeline.series.at(seriesLen - 1 - i);
+      if (b) {
+        tailSig += "|" + b.startTime + ":" + b.open + ":" + b.high + ":" + b.low + ":" + b.close + ":" + b.volume + ":" + b.count;
+      }
+    }
+    if (tailSig !== this.lastSeriesTailSig) {
+      this.lastSeriesTailSig = tailSig;
+      this.lastSeriesTailJson = JSON.stringify(
+        Array.from({ length: tailCount }, (_, offset) => {
+          const bar = this.pipeline.series.at(seriesLen - 1 - offset);
+          return bar ? {
+            time: bar.startTime,
+            open: bar.open,
+            high: bar.high,
+            low: bar.low,
+            close: bar.close,
+            volume: bar.volume,
+            count: bar.count,
+          } : null;
+        }),
+      );
+    }
+    this.setHookAttr("data-series-tail", this.lastSeriesTailJson);
 
-    const automaticLevels = [
-      ...analysis.previousWeekStrategyLevels,
-      ...analysis.mondayRangeLevels,
-      ...analysis.nakedPocs,
-      ...analysis.referenceLevels,
-    ];
     let automaticPriceCount = 0;
     let automaticPriceMin = Infinity;
     let automaticPriceMax = -Infinity;
-    for (const level of automaticLevels) {
-      const price = level.price;
-      if (price === undefined || !Number.isFinite(price)) continue;
-      automaticPriceCount++;
-      if (price < automaticPriceMin) automaticPriceMin = price;
-      if (price > automaticPriceMax) automaticPriceMax = price;
+    for (const group of [
+      analysis.previousWeekStrategyLevels,
+      analysis.mondayRangeLevels,
+      analysis.nakedPocs,
+      analysis.referenceLevels,
+    ]) {
+      for (const level of group) {
+        const price = (level as any).price;
+        if (price === undefined || !Number.isFinite(price)) continue;
+        automaticPriceCount++;
+        if (price < automaticPriceMin) automaticPriceMin = price;
+        if (price > automaticPriceMax) automaticPriceMax = price;
+      }
     }
     const analysisRevision = this.svc.getAnalysisRevisionSnapshot(this.state.market).revision;
 
-    hook.setAttribute("data-market", this.state.market);
-    hook.setAttribute("data-analysis-market", analysis.market);
-    hook.setAttribute("data-analysis-revision", String(analysisRevision));
-    hook.setAttribute("data-npoc-count", String(this.npocLevels.length));
-    hook.setAttribute("data-npoc-visible-count", String(analysis.nakedPocs.length));
-    hook.setAttribute("data-npoc-pending", String(this.npocPending?.length ?? 0));
-    hook.setAttribute("data-npoc-history-ready", String(this.npocHistoryReady));
-    hook.setAttribute("data-automatic-level-count", String(automaticPriceCount));
-    hook.setAttribute("data-automatic-price-min", automaticPriceCount ? String(automaticPriceMin) : "");
-    hook.setAttribute("data-automatic-price-max", automaticPriceCount ? String(automaticPriceMax) : "");
-    hook.setAttribute("data-price-auto-scale", String(this.view.isPriceAutoScale()));
-    hook.setAttribute("data-active-tool", drawings.activeTool ?? "");
-    hook.setAttribute("data-selected", drawingSummary.selectedId ?? "");
-    hook.setAttribute("data-selected-count", String(drawingSummary.selectedCount));
-    hook.setAttribute("data-drawing-count", String(drawingSummary.types.length));
-    hook.setAttribute("data-drawing-types", drawingSummary.types.join(","));
-    hook.setAttribute("data-sync-time", this.syncController?.ghostCrosshairTime != null ? String(this.syncController.ghostCrosshairTime) : "");
-    hook.setAttribute("data-visible-range", range ? `${Math.round(range.from)}:${Math.round(range.to)}` : "");
-    hook.setAttribute("data-follow-latest", String(this.timeViewport.followsLatest()));
-    hook.setAttribute("data-timeframe", this.state.timeframe);
-    hook.setAttribute("data-link-group", this.state.linkGroup ?? "");
-    hook.setAttribute("data-replay-state", replay?.state ?? "");
-    hook.setAttribute("data-replay-visible", replay ? String(replay.visibleBars) : "");
-    hook.setAttribute("data-replay-total", replay ? String(replay.totalBars) : "");
+    this.setHookAttr("data-market", this.state.market);
+    this.setHookAttr("data-analysis-market", analysis.market);
+    this.setHookAttr("data-analysis-revision", String(analysisRevision));
+    this.setHookAttr("data-npoc-count", String(this.npocLevels.length));
+    this.setHookAttr("data-npoc-visible-count", String(analysis.nakedPocs.length));
+    this.setHookAttr("data-npoc-pending", String(this.npocPending?.length ?? 0));
+    this.setHookAttr("data-npoc-history-ready", String(this.npocHistoryReady));
+    this.setHookAttr("data-automatic-level-count", String(automaticPriceCount));
+    this.setHookAttr("data-automatic-price-min", automaticPriceCount ? String(automaticPriceMin) : "");
+    this.setHookAttr("data-automatic-price-max", automaticPriceCount ? String(automaticPriceMax) : "");
+    this.setHookAttr("data-price-auto-scale", String(this.view.isPriceAutoScale()));
+    this.setHookAttr("data-active-tool", drawings.activeTool ?? "");
+    this.setHookAttr("data-selected", drawingSummary.selectedId ?? "");
+    this.setHookAttr("data-selected-count", String(drawingSummary.selectedCount));
+    this.setHookAttr("data-drawing-count", String(drawingSummary.types.length));
+    this.setHookAttr("data-drawing-types", drawingSummary.types.join(","));
+    this.setHookAttr("data-sync-time", this.syncController?.ghostCrosshairTime != null ? String(this.syncController.ghostCrosshairTime) : "");
+    this.setHookAttr("data-visible-range", range ? Math.round(range.from) + ":" + Math.round(range.to) : "");
+    this.setHookAttr("data-follow-latest", String(this.timeViewport.followsLatest()));
+    this.setHookAttr("data-timeframe", this.state.timeframe);
+    this.setHookAttr("data-link-group", this.state.linkGroup ?? "");
+    this.setHookAttr("data-replay-state", replay?.state ?? "");
+    this.setHookAttr("data-replay-visible", replay ? String(replay.visibleBars) : "");
+    this.setHookAttr("data-replay-total", replay ? String(replay.totalBars) : "");
   }
 
   private _setPriceAutoScaleFromControl(autoScale: boolean): void {

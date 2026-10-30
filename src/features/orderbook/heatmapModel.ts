@@ -127,12 +127,26 @@ const HEATMAP_DEEP_RGB: readonly [number, number, number] = [29, 78, 216];
 const HEATMAP_LIGHT_ALPHA = 0.28;
 const HEATMAP_DEEP_ALPHA = 0.95;
 
-/** Fill color for a cell of the given intensity; `alphaScale` fades it (the live bar's extension). */
-export function heatmapCellColor(intensity: number, alphaScale = 1): string {
-  const k = Math.min(1, Math.max(0, intensity));
+function computeHeatmapCellColor(k: number, alphaScale: number): string {
   const channel = (i: number) => Math.round(HEATMAP_LIGHT_RGB[i] + (HEATMAP_DEEP_RGB[i] - HEATMAP_LIGHT_RGB[i]) * k);
   const alpha = (HEATMAP_LIGHT_ALPHA + (HEATMAP_DEEP_ALPHA - HEATMAP_LIGHT_ALPHA) * k) * alphaScale;
   return `rgba(${channel(0)}, ${channel(1)}, ${channel(2)}, ${alpha.toFixed(3)})`;
+}
+
+const HEATMAP_COLOR_LUT_FULL: readonly string[] = Array.from({ length: 1001 }, (_, q) => computeHeatmapCellColor(q / 1000, 1));
+const HEATMAP_COLOR_LUT_LIVE: readonly string[] = Array.from({ length: 1001 }, (_, q) => computeHeatmapCellColor(q / 1000, 0.45));
+
+/** Fill color for a cell of the given intensity; `alphaScale` fades it (the live bar's extension). */
+export function heatmapCellColor(intensity: number, alphaScale = 1): string {
+  const k = Math.min(1, Math.max(0, intensity));
+  const q = Math.round(k * 1000);
+  if (alphaScale === 1) {
+    return HEATMAP_COLOR_LUT_FULL[q];
+  }
+  if (alphaScale === 0.45) {
+    return HEATMAP_COLOR_LUT_LIVE[q];
+  }
+  return computeHeatmapCellColor(k, alphaScale);
 }
 
 export function formatHeatmapValue(value: number, unit: "usd" | "btc"): string {
