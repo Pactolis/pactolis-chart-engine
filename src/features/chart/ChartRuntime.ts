@@ -63,7 +63,7 @@ import { ChartIndicatorController } from "./ChartIndicatorController.js";
 import { buildChartAnalysisSnapshot, countClosedBars } from "./analysisSnapshot.js";
 import { decideLiveSameBarAutoFit, type LiveAutoFitSnapshot } from "./liveAutoFit.js";
 import { OrderbookHeatmapOverlay, type LiveHeatmapTailEvent } from "../orderbook/heatmapOverlay.js";
-import type { HeatmapGpuRenderer, HeatmapGpuCellFrame } from "./heatmap/gpu/heatmapGpuRenderer.js";
+import { HeatmapGpuRenderer, type HeatmapGpuCellFrame } from "./heatmap/gpu/heatmapGpuRenderer.js";
 import type { FootprintSeries } from "../../core/model/footprint.js";
 import { abortableDelay } from "./abortableDelay.js";
 import type { ChartSurfaceModel } from "./chartSurfaceModel.js";
@@ -1523,7 +1523,7 @@ class ChartRuntimeImpl implements ChartRuntime, ChartInputHost {
     // a missing renderer or a denied reservation yields no prepared frame,
     // so the legacy annotation path stays authoritative (no unbudgeted
     // production fallback).
-    if (!this.heatmapGpuRenderer) return null;
+    if (!this.heatmapGpuRenderer) this.heatmapGpuRenderer = new HeatmapGpuRenderer();
     const gpuRenderer = this.heatmapGpuRenderer;
     return this.orderbookHeatmap.prepareGpuCells(
       v,
@@ -1543,7 +1543,7 @@ class ChartRuntimeImpl implements ChartRuntime, ChartInputHost {
       this.heatmapGpuFailureLatched = true;
       return;
     }
-    if (!this.heatmapGpuRenderer) return;
+    if (!this.heatmapGpuRenderer) this.heatmapGpuRenderer = new HeatmapGpuRenderer();
     const range = this.renderer.visibleRange(v, s.length);
     let ok: boolean;
     try {
@@ -2083,16 +2083,6 @@ class ChartRuntimeImpl implements ChartRuntime, ChartInputHost {
 
   setResidentHeatmapEnabled(enabled: boolean): void {
     this.heatmapTexturePrototypeEnabled = enabled;
-    if (enabled && !this.heatmapGpuRenderer) {
-      import("./heatmap/gpu/heatmapGpuRenderer.js").then((mod) => {
-        if (this.heatmapTexturePrototypeEnabled && !this.heatmapGpuRenderer && !this.disposed) {
-          this.heatmapGpuRenderer = new mod.HeatmapGpuRenderer();
-          this.session?.invalidate();
-        }
-      }).catch((err) => {
-        console.error("[ChartRuntime] failed to lazy-load HeatmapGpuRenderer", err);
-      });
-    }
     this.session?.invalidate();
   }
 }
