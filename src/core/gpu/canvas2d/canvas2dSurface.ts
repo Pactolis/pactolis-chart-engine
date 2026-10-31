@@ -1,19 +1,23 @@
 import type { GpuFrame, GpuLossReason, GpuSurface, HeatmapLayer, QuadSink, RGBA, RgbaFrame } from "../gpuBackend.js";
 
-const colorCache = new Map<string, string>();
+function clamp01(v: number): number {
+  return v < 0 ? 0 : v > 1 ? 1 : v;
+}
+
+const RGBA_CACHE = new Map<number, string>();
 
 function formatCssRgba(c: RGBA): string {
-  const r255 = Math.round(c.r * 255);
-  const g255 = Math.round(c.g * 255);
-  const b255 = Math.round(c.b * 255);
-  const aNorm = Number(c.a.toFixed(3));
-  const key = `${r255},${g255},${b255},${aNorm}`;
-  let css = colorCache.get(key);
-  if (!css) {
-    css = `rgba(${r255}, ${g255}, ${b255}, ${aNorm})`;
-    if (colorCache.size > 2048) colorCache.clear();
-    colorCache.set(key, css);
-  }
+  const rByte = Math.round(clamp01(c.r) * 255);
+  const gByte = Math.round(clamp01(c.g) * 255);
+  const bByte = Math.round(clamp01(c.b) * 255);
+  const aNorm = Number(clamp01(c.a).toFixed(3));
+  const aByte = Math.round(aNorm * 255);
+  const key = (rByte | (gByte << 8) | (bByte << 16) | (aByte << 24)) >>> 0;
+  let css = RGBA_CACHE.get(key);
+  if (css !== undefined) return css;
+  css = `rgba(${rByte}, ${gByte}, ${bByte}, ${aNorm})`;
+  if (RGBA_CACHE.size >= 4096) RGBA_CACHE.clear();
+  RGBA_CACHE.set(key, css);
   return css;
 }
 

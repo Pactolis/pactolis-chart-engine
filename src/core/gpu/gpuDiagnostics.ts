@@ -31,7 +31,7 @@ export interface GpuDiagnosticsSnapshot {
   readonly frame?: GpuFrameMetrics;
 }
 
-const ENGINE_VERSION = "0.2.3";
+const ENGINE_VERSION = "0.2.5";
 const MAX_SAMPLES = 120;
 
 const FRAME_COUNTER_KEYS: Record<string, string> = {

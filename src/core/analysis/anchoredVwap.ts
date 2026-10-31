@@ -7,6 +7,20 @@ export interface AnchoredVwapResult {
   available: boolean;
 }
 
+function findFirstBarIndex(bars: readonly FootprintBar[], anchorTime: number): number {
+  let low = 0;
+  let high = bars.length;
+  while (low < high) {
+    const mid = (low + high) >>> 1;
+    if (bars[mid].startTime < anchorTime) {
+      low = mid + 1;
+    } else {
+      high = mid;
+    }
+  }
+  return low;
+}
+
 export function calculateAnchoredVwap(
   bars: readonly FootprintBar[],
   anchorTime: number,
@@ -15,8 +29,10 @@ export function calculateAnchoredVwap(
   let priceVolume = 0;
   let volume = 0;
   const points: VwapPoint[] = [];
-  for (const bar of bars) {
-    if (bar.startTime < anchorTime || bar.startTime > endTime) continue;
+  const startIndex = findFirstBarIndex(bars, anchorTime);
+  for (let i = startIndex; i < bars.length; i++) {
+    const bar = bars[i];
+    if (bar.startTime > endTime) break;
     if (bar.volume > 0) {
       priceVolume += ((bar.high + bar.low + bar.close) / 3) * bar.volume;
       volume += bar.volume;

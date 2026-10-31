@@ -45,6 +45,7 @@ export interface GpuSurface {
   readonly kind: GpuBackendKind;
   readonly canvas: HTMLCanvasElement;
   readonly heatmap: HeatmapLayer | null;
+  getGlContext?(): WebGL2RenderingContext | null;
   resize(bitmapWidth: number, bitmapHeight: number, dpr?: number): void;
   beginFrame(clear: RGBA): GpuFrame;
   requestCapture(): Promise<RgbaFrame>;

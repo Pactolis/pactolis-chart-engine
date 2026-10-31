@@ -25,6 +25,7 @@ import {
   CELL_PIXEL_MERGE_HEIGHT,
   chartLodForSpacing,
   type OhlcBarLike,
+  type PixelCellBucket,
 } from "./chartLod.js";
 import { resolveBuiltInLayerPreset, type BuiltInChartType } from "./scene/chartLayerPreset.js";
 import { measurePerformance } from "../performanceTelemetry.js";
@@ -91,6 +92,15 @@ interface BarProfileCache {
   maxMetric: number;
 }
 
+interface CachedPixelBuckets {
+  cellRevision: number;
+  step: number;
+  yHigh: number;
+  yLow: number;
+  buckets: PixelCellBucket[];
+  mergedMax: number;
+}
+
 export class FootprintRenderer {
   private batch: QuadSink;
   private rawBatch: QuadBatch | null = null;
@@ -99,6 +109,7 @@ export class FootprintRenderer {
   private gl?: WebGL2RenderingContext;
   private readonly heatCache = new WeakMap<FootprintBar, BarHeatCache>();
   private readonly imbalanceCache = new WeakMap<FootprintBar, BarImbalanceCache>();
+  private readonly pixelBucketCache = new WeakMap<FootprintBar, CachedPixelBuckets>();
   private readonly scratchCellRect = { yTop: 0, height: 0 };
   private readonly scratchClipRect = { yTop: 0, height: 0 };
   private static readonly LAYER_PRESET_CACHE = new Map<BuiltInChartType, ReadonlySet<string>>();
@@ -118,8 +129,8 @@ export class FootprintRenderer {
   constructor(glOrSurface: WebGL2RenderingContext | GpuSurface) {
     if (isGpuSurface(glOrSurface)) {
       this.surface = glOrSurface;
-      if (glOrSurface.kind === "webgl2" && typeof (glOrSurface as any).getGlContext === "function") {
-        this.gl = (glOrSurface as any).getGlContext();
+      if (glOrSurface.kind === "webgl2" && typeof glOrSurface.getGlContext === "function") {
+        this.gl = glOrSurface.getGlContext() ?? undefined;
       }
       this.batch = { rect: () => {} };
     } else {
@@ -131,8 +142,8 @@ export class FootprintRenderer {
 
   setSurface(surface: GpuSurface): void {
     this.surface = surface;
-    if (surface.kind === "webgl2" && typeof (surface as any).getGlContext === "function") {
-      this.gl = (surface as any).getGlContext();
+    if (surface.kind === "webgl2" && typeof surface.getGlContext === "function") {
+      this.gl = surface.getGlContext() ?? undefined;
     }
   }
 
@@ -421,13 +432,38 @@ export class FootprintRenderer {
     fpLeft: number,
     halfW: number,
   ): void {
-    const buckets = buildPixelCellBuckets(bar.cells.values(), step, (price) => view.yOfPrice(price));
-    // A merged row sums several cells, so scale against the busiest merged row rather
-    // than the busiest single cell or every row would saturate.
-    let mergedMax = 0;
-    for (const bucket of buckets) {
-      mergedMax = Math.max(mergedMax, bucket.buyVol, bucket.sellVol);
+    const yHigh = view.yOfPrice(bar.high);
+    const yLow = view.yOfPrice(bar.low);
+    const revision = bar.cellRevision ?? 0;
+    const cached = this.pixelBucketCache.get(bar);
+    let buckets: PixelCellBucket[];
+    let mergedMax: number;
+
+    if (
+      cached &&
+      cached.cellRevision === revision &&
+      cached.step === step &&
+      Math.abs(cached.yHigh - yHigh) < 1e-4 &&
+      Math.abs(cached.yLow - yLow) < 1e-4
+    ) {
+      buckets = cached.buckets;
+      mergedMax = cached.mergedMax;
+    } else {
+      buckets = buildPixelCellBuckets(bar.cells.values(), step, (price) => view.yOfPrice(price));
+      mergedMax = 0;
+      for (const bucket of buckets) {
+        mergedMax = Math.max(mergedMax, bucket.buyVol, bucket.sellVol);
+      }
+      this.pixelBucketCache.set(bar, {
+        cellRevision: revision,
+        step,
+        yHigh,
+        yLow,
+        buckets,
+        mergedMax,
+      });
     }
+
     if (mergedMax <= 0) return;
     for (const bucket of buckets) {
       const rect = this.clipPixelSpanToBar(view, bar, bucket.yTop, bucket.height);
@@ -639,7 +675,6 @@ export class FootprintRenderer {
   }
 
   private profileCellMagnitude(cell: FootprintCell, mode: FootprintCellData): number {
-    const counts = cellTradeCounts(cell);
     switch (mode) {
       case "bidask":
         return Math.max(cell.sellVol, cell.buyVol);
@@ -650,9 +685,11 @@ export class FootprintRenderer {
       case "deltaPct":
         return Math.min(100, Math.abs(cellDeltaPercent(cell)));
       case "count":
-        return counts.total;
-      case "countBidask":
+        return cellTradeCounts(cell).total;
+      case "countBidask": {
+        const counts = cellTradeCounts(cell);
         return Math.max(counts.sell, counts.buy);
+      }
       case "avgTradeSize":
         return cellAverageTradeSize(cell);
       case "avgTradeSizeBidask": {
@@ -680,10 +717,10 @@ export class FootprintRenderer {
     const center = fpLeft + halfW;
 
     if (mode === "bidask" || mode === "countBidask" || mode === "avgTradeSizeBidask") {
-      const counts = cellTradeCounts(cell);
+      const counts = mode === "countBidask" ? cellTradeCounts(cell) : null;
       const averages = mode === "avgTradeSizeBidask" ? cellAverageTradeSizes(cell) : null;
-      const sell = mode === "bidask" ? cell.sellVol : mode === "countBidask" ? counts.sell : averages?.sell ?? 0;
-      const buy = mode === "bidask" ? cell.buyVol : mode === "countBidask" ? counts.buy : averages?.buy ?? 0;
+      const sell = mode === "bidask" ? cell.sellVol : mode === "countBidask" ? counts!.sell : averages?.sell ?? 0;
+      const buy = mode === "bidask" ? cell.buyVol : mode === "countBidask" ? counts!.buy : averages?.buy ?? 0;
       if (sell > 0) {
         const w = Math.max((sell / maxMetric) * halfW, 1);
         const a = 0.25 + 0.65 * (sell / maxMetric);

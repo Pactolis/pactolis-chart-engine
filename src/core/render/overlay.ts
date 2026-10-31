@@ -1,5 +1,6 @@
 // Canvas2D layer: cell volume numbers, price/time axes, crosshair, HUD.
 import type { View } from "../engine/view.js";
+import type { FootprintBar } from "../types.js";
 import { cellImbalance, type FootprintSeries } from "../model/footprint.js";
 import { cellAverageTradeSize, cellAverageTradeSizes, cellDeltaPercent, cellTradeCounts, quoteVolumeForBar } from "../model/footprintCellMetrics.js";
 import { settings, type ChartViewConfig } from "../settings.js";
@@ -122,6 +123,19 @@ function toHexByte(value: number): string {
   return Math.round(value).toString(16).padStart(2, "0");
 }
 
+function fmtCellValue(v: number, bp: number, showNotional: boolean): string {
+  return showNotional ? fmtNotional(v * bp) : fmtVol(v);
+}
+
+interface FormattedCellText {
+  centerText?: string;
+  centerColor?: string;
+  leftText?: string;
+  leftColor?: string;
+  rightText?: string;
+  rightColor?: string;
+}
+
 export class Overlay {
   /** When true, cell/HUD volumes are shown as USDT notional (qty * price). */
   showNotional = true;
@@ -138,6 +152,7 @@ export class Overlay {
   private tpoProfileHitZones: TpoProfileHitZone[] = [];
   /** Per-chart görünüm config'i (runtime set eder); null ise global settings. */
   private chartConfig: ChartViewConfig | null = null;
+  private readonly cellTextCache = new WeakMap<FootprintBar, { key: string; cellRevision: number; entries: Map<number, FormattedCellText> }>();
 
   getPriceScaleControlAt(x: number, y: number): PriceScaleControlId | null {
     const hit = this.priceScaleControlRects.find((rect) =>
@@ -254,20 +269,6 @@ export class Overlay {
       crosshair: Crosshair,
     ) => void,
   ) {}
-
-  render(
-    view: View,
-    series: FootprintSeries,
-    crosshair: Crosshair,
-    range: [number, number]
-  ): void {
-    if (!this.interactionCtx || this.interactionCtx === this.ctx) {
-      this.renderCombined(view, series, crosshair, range);
-      return;
-    }
-    this.renderAnnotations(view, series, crosshair, range);
-    this.renderInteraction(view, series, crosshair, range);
-  }
 
   /** Static/semi-static Canvas2D surface. Scene layer order is the render authority. */
   renderAnnotations(
@@ -457,80 +458,6 @@ export class Overlay {
       ));
       top += pane.height;
     }
-  }
-
-  private renderCombined(
-    view: View,
-    series: FootprintSeries,
-    crosshair: Crosshair,
-    range: [number, number]
-  ): void {
-    const ctx = this.ctx;
-    const { left, top, width, height } = view.area;
-    ctx.clearRect(0, 0, ctx.canvas.width, ctx.canvas.height);
-    ctx.save();
-    this.priceMarkers = [];
-    this.timeMarkers = [];
-    this.lineLabels = [];
-    this.priceScaleControlRects = [];
-    this.indicatorScaleControlRects = [];
-    this.indicatorAxisRects = [];
-    this.tpoProfileHitZones = [];
-
-    if (series.length === 0) {
-      // An empty series has no meaningful price range. Drawing the default View
-      // scale produced a ladder of negative prices (-40, -80, ...), which is
-      // especially misleading immediately after a market switch with no bars.
-      drawTimeAxis(ctx, view, series, crosshair, this.timeMarkers);
-      this.onHudText?.(null);
-      ctx.restore();
-      return;
-    }
-
-    if (this.isMainChartSuppressed?.()) {
-      this.drawSubPanes(view, series, range, crosshair);
-      drawTimeAxis(ctx, view, series, crosshair, this.timeMarkers);
-      this.onHudText?.(null);
-      ctx.restore();
-      return;
-    }
-
-    this.drawOrderbookHeatmap?.(ctx, view, series, range);
-    this.drawCells(view, series, range);
-    this.drawSubPanes(view, series, range, crosshair);
-    this.drawVolumeProfile(view, series, range);
-    this.drawTpo(view, series, range);
-    this.drawPreviousWeekStrategy(view, series);
-    this.drawMondayRange(view, series);
-    this.drawNakedPocs(view, series);
-    this.drawReferenceLevels(view, series);
-    this.drawForeground?.(ctx, view, series);
-    this.drawIndicatorPriceOverlays(view, series, range, crosshair);
-    if (settings.lastPrice) this.drawLastPrice(view, series);
-    // draw ghost/sync crosshair before local crosshair so local crosshair overlays it
-    const syncTime = this.getSyncCrosshairTime?.();
-    if (syncTime != null) {
-      const startTime = series.at(0)?.startTime;
-      if (startTime !== undefined) {
-        const idx = (syncTime - startTime) / series.config.intervalMs;
-        const x = view.xOfIndex(idx) + view.colWidth / 2;
-        this.drawSyncCrosshair(ctx, view, x);
-      }
-    }
-    if (crosshair.visible) this.drawCrosshair(ctx, view, crosshair);
-    this.drawHud(ctx, view, series, crosshair, range);
-    this.drawOrderbookHover?.(ctx, view, series, crosshair);
-    this.drawInteractionForeground?.(ctx, view, series);
-    this.drawLineLabels(view);
-    // Axes drawn last — chart content never overlaps axis labels
-    drawPriceAxis(ctx, view, series.config.priceStep, series.config.pricePrecision, this.priceAxisKeepOut(view, crosshair));
-    drawPriceMarkers(ctx, view, this.priceMarkers, series.config.priceStep, series.config.pricePrecision);
-    if (crosshair.visible) drawCrosshairPriceLabel(ctx, view, series, crosshair);
-    drawTimeAxis(ctx, view, series, crosshair, this.timeMarkers);
-    this.priceScaleControlRects = drawPriceScaleControls(ctx, view, crosshair);
-
-    ctx.restore();
-    void left; void top; void width; void height;
   }
 
   /** ChartRuntime her state değişiminde effective config'i buraya iter. */
@@ -902,11 +829,11 @@ export class Overlay {
     const minVisPrice = Math.min(pTop, pBot) - step;
     const maxVisPrice = Math.max(pTop, pBot) + step;
     const showNotional = this.showNotional;
-    const fmtCell = (v: number, bp: number): string =>
-      showNotional ? fmtNotional(v * bp) : fmtVol(v);
 
     ctx.font = `${Math.min(12, cellH - 2)}px ui-monospace, Menlo, monospace`;
     ctx.textBaseline = "middle";
+
+    const cacheKey = `${mode}|${compact ? 1 : 0}|${showNotional ? 1 : 0}|${step}`;
 
     for (let i = from; i < to; i++) {
       const bar = series.at(i);
@@ -914,87 +841,118 @@ export class Overlay {
       const fpLeft = view.xOfIndex(i) + candleW;
       const half = fpW / 2;
 
+      let barCache: { key: string; cellRevision: number; entries: Map<number, FormattedCellText> } | null = null;
+      if (bar.cellRevision !== undefined) {
+        const existing = this.cellTextCache.get(bar);
+        if (existing && existing.key === cacheKey && existing.cellRevision === bar.cellRevision) {
+          barCache = existing;
+        } else {
+          barCache = { key: cacheKey, cellRevision: bar.cellRevision, entries: new Map() };
+          this.cellTextCache.set(bar, barCache);
+        }
+      }
+
       for (const cell of bar.cells.values()) {
         if (cell.priceBin + step < minVisPrice || cell.priceBin > maxVisPrice) continue;
         const yMid = view.yOfPrice(cell.priceBin + step / 2);
         if (yMid < view.area.top || yMid > view.area.top + view.area.height) continue;
 
-        const binPrice = cell.priceBin + step / 2;
-        const fmt = (v: number): string => fmtCell(v, binPrice);
-
-        if (mode === "bidask") {
-          const imb = cellImbalance(cell);
-          if (compact) {
-            // One value, coloured by which side dominates.
-            ctx.fillStyle = imb > 0.3 ? uiColor.buy : imb < -0.3 ? uiColor.sell : uiColor.text;
-            ctx.textAlign = "center";
-            ctx.fillText(fmt(cell.buyVol + cell.sellVol), fpLeft + half, yMid);
-            continue;
+        let entry: FormattedCellText | undefined = barCache?.entries.get(cell.priceBin);
+        if (!entry) {
+          const binPrice = cell.priceBin + step / 2;
+          if (mode === "bidask") {
+            const imb = cellImbalance(cell);
+            if (compact) {
+              entry = {
+                centerText: fmtCellValue(cell.buyVol + cell.sellVol, binPrice, showNotional),
+                centerColor: imb > 0.3 ? uiColor.buy : imb < -0.3 ? uiColor.sell : uiColor.text,
+              };
+            } else {
+              entry = {
+                leftText: fmtCellValue(cell.sellVol, binPrice, showNotional),
+                leftColor: imb < -0.3 ? uiColor.sell : cellDimSell,
+                rightText: fmtCellValue(cell.buyVol, binPrice, showNotional),
+                rightColor: imb > 0.3 ? uiColor.buy : cellDimBuy,
+              };
+            }
+          } else if (mode === "volume") {
+            entry = {
+              centerText: fmtCellValue(cell.buyVol + cell.sellVol, binPrice, showNotional),
+              centerColor: uiColor.text,
+            };
+          } else if (mode === "count") {
+            const counts = cellTradeCounts(cell);
+            entry = {
+              centerText: fmtVol(counts.total),
+              centerColor: uiColor.text,
+            };
+          } else if (mode === "countBidask") {
+            const counts = cellTradeCounts(cell);
+            if (compact) {
+              entry = {
+                centerText: fmtVol(counts.total),
+                centerColor: uiColor.text,
+              };
+            } else {
+              entry = {
+                leftText: fmtVol(counts.sell),
+                leftColor: counts.sell > counts.buy ? uiColor.sell : cellDimSell,
+                rightText: fmtVol(counts.buy),
+                rightColor: counts.buy > counts.sell ? uiColor.buy : cellDimBuy,
+              };
+            }
+          } else if (mode === "deltaPct") {
+            const deltaPct = cellDeltaPercent(cell);
+            const sign = deltaPct > 0 ? "+" : deltaPct < 0 ? "-" : "";
+            entry = {
+              centerText: `${sign}${Math.abs(deltaPct).toFixed(0)}%`,
+              centerColor: deltaPct > 0 ? uiColor.buy : deltaPct < 0 ? uiColor.sell : uiColor.textSecondary,
+            };
+          } else if (mode === "avgTradeSize") {
+            entry = {
+              centerText: fmtCellValue(cellAverageTradeSize(cell), binPrice, showNotional),
+              centerColor: uiColor.text,
+            };
+          } else if (mode === "avgTradeSizeBidask") {
+            const averages = cellAverageTradeSizes(cell);
+            if (compact) {
+              entry = {
+                centerText: fmtCellValue(cellAverageTradeSize(cell), binPrice, showNotional),
+                centerColor: uiColor.text,
+              };
+            } else {
+              entry = {
+                leftText: fmtCellValue(averages.sell, binPrice, showNotional),
+                leftColor: averages.sell > averages.buy ? uiColor.sell : cellDimSell,
+                rightText: fmtCellValue(averages.buy, binPrice, showNotional),
+                rightColor: averages.buy > averages.sell ? uiColor.buy : cellDimBuy,
+              };
+            }
+          } else {
+            const delta = cell.buyVol - cell.sellVol;
+            const sign = delta > 0 ? "+" : delta < 0 ? "-" : "";
+            entry = {
+              centerText: sign + fmtCellValue(Math.abs(delta), binPrice, showNotional),
+              centerColor: delta > 0 ? uiColor.buy : delta < 0 ? uiColor.sell : uiColor.textSecondary,
+            };
           }
-          // sell (left, right-aligned), buy (right, left-aligned)
-          ctx.fillStyle = imb < -0.3 ? uiColor.sell : cellDimSell;
-          ctx.textAlign = "right";
-          ctx.fillText(fmt(cell.sellVol), fpLeft + half - 4, yMid);
-
-          ctx.fillStyle = imb > 0.3 ? uiColor.buy : cellDimBuy;
-          ctx.textAlign = "left";
-          ctx.fillText(fmt(cell.buyVol), fpLeft + half + 4, yMid);
-        } else if (mode === "volume") {
-          ctx.fillStyle = uiColor.text;
-          ctx.textAlign = "center";
-          ctx.fillText(fmt(cell.buyVol + cell.sellVol), fpLeft + half, yMid);
-        } else if (mode === "count") {
-          // trade count is a raw tally, never a notional value
-          ctx.fillStyle = uiColor.text;
-          ctx.textAlign = "center";
-          ctx.fillText(fmtVol(cellTradeCounts(cell).total), fpLeft + half, yMid);
-        } else if (mode === "countBidask") {
-          const counts = cellTradeCounts(cell);
-          if (compact) {
-            ctx.fillStyle = uiColor.text;
-            ctx.textAlign = "center";
-            ctx.fillText(fmtVol(counts.total), fpLeft + half, yMid);
-            continue;
+          if (barCache) {
+            barCache.entries.set(cell.priceBin, entry);
           }
-          ctx.fillStyle = counts.sell > counts.buy ? uiColor.sell : cellDimSell;
-          ctx.textAlign = "right";
-          ctx.fillText(fmtVol(counts.sell), fpLeft + half - 4, yMid);
+        }
 
-          ctx.fillStyle = counts.buy > counts.sell ? uiColor.buy : cellDimBuy;
-          ctx.textAlign = "left";
-          ctx.fillText(fmtVol(counts.buy), fpLeft + half + 4, yMid);
-        } else if (mode === "deltaPct") {
-          const deltaPct = cellDeltaPercent(cell);
-          const sign = deltaPct > 0 ? "+" : deltaPct < 0 ? "-" : "";
-          ctx.fillStyle = deltaPct > 0 ? uiColor.buy : deltaPct < 0 ? uiColor.sell : uiColor.textSecondary;
+        if (entry.centerText !== undefined) {
+          ctx.fillStyle = entry.centerColor!;
           ctx.textAlign = "center";
-          ctx.fillText(`${sign}${Math.abs(deltaPct).toFixed(0)}%`, fpLeft + half, yMid);
-        } else if (mode === "avgTradeSize") {
-          ctx.fillStyle = uiColor.text;
-          ctx.textAlign = "center";
-          ctx.fillText(fmt(cellAverageTradeSize(cell)), fpLeft + half, yMid);
-        } else if (mode === "avgTradeSizeBidask") {
-          const averages = cellAverageTradeSizes(cell);
-          if (compact) {
-            ctx.fillStyle = uiColor.text;
-            ctx.textAlign = "center";
-            ctx.fillText(fmt(cellAverageTradeSize(cell)), fpLeft + half, yMid);
-            continue;
-          }
-          ctx.fillStyle = averages.sell > averages.buy ? uiColor.sell : cellDimSell;
-          ctx.textAlign = "right";
-          ctx.fillText(fmt(averages.sell), fpLeft + half - 4, yMid);
-
-          ctx.fillStyle = averages.buy > averages.sell ? uiColor.buy : cellDimBuy;
-          ctx.textAlign = "left";
-          ctx.fillText(fmt(averages.buy), fpLeft + half + 4, yMid);
+          ctx.fillText(entry.centerText, fpLeft + half, yMid);
         } else {
-          // delta = buy - sell
-          const delta = cell.buyVol - cell.sellVol;
-          const sign = delta > 0 ? "+" : delta < 0 ? "-" : "";
-          ctx.fillStyle = delta > 0 ? uiColor.buy : delta < 0 ? uiColor.sell : uiColor.textSecondary;
-          ctx.textAlign = "center";
-          ctx.fillText(sign + fmt(Math.abs(delta)), fpLeft + half, yMid);
+          ctx.fillStyle = entry.leftColor!;
+          ctx.textAlign = "right";
+          ctx.fillText(entry.leftText!, fpLeft + half - 4, yMid);
+
+          ctx.fillStyle = entry.rightColor!;
+          ctx.textAlign = "left";
+          ctx.fillText(entry.rightText!, fpLeft + half + 4, yMid);
         }
       }
     }

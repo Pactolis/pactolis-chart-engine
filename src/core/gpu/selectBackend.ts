@@ -8,8 +8,7 @@ import {
 import type { GpuBackendPreference } from "./gpuSettings.js";
 import type { GpuSurface } from "./gpuBackend.js";
 import { WebGl2Surface } from "./webgl2/webgl2Surface.js";
-import { requestWebGpuDevice, type WebGpuDeviceHandle } from "./webgpu/webgpuDevice.js";
-import { WebGpuSurface } from "./webgpu/webgpuSurface.js";
+import type { WebGpuDeviceHandle } from "./webgpu/webgpuDevice.js";
 
 export function createGpuSurface(
   canvas: HTMLCanvasElement,
@@ -41,8 +40,11 @@ export function createGpuSurface(
           maxTextureDimension2D: webgpuHandle.limits.maxTextureDimension2D,
         });
       }
-      recordGpuBackendSelection(preference, "webgpu");
-      return new WebGpuSurface(canvas, webgpuHandle);
+      const WebGpuSurfaceClass = (globalThis as any).__PactolisWebGpuSurface;
+      if (WebGpuSurfaceClass) {
+        recordGpuBackendSelection(preference, "webgpu");
+        return new WebGpuSurfaceClass(canvas, webgpuHandle);
+      }
     }
   }
 
@@ -90,6 +92,13 @@ export async function createGpuSurfaceAsync(
 
   if (preference === "webgpu" || preference === "auto") {
     try {
+      const [{ requestWebGpuDevice }, { WebGpuSurface }] = await Promise.all([
+        import("./webgpu/webgpuDevice.js"),
+        import("./webgpu/webgpuSurface.js"),
+      ]);
+      if (typeof globalThis !== "undefined") {
+        (globalThis as any).__PactolisWebGpuSurface = WebGpuSurface;
+      }
       const handle = await requestWebGpuDevice();
       if (handle && !handle.isLost()) {
         const hasWebGpuContext = Boolean(canvas.getContext && canvas.getContext("webgpu"));

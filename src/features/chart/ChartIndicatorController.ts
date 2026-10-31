@@ -44,13 +44,7 @@ interface InteractionPreparedCacheEntry {
   prepared: IndicatorPreparedData;
 }
 
-const LEGACY_CROSSHAIR_PANE_TYPES = new Set([
-  "bar-stats",
-  "liquidations",
-  "funding-regime",
-  "futures-positioning",
-  "cross-exchange-open-interest",
-]);
+const LEGACY_CROSSHAIR_PANE_TYPES = new Set<string>();
 
 /** Thin ownership boundary around IndicatorManager and its pane/layout lifecycle. */
 export class ChartIndicatorController {
@@ -148,6 +142,7 @@ export class ChartIndicatorController {
           crosshair: IndicatorCrosshair,
         ) => {
           if (definition.inputSource === "view") return;
+          const settings = { ...definition.defaultSettings(), ...instance.settings };
           const drawContext: IndicatorDrawContext<IndicatorSettings> = {
             ctx,
             view,
@@ -155,7 +150,7 @@ export class ChartIndicatorController {
             rect,
             range,
             instance: instance as IndicatorInstance<IndicatorSettings>,
-            settings: instance.settings,
+            settings,
             chart: this.options.getChartContext(),
             crosshair,
             requestRefresh: () => this.options.onInvalidate(),

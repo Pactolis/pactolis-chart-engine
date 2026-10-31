@@ -62,11 +62,14 @@ import { expect, test, type Page, type TestInfo } from "@playwright/test";
  * decided yet for loaded profiles.
  */
 
-const FUNCTIONAL_WEBGL_ARGS = [
-  "--use-gl=angle",
-  "--use-angle=swiftshader-webgl",
-  "--enable-unsafe-swiftshader",
-];
+const USE_HARDWARE_GPU = process.env.CHART_CENSUS_GPU_MODE === "hardware";
+const FUNCTIONAL_WEBGL_ARGS = USE_HARDWARE_GPU
+  ? ["--use-gl=angle", "--use-angle=default", "--ignore-gpu-blocklist"]
+  : [
+      "--use-gl=angle",
+      "--use-angle=swiftshader-webgl",
+      "--enable-unsafe-swiftshader",
+    ];
 
 const VIEWPORT = { width: 1280, height: 720 };
 
@@ -98,6 +101,7 @@ interface Scenario {
   drawings: number;
   // Only the empty 4- and 8-chart grids carry the #308 "Kademeli 30" gate.
   frameGate: boolean;
+  frameP95BudgetMs?: number;
   // Burst profile: live trades replace the pointer phases (see BURST below).
   burst?: boolean;
   // Endurance profile: live trades at the normal rate for minutes (see ENDURANCE).
@@ -118,6 +122,15 @@ const FOOTPRINT_MARKETS = [
 ];
 const FOUR_MARKETS = FOOTPRINT_MARKETS.slice(0, 4);
 const EIGHT_MARKETS = [...FOOTPRINT_MARKETS, FOOTPRINT_MARKETS[0]];
+
+// #50 loaded-profile regression alarm budgets on CI SwiftShader (median + >=25% headroom):
+const LOADED_L2_INTERACTION_FRAME_P95_MS = 120;
+const LOADED_L5_INTERACTION_FRAME_P95_MS = 200;
+const LIVE_BURST_FRAME_P95_BUDGET_MS = 250;
+const LIVE_BURST_LATENCY_P95_BUDGET_MS = 3_000;
+// #50 endurance retained heap drift ceiling: <= 64 MiB/hour (~1.06 MiB/min).
+const ENDURANCE_MAX_HEAP_GROWTH_BYTES_PER_MINUTE = Math.round((64 * 1024 * 1024) / 60);
+
 const SCENARIOS: Scenario[] = [
   {
     id: "377",
@@ -156,6 +169,7 @@ const SCENARIOS: Scenario[] = [
     indicators: 10,
     drawings: 100,
     frameGate: false,
+    frameP95BudgetMs: LOADED_L2_INTERACTION_FRAME_P95_MS,
     timeoutMs: 180_000,
   },
   {
@@ -195,6 +209,7 @@ const SCENARIOS: Scenario[] = [
     indicators: 50,
     drawings: 0,
     frameGate: false,
+    frameP95BudgetMs: LOADED_L5_INTERACTION_FRAME_P95_MS,
     timeoutMs: 300_000,
   },
   {
@@ -1349,10 +1364,15 @@ async function runScenario(scenario: Scenario, page: Page, testInfo?: TestInfo) 
       expect(phases.idle.frameMs?.samples ?? 0).toBeGreaterThan(30);
       expect(phases.crosshair.frameMs?.samples ?? 0).toBeGreaterThan(30);
       expect(phases.pan.frameMs?.samples ?? 0).toBeGreaterThan(30);
-      if (scenario.frameGate) {
+      const interactionBudgetMs = scenario.frameGate
+        ? MULTI_CHART_INTERACTION_FRAME_P95_MS
+        : scenario.frameP95BudgetMs;
+      if (interactionBudgetMs !== undefined) {
         for (const name of ["idle", "crosshair", "pan"] as const) {
-          expect(phases[name].frameMs!.p95, `${name} frame p95 with ${MARKETS.length} charts (#308 budget 33.3 ms)`)
-            .toBeLessThanOrEqual(MULTI_CHART_INTERACTION_FRAME_P95_MS + RAF_TIMESTAMP_TOLERANCE_MS);
+          expect(
+            phases[name].frameMs!.p95,
+            `${name} frame p95 for profile ${scenario.id} with ${MARKETS.length} charts (budget ${interactionBudgetMs.toFixed(1)} ms)`,
+          ).toBeLessThanOrEqual(interactionBudgetMs + RAF_TIMESTAMP_TOLERANCE_MS);
         }
       }
       // The drag really scrolled each chart back in time.
@@ -1511,6 +1531,21 @@ async function runScenario(scenario: Scenario, page: Page, testInfo?: TestInfo) 
       }
       expect(stream.unframedMessages).toBe(0);
     }
+    if (live) {
+      expect(phases.burst.frameMs?.samples ?? 0, "burst phase frame samples").toBeGreaterThan(30);
+      expect(
+        phases.burst.frameMs!.p95,
+        `burst phase frame p95 (#50 budget ${LIVE_BURST_FRAME_P95_BUDGET_MS} ms)`,
+      ).toBeLessThanOrEqual(LIVE_BURST_FRAME_P95_BUDGET_MS + RAF_TIMESTAMP_TOLERANCE_MS);
+      expect(
+        live.latency.burst.frameMs?.p95 ?? Number.POSITIVE_INFINITY,
+        `burst live trade frameLatencyMs.p95 (#50 budget ${LIVE_BURST_LATENCY_P95_BUDGET_MS} ms)`,
+      ).toBeLessThanOrEqual(LIVE_BURST_LATENCY_P95_BUDGET_MS);
+      expect(
+        live.recoveredAfterMs,
+        `burst recovery time (#50 target <= ${BURST.recoveryTargetMs} ms)`,
+      ).toBeLessThanOrEqual(BURST.recoveryTargetMs);
+    }
     expect(probe.gcExposed, "GC hook for retained-heap readings").toBe(true);
     // #308 "Kapı": retained heap over 1 GB turns CI red.
     for (const [name, reading] of [["after load", load.heap], ["after interaction", probe.heap]] as const) {
@@ -1530,6 +1565,13 @@ async function runScenario(scenario: Scenario, page: Page, testInfo?: TestInfo) 
       // shared validator together with count, uniqueness, spacing and heaps).
       expect(endurance.durationMs, "endurance actual duration").toBeGreaterThanOrEqual(ENDURANCE_MINUTES * 60_000);
       expect(validateEnduranceSamples(endurance.samples, endurance.durationMs, ENDURANCE_MINUTES, ENDURANCE.sampleMs), "endurance minute-sample integrity").toEqual([]);
+      const trend = heapTrend(endurance.samples);
+      if (trend !== null) {
+        expect(
+          trend.growthBytesPerMinute,
+          `endurance retained heap growth rate (#50 ceiling ${ENDURANCE_MAX_HEAP_GROWTH_BYTES_PER_MINUTE} B/min)`,
+        ).toBeLessThanOrEqual(ENDURANCE_MAX_HEAP_GROWTH_BYTES_PER_MINUTE);
+      }
     }
 
     // Transport: every market used both the one-shot JSON phase and the streamed
@@ -1756,6 +1798,22 @@ test("census minute-sample validator rejects fabricated sets", () => {
   expect(validateEnduranceSamples([{ minute: 1, at: Number.NaN, heapBytes: 1 }, good[1], good[2]], 180_000, 3, 60_000).join()).toContain("non-finite");
   expect(validateEnduranceSamples([{ minute: 1, at: 60_000, heapBytes: 1_000 }, { minute: 2, at: 70_000, heapBytes: 1_000 },
     { minute: 3, at: 80_000, heapBytes: 1_000 }], 180_000, 3, 60_000).join()).toContain("span");
+});
+
+test("census heap trend accurately tracks slope and detects excessive drift (#50)", () => {
+  const stableSamples = Array.from({ length: 10 }, (_, i) => ({
+    heapBytes: 100 * 1024 * 1024 + (i % 2 === 0 ? 50_000 : -50_000),
+  }));
+  const stableTrend = heapTrend(stableSamples);
+  expect(stableTrend).not.toBeNull();
+  expect(stableTrend!.growthBytesPerMinute).toBeLessThanOrEqual(ENDURANCE_MAX_HEAP_GROWTH_BYTES_PER_MINUTE);
+
+  const leakingSamples = Array.from({ length: 10 }, (_, i) => ({
+    heapBytes: 100 * 1024 * 1024 + i * 2 * 1024 * 1024,
+  }));
+  const leakingTrend = heapTrend(leakingSamples);
+  expect(leakingTrend).not.toBeNull();
+  expect(leakingTrend!.growthBytesPerMinute).toBeGreaterThan(ENDURANCE_MAX_HEAP_GROWTH_BYTES_PER_MINUTE);
 });
 
 for (const scenario of SCENARIOS) test(scenario.title, ({ page }) => runScenario(scenario, page));

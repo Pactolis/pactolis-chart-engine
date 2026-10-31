@@ -511,8 +511,8 @@ class ChartRuntimeImpl implements ChartRuntime, ChartInputHost {
       setSurface: (nextSurface: GpuSurface) => {
         this.renderer.setSurface(nextSurface);
         this.heatmapGpuRendererGl =
-          nextSurface.kind === "webgl2" && typeof (nextSurface as any).getGlContext === "function"
-            ? (nextSurface as any).getGlContext()
+          nextSurface.kind === "webgl2"
+            ? nextSurface.getGlContext?.() ?? null
             : null;
       },
     };
@@ -552,7 +552,7 @@ class ChartRuntimeImpl implements ChartRuntime, ChartInputHost {
       crosshair,
       onRestoreContext: (restoredGl) => {
         this.renderer.dispose();
-        this.renderer = new FootprintRenderer(restoredGl);
+        this.renderer = new FootprintRenderer(this.session.getSurface());
         // The prototype's GPU resources belonged to the lost context; drop them
         // and let the next enabled frame rebuild against the restored GL.
         this.disposeHeatmapGpuRenderer();
@@ -2221,8 +2221,8 @@ async function buildChartRuntime(
       undefined,
       (c) => getChartWebGl2Context(c, display.webgl),
     );
-    if (gpuSurface.kind === "webgl2" && typeof (gpuSurface as any).getGlContext === "function") {
-      gl = (gpuSurface as any).getGlContext();
+    if (gpuSurface.kind === "webgl2") {
+      gl = gpuSurface.getGlContext?.() ?? null;
     }
     if (!annotationCtx2d || !interactionCtx2d || (!gl && gpuSurface.kind === "webgl2")) {
       if (!gl && gpuSurface.kind === "webgl2") incrementPerformanceCounter("chart.gpu.contextCreateFailed");

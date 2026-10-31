@@ -1,5 +1,5 @@
 import { incrementPerformanceCounter } from "../../performanceTelemetry.js";
-import { recordGpuContextEvent, recordGpuFallback } from "../gpuDiagnostics.js";
+import { recordGpuContextEvent, recordGpuFallback, setGpuAdapterInfo } from "../gpuDiagnostics.js";
 
 export interface WebGpuLimits {
   readonly maxBufferSize: number;
@@ -49,6 +49,33 @@ export async function requestWebGpuDevice(options?: {
       if (!adapter) {
         recordGpuFallback("webgpu", "webgl2", "adapter_request_failed");
         return null;
+      }
+
+      if (typeof adapter.requestAdapterInfo === "function") {
+        try {
+          const info = await adapter.requestAdapterInfo();
+          setGpuAdapterInfo({
+            vendor: info.vendor,
+            architecture: info.architecture,
+            description: info.description,
+            isFallbackAdapter: adapter.isFallbackAdapter,
+          });
+        } catch {
+          setGpuAdapterInfo({
+            isFallbackAdapter: adapter.isFallbackAdapter,
+          });
+        }
+      } else if (adapter.info) {
+        setGpuAdapterInfo({
+          vendor: adapter.info.vendor,
+          architecture: adapter.info.architecture,
+          description: adapter.info.description,
+          isFallbackAdapter: adapter.isFallbackAdapter,
+        });
+      } else {
+        setGpuAdapterInfo({
+          isFallbackAdapter: adapter.isFallbackAdapter,
+        });
       }
 
       const device = await adapter.requestDevice();
