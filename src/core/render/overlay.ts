@@ -1,5 +1,6 @@
 // Canvas2D layer: cell volume numbers, price/time axes, crosshair, HUD.
 import type { View } from "../engine/view.js";
+import type { FootprintBar } from "../types.js";
 import { cellImbalance, type FootprintSeries } from "../model/footprint.js";
 import { cellAverageTradeSize, cellAverageTradeSizes, cellDeltaPercent, cellTradeCounts, quoteVolumeForBar } from "../model/footprintCellMetrics.js";
 import { settings, type ChartViewConfig } from "../settings.js";

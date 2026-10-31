@@ -289,7 +289,10 @@ export class ChartSession {
     this.gpuSurface = nextSurface;
     this.gpuCanvas = nextCanvas;
     if (nextSurface.kind === "webgl2") {
-      this.gl = nextSurface.getGlContext?.() ?? null;
+      const gl = nextSurface.getGlContext?.();
+      if (gl) {
+        this.gl = gl;
+      }
     }
     this.gpuValid = true;
 

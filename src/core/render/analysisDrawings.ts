@@ -20,13 +20,6 @@ import { uiColor } from "../ui/seriesPalette.js";
 
 type AnchoredVwapResult = ReturnType<typeof calculateAnchoredVwap>;
 
-interface CachedCalculation<T> {
-  series: FootprintSeries;
-  revision: number;
-  key: string;
-  result: T;
-}
-
 interface CachedRangeProfileResult {
   profile: OrderFlowRangeProfileResult;
   maxMagnitude: number;
