@@ -1269,6 +1269,13 @@ class ChartRuntimeImpl implements ChartRuntime, ChartInputHost {
       return { time: defaultTime, price: rawPrice };
     }
 
+    if (this.analysisContextForChart().drawings?.activeTool === "brush") {
+      this.clearMagnetSnap?.();
+      const forceNearest = settings.magnetMode === "strong" || temporaryMagnet;
+      const snappedPrice = this._magnetSnapPrice(idx, cy, rawPrice, forceNearest);
+      return { time: defaultTime, price: snappedPrice };
+    }
+
     if (typeof (this as any)._resolveMagnetSnap === "function") {
       return this._resolveMagnetSnap(cx, cy, rawPrice, defaultTime, idx, temporaryMagnet);
     }
@@ -1364,9 +1371,8 @@ class ChartRuntimeImpl implements ChartRuntime, ChartInputHost {
       for (const { price: lvlPrice, label: lvlLabel } of ohlcLevels) {
         const lvlY = this.view.yOfPrice(lvlPrice);
         const distY = Math.abs(lvlY - cy);
-        const dist2d = Math.hypot(barX - cx, lvlY - cy);
         if (forceNearest || distY <= WEAK_MAGNET_THRESHOLD_PX) {
-          candidates.push({ x: barX, y: lvlY, price: lvlPrice, time: barTime, label: lvlLabel, distancePx: dist2d });
+          candidates.push({ x: barX, y: lvlY, price: lvlPrice, time: barTime, label: lvlLabel, distancePx: distY });
         }
       }
     }
