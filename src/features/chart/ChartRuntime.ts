@@ -63,7 +63,7 @@ import { ChartIndicatorController } from "./ChartIndicatorController.js";
 import { buildChartAnalysisSnapshot, countClosedBars } from "./analysisSnapshot.js";
 import { decideLiveSameBarAutoFit, type LiveAutoFitSnapshot } from "./liveAutoFit.js";
 import { OrderbookHeatmapOverlay, type LiveHeatmapTailEvent } from "../orderbook/heatmapOverlay.js";
-import { HeatmapGpuRenderer, type HeatmapGpuCellFrame } from "./heatmap/gpu/heatmapGpuRenderer.js";
+import type { HeatmapGpuRenderer, HeatmapGpuCellFrame } from "./heatmap/gpu/heatmapGpuRenderer.js";
 import type { FootprintSeries } from "../../core/model/footprint.js";
 import { abortableDelay } from "./abortableDelay.js";
 import type { ChartSurfaceModel } from "./chartSurfaceModel.js";
@@ -511,8 +511,8 @@ class ChartRuntimeImpl implements ChartRuntime, ChartInputHost {
       setSurface: (nextSurface: GpuSurface) => {
         this.renderer.setSurface(nextSurface);
         this.heatmapGpuRendererGl =
-          nextSurface.kind === "webgl2" && typeof (nextSurface as any).getGlContext === "function"
-            ? (nextSurface as any).getGlContext()
+          nextSurface.kind === "webgl2"
+            ? nextSurface.getGlContext?.() ?? null
             : null;
       },
     };
@@ -552,7 +552,7 @@ class ChartRuntimeImpl implements ChartRuntime, ChartInputHost {
       crosshair,
       onRestoreContext: (restoredGl) => {
         this.renderer.dispose();
-        this.renderer = new FootprintRenderer(restoredGl);
+        this.renderer = new FootprintRenderer(this.session.getSurface());
         // The prototype's GPU resources belonged to the lost context; drop them
         // and let the next enabled frame rebuild against the restored GL.
         this.disposeHeatmapGpuRenderer();
@@ -1523,7 +1523,7 @@ class ChartRuntimeImpl implements ChartRuntime, ChartInputHost {
     // a missing renderer or a denied reservation yields no prepared frame,
     // so the legacy annotation path stays authoritative (no unbudgeted
     // production fallback).
-    if (!this.heatmapGpuRenderer) this.heatmapGpuRenderer = new HeatmapGpuRenderer();
+    if (!this.heatmapGpuRenderer) return null;
     const gpuRenderer = this.heatmapGpuRenderer;
     return this.orderbookHeatmap.prepareGpuCells(
       v,
@@ -1543,7 +1543,7 @@ class ChartRuntimeImpl implements ChartRuntime, ChartInputHost {
       this.heatmapGpuFailureLatched = true;
       return;
     }
-    if (!this.heatmapGpuRenderer) this.heatmapGpuRenderer = new HeatmapGpuRenderer();
+    if (!this.heatmapGpuRenderer) return;
     const range = this.renderer.visibleRange(v, s.length);
     let ok: boolean;
     try {
@@ -2083,6 +2083,16 @@ class ChartRuntimeImpl implements ChartRuntime, ChartInputHost {
 
   setResidentHeatmapEnabled(enabled: boolean): void {
     this.heatmapTexturePrototypeEnabled = enabled;
+    if (enabled && !this.heatmapGpuRenderer) {
+      import("./heatmap/gpu/heatmapGpuRenderer.js").then((mod) => {
+        if (this.heatmapTexturePrototypeEnabled && !this.heatmapGpuRenderer && !this.disposed) {
+          this.heatmapGpuRenderer = new mod.HeatmapGpuRenderer();
+          this.session?.invalidate();
+        }
+      }).catch((err) => {
+        console.error("[ChartRuntime] failed to lazy-load HeatmapGpuRenderer", err);
+      });
+    }
     this.session?.invalidate();
   }
 }
@@ -2221,8 +2231,8 @@ async function buildChartRuntime(
       undefined,
       (c) => getChartWebGl2Context(c, display.webgl),
     );
-    if (gpuSurface.kind === "webgl2" && typeof (gpuSurface as any).getGlContext === "function") {
-      gl = (gpuSurface as any).getGlContext();
+    if (gpuSurface.kind === "webgl2") {
+      gl = gpuSurface.getGlContext?.() ?? null;
     }
     if (!annotationCtx2d || !interactionCtx2d || (!gl && gpuSurface.kind === "webgl2")) {
       if (!gl && gpuSurface.kind === "webgl2") incrementPerformanceCounter("chart.gpu.contextCreateFailed");

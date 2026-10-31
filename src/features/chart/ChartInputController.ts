@@ -16,7 +16,7 @@ import { DEFAULT_CHART_INTERACTION_POLICY, canUseContextMenu } from "./interacti
 import { hitTestChartAxis, type ChartAxisTarget } from "./axisInteraction.js";
 import type { ChartContextMenuAction, ChartContextMenuDetail } from "./contextMenuModel.js";
 import type { Crosshair } from "../../core/render/overlay.js";
-import { ChartChange } from "../../core/render/scene/chartScene.js";
+import { ChartChange, ChartSurfaceDirty } from "../../core/render/scene/chartScene.js";
 import type { View } from "../../core/engine/view.js";
 import type { Overlay } from "../../core/render/overlay.js";
 import type { ChartSession } from "./ChartSession.js";
@@ -305,7 +305,7 @@ function attachChartInput(canvas: HTMLCanvasElement, crosshair: Crosshair, host:
     syncTransientMagnet(e);
     drawings.setMarket(host.state.market);
     drawings.pointerMove(host.screenToDrawingPoint(cx, cy, shouldUseTemporaryDrawingMagnet(drawings.activeTool, e, drawings.isPointerDragActive?.() === true)));
-    session.invalidate();
+    session.invalidateSurface(ChartSurfaceDirty.Annotation | ChartSurfaceDirty.Interaction);
   };
 
   const onPointerMove = (e: PointerEvent) => {

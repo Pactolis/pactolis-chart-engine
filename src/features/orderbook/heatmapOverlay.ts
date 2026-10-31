@@ -122,6 +122,7 @@ export interface OrderbookHeatmapOverlayOptions {
 }
 
 export class OrderbookHeatmapOverlay {
+  private static readonly MAX_CACHED_CHUNKS = 12;
   private readonly fetchHeatmap: OrderbookHeatmapFetch;
   private readonly invalidate: () => void;
   private readonly now: () => number;
@@ -132,6 +133,8 @@ export class OrderbookHeatmapOverlay {
   private liveDebounceTimer: ReturnType<typeof setTimeout> | null = null;
   private lastLiveEventAt = 0;
   private currentTier: HeatmapTier | null = null;
+  private lastVisibleFromMs = 0;
+  private lastVisibleToMs = 0;
 
   /** Identifies what the cached bars were fetched for; any change drops the cache. */
   private dataKey = "";
@@ -257,6 +260,7 @@ export class OrderbookHeatmapOverlay {
       mergeHeatmapBars(this.bars, response.bars);
       this.barsRevision++;
       this.chunks.set(chunkStart, { status: "ready", fetchedAt: this.now() });
+      this.evictStaleChunks(tier);
       this.invalidate();
     }, () => {
       if (key !== this.dataKey || controller.signal.aborted) return;
@@ -359,9 +363,11 @@ export class OrderbookHeatmapOverlay {
     const first = Math.max(0, Math.floor(range[0]));
     const last = Math.min(series.length - 1, Math.ceil(range[1]));
     if (last < first) return null;
+    this.lastVisibleFromMs = series.timeOfIndex(first);
+    this.lastVisibleToMs = series.timeOfIndex(last + 1) - 1;
     // Chunk scheduling runs every frame so a quiet chart still honors the
     // live-refresh TTL and error retries.
-    this.ensureChunks(series.timeOfIndex(first), series.timeOfIndex(last + 1) - 1, tier);
+    this.ensureChunks(this.lastVisibleFromMs, this.lastVisibleToMs, tier);
     return { settings, tier, threshold, first, last };
   }
 
@@ -559,6 +565,40 @@ export class OrderbookHeatmapOverlay {
     return visible;
   }
 
+  private evictStaleChunks(tier: HeatmapTier): void {
+    if (this.chunks.size <= OrderbookHeatmapOverlay.MAX_CACHED_CHUNKS) return;
+    const now = this.now();
+    const candidates: Array<{ chunkStart: number; chunkEnd: number; fetchedAt: number }> = [];
+
+    for (const [chunkStart, state] of this.chunks) {
+      if (state.status === "loading") continue;
+      const chunkEnd = heatmapChunkEnd(chunkStart, tier);
+      const isLive = now <= chunkEnd + tier.periodMs;
+      if (isLive) continue;
+      const isVisible = chunkEnd >= this.lastVisibleFromMs && chunkStart <= this.lastVisibleToMs;
+      if (isVisible) continue;
+      candidates.push({ chunkStart, chunkEnd, fetchedAt: state.fetchedAt });
+    }
+
+    candidates.sort((a, b) => a.fetchedAt - b.fetchedAt);
+
+    let evictedAny = false;
+    while (this.chunks.size > OrderbookHeatmapOverlay.MAX_CACHED_CHUNKS && candidates.length > 0) {
+      const { chunkStart, chunkEnd } = candidates.shift()!;
+      this.chunks.delete(chunkStart);
+      for (const barTime of [...this.bars.keys()]) {
+        if (barTime >= chunkStart && barTime < chunkEnd) {
+          this.bars.delete(barTime);
+          evictedAny = true;
+        }
+      }
+    }
+
+    if (evictedAny) {
+      this.barsRevision++;
+    }
+  }
+
   private ensureChunks(from: number, to: number, tier: HeatmapTier): void {
     const now = this.now();
     const key = this.dataKey;
@@ -592,6 +632,7 @@ export class OrderbookHeatmapOverlay {
         mergeHeatmapBars(this.bars, response.bars);
         this.barsRevision++;
         this.chunks.set(chunkStart, { status: "ready", fetchedAt: this.now() });
+        this.evictStaleChunks(tier);
         this.invalidate();
       }, () => {
         if (key !== this.dataKey || controller.signal.aborted) return;
@@ -691,6 +732,11 @@ export class OrderbookHeatmapOverlay {
   /** Read-only test seam: returns cached bars count. */
   cachedBarsCount(): number {
     return this.bars.size;
+  }
+
+  /** Read-only test seam: returns cached chunks count. */
+  cachedChunksCount(): number {
+    return this.chunks.size;
   }
 
   /** Read-only test seam: returns chunk status for a chunk start time. */

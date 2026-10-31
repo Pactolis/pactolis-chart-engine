@@ -86,13 +86,17 @@ function asBarStatsData(prepared?: IndicatorPreparedData): BarStatsPreparedData 
   return emptyPrepared("no-data", prepared?.message ?? prepared?.error ?? t("indicator.barStats.noData"));
 }
 
-function drawBarStats(ctx: IndicatorDrawContext<BarStatsSettings>, prepared?: IndicatorPreparedData): void {
+function drawBarStatsSubPane(ctx: IndicatorDrawContext<BarStatsSettings>, prepared?: IndicatorPreparedData): void {
   const data = asBarStatsData(prepared);
-  const { ctx: canvas, view, rect } = ctx;
-  if (data.status !== "ok") {
+  if (data.status !== "ok" || ctx.series.listReadonly().length === 0) {
     drawIndicatorMessage(ctx, data.message ?? t("indicator.barStats.noData"));
-    return;
   }
+}
+
+function drawBarStatsInteraction(ctx: IndicatorDrawContext<BarStatsSettings>, prepared?: IndicatorPreparedData): void {
+  const data = asBarStatsData(prepared ?? prepareBarStats(ctx));
+  if (data.status !== "ok" || ctx.series.listReadonly().length === 0) return;
+  const { ctx: canvas, view, rect } = ctx;
   const m = data.meta;
   const showDeltaPercent = boolSetting(ctx.settings, "showDeltaPercent", true);
   const showLiquidations = boolSetting(ctx.settings, "showLiquidations", true);
@@ -156,5 +160,6 @@ export const barStatsIndicatorDefinition: IndicatorDefinition<BarStatsSettings> 
   ] },
   getHeaderLabel: headerLabel,
   prepareData: prepareBarStats,
-  drawSubPane: drawBarStats,
+  drawSubPane: drawBarStatsSubPane,
+  drawInteraction: drawBarStatsInteraction,
 };

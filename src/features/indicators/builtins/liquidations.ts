@@ -402,14 +402,8 @@ function drawLiquidations(ctx: IndicatorDrawContext<LiquidationsIndicatorSetting
   if (drawStatus(ctx, data)) return;
 
   const { top, bottom } = panePlotBounds(rect, 32, 5);
-  const hoverIndex = focusIndex(ctx, data);
-  const focus = focusPoint(data, hoverIndex);
 
   if (data.meta.maxAbs <= 0) {
-    if (showReadout(settings)) {
-      const readout = liquidationsReadout(ctx, data, hoverIndex);
-      if (readout) drawIndicatorReadout(ctx, indicatorReadoutToText(readout));
-    }
     drawIndicatorMessage(ctx, data.message ?? "bu görünümde likidasyon yok");
     return;
   }
@@ -466,32 +460,59 @@ function drawLiquidations(ctx: IndicatorDrawContext<LiquidationsIndicatorSetting
   }
   canvas.restore();
 
+  if (settings.showAxisTicks) drawIndicatorAxisTicks(ctx, scale, top, bottom);
+
+  const lastPoint = focusPoint(data, null);
+  if (showLastValueLabel(settings) && lastPoint) {
+    const total = lastPoint.longLiquidationsUsd + lastPoint.shortLiquidationsUsd;
+    const value = settings.showDelta ? lastPoint.liquidationDeltaUsd : total;
+    const color = settings.showDelta
+      ? settings.deltaColor || positioningRatioColorDefault
+      : total > 0 && lastPoint.shortLiquidationsUsd >= lastPoint.longLiquidationsUsd
+        ? settings.shortColor || uiColor.buy
+        : settings.longColor || uiColor.sell;
+    const yValue = settings.showDelta
+      ? lastPoint.liquidationDeltaUsd
+      : lastPoint.shortLiquidationsUsd >= lastPoint.longLiquidationsUsd
+        ? lastPoint.shortLiquidationsUsd
+        : -lastPoint.longLiquidationsUsd;
+    const y = Math.max(top + 9, Math.min(bottom - 9, scale.y(yValue)));
+    drawIndicatorLastValueLabel(ctx, { text: scale.format(value), color, y });
+  }
+}
+
+function drawLiquidationsInteraction(
+  ctx: IndicatorDrawContext<LiquidationsIndicatorSettings>,
+  prepared?: IndicatorPreparedData,
+): void {
+  const { ctx: canvas, rect, settings } = ctx;
+  const data = asLiquidationsData(prepared ?? prepareLiquidationsData(ctx));
+  if (data.status !== "ok") return;
+
+  const { top, bottom } = panePlotBounds(rect, 32, 5);
+  const hoverIndex = focusIndex(ctx, data);
+  const focus = focusPoint(data, hoverIndex);
+
   if (showReadout(settings)) {
     const readout = liquidationsReadout(ctx, data, hoverIndex);
     if (readout) drawIndicatorReadout(ctx, indicatorReadoutToText(readout));
   }
+
+  if (data.meta.maxAbs <= 0) return;
+
+  const displayRange = indicatorDisplayRange(settings, data.range.min, data.range.max);
+  const scale = createIndicatorScale({
+    mode: "signed-zero",
+    min: displayRange.min,
+    max: displayRange.max,
+    baseline: 0,
+    formatter: compactUsd,
+    displayMode: indicatorDisplayScaleMode(settings),
+    paddingFraction: 0.08,
+  }, { top, bottom });
+
   if (hoverIndex !== null && focus) drawHoveredVerticalGuide(canvas, pointX(ctx, focus), top, bottom);
-
-  if (settings.showAxisTicks) drawIndicatorAxisTicks(ctx, scale, top, bottom);
   drawIndicatorCrosshairValueLabel(ctx, scale, top, bottom);
-
-  if (showLastValueLabel(settings) && focus) {
-    const total = focus.longLiquidationsUsd + focus.shortLiquidationsUsd;
-    const value = settings.showDelta ? focus.liquidationDeltaUsd : total;
-    const color = settings.showDelta
-      ? settings.deltaColor || positioningRatioColorDefault
-      : total > 0 && focus.shortLiquidationsUsd >= focus.longLiquidationsUsd
-        ? settings.shortColor || uiColor.buy
-        : settings.longColor || uiColor.sell;
-    const yValue = settings.showDelta
-      ? focus.liquidationDeltaUsd
-      : focus.shortLiquidationsUsd >= focus.longLiquidationsUsd
-        ? focus.shortLiquidationsUsd
-        : -focus.longLiquidationsUsd;
-    const y = Math.max(top + 9, Math.min(bottom - 9, scale.y(yValue)));
-    drawIndicatorLastValueLabel(ctx, { text: scale.format(value), color, y });
-  }
-
 }
 
 export const liquidationsIndicatorDefinition: IndicatorDefinition<LiquidationsIndicatorSettings> = {
@@ -559,4 +580,5 @@ export const liquidationsIndicatorDefinition: IndicatorDefinition<LiquidationsIn
   prepareData: prepareLiquidationsData,
   getReadout: liquidationsReadout,
   drawSubPane: drawLiquidations,
+  drawInteraction: drawLiquidationsInteraction,
 };

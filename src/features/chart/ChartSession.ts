@@ -186,7 +186,7 @@ export class ChartSession {
     this.ownerDocument = opts.ownerDocument;
     if (opts.gpuSurface) {
       this.gpuSurface = opts.gpuSurface;
-      this.gl = (opts.gl ?? (opts.gpuSurface.kind === "webgl2" && typeof (opts.gpuSurface as any).getGlContext === "function" ? (opts.gpuSurface as any).getGlContext() : null)) as WebGL2RenderingContext;
+      this.gl = (opts.gl ?? (opts.gpuSurface.kind === "webgl2" ? opts.gpuSurface.getGlContext?.() : null)) as WebGL2RenderingContext;
     } else {
       this.gpuSurface = new WebGl2Surface(opts.gpuCanvas, opts.gl as WebGL2RenderingContext);
       this.gl = opts.gl as WebGL2RenderingContext;
@@ -256,19 +256,6 @@ export class ChartSession {
     this.onInvalidateCb?.(changes);
   }
 
-  restoreContext(): void {
-    const freshGl = getChartWebGl2Context(this.gpuCanvas);
-    if (!freshGl) return;
-    this.gl = freshGl;
-    this.onRestoreContextCb(freshGl);
-    this.gpuValid = true;
-    this.applyContainerSize();
-    this.dirtySurfaces = ChartSurfaceDirty.All;
-    this.pendingChanges = ChartChange.All;
-    this.cancelRaf();
-    this.startRaf();
-  }
-
   getSurface(): GpuSurface {
     return this.gpuSurface;
   }
@@ -301,8 +288,8 @@ export class ChartSession {
     this.gpuSurface.dispose();
     this.gpuSurface = nextSurface;
     this.gpuCanvas = nextCanvas;
-    if (nextSurface.kind === "webgl2" && typeof (nextSurface as any).getGlContext === "function") {
-      this.gl = (nextSurface as any).getGlContext();
+    if (nextSurface.kind === "webgl2") {
+      this.gl = nextSurface.getGlContext?.() ?? null;
     }
     this.gpuValid = true;
 
@@ -432,7 +419,11 @@ export class ChartSession {
     const useAsyncCapture = this.pendingCapture !== null && Boolean(readGpuSettings(this.ownerDocument.defaultView).asyncCapture || this.gpuSurface.kind === "webgpu");
     if (dirty & ChartSurfaceDirty.GpuScene) {
       incrementPerformanceCounter("chart.surface.gpu.draw");
-      measurePerformance("chart.surface.gpu.draw.ms", () => this.renderer.render(this.view, this.series));
+      if (telemetryEnabled) {
+        measurePerformance("chart.surface.gpu.draw.ms", () => this.renderer.render(this.view, this.series));
+      } else {
+        this.renderer.render(this.view, this.series);
+      }
       if (this.pendingCapture && !useAsyncCapture) {
         try {
           captureSize = validateCaptureDimensions(
@@ -463,15 +454,23 @@ export class ChartSession {
     const range = this.renderer.visibleRange(this.view, this.series.length);
     if (dirty & ChartSurfaceDirty.Annotation) {
       incrementPerformanceCounter("chart.surface.annotation.draw");
-      measurePerformance("chart.surface.annotation.draw.ms", () => {
+      if (telemetryEnabled) {
+        measurePerformance("chart.surface.annotation.draw.ms", () => {
+          this.annotationRenderer.render(this.view, this.series, this.crosshair, range);
+        });
+      } else {
         this.annotationRenderer.render(this.view, this.series, this.crosshair, range);
-      });
+      }
     }
     if (dirty & ChartSurfaceDirty.Interaction) {
       incrementPerformanceCounter("chart.surface.interaction.draw");
-      measurePerformance("chart.surface.interaction.draw.ms", () => {
+      if (telemetryEnabled) {
+        measurePerformance("chart.surface.interaction.draw.ms", () => {
+          this.interactionRenderer.render(this.view, this.series, this.crosshair, range);
+        });
+      } else {
         this.interactionRenderer.render(this.view, this.series, this.crosshair, range);
-      });
+      }
     }
     this.hasRenderedFrame = true;
     this.onRenderedCb?.(dirty, changes);
@@ -714,7 +713,7 @@ export class ChartSession {
         recordGpuFallback("webgpu", "webgl2", reason);
         try {
           const fallbackCanvas = this.ownerDocument.createElement("canvas");
-          const fallbackGl = fallbackCanvas.getContext("webgl2") as WebGL2RenderingContext | null;
+          const fallbackGl = getChartWebGl2Context(fallbackCanvas);
           if (fallbackGl) {
             this.replaceSurface(new WebGl2Surface(fallbackCanvas, fallbackGl));
           } else {

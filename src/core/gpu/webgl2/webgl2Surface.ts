@@ -1,16 +1,17 @@
 import { WebGl2HeatmapLayer } from "./webgl2Heatmap.js";
 import { QuadBatch } from "../../engine/quadBatch.js";
 import type { GpuFrame, GpuLossReason, GpuSurface, HeatmapLayer, QuadSink, RGBA, RgbaFrame } from "../gpuBackend.js";
+import { flipRgbaRows } from "../../../features/chart/nativeCapture.js";
 
-function flipRgba(source: Uint8Array, width: number, height: number): Uint8ClampedArray {
-  const rowBytes = width * 4;
-  const expected = rowBytes * height;
-  const output = new Uint8ClampedArray(expected);
-  for (let sourceRow = 0; sourceRow < height; sourceRow++) {
-    const targetRow = height - 1 - sourceRow;
-    output.set(source.subarray(sourceRow * rowBytes, (sourceRow + 1) * rowBytes), targetRow * rowBytes);
-  }
-  return output;
+function hasWebGl2ShaderCapabilities(gl: WebGL2RenderingContext): boolean {
+  return Boolean(
+    gl
+    && typeof gl.createShader === "function"
+    && typeof gl.createProgram === "function"
+    && typeof gl.getShaderParameter === "function"
+    && typeof gl.createTexture === "function"
+    && typeof gl.createVertexArray === "function"
+  );
 }
 
 function makeNoopBatch(): QuadSink & { begin(): void; flush(): void; dispose(): void } {
@@ -52,20 +53,9 @@ export class WebGl2Surface implements GpuSurface {
     private gl: WebGL2RenderingContext,
     batch?: QuadBatch,
   ) {
-    const canCreateBatch = Boolean(
-      gl
-      && typeof gl.createVertexArray === "function"
-      && typeof gl.createProgram === "function"
-    );
-    this.batch = batch ?? (canCreateBatch ? new QuadBatch(gl) : makeNoopBatch());
-    const canCreateHeatmap = Boolean(
-      gl
-      && typeof gl.createShader === "function"
-      && typeof gl.createProgram === "function"
-      && typeof gl.getShaderParameter === "function"
-      && typeof gl.createTexture === "function"
-    );
-    this._heatmap = canCreateHeatmap ? new WebGl2HeatmapLayer(gl) : null;
+    const hasShaders = hasWebGl2ShaderCapabilities(gl);
+    this.batch = batch ?? (hasShaders ? new QuadBatch(gl) : makeNoopBatch());
+    this._heatmap = hasShaders ? new WebGl2HeatmapLayer(gl) : null;
   }
 
   getGlContext(): WebGL2RenderingContext {
@@ -81,20 +71,9 @@ export class WebGl2Surface implements GpuSurface {
     this.gl = nextGl;
     this.batch.dispose();
     this._heatmap?.dispose();
-    const canCreateHeatmap = Boolean(
-      nextGl
-      && typeof nextGl.createShader === "function"
-      && typeof nextGl.createProgram === "function"
-      && typeof nextGl.getShaderParameter === "function"
-      && typeof nextGl.createTexture === "function"
-    );
-    this._heatmap = canCreateHeatmap ? new WebGl2HeatmapLayer(nextGl) : null;
-    const canCreateBatch = Boolean(
-      nextGl
-      && typeof nextGl.createVertexArray === "function"
-      && typeof nextGl.createProgram === "function"
-    );
-    this.batch = canCreateBatch ? new QuadBatch(nextGl) : makeNoopBatch();
+    const hasShaders = hasWebGl2ShaderCapabilities(nextGl);
+    this._heatmap = hasShaders ? new WebGl2HeatmapLayer(nextGl) : null;
+    this.batch = hasShaders ? new QuadBatch(nextGl) : makeNoopBatch();
   }
 
   resize(bitmapWidth: number, bitmapHeight: number, dpr = 1): void {
@@ -148,7 +127,7 @@ export class WebGl2Surface implements GpuSurface {
 
     const raw = new Uint8Array(width * height * 4);
     gl.readPixels(0, 0, width, height, gl.RGBA, gl.UNSIGNED_BYTE, raw);
-    const flipped = flipRgba(raw, width, height);
+    const flipped = flipRgbaRows(raw, width, height);
     return {
       data: flipped,
       width,

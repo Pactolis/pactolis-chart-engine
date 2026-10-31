@@ -437,22 +437,49 @@ function drawCrossExchangeOpenInterest(
   }
   canvas.restore();
 
+  if (settings.showAxisTicks) drawIndicatorAxisTicks(ctx, scale, top, bottom);
+
+  const lastPoint = focusPoint(data, null);
+  if (showLastValueLabel(settings) && lastPoint) {
+    const labelColor = mode === "openInterestDeltaUsd"
+      ? lastPoint.value >= 0 ? settings.positiveColor : settings.negativeColor
+      : settings.lineColor;
+    const y = Math.max(top + 9, Math.min(bottom - 9, scale.y(lastPoint.value)));
+    drawIndicatorLastValueLabel(ctx, { text: scale.format(lastPoint.value), color: labelColor || openInterestLineColorDefault, y });
+  }
+}
+
+function drawCrossExchangeOpenInterestInteraction(
+  ctx: IndicatorDrawContext<CrossExchangeOpenInterestSettings>,
+  prepared?: IndicatorPreparedData,
+): void {
+  const { ctx: canvas, rect, settings } = ctx;
+  const data = asCrossExchangeOpenInterestData(prepared ?? prepareCrossExchangeOpenInterestData(ctx));
+  if (data.status !== "ok") return;
+
+  const { top, bottom } = panePlotBounds(rect, 32, 5);
   const hoverIndex = focusIndex(ctx, data);
   const focus = focusPoint(data, hoverIndex);
+
   if (showReadout(settings)) {
     const readout = crossExchangeOpenInterestReadout(ctx, data, hoverIndex);
     if (readout) drawIndicatorReadout(ctx, indicatorReadoutToText(readout));
   }
+
+  const mode = data.meta.mode;
+  const displayRange = indicatorDisplayRange(settings, data.range.min, data.range.max);
+  const scale = createIndicatorScale({
+    mode: mode === "openInterestDeltaUsd" ? "signed-zero" : "usd",
+    min: displayRange.min,
+    max: displayRange.max,
+    baseline: data.range.baseline,
+    formatter: compactUsd,
+    displayMode: indicatorDisplayScaleMode(settings),
+    paddingFraction: 0.08,
+  }, { top, bottom });
+
   if (hoverIndex !== null && focus) drawHoveredVerticalGuide(canvas, pointX(ctx, focus), top, bottom);
-  if (settings.showAxisTicks) drawIndicatorAxisTicks(ctx, scale, top, bottom);
   drawIndicatorCrosshairValueLabel(ctx, scale, top, bottom);
-  if (showLastValueLabel(settings) && focus) {
-    const labelColor = mode === "openInterestDeltaUsd"
-      ? focus.value >= 0 ? settings.positiveColor : settings.negativeColor
-      : settings.lineColor;
-    const y = Math.max(top + 9, Math.min(bottom - 9, scale.y(focus.value)));
-    drawIndicatorLastValueLabel(ctx, { text: scale.format(focus.value), color: labelColor || openInterestLineColorDefault, y });
-  }
 }
 
 function crossExchangeOpenInterestHeaderLabel(ctx: {
@@ -547,4 +574,5 @@ export const crossExchangeOpenInterestIndicatorDefinition: IndicatorDefinition<C
   prepareData: prepareCrossExchangeOpenInterestData,
   getReadout: crossExchangeOpenInterestReadout,
   drawSubPane: drawCrossExchangeOpenInterest,
+  drawInteraction: drawCrossExchangeOpenInterestInteraction,
 };

@@ -268,3 +268,7 @@ export class WebGpuSurface implements GpuSurface {
     this.heatmap?.dispose();
   }
 }
+
+if (typeof globalThis !== "undefined") {
+  (globalThis as any).__PactolisWebGpuSurface = WebGpuSurface;
+}

@@ -522,7 +522,7 @@ function safeDrawingTool(type: DrawingType): { color: string; lineWidth: number;
   }
 }
 
-function safeDrawingTypeLabel(type: DrawingType): string {
+export function safeDrawingTypeLabel(type: DrawingType): string {
   try {
     return t(getDrawingToolLabelKey(type));
   } catch {

@@ -509,19 +509,45 @@ function drawFundingRegime(ctx: IndicatorDrawContext<FundingRegimeSettings>, pre
   canvas.stroke();
   canvas.restore();
 
+  if (settings.showAxisTicks) drawIndicatorAxisTicks(ctx, scale, top, bottom);
+
+  const lastPoint = focusPoint(data, null);
+  if (showLastValueLabel(settings) && lastPoint) {
+    const y = Math.max(top + 9, Math.min(bottom - 9, scale.y(lastPoint.value)));
+    drawIndicatorLastValueLabel(ctx, { text: scale.format(lastPoint.value), color, y });
+  }
+}
+
+function drawFundingRegimeInteraction(
+  ctx: IndicatorDrawContext<FundingRegimeSettings>,
+  prepared?: IndicatorPreparedData,
+): void {
+  const { ctx: canvas, rect, settings } = ctx;
+  const data = asFundingRegimeData(prepared ?? prepareFundingRegimeData(ctx));
+  if (data.status !== "ok") return;
+
+  const { top, bottom } = panePlotBounds(rect, 32, 5);
   const hoverIndex = focusIndex(ctx, data);
   const focus = focusPoint(data, hoverIndex);
+
   if (showReadout(settings)) {
     const readout = fundingRegimeReadout(ctx, data, hoverIndex);
     if (readout) drawIndicatorReadout(ctx, indicatorReadoutToText(readout));
   }
+
+  const displayRange = indicatorDisplayRange(settings, data.range.min, data.range.max);
+  const scale = createIndicatorScale({
+    mode: "percent",
+    min: displayRange.min,
+    max: displayRange.max,
+    baseline: 0,
+    formatter: formatFundingRate,
+    displayMode: indicatorDisplayScaleMode(settings),
+    paddingFraction: 0.12,
+  }, { top, bottom });
+
   if (hoverIndex !== null && focus) drawHoveredVerticalGuide(canvas, pointX(ctx, focus), top, bottom);
-  if (settings.showAxisTicks) drawIndicatorAxisTicks(ctx, scale, top, bottom);
   drawIndicatorCrosshairValueLabel(ctx, scale, top, bottom);
-  if (showLastValueLabel(settings) && focus) {
-    const y = Math.max(top + 9, Math.min(bottom - 9, scale.y(focus.value)));
-    drawIndicatorLastValueLabel(ctx, { text: scale.format(focus.value), color, y });
-  }
 }
 
 function fundingRegimeHeaderLabel(ctx: {
@@ -617,4 +643,5 @@ export const fundingRegimeIndicatorDefinition: IndicatorDefinition<FundingRegime
   prepareData: prepareFundingRegimeData,
   getReadout: fundingRegimeReadout,
   drawSubPane: drawFundingRegime,
+  drawInteraction: drawFundingRegimeInteraction,
 };

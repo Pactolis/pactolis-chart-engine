@@ -47,15 +47,84 @@ interface CachedRangeProfileCalculation {
   result: CachedRangeProfileResult;
 }
 
-const anchoredVwapCache = new WeakMap<Drawing, CachedCalculation<AnchoredVwapResult>>();
+interface CachedAnchoredVwapEntry {
+  series: FootprintSeries;
+  revision: number;
+  anchorTime: number;
+  barCount: number;
+  lastBarStartTime: number;
+  prefixPriceVolume: number;
+  prefixVolume: number;
+  result: AnchoredVwapResult;
+}
+
+const anchoredVwapCache = new WeakMap<Drawing, CachedAnchoredVwapEntry>();
 const rangeProfileCache = new WeakMap<Drawing, CachedRangeProfileCalculation>();
 
 function cachedAnchoredVwap(series: FootprintSeries, drawing: Drawing, anchor: number): AnchoredVwapResult {
-  const key = String(anchor);
+  const bars = series.listReadonly();
   const cached = anchoredVwapCache.get(drawing);
-  if (cached && cached.series === series && cached.revision === series.revision && cached.key === key) return cached.result;
-  const result = measurePerformance("analysis.drawings.avwap.calculate.ms", () => calculateAnchoredVwap(series.listReadonly(), anchor));
-  anchoredVwapCache.set(drawing, { series, revision: series.revision, key, result });
+
+  if (
+    cached &&
+    cached.series === series &&
+    cached.anchorTime === anchor &&
+    cached.barCount === bars.length &&
+    bars.length > 0 &&
+    cached.lastBarStartTime === bars[bars.length - 1].startTime
+  ) {
+    if (cached.revision === series.revision) {
+      return cached.result;
+    }
+    const lastBar = bars[bars.length - 1];
+    let tailPriceVol = 0;
+    let tailVol = 0;
+    if (lastBar.startTime >= anchor && lastBar.volume > 0) {
+      tailPriceVol = ((lastBar.high + lastBar.low + lastBar.close) / 3) * lastBar.volume;
+      tailVol = lastBar.volume;
+    }
+    const totalPv = cached.prefixPriceVolume + tailPriceVol;
+    const totalVol = cached.prefixVolume + tailVol;
+    const points = cached.result.points;
+    if (points.length > 0 && points[points.length - 1].time === lastBar.startTime) {
+      points[points.length - 1] = {
+        time: lastBar.startTime,
+        value: totalVol > 0 ? totalPv / totalVol : null,
+      };
+      cached.result.available = points.some((p) => p.value !== null);
+      cached.revision = series.revision;
+      return cached.result;
+    }
+  }
+
+  const result = measurePerformance("analysis.drawings.avwap.calculate.ms", () =>
+    calculateAnchoredVwap(bars, anchor)
+  );
+
+  let prefixPriceVolume = 0;
+  let prefixVolume = 0;
+  if (bars.length >= 2) {
+    for (let i = 0; i < bars.length - 1; i++) {
+      const b = bars[i];
+      if (b.startTime >= anchor && b.volume > 0) {
+        prefixPriceVolume += ((b.high + b.low + b.close) / 3) * b.volume;
+        prefixVolume += b.volume;
+      }
+    }
+  }
+
+  const lastBarStartTime = bars.length > 0 ? bars[bars.length - 1].startTime : 0;
+  anchoredVwapCache.set(drawing, {
+    series,
+    revision: series.revision,
+    anchorTime: anchor,
+    barCount: bars.length,
+    lastBarStartTime,
+    prefixPriceVolume,
+    prefixVolume,
+    result,
+  });
+
   return result;
 }
 

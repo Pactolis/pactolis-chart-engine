@@ -68,6 +68,7 @@ import {
   queueTrendPriceLabels,
   queueZonePriceLabels,
   queueZoneTimeLabels,
+  safeDrawingTypeLabel,
   renderAnnotationTool,
   renderBrush,
   renderEllipse,
@@ -130,6 +131,27 @@ export class DrawingManager {
   private touchTargets = false;
   private summaryRevision = 0;
   private readonly summaryCache = new Map<string, { revision: number; summary: DrawingMarketSummary }>();
+  private displayNameCache: Map<string, string> | null = null;
+
+  private getDisplayNames(): Map<string, string> {
+    if (this.displayNameCache) return this.displayNameCache;
+    const cache = new Map<string, string>();
+    const typeCounters = new Map<DrawingType, number>();
+    for (const drawing of this.drawings) {
+      const count = (typeCounters.get(drawing.type) ?? 0) + 1;
+      typeCounters.set(drawing.type, count);
+      if (drawing.text && drawing.text.trim()) {
+        cache.set(drawing.id, drawing.text);
+      } else if (drawing.type === "text") {
+        cache.set(drawing.id, t("draw.text"));
+      } else {
+        const base = safeDrawingTypeLabel(drawing.type);
+        cache.set(drawing.id, `${base} ${count}`);
+      }
+    }
+    this.displayNameCache = cache;
+    return cache;
+  }
 
   constructor(
     private readonly onChange: (drawings: Drawing[], transient: boolean) => void,
@@ -167,6 +189,7 @@ export class DrawingManager {
     if (!this.draft) return;
     const draftId = this.draft.id;
     this.drawings = this.drawings.filter((drawing) => drawing.id !== draftId);
+    this.displayNameCache = null;
     this.draft = null;
     this.draftStage = null;
     this.placementPointerDown = false;
@@ -316,6 +339,7 @@ export class DrawingManager {
   }
 
   replace(drawings: Drawing[]): void {
+    this.displayNameCache = null;
     this.drawings = structuredClone(drawings).map(normalizeDrawing);
     this.pruneSelection();
     this.gestureBefore = null;
@@ -713,6 +737,7 @@ export class DrawingManager {
     this.placementPointerDown = true;
     this.placementMoved = false;
     this.drawings.push(this.draft);
+    this.displayNameCache = null;
     this.summaryRevision++;
     if (tool.pointsRequired > 1 && this.tool !== "brush") this.onToolChange?.(this.tool);
     if (tool.pointsRequired === 1) this.commitDraft();
@@ -854,6 +879,7 @@ export class DrawingManager {
     this.lastView = view;
     this.lastTime = time;
     const renderMarket = market ?? this.currentMarket;
+    const displayNames = this.getDisplayNames();
     ctx.save();
     ctx.font = "12px ui-monospace, monospace";
     for (const drawing of this.drawings) {
@@ -864,7 +890,7 @@ export class DrawingManager {
       ctx.fillStyle = drawing.color;
       ctx.lineWidth = drawing.lineWidth;
       applyLineStyle(ctx, drawing.lineStyle);
-      const displayName = drawingDisplayName(drawing, this.drawings);
+      const displayName = displayNames.get(drawing.id) ?? drawingDisplayName(drawing, this.drawings);
       ctx.globalAlpha = clamp01(drawing.opacity ?? 1);
       if (drawing.type === "anchored-vwap" || drawing.type === "fixed-range-volume-profile") {
         ctx.fillStyle = drawing.color;
@@ -1014,6 +1040,7 @@ export class DrawingManager {
   }
 
   private changed(transient = false): void {
+    this.displayNameCache = null;
     this.summaryRevision++;
     this.onChange(structuredClone(this.drawings.filter((drawing) => drawing.id !== this.draft?.id)), transient);
   }
