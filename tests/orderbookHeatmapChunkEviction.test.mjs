@@ -9,8 +9,9 @@ test("OrderbookHeatmapOverlay bounds chunk cache to MAX_CACHED_CHUNKS (12)", asy
     settingsFor: () => ({
       mode: "single",
       unit: "usd",
-      bucketStep: 10,
-      thresholds: { "1m": 100 },
+      bucketStep: 25,
+      single: { usd: 20_000_000, btc: 240 },
+      aggregated: { usd: 50_000_000, btc: 600 },
     }),
     onChange: () => () => {},
   });

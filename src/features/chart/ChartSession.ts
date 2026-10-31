@@ -256,6 +256,19 @@ export class ChartSession {
     this.onInvalidateCb?.(changes);
   }
 
+  restoreContext(): void {
+    const freshGl = getChartWebGl2Context(this.gpuCanvas);
+    if (!freshGl) return;
+    this.gl = freshGl;
+    this.onRestoreContextCb(freshGl);
+    this.gpuValid = true;
+    this.applyContainerSize();
+    this.dirtySurfaces = ChartSurfaceDirty.All;
+    this.pendingChanges = ChartChange.All;
+    this.cancelRaf();
+    this.startRaf();
+  }
+
   getSurface(): GpuSurface {
     return this.gpuSurface;
   }

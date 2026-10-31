@@ -10,17 +10,12 @@ function formatCssRgba(c: RGBA): string {
   const rByte = Math.round(clamp01(c.r) * 255);
   const gByte = Math.round(clamp01(c.g) * 255);
   const bByte = Math.round(clamp01(c.b) * 255);
-  const aByte = Math.round(clamp01(c.a) * 255);
+  const aNorm = Number(clamp01(c.a).toFixed(3));
+  const aByte = Math.round(aNorm * 255);
   const key = (rByte | (gByte << 8) | (bByte << 16) | (aByte << 24)) >>> 0;
   let css = RGBA_CACHE.get(key);
   if (css !== undefined) return css;
-  if (aByte === 255) {
-    css = `rgb(${rByte},${gByte},${bByte})`;
-  } else if (aByte === 0) {
-    css = "rgba(0,0,0,0)";
-  } else {
-    css = `rgba(${rByte},${gByte},${bByte},${Number((aByte / 255).toFixed(3))})`;
-  }
+  css = `rgba(${rByte}, ${gByte}, ${bByte}, ${aNorm})`;
   if (RGBA_CACHE.size >= 4096) RGBA_CACHE.clear();
   RGBA_CACHE.set(key, css);
   return css;
