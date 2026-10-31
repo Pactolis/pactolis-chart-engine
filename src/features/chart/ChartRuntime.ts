@@ -20,7 +20,7 @@ import {
 import { ChartDataPipeline, PRICE_STEP_RESOLVE_TIMEOUT_MS } from "./ChartDataPipeline.js";
 import { ChartSession } from "./ChartSession.js";
 import { requestChartPanelMaximize } from "./chartPanelFocus.js";
-import { ChartInputController, isDrawingMagnetEnabled, snapPriceToOhlc, WEAK_MAGNET_THRESHOLD_PX, type ChartInputHost } from "./ChartInputController.js";
+import { ChartInputController, isDrawingMagnetEnabled, WEAK_MAGNET_THRESHOLD_PX, type ChartInputHost } from "./ChartInputController.js";
 import { captureRawSource, resolveRawCursor } from "./rawViewContract.js";
 import { View } from "../../core/engine/view.js";
 import { FootprintRenderer } from "../../core/render/footprintRenderer.js";
@@ -1296,9 +1296,10 @@ class ChartRuntimeImpl implements ChartRuntime, ChartInputHost {
     if (drawings) {
       const currentList = drawings.listCurrent?.() ?? [];
       const isDragActive = drawings.isPointerDragActive?.() === true;
+      const selectedSet = new Set(drawings.getSelectedIds?.() ?? []);
       for (const d of currentList) {
         if (!d.visible) continue;
-        if (isDragActive && d.id === drawings.selectedId) continue;
+        if (isDragActive && selectedSet.has(d.id)) continue;
         for (const pt of d.points) {
           if (typeof pt.price !== "number" || typeof pt.time !== "number") continue;
           const ptIdx = this.pipeline.series.indexOfTime(pt.time);
