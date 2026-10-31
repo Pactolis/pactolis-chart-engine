@@ -163,6 +163,15 @@ export class Overlay {
     return hit ? { paneId: hit.paneId, id: hit.id } : null;
   }
 
+  getActiveVolumeProfileLevels(): { poc: number | null; vah: number | null; val: number | null } | null {
+    if (!this.profileCache?.result) return null;
+    return {
+      poc: this.profileCache.result.poc ?? null,
+      vah: this.profileCache.result.vah ?? null,
+      val: this.profileCache.result.val ?? null,
+    };
+  }
+
   getIndicatorAxisPaneAt(x: number, y: number): string | null {
     const hit = this.indicatorAxisRects.find((rect) => x >= rect.x && x <= rect.x + rect.w && y >= rect.y && y <= rect.y + rect.h);
     return hit?.paneId ?? null;
