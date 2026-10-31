@@ -20,7 +20,7 @@ import {
 import { ChartDataPipeline, PRICE_STEP_RESOLVE_TIMEOUT_MS } from "./ChartDataPipeline.js";
 import { ChartSession } from "./ChartSession.js";
 import { requestChartPanelMaximize } from "./chartPanelFocus.js";
-import { ChartInputController, isDrawingMagnetEnabled, WEAK_MAGNET_THRESHOLD_PX, type ChartInputHost } from "./ChartInputController.js";
+import { ChartInputController, isDrawingMagnetEnabled, snapPriceToOhlc, WEAK_MAGNET_THRESHOLD_PX, type ChartInputHost } from "./ChartInputController.js";
 import { captureRawSource, resolveRawCursor } from "./rawViewContract.js";
 import { View } from "../../core/engine/view.js";
 import { FootprintRenderer } from "../../core/render/footprintRenderer.js";
@@ -1270,6 +1270,17 @@ class ChartRuntimeImpl implements ChartRuntime, ChartInputHost {
     }
 
     return this._resolveMagnetSnap(cx, cy, rawPrice, defaultTime, idx, temporaryMagnet);
+  }
+  private _magnetSnapPrice(idx: number, cy: number, rawPrice: number, forceNearest: boolean): number {
+    const bar = this.pipeline.series.at(Math.round(idx));
+    if (!bar) return rawPrice;
+    return snapPriceToOhlc(
+      rawPrice,
+      cy,
+      [bar.open, bar.high, bar.low, bar.close],
+      (value) => this.view.yOfPrice(value),
+      forceNearest,
+    );
   }
 
   private _resolveMagnetSnap(
