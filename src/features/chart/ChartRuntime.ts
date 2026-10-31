@@ -1265,11 +1265,15 @@ class ChartRuntimeImpl implements ChartRuntime, ChartInputHost {
     const rawPrice = this.view.priceOfY(cy);
 
     if (!magnetEnabled) {
-      this.clearMagnetSnap();
+      this.clearMagnetSnap?.();
       return { time: defaultTime, price: rawPrice };
     }
 
-    return this._resolveMagnetSnap(cx, cy, rawPrice, defaultTime, idx, temporaryMagnet);
+    if (typeof (this as any)._resolveMagnetSnap === "function") {
+      return this._resolveMagnetSnap(cx, cy, rawPrice, defaultTime, idx, temporaryMagnet);
+    }
+    const snappedPrice = this._magnetSnapPrice(idx, cy, rawPrice, temporaryMagnet);
+    return { time: defaultTime, price: snappedPrice };
   }
   private _magnetSnapPrice(idx: number, cy: number, rawPrice: number, forceNearest: boolean): number {
     const bar = this.pipeline.series.at(Math.round(idx));
