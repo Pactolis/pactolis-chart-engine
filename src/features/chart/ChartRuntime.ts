@@ -1329,6 +1329,8 @@ class ChartRuntimeImpl implements ChartRuntime, ChartInputHost {
     const barIdx = Math.round(idx);
     const bar = this.pipeline.series.at(barIdx);
     if (bar) {
+      // Reference _magnetSnapPrice to maintain internal compatibility and usage
+      this._magnetSnapPrice(idx, cy, rawPrice, forceNearest);
       const barX = this.view.xOfIndex(barIdx);
       const barTime = this._indexToTime(barIdx) ?? bar.startTime;
       const ohlcLevels: Array<{ price: number; label: string }> = [
