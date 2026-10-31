@@ -20,7 +20,7 @@ import {
 import { ChartDataPipeline, PRICE_STEP_RESOLVE_TIMEOUT_MS } from "./ChartDataPipeline.js";
 import { ChartSession } from "./ChartSession.js";
 import { requestChartPanelMaximize } from "./chartPanelFocus.js";
-import { ChartInputController, isDrawingMagnetEnabled, snapPriceToOhlc, type ChartInputHost } from "./ChartInputController.js";
+import { ChartInputController, isDrawingMagnetEnabled, snapPriceToOhlc, WEAK_MAGNET_THRESHOLD_PX, type ChartInputHost } from "./ChartInputController.js";
 import { captureRawSource, resolveRawCursor } from "./rawViewContract.js";
 import { View } from "../../core/engine/view.js";
 import { FootprintRenderer } from "../../core/render/footprintRenderer.js";
@@ -180,6 +180,7 @@ class ChartRuntimeImpl implements ChartRuntime, ChartInputHost {
   private readonly _hook: HTMLElement;
   private readonly interactionCanvas: HTMLCanvasElement;
   private readonly crosshair: Crosshair;
+  private activeMagnetSnap: { x: number; y: number; price: number; time: number; label: string } | null = null;
   /** What `ChartHost.displayOptions()` last answered, resolved; WebGL attributes only apply at mount. */
   private displayOptions: ResolvedChartDisplayOptions;
   private disposeInput: () => void = () => undefined;
@@ -458,6 +459,9 @@ class ChartRuntimeImpl implements ChartRuntime, ChartInputHost {
         ctx.clip();
         try {
           drawings.renderSelection(ctx, activeView, drawingTime, this.state.market);
+          if (this.activeMagnetSnap) {
+            this.drawMagnetSnapRing(ctx, activeView, this.activeMagnetSnap);
+          }
         } finally {
           ctx.restore();
         }
@@ -1200,6 +1204,13 @@ class ChartRuntimeImpl implements ChartRuntime, ChartInputHost {
   screenToDrawingPoint(cx: number, cy: number, temporaryMagnet = false): { time: number; price: number } {
     return this._screenToDrawingPoint(cx, cy, temporaryMagnet);
   }
+  clearMagnetSnap(): void {
+    if (this.activeMagnetSnap !== null) {
+      this.activeMagnetSnap = null;
+      this.setHookAttr("data-magnet-snap", "");
+      this.session.invalidate(ChartChange.Interaction);
+    }
+  }
   setPriceAutoScaleFromControl(autoScale: boolean): void { this._setPriceAutoScaleFromControl(autoScale); }
   togglePriceScaleModeFromControl(): ChartPanelState["scaleMode"] { return this._togglePriceScaleModeFromControl(); }
   toggleIndicatorScaleModeFromControl(paneId: string): "linear" | "log" | null {
@@ -1244,29 +1255,204 @@ class ChartRuntimeImpl implements ChartRuntime, ChartInputHost {
   private _screenToDrawingPoint(cx: number, cy: number, temporaryMagnet = false): { time: number; price: number } {
     const idx = this.view.indexOfX(cx);
     const magnetEnabled = isDrawingMagnetEnabled(settings.magnet, temporaryMagnet);
-    let time: number;
+    let defaultTime: number;
     if (!magnetEnabled && this.analysisContextForChart().drawings?.activeTool === "brush") {
       // Brush drafts keep fractional sub-bar x; raw logical x sits on a column edge, so recenter by half a column.
-      time = this._indexToTime(idx - 0.5) ?? Date.now();
+      defaultTime = this._indexToTime(idx - 0.5) ?? Date.now();
     } else {
-      time = this._indexToTime(Math.round(idx)) ?? Date.now();
+      defaultTime = this._indexToTime(Math.round(idx)) ?? Date.now();
     }
-    let price = this.view.priceOfY(cy);
-    if (magnetEnabled) {
-      price = this._magnetSnapPrice(idx, cy, price, temporaryMagnet);
+    const rawPrice = this.view.priceOfY(cy);
+
+    if (!magnetEnabled) {
+      this.clearMagnetSnap();
+      return { time: defaultTime, price: rawPrice };
     }
-    return { time, price };
+
+    return this._resolveMagnetSnap(cx, cy, rawPrice, defaultTime, idx, temporaryMagnet);
   }
-  private _magnetSnapPrice(idx: number, cy: number, rawPrice: number, forceNearest: boolean): number {
-    const bar = this.pipeline.series.at(Math.round(idx));
-    if (!bar) return rawPrice;
-    return snapPriceToOhlc(
-      rawPrice,
-      cy,
-      [bar.open, bar.high, bar.low, bar.close],
-      (value) => this.view.yOfPrice(value),
-      forceNearest,
-    );
+
+  private _resolveMagnetSnap(
+    cx: number,
+    cy: number,
+    rawPrice: number,
+    defaultTime: number,
+    idx: number,
+    temporaryMagnet: boolean,
+  ): { time: number; price: number } {
+    const forceNearest = settings.magnetMode === "strong" || temporaryMagnet;
+    interface SnapCandidate {
+      x: number;
+      y: number;
+      price: number;
+      time: number;
+      label: string;
+      distancePx: number;
+    }
+    const candidates: SnapCandidate[] = [];
+
+    // 1. Drawing anchors
+    const drawings = this.analysisContextForChart().drawings;
+    if (drawings) {
+      const currentList = drawings.listCurrent?.() ?? [];
+      const isDragActive = drawings.isPointerDragActive?.() === true;
+      for (const d of currentList) {
+        if (!d.visible) continue;
+        if (isDragActive && d.id === drawings.selectedId) continue;
+        for (const pt of d.points) {
+          if (typeof pt.price !== "number" || typeof pt.time !== "number") continue;
+          const ptIdx = this.pipeline.series.indexOfTime(pt.time);
+          const ax = this.view.xOfIndex(ptIdx);
+          const ay = this.view.yOfPrice(pt.price);
+          if (!Number.isFinite(ax) || !Number.isFinite(ay)) continue;
+          const dist = Math.hypot(ax - cx, ay - cy);
+          if (forceNearest || dist <= 14) {
+            candidates.push({ x: ax, y: ay, price: pt.price, time: pt.time, label: "ANCHOR", distancePx: dist });
+          }
+        }
+      }
+    }
+
+    // 2. Primary Bar OHLC + POC
+    const barIdx = Math.round(idx);
+    const bar = this.pipeline.series.at(barIdx);
+    if (bar) {
+      const barX = this.view.xOfIndex(barIdx);
+      const barTime = this._indexToTime(barIdx) ?? bar.startTime;
+      const ohlcLevels: Array<{ price: number; label: string }> = [
+        { price: bar.open, label: "O" },
+        { price: bar.high, label: "H" },
+        { price: bar.low, label: "L" },
+        { price: bar.close, label: "C" },
+      ];
+
+      // Bar POC if footprint cells exist
+      if (bar.cells && bar.cells.size > 0) {
+        let maxVol = 0;
+        let pocPrice: number | null = null;
+        const step = this.pipeline.series.config?.priceStep ?? 0;
+        for (const cell of bar.cells.values()) {
+          const v = cell.buyVol + cell.sellVol;
+          if (v > maxVol) {
+            maxVol = v;
+            pocPrice = cell.priceBin + step / 2;
+          }
+        }
+        if (pocPrice !== null) {
+          ohlcLevels.push({ price: pocPrice, label: "POC" });
+        }
+      }
+
+      for (const { price: lvlPrice, label: lvlLabel } of ohlcLevels) {
+        const lvlY = this.view.yOfPrice(lvlPrice);
+        const distY = Math.abs(lvlY - cy);
+        const dist2d = Math.hypot(barX - cx, lvlY - cy);
+        if (forceNearest || distY <= WEAK_MAGNET_THRESHOLD_PX) {
+          candidates.push({ x: barX, y: lvlY, price: lvlPrice, time: barTime, label: lvlLabel, distancePx: dist2d });
+        }
+      }
+    }
+
+    // 3. Neighbor Bar (+-1 bar wicks: High / Low)
+    for (const offset of [-1, 1]) {
+      const nIdx = barIdx + offset;
+      const nBar = this.pipeline.series.at(nIdx);
+      if (!nBar) continue;
+      const nX = this.view.xOfIndex(nIdx);
+      const nTime = this._indexToTime(nIdx) ?? nBar.startTime;
+      for (const [nPrice, nLabel] of [[nBar.high, "H"], [nBar.low, "L"]] as const) {
+        const nY = this.view.yOfPrice(nPrice);
+        const dist = Math.hypot(nX - cx, nY - cy);
+        if (forceNearest || dist <= WEAK_MAGNET_THRESHOLD_PX) {
+          candidates.push({ x: nX, y: nY, price: nPrice, time: nTime, label: nLabel, distancePx: dist });
+        }
+      }
+    }
+
+    // 4. Volume Profile levels (PPOC, VAH, VAL)
+    const vpLevels = this.overlay.getActiveVolumeProfileLevels();
+    if (vpLevels) {
+      const profileItems: Array<{ price: number | null; label: string }> = [
+        { price: vpLevels.poc, label: "PPOC" },
+        { price: vpLevels.vah, label: "VAH" },
+        { price: vpLevels.val, label: "VAL" },
+      ];
+      for (const { price: vpPrice, label: vpLabel } of profileItems) {
+        if (vpPrice === null || !Number.isFinite(vpPrice)) continue;
+        const vpY = this.view.yOfPrice(vpPrice);
+        const vpDistY = Math.abs(vpY - cy);
+        if (forceNearest || vpDistY <= WEAK_MAGNET_THRESHOLD_PX) {
+          candidates.push({ x: cx, y: vpY, price: vpPrice, time: defaultTime, label: vpLabel, distancePx: vpDistY });
+        }
+      }
+    }
+
+    if (candidates.length > 0) {
+      candidates.sort((a, b) => a.distancePx - b.distancePx);
+      const best = candidates[0];
+      this.activeMagnetSnap = { x: best.x, y: best.y, price: best.price, time: best.time, label: best.label };
+      this.setHookAttr("data-magnet-snap", best.label);
+      this.session.invalidate(ChartChange.Interaction);
+      return { time: best.time, price: best.price };
+    }
+
+    this.clearMagnetSnap();
+    return { time: defaultTime, price: rawPrice };
+  }
+
+  private drawMagnetSnapRing(
+    ctx: CanvasRenderingContext2D,
+    view: View,
+    snap: { x: number; y: number; label: string },
+  ): void {
+    const { x, y, label } = snap;
+    if (x < view.area.left - 20 || x > view.area.left + view.area.width + 20) return;
+    if (y < view.area.top - 20 || y > view.area.top + view.area.height + 20) return;
+
+    ctx.save();
+    // Halo
+    ctx.beginPath();
+    ctx.arc(x, y, 7.5, 0, Math.PI * 2);
+    ctx.strokeStyle = "rgba(41, 98, 255, 0.4)";
+    ctx.lineWidth = 3;
+    ctx.stroke();
+
+    // Core ring
+    ctx.beginPath();
+    ctx.arc(x, y, 4.5, 0, Math.PI * 2);
+    ctx.strokeStyle = "#2962ff";
+    ctx.lineWidth = 1.5;
+    ctx.stroke();
+
+    // Center dot
+    ctx.beginPath();
+    ctx.arc(x, y, 1.5, 0, Math.PI * 2);
+    ctx.fillStyle = "#ffffff";
+    ctx.fill();
+
+    // Badge
+    if (label) {
+      ctx.font = "bold 9px -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif";
+      const padX = 4;
+      const metrics = ctx.measureText(label);
+      const badgeW = metrics.width + padX * 2;
+      const badgeH = 13;
+      const bx = x + 10;
+      const by = y - 6;
+
+      ctx.fillStyle = "rgba(24, 28, 38, 0.9)";
+      ctx.beginPath();
+      ctx.roundRect(bx, by, badgeW, badgeH, 2.5);
+      ctx.fill();
+      ctx.strokeStyle = "#2962ff";
+      ctx.lineWidth = 1;
+      ctx.stroke();
+
+      ctx.fillStyle = "#e0e6ed";
+      ctx.textBaseline = "middle";
+      ctx.fillText(label, bx + padX, by + badgeH / 2);
+    }
+    ctx.restore();
   }
 
   private bindInputController(): void {

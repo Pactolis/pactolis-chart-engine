@@ -6,8 +6,9 @@ const listeners = new Set<TransientMagnetListener>();
 export function isDrawingMagnetTransientActive(
   activeTool: string | null,
   modifiers: Pick<MouseEvent, "ctrlKey" | "metaKey">,
+  isEditingDrawing = false,
 ): boolean {
-  return activeTool !== null && (modifiers.ctrlKey || modifiers.metaKey);
+  return (activeTool !== null || isEditingDrawing) && (modifiers.ctrlKey || modifiers.metaKey);
 }
 
 export function setDrawingMagnetTransient(source: object, active: boolean): void {

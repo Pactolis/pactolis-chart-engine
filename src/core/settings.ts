@@ -13,6 +13,7 @@ export type FootprintCellData =
   | "avgTradeSizeBidask";
 export type TpoProfilePeriod = "daily" | "weekly" | "monthly" | "visible";
 export type TpoBracketSize = "auto" | "5m" | "15m" | "30m" | "1h";
+export type MagnetMode = "weak" | "strong";
 
 /**
  * Per-chart görünüm ayarlarının çözülmüş (effective) hali. Alan adları
@@ -82,6 +83,8 @@ export interface DisplaySettings {
   scaleMarginBottom: number;
   /** Snap drawing points to nearby OHLC prices. */
   magnet: boolean;
+  /** Magnet sensitivity mode: "weak" snaps within threshold, "strong" forces snap to nearest level. Default "weak". */
+  magnetMode: MagnetMode;
 }
 
 export const DEFAULT_SCALE_MARGINS = { top: 0.2, bottom: 0.1 } as const;
@@ -112,4 +115,5 @@ export const settings: DisplaySettings = {
   scaleMarginTop: DEFAULT_SCALE_MARGINS.top,
   scaleMarginBottom: DEFAULT_SCALE_MARGINS.bottom,
   magnet: false,
+  magnetMode: "weak",
 };

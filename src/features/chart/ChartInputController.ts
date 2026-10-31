@@ -40,6 +40,7 @@ import {
   pinchStep,
 } from "./touchGestures.js";
 export { isDrawingMagnetTransientActive } from "./drawingInteractionState.js";
+export const WEAK_MAGNET_THRESHOLD_PX = 16;
 
 /** Internal owner-document route from WindowOverlayRoot back to the originating canvas. */
 export const CHART_OVERLAY_ACTION_EVENT = "footprint-internal-chart-overlay-action";
@@ -69,7 +70,7 @@ function prefersCoarsePointer(win: Window | null): boolean {
 }
 
 export function isDrawingMagnetEnabled(persistentMagnet: boolean, temporaryMagnet: boolean): boolean {
-  return persistentMagnet || temporaryMagnet;
+  return Boolean(persistentMagnet) !== Boolean(temporaryMagnet);
 }
 
 /**
@@ -83,6 +84,7 @@ export function snapPriceToOhlc(
   ohlc: readonly number[],
   yOfPrice: (price: number) => number,
   forceNearest: boolean,
+  thresholdPx = 8,
 ): number {
   let nearestPrice = rawPrice;
   let nearestDistancePx = Infinity;
@@ -93,7 +95,7 @@ export function snapPriceToOhlc(
       nearestPrice = price;
     }
   }
-  return forceNearest || nearestDistancePx <= 8 ? nearestPrice : rawPrice;
+  return forceNearest || nearestDistancePx <= thresholdPx ? nearestPrice : rawPrice;
 }
 
 export function isDrawingMagnetModifierPressed(
@@ -105,8 +107,9 @@ export function isDrawingMagnetModifierPressed(
 export function shouldUseTemporaryDrawingMagnet(
   activeTool: string | null,
   modifiers: Pick<MouseEvent, "ctrlKey" | "metaKey">,
+  isEditingDrawing = false,
 ): boolean {
-  return activeTool !== null && isDrawingMagnetModifierPressed(modifiers);
+  return (activeTool !== null || isEditingDrawing) && isDrawingMagnetModifierPressed(modifiers);
 }
 
 /**
@@ -127,6 +130,7 @@ export interface ChartInputHost extends ChartCommandTarget {
   readonly applyingExternal: boolean;
 
   screenToDrawingPoint(cx: number, cy: number, temporaryMagnet?: boolean): { time: number; price: number };
+  clearMagnetSnap?(): void;
   indexToTime(index: number): number | null;
   /** Internal seam: maps screen coords through the runtime-owned raw cursor contract. */
   resolveScreenCrosshair(cx: number, cy: number): { time: number | null; price: number | null };
@@ -190,7 +194,8 @@ function attachChartInput(canvas: HTMLCanvasElement, crosshair: Crosshair, host:
 
   const syncTransientMagnet = (modifiers: Pick<MouseEvent, "ctrlKey" | "metaKey">): void => {
     const drawings = host.svc.getAnalysisContext().drawings;
-    const active = isDrawingMagnetTransientActive(drawings.activeTool, modifiers);
+    const isEditing = drawings.isPointerDragActive?.() === true;
+    const active = isDrawingMagnetTransientActive(drawings.activeTool, modifiers, isEditing);
     if (active === transientMagnetActive || !ownerWindow) return;
     transientMagnetActive = active;
     setDrawingMagnetTransient(transientMagnetSource, active);
@@ -299,7 +304,7 @@ function attachChartInput(canvas: HTMLCanvasElement, crosshair: Crosshair, host:
     const drawings = host.svc.getAnalysisContext().drawings;
     syncTransientMagnet(e);
     drawings.setMarket(host.state.market);
-    drawings.pointerMove(host.screenToDrawingPoint(cx, cy, shouldUseTemporaryDrawingMagnet(drawings.activeTool, e)));
+    drawings.pointerMove(host.screenToDrawingPoint(cx, cy, shouldUseTemporaryDrawingMagnet(drawings.activeTool, e, drawings.isPointerDragActive?.() === true)));
     session.invalidate();
   };
 
@@ -311,6 +316,9 @@ function attachChartInput(canvas: HTMLCanvasElement, crosshair: Crosshair, host:
     if (gestures.drawingActive || drawings.hasDraft()) {
       moveDrawing(e, cx, cy);
       if (gestures.drawingActive) return;
+    } else if (drawings.activeTool !== null && drawings.activeTool !== "brush") {
+      syncTransientMagnet(e);
+      host.screenToDrawingPoint(cx, cy, shouldUseTemporaryDrawingMagnet(drawings.activeTool, e));
     }
     crosshair.x = cx;
     crosshair.y = cy;
@@ -323,6 +331,8 @@ function attachChartInput(canvas: HTMLCanvasElement, crosshair: Crosshair, host:
   };
 
   const onPointerLeave = () => {
+    clearTransientMagnet();
+    host.clearMagnetSnap?.();
     crosshair.visible = false;
     if (host.isReplaySelecting()) host.previewReplayStart(null);
     if (!gestures.pan) canvas.style.cursor = "default";
@@ -534,7 +544,7 @@ function attachChartInput(canvas: HTMLCanvasElement, crosshair: Crosshair, host:
     const drawings = host.svc.getAnalysisContext().drawings;
     syncTransientMagnet(e);
     drawings.setMarket(host.state.market);
-    const point = host.screenToDrawingPoint(cx, cy, shouldUseTemporaryDrawingMagnet(drawings.activeTool, e));
+    const point = host.screenToDrawingPoint(cx, cy, shouldUseTemporaryDrawingMagnet(drawings.activeTool, e, drawings.isPointerDragActive?.() === true));
     if (!drawings.pointerDown(point, { x: cx, y: cy }, { additive: e.shiftKey || e.ctrlKey || e.metaKey, touch: isTouchPointer(e) })) return false;
     gestures.acceptedDrawingPointerId = e.pointerId;
     gestures.drawingActive = drawings.isPointerDragActive();
