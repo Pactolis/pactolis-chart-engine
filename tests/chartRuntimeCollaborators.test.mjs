@@ -21,7 +21,7 @@ const {
 
 test("ChartMagnetController: snaps to OHLC, POC, and volume profile levels", () => {
   const INTERVAL = 60_000;
-  const T = 1_700_000_000_000;
+  const T = 1_800_000_000_000;
 
   const view = new View();
   view.area = { left: 0, top: 0, width: 800, height: 600 };
@@ -183,7 +183,7 @@ test("ChartHeatmapGpuCoordinator: manages lifecycle, lease, and annotation suppr
   view.pricePerPx = 1;
 
   const series = new FootprintSeries({ intervalMs: 60000, priceStep: 1 });
-  series.loadBars([{ startTime: 1000, open: 10, high: 20, low: 5, close: 15, volume: 10, count: 1, cells: new Map() }]);
+  series.loadBars([{ startTime: 0, open: 10, high: 20, low: 5, close: 15, volume: 10, count: 1, cells: new Map() }]);
 
   // Prepare frame
   const frame = coordinator.prepareHeatmapGpuCells(view, series);
@@ -241,7 +241,7 @@ test("ChartLevelContextController: nPOC request abortion, settling, and level ca
   };
 
   const series = new FootprintSeries({ intervalMs: 60000, priceStep: 1 });
-  series.loadBars([{ startTime: 1000, open: 10, high: 20, low: 5, close: 15, volume: 10, count: 1, cells: new Map() }]);
+  series.loadBars([{ startTime: 0, open: 10, high: 20, low: 5, close: 15, volume: 10, count: 1, cells: new Map() }]);
 
   const view = new View();
   view.area = { left: 0, top: 0, width: 800, height: 600 };
