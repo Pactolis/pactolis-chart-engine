@@ -184,7 +184,7 @@ class ChartRuntimeImpl implements ChartRuntime, ChartInputHost {
   private readonly interactionCanvas: HTMLCanvasElement;
   private readonly crosshair: Crosshair;
   /** What `ChartHost.displayOptions()` last answered, resolved; WebGL attributes only apply at mount. */
-  private displayOptions: ResolvedChartDisplayOptions;
+  displayOptions: ResolvedChartDisplayOptions;
   private disposeInput: () => void = () => undefined;
   private disposeDebugGlobals: (() => void) | null = null;
   private disposed = false;
@@ -1273,7 +1273,7 @@ class ChartRuntimeImpl implements ChartRuntime, ChartInputHost {
     const next = resolveChartDisplayOptions(chartHost().displayOptions?.());
     if (sameChartDisplayOptions(next, this.displayOptions)) return;
     this.displayOptions = next;
-    // antialias and powerPreference belong to the WebGL context, which exists already; they apply to charts mounted later.
+    // antialias and powerPreference belong to the WebGL2 / WebGPU context, which exists already; they apply to charts mounted later.
     this.session.setMaxDevicePixelRatio(next.maxDevicePixelRatio);
     if (this.view.setDisplayOptions(next.timeScale, next.layout)) this._layoutFromCurrentSize();
   }
@@ -1880,6 +1880,7 @@ async function buildChartRuntime(
       gpuSettings.backend,
       undefined,
       (c) => getChartWebGl2Context(c, display.webgl),
+      { powerPreference: display.webgl.powerPreference },
     );
     if (gpuSurface.kind === "webgl2") {
       gl = gpuSurface.getGlContext?.() ?? null;
@@ -1950,6 +1951,7 @@ async function buildChartRuntime(
         nextSettings.backend,
         undefined,
         (c) => getChartWebGl2Context(c, display.webgl),
+        { powerPreference: runtime.displayOptions.webgl.powerPreference },
       );
       runtime.session.replaceSurface(nextSurface, (canvasNext: HTMLCanvasElement, canvasPrev: HTMLCanvasElement) => {
         canvasPrev.replaceWith(canvasNext);

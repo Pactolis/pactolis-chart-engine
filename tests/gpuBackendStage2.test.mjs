@@ -429,6 +429,118 @@ test("Issue #57: WebGPU device cache retry after failure, loss recovery without 
   }
 });
 
+test("WebGPU powerPreference adapter option negotiation and cache behavior (#67)", async () => {
+  resetGpuDiagnosticsForTest();
+  resetSharedWebGpuDevice();
+
+  const originalDescriptor = Object.getOwnPropertyDescriptor(globalThis, "navigator");
+  try {
+    const { device } = makeFakeWebGpuDevice("rgba8unorm");
+    const adapterCalls = [];
+
+    const fakeAdapter = {
+      async requestDevice() {
+        return device;
+      },
+    };
+
+    setMockNavigator({
+      gpu: {
+        async requestAdapter(options) {
+          adapterCalls.push(options ? { ...options } : options);
+          return fakeAdapter;
+        },
+        getPreferredCanvasFormat() {
+          return "rgba8unorm";
+        },
+      },
+    });
+
+    // 1. requestWebGpuDevice() without options does not pass powerPreference
+    resetSharedWebGpuDevice();
+    adapterCalls.length = 0;
+    const h1 = await requestWebGpuDevice();
+    assert.ok(h1);
+    assert.equal(adapterCalls.length, 1);
+    assert.equal("powerPreference" in (adapterCalls[0] ?? {}), false, "no powerPreference sent when options omitted");
+
+    // 2. requestWebGpuDevice({ powerPreference: 'default' }) does not pass powerPreference
+    resetSharedWebGpuDevice();
+    adapterCalls.length = 0;
+    const hDefault = await requestWebGpuDevice({ powerPreference: "default" });
+    assert.ok(hDefault);
+    assert.equal(adapterCalls.length, 1);
+    assert.equal("powerPreference" in (adapterCalls[0] ?? {}), false, "no powerPreference sent for 'default'");
+
+    // 3. requestWebGpuDevice({ powerPreference: 'low-power' }) passes low-power
+    resetSharedWebGpuDevice();
+    adapterCalls.length = 0;
+    const hLow = await requestWebGpuDevice({ powerPreference: "low-power" });
+    assert.ok(hLow);
+    assert.equal(adapterCalls.length, 1);
+    assert.equal(adapterCalls[0]?.powerPreference, "low-power");
+
+    // 4. requestWebGpuDevice({ powerPreference: 'high-performance' }) passes high-performance
+    resetSharedWebGpuDevice();
+    adapterCalls.length = 0;
+    const hHigh = await requestWebGpuDevice({ powerPreference: "high-performance" });
+    assert.ok(hHigh);
+    assert.equal(adapterCalls.length, 1);
+    assert.equal(adapterCalls[0]?.powerPreference, "high-performance");
+
+    // 5. Switching powerPreference requests a new device matching the new preference
+    resetSharedWebGpuDevice();
+    adapterCalls.length = 0;
+    const devA = await requestWebGpuDevice({ powerPreference: "low-power" });
+    assert.equal(adapterCalls.length, 1);
+    assert.equal(adapterCalls[0]?.powerPreference, "low-power");
+
+    // Same preference returns shared device
+    const devA2 = await requestWebGpuDevice({ powerPreference: "low-power" });
+    assert.equal(devA2, devA);
+    assert.equal(adapterCalls.length, 1);
+
+    // Changed preference triggers new adapter request
+    const devB = await requestWebGpuDevice({ powerPreference: "high-performance" });
+    assert.equal(adapterCalls.length, 2);
+    assert.equal(adapterCalls[1]?.powerPreference, "high-performance");
+
+    // 6. createGpuSurfaceAsync propagates powerPreference to WebGPU adapter request
+    resetSharedWebGpuDevice();
+    adapterCalls.length = 0;
+    const fakeWebGpuCtx = makeFakeWebGpuContext(device, "rgba8unorm");
+    const canvas = makeFakeCanvas({ webgpu: fakeWebGpuCtx });
+
+    const surface = await createGpuSurfaceAsync(
+      canvas,
+      "webgpu",
+      undefined,
+      undefined,
+      { powerPreference: "low-power" },
+    );
+    assert.equal(surface.kind, "webgpu");
+    assert.equal(adapterCalls.length, 1);
+    assert.equal(adapterCalls[0]?.powerPreference, "low-power");
+
+    // createGpuSurfaceAsync with default powerPreference omits powerPreference
+    resetSharedWebGpuDevice();
+    adapterCalls.length = 0;
+    const surfaceDefault = await createGpuSurfaceAsync(
+      canvas,
+      "webgpu",
+      undefined,
+      undefined,
+      { powerPreference: "default" },
+    );
+    assert.equal(surfaceDefault.kind, "webgpu");
+    assert.equal(adapterCalls.length, 1);
+    assert.equal("powerPreference" in (adapterCalls[0] ?? {}), false);
+  } finally {
+    restoreNavigator(originalDescriptor);
+    resetSharedWebGpuDevice();
+  }
+});
+
 test("WebGpuQuadPipeline compiles shaders, writes uniforms, dynamic buffer growth and records draws", () => {
   const { device, buffers, passes, writtenBuffers } = makeFakeWebGpuDevice("rgba8unorm");
 
