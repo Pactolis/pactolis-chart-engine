@@ -2,7 +2,6 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import { performance } from "node:perf_hooks";
-import ts from "typescript";
 import { View } from "../dist/core/engine/view.js";
 import { FootprintSeries } from "../dist/core/model/footprint.js";
 import { settings } from "../dist/core/settings.js";
@@ -19,33 +18,149 @@ import { incrementPerformanceCounter, measurePerformance } from "../dist/core/pe
 // AF12: finite narrow range, varying minMove -> fit -> no inappropriate flat padding.
 // AF13: same actual fit loop, bounded warmup/samples -> count/timing evidence, no timing gate.
 // Evidence pin: ed9bd09dc5f8b5c80d56694ea839c916dc8f6b60.
-// Always execute checked-out private source, not a copied fit implementation or browser constructor.
-const source = await readFile(new URL("../src/features/chart/ChartRuntime.ts", import.meta.url), "utf8");
-const ast = ts.createSourceFile("ChartRuntime.ts", source, ts.ScriptTarget.Latest, true);
-assert.equal(ast.parseDiagnostics.length, 0, "Runtime source parses");
-const owner = ast.statements.find((node) =>
-  ts.isClassDeclaration(node) && node.name?.text === "ChartRuntimeImpl");
-assert.ok(owner, "real private Runtime source owner");
+// Always execute checked-out private source from compiled dist, not a copied fit implementation or browser constructor.
+const source = await readFile(new URL("../dist/features/chart/ChartRuntime.js", import.meta.url), "utf8");
+
+function extractClassMethod(source, methodName) {
+  const classMatch = source.match(/\bclass\s+ChartRuntimeImpl\b[\s\S]*?\{/);
+  if (!classMatch) throw new Error("ChartRuntimeImpl class not found");
+  const classStart = classMatch.index + classMatch[0].length;
+
+  let classDepth = 1;
+  let classEnd = -1;
+  let inStr = null;
+  let inComm = false;
+  for (let i = classStart; i < source.length; i++) {
+    const c = source[i];
+    const prev = source[i - 1];
+    if (!inComm) {
+      if (inStr) {
+        if (c === inStr && prev !== "\\") inStr = null;
+        continue;
+      } else if (c === '"' || c === "'" || c === "`") {
+        inStr = c;
+        continue;
+      }
+    }
+    if (!inStr) {
+      if (!inComm && c === "/" && source[i + 1] === "/") {
+        const nextNl = source.indexOf("\n", i);
+        i = nextNl === -1 ? source.length : nextNl;
+        continue;
+      }
+      if (!inComm && c === "/" && source[i + 1] === "*") {
+        inComm = true;
+        i++;
+        continue;
+      }
+      if (inComm && c === "*" && source[i + 1] === "/") {
+        inComm = false;
+        i++;
+        continue;
+      }
+      if (inComm) continue;
+    }
+    if (c === "{") classDepth++;
+    else if (c === "}") {
+      classDepth--;
+      if (classDepth === 0) {
+        classEnd = i;
+        break;
+      }
+    }
+  }
+  if (classEnd === -1) throw new Error("ChartRuntimeImpl class end not found");
+
+  const classBody = source.slice(classStart, classEnd);
+  const methodRegex = new RegExp(`(?:^|\\n)\\s*(?:async\\s+)?\\b${methodName}\\s*\\(`, "g");
+  const match = methodRegex.exec(classBody);
+  if (!match) throw new Error(`Method ${methodName} not found in ChartRuntimeImpl`);
+
+  const methodStart = match.index;
+  const isAsync = match[0].includes("async");
+
+  const parenStart = classBody.indexOf("(", methodStart);
+  let parenDepth = 0;
+  let parenEnd = -1;
+  for (let i = parenStart; i < classBody.length; i++) {
+    if (classBody[i] === "(") {
+      parenDepth++;
+    } else if (classBody[i] === ")") {
+      parenDepth--;
+      if (parenDepth === 0) {
+        parenEnd = i;
+        break;
+      }
+    }
+  }
+  if (parenEnd === -1) throw new Error(`Unmatched parentheses in method signature: ${methodName}`);
+
+  const braceStart = classBody.indexOf("{", parenEnd);
+  if (braceStart === -1) throw new Error(`Opening brace not found for method: ${methodName}`);
+
+  let depth = 0;
+  let braceEnd = -1;
+  inStr = null;
+  inComm = false;
+
+  for (let i = braceStart; i < classBody.length; i++) {
+    const char = classBody[i];
+    const prev = classBody[i - 1];
+
+    if (!inComm) {
+      if (inStr) {
+        if (char === inStr && prev !== "\\") inStr = null;
+        continue;
+      } else if (char === '"' || char === "'" || char === "`") {
+        inStr = char;
+        continue;
+      }
+    }
+
+    if (!inStr) {
+      if (!inComm && char === "/" && classBody[i + 1] === "/") {
+        const nextNl = classBody.indexOf("\n", i);
+        i = nextNl === -1 ? classBody.length : nextNl;
+        continue;
+      }
+      if (!inComm && char === "/" && classBody[i + 1] === "*") {
+        inComm = true;
+        i++;
+        continue;
+      }
+      if (inComm && char === "*" && classBody[i + 1] === "/") {
+        inComm = false;
+        i++;
+        continue;
+      }
+      if (inComm) continue;
+    }
+
+    if (char === "{") {
+      depth++;
+    } else if (char === "}") {
+      depth--;
+      if (depth === 0) {
+        braceEnd = i + 1;
+        break;
+      }
+    }
+  }
+
+  if (braceEnd === -1) throw new Error(`Unmatched braces for method: ${methodName}`);
+
+  const params = classBody.slice(parenStart + 1, parenEnd).trim();
+  const body = classBody.slice(braceStart, braceEnd);
+  return `${isAsync ? "async " : ""}function(${params}) ${body}`;
+}
+
 const bindings = { settings, footprintVisiblePriceRange, footprintAutoscaleSource,
   incrementPerformanceCounter, measurePerformance };
 const methods = {};
 for (const name of ["_fitToData", "_autoFit"]) {
-  const method = owner.members.find((node) =>
-    ts.isMethodDeclaration(node) && node.name.getText(ast) === name);
-  assert.ok(method?.body, "real Runtime method: " + name);
-  const parameters = method.parameters.map((parameter) => parameter.getText(ast)).join(", ");
-  const program = "function extractedMethod(" + parameters + ") " + method.body.getText(ast);
-  const compiled = ts.transpileModule(program, {
-    compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.CommonJS },
-    reportDiagnostics: true,
-  });
-  const errors = (compiled.diagnostics ?? []).filter((d) => d.category === ts.DiagnosticCategory.Error);
-  assert.equal(errors.length, 0, "method transpiles: " + name + ": " + JSON.stringify(errors.map((d) => ({
-    code: d.code, message: ts.flattenDiagnosticMessageText(d.messageText, "\\n"),
-  }))));
-  // The entire transpiled program executes before return (including any leading use-strict directive).
-  methods[name] = new Function(...Object.keys(bindings),
-    compiled.outputText + "\nreturn extractedMethod;")(...Object.values(bindings));
+  const extracted = extractClassMethod(source, name);
+  const program = "const extractedMethod = " + extracted + ";\nreturn extractedMethod;";
+  methods[name] = new Function(...Object.keys(bindings), program)(...Object.values(bindings));
   assert.equal(typeof methods[name], "function", "compiled real Runtime method: " + name);
 }
 const T = 1_800_000_000_000;

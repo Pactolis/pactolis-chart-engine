@@ -1,37 +1,163 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
-import ts from "typescript";
 import { View } from "../dist/core/engine/view.js";
 import { FootprintSeries } from "../dist/core/model/footprint.js";
 import { DrawingManager } from "../dist/features/drawings/drawingManager.js";
 import { screenPoint } from "../dist/features/drawings/drawingPrimitives.js";
 import { settings } from "../dist/core/settings.js";
 import {
-  isDrawingMagnetEnabled, isDrawingMagnetModifierPressed, snapPriceToOhlc,
+  isDrawingMagnetEnabled, isDrawingMagnetModifierPressed, snapPriceToOhlc, WEAK_MAGNET_THRESHOLD_PX,
 } from "../dist/features/chart/ChartInputController.js";
+import { ChartChange } from "../dist/core/render/scene/chartScene.js";
 
 // Source owner: ChartRuntimeImpl (private, deliberately not exported).
 // Initial evidence pin: f817a9c9fe695c9b541cd5922cce86a3771d1d53.
-// Read the checked-out CI source so a future production fix is exercised too.
+// Read the compiled dist source so runtime execution does not depend on compiler AST APIs.
 // No copied inverse mapper, rewritten method body, or dist prototype assumption.
-const source = await readFile(new URL("../src/features/chart/ChartRuntime.ts", import.meta.url), "utf8");
-const ast = ts.createSourceFile("ChartRuntime.ts", source, ts.ScriptTarget.Latest, true);
-const owner = ast.statements.find((node) =>
-  ts.isClassDeclaration(node) && node.name?.text === "ChartRuntimeImpl");
-assert.ok(owner, "real private Runtime source owner");
+const source = await readFile(new URL("../dist/features/chart/ChartRuntime.js", import.meta.url), "utf8");
+
+function extractClassMethod(source, methodName) {
+  const classMatch = source.match(/\bclass\s+ChartRuntimeImpl\b[\s\S]*?\{/);
+  if (!classMatch) throw new Error("ChartRuntimeImpl class not found");
+  const classStart = classMatch.index + classMatch[0].length;
+
+  let classDepth = 1;
+  let classEnd = -1;
+  let inStr = null;
+  let inComm = false;
+  for (let i = classStart; i < source.length; i++) {
+    const c = source[i];
+    const prev = source[i - 1];
+    if (!inComm) {
+      if (inStr) {
+        if (c === inStr && prev !== "\\") inStr = null;
+        continue;
+      } else if (c === '"' || c === "'" || c === "`") {
+        inStr = c;
+        continue;
+      }
+    }
+    if (!inStr) {
+      if (!inComm && c === "/" && source[i + 1] === "/") {
+        const nextNl = source.indexOf("\n", i);
+        i = nextNl === -1 ? source.length : nextNl;
+        continue;
+      }
+      if (!inComm && c === "/" && source[i + 1] === "*") {
+        inComm = true;
+        i++;
+        continue;
+      }
+      if (inComm && c === "*" && source[i + 1] === "/") {
+        inComm = false;
+        i++;
+        continue;
+      }
+      if (inComm) continue;
+    }
+    if (c === "{") classDepth++;
+    else if (c === "}") {
+      classDepth--;
+      if (classDepth === 0) {
+        classEnd = i;
+        break;
+      }
+    }
+  }
+  if (classEnd === -1) throw new Error("ChartRuntimeImpl class end not found");
+
+  const classBody = source.slice(classStart, classEnd);
+  const methodRegex = new RegExp(`(?:^|\\n)\\s*(?:async\\s+)?\\b${methodName}\\s*\\(`, "g");
+  const match = methodRegex.exec(classBody);
+  if (!match) throw new Error(`Method ${methodName} not found in ChartRuntimeImpl`);
+
+  const methodStart = match.index;
+  const isAsync = match[0].includes("async");
+
+  const parenStart = classBody.indexOf("(", methodStart);
+  let parenDepth = 0;
+  let parenEnd = -1;
+  for (let i = parenStart; i < classBody.length; i++) {
+    if (classBody[i] === "(") {
+      parenDepth++;
+    } else if (classBody[i] === ")") {
+      parenDepth--;
+      if (parenDepth === 0) {
+        parenEnd = i;
+        break;
+      }
+    }
+  }
+  if (parenEnd === -1) throw new Error(`Unmatched parentheses in method signature: ${methodName}`);
+
+  const braceStart = classBody.indexOf("{", parenEnd);
+  if (braceStart === -1) throw new Error(`Opening brace not found for method: ${methodName}`);
+
+  let depth = 0;
+  let braceEnd = -1;
+  inStr = null;
+  inComm = false;
+
+  for (let i = braceStart; i < classBody.length; i++) {
+    const char = classBody[i];
+    const prev = classBody[i - 1];
+
+    if (!inComm) {
+      if (inStr) {
+        if (char === inStr && prev !== "\\") inStr = null;
+        continue;
+      } else if (char === '"' || char === "'" || char === "`") {
+        inStr = char;
+        continue;
+      }
+    }
+
+    if (!inStr) {
+      if (!inComm && char === "/" && classBody[i + 1] === "/") {
+        const nextNl = classBody.indexOf("\n", i);
+        i = nextNl === -1 ? classBody.length : nextNl;
+        continue;
+      }
+      if (!inComm && char === "/" && classBody[i + 1] === "*") {
+        inComm = true;
+        i++;
+        continue;
+      }
+      if (inComm && char === "*" && classBody[i + 1] === "/") {
+        inComm = false;
+        i++;
+        continue;
+      }
+      if (inComm) continue;
+    }
+
+    if (char === "{") {
+      depth++;
+    } else if (char === "}") {
+      depth--;
+      if (depth === 0) {
+        braceEnd = i + 1;
+        break;
+      }
+    }
+  }
+
+  if (braceEnd === -1) throw new Error(`Unmatched braces for method: ${methodName}`);
+
+  const params = classBody.slice(parenStart + 1, parenEnd).trim();
+  const body = classBody.slice(braceStart, braceEnd);
+  return `${isAsync ? "async " : ""}function(${params}) ${body}`;
+}
+
 const methods = {};
 for (const name of ["_indexToTime", "_screenToDrawingPoint", "_magnetSnapPrice", "_resolveMagnetSnap"]) {
-  const method = owner.members.find((node) =>
-    ts.isMethodDeclaration(node) && node.name.getText(ast) === name);
-  assert.ok(method?.body, "real Runtime method: " + name);
-  const parameters = method.parameters.map((parameter) => parameter.getText(ast)).join(", ");
-  const program = "const extractedMethod = function(" + parameters + ") " + method.body.getText(ast) + ";";
-  const compiled = ts.transpileModule(program, {
-    compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.None },
-  }).outputText;
-  methods[name] = new Function("settings", "isDrawingMagnetEnabled", "snapPriceToOhlc",
-    compiled + "\nreturn extractedMethod;")(settings, isDrawingMagnetEnabled, snapPriceToOhlc);
+  const extracted = extractClassMethod(source, name);
+  const program = "const extractedMethod = " + extracted + ";\nreturn extractedMethod;";
+  methods[name] = new Function(
+    "settings", "isDrawingMagnetEnabled", "snapPriceToOhlc", "WEAK_MAGNET_THRESHOLD_PX", "ChartChange",
+    program
+  )(settings, isDrawingMagnetEnabled, snapPriceToOhlc, WEAK_MAGNET_THRESHOLD_PX, ChartChange);
   assert.equal(typeof methods[name], "function", "compiled real Runtime method: " + name);
 }
 
