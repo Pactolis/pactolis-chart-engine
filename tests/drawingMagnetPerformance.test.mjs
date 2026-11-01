@@ -171,7 +171,7 @@ test("Magnet snap on 1,000 drawings uses listCurrentReadonly with 0 structuredCl
     // barX for index 0 is 10 (colWidth / 2 = 10)
     const anchorY = view.yOfPrice(50080); // 50200 - 50080 = 120
     cloneCount = 0;
-    const snap1 = host._screenToDrawingPoint({ x: 10, y: anchorY + 1 });
+    const snap1 = host._screenToDrawingPoint(10, anchorY + 1);
     assert.equal(cloneCount, 0, "No structuredClone called during magnet snap");
     assert.equal(snap1.price, 50080, "Snaps to anchor price");
     assert.equal(snap1.time, T, "Snaps to anchor time");
@@ -179,14 +179,14 @@ test("Magnet snap on 1,000 drawings uses listCurrentReadonly with 0 structuredCl
     // 2. Cursor close to Bar High (50100): should snap to bar High
     const highY = view.yOfPrice(50100);
     cloneCount = 0;
-    const snapHigh = host._screenToDrawingPoint({ x: 10, y: highY + 1 });
+    const snapHigh = host._screenToDrawingPoint(10, highY + 1);
     assert.equal(cloneCount, 0, "No structuredClone called during High snap");
     assert.equal(snapHigh.price, 50100, "Snaps to Bar High");
 
     // 3. Cursor close to Bar POC (50020): should snap to Bar POC
     const pocY = view.yOfPrice(50020);
     cloneCount = 0;
-    const snapPoc = host._screenToDrawingPoint({ x: 10, y: pocY });
+    const snapPoc = host._screenToDrawingPoint(10, pocY);
     assert.equal(cloneCount, 0, "No structuredClone called during POC snap");
     assert.equal(snapPoc.price, 50020, "Snaps to Bar POC");
   } finally {
