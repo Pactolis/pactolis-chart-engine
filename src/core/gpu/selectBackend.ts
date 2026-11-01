@@ -9,6 +9,7 @@ import type { GpuBackendPreference } from "./gpuSettings.js";
 import type { GpuSurface } from "./gpuBackend.js";
 import { WebGl2Surface } from "./webgl2/webgl2Surface.js";
 import type { WebGpuDeviceHandle } from "./webgpu/webgpuDevice.js";
+import type { ChartPowerPreference } from "../model/chartDisplayOptions.js";
 
 export function createGpuSurface(
   canvas: HTMLCanvasElement,
@@ -85,6 +86,7 @@ export async function createGpuSurfaceAsync(
   preference: GpuBackendPreference = "webgl2",
   providedGl?: WebGL2RenderingContext | null,
   getWebGl2Context?: (canvas: HTMLCanvasElement) => WebGL2RenderingContext | null,
+  options?: { powerPreference?: ChartPowerPreference },
 ): Promise<GpuSurface> {
   if (preference === "canvas2d") {
     return createGpuSurface(canvas, "canvas2d");
@@ -99,7 +101,9 @@ export async function createGpuSurfaceAsync(
       if (typeof globalThis !== "undefined") {
         (globalThis as any).__PactolisWebGpuSurface = WebGpuSurface;
       }
-      const handle = await requestWebGpuDevice();
+      const handle = await requestWebGpuDevice(
+        options?.powerPreference ? { powerPreference: options.powerPreference } : undefined,
+      );
       if (handle && !handle.isLost()) {
         const hasWebGpuContext = Boolean(canvas.getContext && canvas.getContext("webgpu"));
         if (hasWebGpuContext) {

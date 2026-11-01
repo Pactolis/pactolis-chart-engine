@@ -1,5 +1,6 @@
 import { incrementPerformanceCounter } from "../../performanceTelemetry.js";
 import { recordGpuContextEvent, recordGpuFallback, setGpuAdapterInfo } from "../gpuDiagnostics.js";
+import type { ChartPowerPreference } from "../../model/chartDisplayOptions.js";
 
 export interface WebGpuLimits {
   readonly maxBufferSize: number;
@@ -18,33 +19,37 @@ export interface WebGpuDeviceHandle {
 
 let sharedHandle: WebGpuDeviceHandle | null = null;
 let sharedDevicePromise: Promise<WebGpuDeviceHandle | null> | null = null;
+let sharedPowerPreference: ChartPowerPreference = "default";
 
 export function isWebGpuSupported(): boolean {
   return typeof navigator !== "undefined" && Boolean((navigator as any).gpu);
 }
 
 export async function requestWebGpuDevice(options?: {
-  powerPreference?: "low-power" | "high-performance";
+  powerPreference?: ChartPowerPreference;
   forceNew?: boolean;
 }): Promise<WebGpuDeviceHandle | null> {
   if (!isWebGpuSupported()) {
     return null;
   }
 
-  if (!options?.forceNew && sharedHandle && !sharedHandle.isLost()) {
+  const requestedPref: ChartPowerPreference = options?.powerPreference ?? "default";
+  const prefChanged = options?.powerPreference !== undefined && options.powerPreference !== sharedPowerPreference;
+
+  if (!options?.forceNew && !prefChanged && sharedHandle && !sharedHandle.isLost()) {
     return sharedHandle;
   }
 
-  if (!options?.forceNew && sharedDevicePromise) {
+  if (!options?.forceNew && !prefChanged && sharedDevicePromise) {
     return sharedDevicePromise;
   }
 
   const acquirePromise = (async (): Promise<WebGpuDeviceHandle | null> => {
     try {
       const gpu = (navigator as any).gpu;
-      const adapter = await gpu.requestAdapter({
-        powerPreference: options?.powerPreference ?? "high-performance",
-      });
+      const adapter = await (requestedPref === "low-power" || requestedPref === "high-performance"
+        ? gpu.requestAdapter({ powerPreference: requestedPref })
+        : gpu.requestAdapter());
 
       if (!adapter) {
         recordGpuFallback("webgpu", "webgl2", "adapter_request_failed");
@@ -97,6 +102,7 @@ export async function requestWebGpuDevice(options?: {
         recordGpuContextEvent("lost");
         if (sharedHandle === handle) {
           sharedHandle = null;
+          sharedPowerPreference = "default";
         }
         if (sharedDevicePromise === acquirePromise) {
           sharedDevicePromise = null;
@@ -155,12 +161,14 @@ export async function requestWebGpuDevice(options?: {
           if (sharedHandle === handle) {
             sharedHandle = null;
             sharedDevicePromise = null;
+            sharedPowerPreference = "default";
           }
         },
       };
 
       if (!options?.forceNew) {
         sharedHandle = handle;
+        sharedPowerPreference = requestedPref;
       }
       return handle;
     } catch (error) {
@@ -189,4 +197,5 @@ export function resetSharedWebGpuDevice(): void {
     sharedHandle = null;
   }
   sharedDevicePromise = null;
+  sharedPowerPreference = "default";
 }

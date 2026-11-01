@@ -27,7 +27,7 @@ export interface ChartDisplayOptions {
   maxDevicePixelRatio?: number;
   /** WebGL2 antialiasing. Default true. Read when the chart's WebGL context is created. */
   antialias?: boolean;
-  /** WebGL2 power preference. Default `default`. Read when the chart's WebGL context is created. */
+  /** WebGL2 and WebGPU power preference. Default `default`. Read when the chart's WebGL context or WebGPU device is created. */
   powerPreference?: ChartPowerPreference;
 }
 
