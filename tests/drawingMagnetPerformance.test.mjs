@@ -136,6 +136,7 @@ test("Magnet snap on 1,000 drawings uses listCurrentReadonly with 0 structuredCl
     view,
     pipeline: { series },
     state: { market },
+    setHookAttr: () => {},
     overlay: {
       getActiveVolumeProfileLevels: () => null,
     },

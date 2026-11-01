@@ -124,7 +124,7 @@ export class ChartHistoryController {
   private candleGapRetryToken = 0;
 
   constructor(private readonly host: ChartHistoryControllerHost) {
-    this.host.pipeline.setRecentCoverageRetryScheduler((attempt, retry, reason) => this.queueLiveRepairRetry(attempt, retry, reason));
+    this.host.pipeline?.setRecentCoverageRetryScheduler?.((attempt, retry, reason) => this.queueLiveRepairRetry(attempt, retry, reason));
     this.bindPipelineUpdates();
     if (typeof document !== "undefined") document.addEventListener("visibilitychange", this.onVisibilityChange);
   }

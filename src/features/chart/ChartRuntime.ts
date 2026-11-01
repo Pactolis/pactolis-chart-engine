@@ -1207,7 +1207,7 @@ class ChartRuntimeImpl implements ChartRuntime, ChartInputHost {
   clearMagnetSnap(): void {
     if (this.activeMagnetSnap !== null) {
       this.activeMagnetSnap = null;
-      this.setHookAttr("data-magnet-snap", "");
+      this.setHookAttr?.("data-magnet-snap", "");
       this.session.invalidate(ChartChange.Interaction);
     }
   }
@@ -1409,7 +1409,7 @@ class ChartRuntimeImpl implements ChartRuntime, ChartInputHost {
       candidates.sort((a, b) => a.distancePx - b.distancePx);
       const best = candidates[0];
       this.activeMagnetSnap = { x: best.x, y: best.y, price: best.price, time: best.time, label: best.label };
-      this.setHookAttr("data-magnet-snap", best.label);
+      this.setHookAttr?.("data-magnet-snap", best.label);
       this.session.invalidate(ChartChange.Interaction);
       return { time: best.time, price: best.price };
     }
