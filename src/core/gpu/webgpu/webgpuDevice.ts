@@ -167,16 +167,18 @@ export async function requestWebGpuDevice(options?: {
       incrementPerformanceCounter("chart.gpu.contextCreateFailed");
       recordGpuFallback("webgpu", "webgl2", "device_creation_exception");
       return null;
-    } finally {
-      if (sharedDevicePromise === acquirePromise) {
-        sharedDevicePromise = null;
-      }
     }
   })();
 
   if (!options?.forceNew) {
     sharedDevicePromise = acquirePromise;
   }
+
+  void acquirePromise.finally(() => {
+    if (sharedDevicePromise === acquirePromise) {
+      sharedDevicePromise = null;
+    }
+  });
 
   return acquirePromise;
 }
