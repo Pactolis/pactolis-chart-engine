@@ -6,7 +6,7 @@
  * stable product-facing API and composes those capabilities for one panel.
  */
 
-import { hasChartAutomaticVisibility, type ChartPanelState, type ChartType, type LinkGroupColor, type TpoMode } from "../../core/chartPanelState.js";
+import { type ChartPanelState, type ChartType, type LinkGroupColor, type TpoMode } from "../../core/chartPanelState.js";
 import type { AnalysisContext, AutomaticLevelsAsOf } from "../../core/analysisContext.js";
 import type { ChartAnalysisSnapshot, AnalysisSnapshotOptions } from "../../core/analysisSnapshot.js";
 import type { ChartRuntimeServices } from "./ChartServicePorts.js";
@@ -335,9 +335,23 @@ class ChartRuntimeImpl implements ChartRuntime, ChartInputHost {
       })
       : null;
 
-    this.heatmapGpuCoordinator = new ChartHeatmapGpuCoordinator(this);
+    const self = this;
+    this.heatmapGpuCoordinator = new ChartHeatmapGpuCoordinator({
+      orderbookHeatmap: this.orderbookHeatmap,
+      get renderCoordinator() { return self.renderCoordinator; },
+      renderer: this.renderer,
+      invalidateSession: () => this.invalidateSession(),
+    });
     this.heatmapGpuCoordinator.setGl(gl);
-    this.magnetController = new ChartMagnetController(this);
+    this.magnetController = new ChartMagnetController({
+      view: this.view,
+      pipeline: this.pipeline,
+      get state() { return self.state; },
+      session: this.session,
+      overlay: this.overlay,
+      setHookAttr: (name, value) => this.setHookAttr(name, value),
+      analysisContextForChart: () => this.analysisContextForChart(),
+    });
 
     this.overlay = new Overlay(
       annotationCtx2d,
@@ -571,7 +585,16 @@ class ChartRuntimeImpl implements ChartRuntime, ChartInputHost {
       },
     });
 
-    this.levelContextController = new ChartLevelContextController(this);
+    this.levelContextController = new ChartLevelContextController({
+      get state() { return self.state; },
+      pipeline: this.pipeline,
+      view: this.view,
+      svc: this.svc,
+      session: this.session,
+      replayCoordinator: this.replayCoordinator,
+      isDisposed: () => self.isDisposed(),
+      updateHook: () => self.updateHook(),
+    });
 
     this.analysisBridge = new ChartAnalysisBridge({
       svc: this.svc,
@@ -1024,21 +1047,21 @@ class ChartRuntimeImpl implements ChartRuntime, ChartInputHost {
     this.replayCoordinator.seek(time);
   }
 
-  private _indexToTime(index: number): number | null {
+  _indexToTime(index: number): number | null {
     return this.magnetController.indexToTime(index);
   }
 
-  private _screenToDrawingPoint(cx: number, cy: number, temporaryMagnet = false): { time: number; price: number } {
+  _screenToDrawingPoint(cx: number, cy: number, temporaryMagnet = false): { time: number; price: number } {
     const controller = this.magnetController ?? new ChartMagnetController(this as any);
     return controller.screenToDrawingPoint(cx, cy, temporaryMagnet);
   }
 
-  private _magnetSnapPrice(idx: number, cy: number, rawPrice: number, forceNearest: boolean): number {
+  _magnetSnapPrice(idx: number, cy: number, rawPrice: number, forceNearest: boolean): number {
     const controller = this.magnetController ?? new ChartMagnetController(this as any);
     return controller.magnetSnapPrice(idx, cy, rawPrice, forceNearest);
   }
 
-  private _resolveMagnetSnap(
+  _resolveMagnetSnap(
     cx: number,
     cy: number,
     rawPrice: number,
@@ -1050,7 +1073,7 @@ class ChartRuntimeImpl implements ChartRuntime, ChartInputHost {
     return controller.resolveMagnetSnap(cx, cy, rawPrice, defaultTime, idx, temporaryMagnet);
   }
 
-  private drawMagnetSnapRing(
+  drawMagnetSnapRing(
     ctx: CanvasRenderingContext2D,
     view: View,
     snap: { x: number; y: number; label: string },
@@ -1100,7 +1123,7 @@ class ChartRuntimeImpl implements ChartRuntime, ChartInputHost {
 
   dispose(): void {
     this.levelContextController.dispose();
-    this.heatmapGpuCoordinator.dispose();
+    this.disposeHeatmapGpuRenderer();
     this.magnetController.clearMagnetSnap();
     if (this.disposed) return;
     this.disposed = true;

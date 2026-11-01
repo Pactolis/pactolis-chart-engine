@@ -3,7 +3,7 @@ import type { FootprintSeries } from "../../core/model/footprint.js";
 import { settings } from "../../core/settings.js";
 import { isDrawingMagnetEnabled, snapPriceToOhlc, WEAK_MAGNET_THRESHOLD_PX } from "./ChartInputController.js";
 import { ChartChange } from "../../core/render/scene/chartScene.js";
-import type { AnalysisContext } from "./ChartServicePorts.js";
+import type { AnalysisContext } from "../../core/analysisContext.js";
 
 export interface MagnetSnapTarget {
   x: number;
