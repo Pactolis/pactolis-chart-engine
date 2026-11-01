@@ -184,7 +184,7 @@ class ChartRuntimeImpl implements ChartRuntime, ChartInputHost {
   private readonly interactionCanvas: HTMLCanvasElement;
   private readonly crosshair: Crosshair;
   /** What `ChartHost.displayOptions()` last answered, resolved; WebGL attributes only apply at mount. */
-  private displayOptions: ResolvedChartDisplayOptions;
+  displayOptions: ResolvedChartDisplayOptions;
   private disposeInput: () => void = () => undefined;
   private disposeDebugGlobals: (() => void) | null = null;
   private disposed = false;
