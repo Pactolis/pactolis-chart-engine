@@ -49,6 +49,7 @@ function runGateFor(result) {
 
 test('CI partitions the selected census tests and fails closed on incomplete shards', () => {
   const shardBlock = jobBlock('census-shards');
+  assert.match(shardBlock, /if:\s*github\.event_name\s*==\s*'pull_request'/);
   assert.match(shardBlock, /strategy:[\s\S]*?fail-fast:\s*false/);
   assert.match(shardBlock, /matrix:[\s\S]*?shard:\s*\[1,\s*2\]/);
   assert.match(shardBlock, /--project=census/);
@@ -59,8 +60,11 @@ test('CI partitions the selected census tests and fails closed on incomplete sha
   assert.match(shardBlock, /--workers=1/);
   assert.match(shardBlock, /--shard=\$\{\{\s*matrix\.shard\s*\}\}\/2/);
 
+  const browserBlock = jobBlock('browser');
+  assert.match(browserBlock, /if:\s*github\.event_name\s*==\s*'pull_request'/);
+
   const censusGate = jobBlock('census');
-  assert.match(censusGate, /if:\s*\$\{\{\s*always\(\)\s*\}\}/);
+  assert.match(censusGate, /if:\s*\$\{\{\s*always\(\)\s*&&\s*github\.event_name\s*==\s*'pull_request'\s*\}\}/);
   assert.match(censusGate, /needs:\s*census-shards/);
   assert.match(censusGate, /name:\s*census/);
   for (const result of ['failure', 'cancelled', 'skipped', '', 'missing', 'unknown']) {
@@ -79,20 +83,62 @@ test('CI partitions the selected census tests and fails closed on incomplete sha
     'shards must cover the complete unsharded census selection');
   assert.ok(all.some((name) => name.includes('census minute-sample validator')),
     'the census qualification regression test remains selected');
+  assert.ok(!all.some((name) => /#308 L[2-9]/.test(name)),
+    'PR census must exclude L2-L9 report-only scenarios (#61)');
+  assert.ok(all.some((name) => name.includes('#377')), 'census includes #377');
+  assert.ok(all.some((name) => name.includes('#392')), 'census includes #392');
+  assert.ok(all.some((name) => name.includes('#308 Tam')), 'census includes #308 Tam');
+  assert.ok(all.some((name) => name.includes('#308 burst')), 'census includes #308 burst');
   assert.match(censusSpec, /test\.skip\(ENDURANCE_MINUTES <= 0/,
     'runtime endurance remains an explicit conditional skip, not a workflow filter');
   assert.doesNotMatch(shardBlock, /CHART_ENDURANCE_(?:MINUTES|PROFILE)\s*:/,
     'regular census shards must not activate weekly endurance');
 });
 
-test('CI and release workflows use pinned ubuntu-24.04 runner without ubuntu-latest', () => {
-  const ciYaml = readFileSync(new URL('../.github/workflows/ci.yml', import.meta.url), 'utf8');
-  const releaseYaml = readFileSync(new URL('../.github/workflows/release.yml', import.meta.url), 'utf8');
-  assert.doesNotMatch(ciYaml, /runs-on:\s*ubuntu-latest/, 'ci.yml must not use unpinned ubuntu-latest');
-  assert.doesNotMatch(releaseYaml, /runs-on:\s*ubuntu-latest/, 'release.yml must not use unpinned ubuntu-latest');
-  assert.match(jobBlock('test'), /runs-on:\s*ubuntu-24\.04/);
-  assert.match(jobBlock('browser'), /runs-on:\s*ubuntu-24\.04/);
-  assert.match(jobBlock('census-shards'), /runs-on:\s*ubuntu-24\.04/);
-  assert.match(jobBlock('census'), /runs-on:\s*ubuntu-24\.04/);
-  assert.match(releaseYaml, /runs-on:\s*ubuntu-24\.04/);
+test('census-load project selects intermediate report-only load profiles (L2-L9) for scheduled runs (#61)', () => {
+  const args = ['--no-install', 'playwright', 'test', '--project=census-load', '--list', '--reporter=json'];
+  const result = spawnSync('npx', args, { encoding: 'utf8', timeout: 120_000, windowsHide: true });
+  assert.equal(result.status, 0, `Playwright census-load listing failed: ${result.stderr}`);
+  const report = JSON.parse(result.stdout);
+  const names = [];
+  const visit = (suite) => {
+    for (const child of suite.suites ?? []) visit(child);
+    for (const spec of suite.specs ?? []) {
+      for (const item of spec.tests ?? []) {
+        names.push(`${spec.id} :: ${spec.title} :: ${item.projectName}`);
+      }
+    }
+  };
+  for (const suite of report.suites ?? []) visit(suite);
+  assert.equal(names.length, 8, 'census-load must contain exactly 8 scenarios (L2-L9)');
+  for (let l = 2; l <= 9; l++) {
+    assert.ok(names.some((name) => name.includes(`#308 L${l}`)), `census-load contains L${l}`);
+  }
+});
+
+test('Chart Endurance PR trigger restricts paths and excludes harness/** (#63)', () => {
+  const enduranceYaml = readFileSync(new URL('../.github/workflows/chart-endurance.yml', import.meta.url), 'utf8');
+  assert.doesNotMatch(enduranceYaml, /-\s*["']?harness\/\*\*["']?/, 'endurance PR paths must not trigger on harness/**');
+  assert.match(enduranceYaml, /-\s*"\.github\/workflows\/chart-endurance\.yml"/);
+  assert.match(enduranceYaml, /-\s*"tests\/browser\/chart-multi-market-census\.spec\.ts"/);
+});
+
+test('dependabot.yml is configured for github-actions and npm with weekly schedule and groups (#64)', () => {
+  const dependabotYaml = readFileSync(new URL('../.github/dependabot.yml', import.meta.url), 'utf8');
+  assert.match(dependabotYaml, /version:\s*2/);
+  assert.match(dependabotYaml, /package-ecosystem:\s*["']?github-actions["']?/);
+  assert.match(dependabotYaml, /package-ecosystem:\s*["']?npm["']?/);
+  assert.match(dependabotYaml, /interval:\s*["']?weekly["']?/);
+  assert.match(dependabotYaml, /groups:/);
+});
+
+test('all workflows use pinned ubuntu-24.04 runner and unified @v7 actions without ubuntu-latest (#64)', () => {
+  const workflows = ['ci.yml', 'release.yml', 'chart-endurance.yml', 'census-load.yml'];
+  for (const file of workflows) {
+    const yaml = readFileSync(new URL(`../.github/workflows/${file}`, import.meta.url), 'utf8');
+    assert.doesNotMatch(yaml, /runs-on:\s*ubuntu-latest/, `${file} must not use unpinned ubuntu-latest`);
+    assert.match(yaml, /runs-on:\s*ubuntu-24\.04/, `${file} must use ubuntu-24.04`);
+    assert.doesNotMatch(yaml, /actions\/checkout@v[1-6]\b/, `${file} must not use outdated actions/checkout`);
+    assert.doesNotMatch(yaml, /actions\/upload-artifact@v[1-6]\b/, `${file} must not use outdated actions/upload-artifact`);
+  }
 });

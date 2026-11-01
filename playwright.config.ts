@@ -15,9 +15,18 @@ export default defineConfig({
   },
   projects: [
     // The multi-chart census and its endurance profile take most of the run; CI
-    // gives them their own job.
+    // gives them their own job. PR CI runs the core census scenarios (#61).
     { name: "default", testIgnore: ["**/chart-multi-market-census.spec.ts"] },
-    { name: "census", testMatch: ["**/chart-multi-market-census.spec.ts"] },
+    {
+      name: "census",
+      testMatch: ["**/chart-multi-market-census.spec.ts"],
+      grepInvert: /#308 L[2-9]/,
+    },
+    {
+      name: "census-load",
+      testMatch: ["**/chart-multi-market-census.spec.ts"],
+      grep: /#308 L[2-9]/,
+    },
   ],
   webServer: {
     command: "node ./node_modules/vite/bin/vite.js --configLoader native",

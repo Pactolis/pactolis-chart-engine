@@ -33,6 +33,7 @@ jobs:
       - run: npm pack --dry-run
 
   browser:
+    if: github.event_name == 'pull_request'
     runs-on: ubuntu-24.04
     timeout-minutes: 30
     steps:
@@ -54,6 +55,7 @@ jobs:
           retention-days: 3
 
   census-shards:
+    if: github.event_name == 'pull_request'
     runs-on: ubuntu-24.04
     timeout-minutes: 60
     strategy:
@@ -80,7 +82,7 @@ jobs:
   census:
     name: census
     needs: census-shards
-    if: ${{ always() }}
+    if: ${{ always() && github.event_name == 'pull_request' }}
     runs-on: ubuntu-24.04
     steps:
       - run: |

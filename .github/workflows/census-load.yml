@@ -1,0 +1,36 @@
+name: Census Load
+
+# Weekly/nightly scheduled run and manual trigger for the heavy #308 L2-L9
+# report-only census load profiles (moved out of PR CI per #61).
+on:
+  schedule:
+    - cron: "0 2 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: census-load-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  load:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24
+      - run: npm ci --no-audit --no-fund
+      - run: npx --no-install playwright install --with-deps chromium
+      - run: npm run test:browser -- --project=census-load --workers=1
+      - if: failure()
+        uses: actions/upload-artifact@v7
+        with:
+          name: census-load-results
+          path: test-results/
+          retention-days: 3
