@@ -347,8 +347,8 @@ class ChartRuntimeImpl implements ChartRuntime, ChartInputHost {
       view: this.view,
       pipeline: this.pipeline,
       get state() { return self.state; },
-      session: this.session,
-      overlay: this.overlay,
+      get session() { return self.session; },
+      get overlay() { return self.overlay; },
       setHookAttr: (name, value) => this.setHookAttr(name, value),
       analysisContextForChart: () => this.analysisContextForChart(),
     });
