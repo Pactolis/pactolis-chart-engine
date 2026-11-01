@@ -1276,11 +1276,7 @@ class ChartRuntimeImpl implements ChartRuntime, ChartInputHost {
       return { time: defaultTime, price: snappedPrice };
     }
 
-    if (typeof (this as any)._resolveMagnetSnap === "function") {
-      return this._resolveMagnetSnap(cx, cy, rawPrice, defaultTime, idx, temporaryMagnet);
-    }
-    const snappedPrice = this._magnetSnapPrice(idx, cy, rawPrice, temporaryMagnet);
-    return { time: defaultTime, price: snappedPrice };
+    return this._resolveMagnetSnap(cx, cy, rawPrice, defaultTime, idx, temporaryMagnet);
   }
   private _magnetSnapPrice(idx: number, cy: number, rawPrice: number, forceNearest: boolean): number {
     const bar = this.pipeline.series.at(Math.round(idx));
@@ -1316,7 +1312,7 @@ class ChartRuntimeImpl implements ChartRuntime, ChartInputHost {
     // 1. Drawing anchors
     const drawings = this.analysisContextForChart().drawings;
     if (drawings) {
-      const currentList = drawings.listCurrent?.() ?? [];
+      const currentList = drawings.listCurrentReadonly ? drawings.listCurrentReadonly() : (drawings.listCurrent?.() ?? []);
       const isDragActive = drawings.isPointerDragActive?.() === true;
       const selectedSet = new Set(drawings.getSelectedIds?.() ?? []);
       for (const d of currentList) {
@@ -1340,8 +1336,6 @@ class ChartRuntimeImpl implements ChartRuntime, ChartInputHost {
     const barIdx = Math.round(idx);
     const bar = this.pipeline.series.at(barIdx);
     if (bar) {
-      // Reference _magnetSnapPrice to maintain internal compatibility and usage
-      this._magnetSnapPrice(idx, cy, rawPrice, forceNearest);
       const barX = this.view.xOfIndex(barIdx);
       const barTime = this._indexToTime(barIdx) ?? bar.startTime;
       const ohlcLevels: Array<{ price: number; label: string }> = [

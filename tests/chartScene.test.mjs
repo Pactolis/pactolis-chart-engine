@@ -3,7 +3,6 @@ import assert from "node:assert/strict";
 
 import {
   ChartChange,
-  ChartRenderScene,
   ChartSurfaceDirty,
   chartChangeForDataUpdate,
   invalidationScopeForChanges,
@@ -11,8 +10,9 @@ import {
   surfaceForStage,
 } from "../dist/core/render/scene/chartScene.js";
 import {
-  buildIndicatorSceneLayer,
+  LAYER_STAGE,
   resolveBuiltInLayerPreset,
+  resolveLayerOrder,
 } from "../dist/core/render/scene/chartLayerPreset.js";
 
 test("render stages have a hard physical-surface mapping", () => {
@@ -93,76 +93,6 @@ test("classified data updates map to tail or non-tail data changes", () => {
   }
 });
 
-test("scene validates stage/surface ownership and duplicate IDs", () => {
-  const scene = new ChartRenderScene();
-  scene.addLayer({
-    id: "candles",
-    kind: "candles",
-    visible: true,
-    passes: [{ id: "candles:gpu", surface: "gpu-scene", stage: "gpu-series", order: 20 }],
-  });
-
-  assert.throws(
-    () => scene.addLayer({
-      id: "candles",
-      kind: "duplicate",
-      visible: true,
-      passes: [],
-    }),
-    /duplicate layer id/i,
-  );
-
-  assert.throws(
-    () => scene.addLayer({
-      id: "broken",
-      kind: "broken",
-      visible: true,
-      passes: [{ id: "broken:pass", surface: "annotation", stage: "gpu-series", order: 1 }],
-    }),
-    /stage.*surface/i,
-  );
-});
-
-test("scene ordering is deterministic and hidden layers are omitted", () => {
-  const scene = new ChartRenderScene();
-  scene.addLayer({
-    id: "footprint",
-    kind: "footprint",
-    visible: true,
-    passes: [{ id: "footprint:gpu", surface: "gpu-scene", stage: "gpu-series", order: 30 }],
-  });
-  scene.addLayer({
-    id: "grid",
-    kind: "grid",
-    visible: true,
-    passes: [{ id: "grid:gpu", surface: "gpu-scene", stage: "gpu-background", order: 50 }],
-  });
-  scene.addLayer({
-    id: "candles-b",
-    kind: "candles",
-    visible: true,
-    passes: [{ id: "candles:b", surface: "gpu-scene", stage: "gpu-series", order: 20 }],
-  });
-  scene.addLayer({
-    id: "candles-a",
-    kind: "candles",
-    visible: true,
-    passes: [{ id: "candles:a", surface: "gpu-scene", stage: "gpu-series", order: 20 }],
-  });
-  scene.addLayer({
-    id: "hidden-signal",
-    kind: "signal",
-    visible: false,
-    passes: [{ id: "hidden:gpu", surface: "gpu-scene", stage: "gpu-signal", order: 1 }],
-  });
-
-  assert.deepEqual(
-    scene.passesForSurface("gpu-scene").map((pass) => pass.id),
-    ["grid:gpu", "candles:a", "candles:b", "footprint:gpu"],
-  );
-  assert.deepEqual(scene.layerIdsForSurface("gpu-scene"), ["grid", "candles-a", "candles-b", "footprint"]);
-});
-
 test("built-in chart presets preserve deterministic semantic layer composition", () => {
   const candlestick = resolveBuiltInLayerPreset("candlestick");
   const footprint = resolveBuiltInLayerPreset("footprint");
@@ -182,23 +112,57 @@ test("built-in chart presets preserve deterministic semantic layer composition",
   }
 });
 
+test("LAYER_STAGE maps each layer descriptor to a valid stage and surface", () => {
+  for (const [layerId, descriptor] of Object.entries(LAYER_STAGE)) {
+    assert.ok(descriptor.stage, `layer '${layerId}' has stage`);
+    assert.ok(typeof descriptor.order === "number", `layer '${layerId}' has numeric order`);
+    const surface = surfaceForStage(descriptor.stage);
+    assert.ok(
+      surface === "gpu-scene" || surface === "annotation" || surface === "interaction",
+      `layer '${layerId}' surface '${surface}' must be a valid surface`,
+    );
+  }
+});
 
-test("visible indicator instances are independent semantic layers", () => {
-  const scene = new ChartRenderScene();
-  scene.addLayer(buildIndicatorSceneLayer("vwap-main", 0));
-  scene.addLayer(buildIndicatorSceneLayer("ema-50", 1));
+test("resolveLayerOrder resolves deterministic layer orders across all 4 chart types with {0, 1, 3} indicators", () => {
+  const chartTypes = ["candlestick", "footprint", "footprintProfile", "tpo"];
+  const indicatorSets = [
+    [],
+    ["rsi"],
+    ["vwap", "ema", "rsi"],
+  ];
 
-  assert.equal(scene.hasLayer("indicator:vwap-main"), true);
-  assert.equal(scene.hasLayer("indicator:ema-50"), true);
-  assert.deepEqual(
-    scene.layerIdsForSurface("annotation").filter((id) => id.startsWith("indicator:")),
-    ["indicator:vwap-main", "indicator:ema-50"],
-  );
-  assert.deepEqual(
-    scene.passesForSurface("annotation").map((pass) => [pass.ownerLayerId, pass.stage]),
-    [
-      ["indicator:vwap-main", "annotation-overlay"],
-      ["indicator:ema-50", "annotation-overlay"],
-    ],
-  );
+  for (const chartType of chartTypes) {
+    for (const indicatorIds of indicatorSets) {
+      const order = resolveLayerOrder(chartType, indicatorIds);
+
+      assert.ok(order.gpu instanceof Set, "gpu must be a Set");
+      assert.ok(Array.isArray(order.annotation), "annotation must be an Array");
+      assert.ok(Array.isArray(order.interaction), "interaction must be an Array");
+
+      // Verify grid and candles exist in GPU layers for all built-in types
+      assert.ok(order.gpu.has("grid"), `${chartType} must have grid`);
+      assert.ok(order.gpu.has("candles"), `${chartType} must have candles`);
+
+      // Verify indicator instances appear in annotation order
+      for (const id of indicatorIds) {
+        assert.ok(
+          order.annotation.includes(`indicator:${id}`),
+          `annotation must include indicator:${id}`,
+        );
+      }
+
+      // Verify interaction layers order
+      assert.deepEqual(
+        order.interaction,
+        ["crosshair", "hud", "interaction-controls"],
+        `interaction order for ${chartType}`,
+      );
+
+      // Verify no duplicate IDs on any surface
+      const allIds = [...order.gpu, ...order.annotation, ...order.interaction];
+      const uniqueIds = new Set(allIds);
+      assert.equal(allIds.length, uniqueIds.size, `all layer IDs must be unique for ${chartType}`);
+    }
+  }
 });

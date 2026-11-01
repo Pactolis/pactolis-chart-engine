@@ -131,6 +131,7 @@ export class DrawingManager {
   private touchTargets = false;
   private summaryRevision = 0;
   private readonly summaryCache = new Map<string, { revision: number; summary: DrawingMarketSummary }>();
+  private readonly readonlyListCache = new Map<string, { revision: number; draftId: string | null; list: readonly Drawing[] }>();
   private displayNameCache: Map<string, string> | null = null;
 
   private getDisplayNames(): Map<string, string> {
@@ -356,8 +357,23 @@ export class DrawingManager {
     return this.listForMarket(this.currentMarket);
   }
 
+  listCurrentReadonly(): readonly Drawing[] {
+    return this.listForMarketReadonly(this.currentMarket);
+  }
+
   listForMarket(market: string): Drawing[] {
     return structuredClone(this.drawings.filter((drawing) => drawing.id !== this.draft?.id && drawing.market === market));
+  }
+
+  listForMarketReadonly(market: string): readonly Drawing[] {
+    const draftId = this.draft?.id ?? null;
+    const cached = this.readonlyListCache.get(market);
+    if (cached && cached.revision === this.summaryRevision && cached.draftId === draftId) {
+      return cached.list;
+    }
+    const list = this.drawings.filter((drawing) => drawing.id !== draftId && drawing.market === market);
+    this.readonlyListCache.set(market, { revision: this.summaryRevision, draftId, list });
+    return list;
   }
 
   /** Read-only test-hook seam: summarizes one market's drawings without cloning them. */

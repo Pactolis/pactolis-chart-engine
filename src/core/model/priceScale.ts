@@ -41,8 +41,6 @@ export interface PriceScaleOptions {
   autoScale: boolean;
   /** Active vertical price scale mode. */
   mode: PriceScaleMode;
-  /** Invert vertical price coordinates when enabled. Reserved for a later phase. */
-  invertScale: boolean;
   /** Auto-scale margins around the visible price range. */
   scaleMargins: PriceScaleMargins;
   /** Target density for generated price tick marks. */
@@ -54,8 +52,6 @@ export interface PriceScaleState {
   autoScale: boolean;
   /** Active vertical price scale mode. */
   mode: PriceScaleMode;
-  /** Whether the price scale is inverted. */
-  isInverted: boolean;
   /** Current auto-scale margins. */
   scaleMargins: PriceScaleMargins;
   /** Current price tick density target. */
@@ -70,11 +66,6 @@ export interface LogicalRange {
 export interface AutoscaleInfo {
   /** Source price range in raw price units before active price-scale conversion. */
   priceRange: PriceRange | null;
-  /** Optional pixel margins requested by a source; reserved for indicator/overlay phases. */
-  margins?: {
-    above: number;
-    below: number;
-  } | null;
 }
 
 export interface AutoscaleSource {
@@ -106,12 +97,11 @@ export interface PriceMarksContext {
 
 export type { PriceMark };
 
-export type PriceScaleModeState = Partial<Pick<PriceScaleOptions, "autoScale" | "mode" | "invertScale">>;
+export type PriceScaleModeState = Partial<Pick<PriceScaleOptions, "autoScale" | "mode">>;
 
 export const DEFAULT_PRICE_SCALE_OPTIONS: PriceScaleOptions = {
   autoScale: true,
   mode: PriceScaleMode.Normal,
-  invertScale: false,
   scaleMargins: { top: 0.2, bottom: 0.1 },
   tickMarkDensity: 2.5,
 };
@@ -135,7 +125,6 @@ export class PriceScaleModel {
     return {
       autoScale: this._options.autoScale,
       mode: this._options.mode,
-      isInverted: this._options.invertScale,
       scaleMargins: { ...this._options.scaleMargins },
       tickMarkDensity: this._options.tickMarkDensity,
     };
@@ -151,10 +140,6 @@ export class PriceScaleModel {
 
   isAutoScale(): boolean {
     return this._options.autoScale;
-  }
-
-  isInverted(): boolean {
-    return this._options.invertScale;
   }
 
   scaleMargins(): PriceScaleMargins {

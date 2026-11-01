@@ -1,7 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { ChartDataPipeline } from "../dist/features/chart/ChartDataPipeline.js";
-import { registerRecentCoverageRetryScheduler } from "../dist/features/chart/recentCoverageRetryBridge.js";
 import { useFakeChartDataSource } from "./support/fakeChartDataSource.mjs";
 
 const BASE = Date.UTC(2024, 0, 1);
@@ -108,10 +107,8 @@ function harness(metaOverrides = {}) {
   });
   const scheduledRetries = [];
   const retryAttempts = [];
-  const releaseRetryScheduler = registerRecentCoverageRetryScheduler(
-    pipeline.series,
-    (attempt, retry) => { retryAttempts.push(attempt); scheduledRetries.push(retry); },
-  );
+  pipeline.setRecentCoverageRetryScheduler((attempt, retry) => { retryAttempts.push(attempt); scheduledRetries.push(retry); });
+  const releaseRetryScheduler = () => pipeline.setRecentCoverageRetryScheduler(null);
   return {
     services, pipeline, reporterEvents, degraded, scheduledRetries, retryAttempts,
     runScheduledRetry() { return scheduledRetries.shift()?.(); },

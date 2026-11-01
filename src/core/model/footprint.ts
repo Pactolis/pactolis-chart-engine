@@ -209,6 +209,7 @@ export class FootprintSeries {
   private readonly basis = new Map<string, number>();
   private revisionValue = 0;
   private structureRevisionValue = 0;
+  private nonTailRevisionValue = 0;
   private orderedSnapshotStructureRevision = -1;
   private orderedSnapshot: readonly FootprintBar[] = [];
   private pricePrecisionExplicit: boolean;
@@ -241,6 +242,7 @@ export class FootprintSeries {
   get config(): FootprintConfig { return this.cfg; }
   get revision(): number { return this.revisionValue; }
   get structureRevision(): number { return this.structureRevisionValue; }
+  get nonTailRevision(): number { return this.nonTailRevisionValue; }
   /** Deliveries that reused an already-applied trade identity with a different payload. */
   get identityConflictCount(): number { return this.identityConflictCountValue; }
   /** Advances whenever the series is cleared and rebuilt (config change, full load). */
@@ -293,6 +295,7 @@ export class FootprintSeries {
     if (lastStart !== undefined) this.refPrice = this.bars.get(lastStart)!.close;
     this.revisionValue++;
     this.structureRevisionValue++;
+    this.nonTailRevisionValue++;
   }
 
   private visibleOrder(): readonly number[] {
@@ -318,6 +321,7 @@ export class FootprintSeries {
     this.nextRecentTradesPruneAt = 0;
     this.revisionValue++;
     this.structureRevisionValue++;
+    this.nonTailRevisionValue++;
   }
 
   list(): FootprintBar[] { return [...this.listReadonly()]; }
@@ -444,6 +448,10 @@ export class FootprintSeries {
     if (this.repairOwnership.has(startTime)) return;
     const bar = this.bars.get(startTime);
     if (!bar) return;
+    const lastStart = this.order[this.order.length - 1];
+    if (lastStart === undefined || startTime !== lastStart) {
+      this.nonTailRevisionValue++;
+    }
     const takeIncomingClose = options.preferIncomingClose === true && options.close !== undefined;
     const close = takeIncomingClose ? options.close! : bar.close;
     bar.open = open;
@@ -470,15 +478,20 @@ export class FootprintSeries {
     const safeBar = enforceFootprintPolicy(bar);
     validateBar(safeBar, this.cfg.intervalMs);
     if (this.repairOwnership.has(safeBar.startTime) || this.repairFences.has(safeBar.startTime)) return false;
+    const lastStartBefore = this.order[this.order.length - 1];
+    const isTail = lastStartBefore !== undefined && safeBar.startTime === lastStartBefore;
     if (!this.bars.has(safeBar.startTime)) this.insertOrdered(safeBar.startTime);
     this.bars.set(safeBar.startTime, safeBar);
     this.refTradeBounds.delete(safeBar.startTime);
     this.inferPricePrecision([safeBar]);
-    this.pruneLegacyCalendarOverlaps();
-    this.pruneOldestBars();
+    const prunedCalendar = this.pruneLegacyCalendarOverlaps();
+    const prunedOldest = this.pruneOldestBars();
     if (this.refPrice === undefined) this.refPrice = safeBar.close;
     this.revisionValue++;
     this.structureRevisionValue++;
+    if (!isTail || prunedCalendar || prunedOldest) {
+      this.nonTailRevisionValue++;
+    }
     return true;
   }
 
@@ -617,6 +630,7 @@ export class FootprintSeries {
     if (this.refPrice === undefined && lastStart !== undefined) this.refPrice = this.bars.get(lastStart)!.close;
     this.revisionValue++;
     this.structureRevisionValue++;
+    this.nonTailRevisionValue++;
   }
 
   addTrade(trade: AggTrade): void { this.addTradeInternal(trade, true, true, true); }
@@ -751,9 +765,12 @@ export class FootprintSeries {
       if (Number.isNaN(price)) price = trade.price;
     }
 
+    const lastStartBefore = this.order[this.order.length - 1];
+    let nonTailChanged = false;
     let bar = this.bars.get(start);
     let structureChanged = false;
     if (!bar) {
+      nonTailChanged = true;
       bar = {
         startTime: start,
         open: price,
@@ -777,7 +794,9 @@ export class FootprintSeries {
       this.insertOrdered(start);
       structureChanged = true;
       if (this.pruneLegacyCalendarOverlaps()) structureChanged = true;
-      this.pruneOldestBars();
+      if (this.pruneOldestBars()) nonTailChanged = true;
+    } else if (lastStartBefore === undefined || start !== lastStartBefore) {
+      nonTailChanged = true;
     }
 
     if (!includeCandle) {
@@ -853,6 +872,7 @@ export class FootprintSeries {
     if (includeCells) bar.cellRevision = (bar.cellRevision ?? 0) + 1;
     this.revisionValue++;
     if (structureChanged) this.structureRevisionValue++;
+    if (nonTailChanged) this.nonTailRevisionValue++;
   }
 
   private isRefOutlier(price: number): boolean {
@@ -920,13 +940,14 @@ export class FootprintSeries {
   }
 
   /** Drop the oldest bars once live inserts push the series past MAX_SERIES_BARS. */
-  private pruneOldestBars(): void {
+  private pruneOldestBars(): boolean {
     const excess = this.order.length - MAX_SERIES_BARS;
-    if (excess <= 0) return;
+    if (excess <= 0) return false;
     for (const start of this.order.splice(0, excess)) {
       this.bars.delete(start);
       this.refTradeBounds.delete(start);
     }
+    return true;
   }
 
   private inferPricePrecision(bars: readonly FootprintBar[]): void {

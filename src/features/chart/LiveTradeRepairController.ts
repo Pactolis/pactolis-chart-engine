@@ -7,7 +7,6 @@ import { validateBar, validateTrade } from "../../core/dataContracts.js";
 import type { HistoryQuery } from "./historyContracts.js";
 import type { TradeStreamSession } from "./historyContracts.js";
 import type { ChartDataPipelineServices, PipelineIntegrityReporter, TradeMarketReadiness } from "./ChartDataPipelinePorts.js";
-import { requestRecentCoverageRetry } from "./recentCoverageRetryBridge.js";
 import {
   LIVE_REPAIR_EVIDENCE_WAIT_MS,
   LIVE_REPAIR_UNRESOLVED_AFTER_MS,
@@ -315,6 +314,7 @@ export interface LiveTradeRepairHost {
   handleMeta(meta: HistoryMeta): void;
   setDataDegraded(degraded: boolean, detail: string): void;
   reportIdentityConflicts?(count: number): void;
+  scheduleRecentCoverageRetry?: (attempt: number, retry: () => boolean, reason: LiveRepairRetryReason) => boolean;
   onReconciled?(): void;
   trace?(stage: string, fields?: Record<string, unknown>): void;
 }
@@ -815,8 +815,7 @@ export class LiveTradeRepairController {
           this.pendingRepairFrom = from;
         }
         this.repairActive = true;
-        const scheduled = requestRecentCoverageRetry(
-          this.host.series,
+        const scheduled = this.host.scheduleRecentCoverageRetry?.(
           this.repairRetryCount - 1,
           () => {
             if (this.host.isDisposed() || generation !== this.host.getGeneration() || this.pendingSession !== session) return false;
@@ -824,7 +823,7 @@ export class LiveTradeRepairController {
             return true;
           },
           repairRetryReason(rejection),
-        );
+        ) ?? false;
         if (scheduled) {
           retryScheduled = true;
           this.reportRetrying(`${detail.slice(0, 140)}; retrying`);

@@ -21,7 +21,7 @@ const owner = ast.statements.find((node) =>
   ts.isClassDeclaration(node) && node.name?.text === "ChartRuntimeImpl");
 assert.ok(owner, "real private Runtime source owner");
 const methods = {};
-for (const name of ["_indexToTime", "_screenToDrawingPoint", "_magnetSnapPrice"]) {
+for (const name of ["_indexToTime", "_screenToDrawingPoint", "_magnetSnapPrice", "_resolveMagnetSnap"]) {
   const method = owner.members.find((node) =>
     ts.isMethodDeclaration(node) && node.name.getText(ast) === name);
   assert.ok(method?.body, "real Runtime method: " + name);

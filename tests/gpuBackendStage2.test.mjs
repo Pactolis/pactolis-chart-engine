@@ -328,6 +328,106 @@ test("WebGPU support detection and requestWebGpuDevice lifecycle", async () => {
   }
 });
 
+test("Issue #57: WebGPU device cache retry after failure, loss recovery without resetSharedWebGpuDevice, and concurrent flight coalescence", async () => {
+  resetGpuDiagnosticsForTest();
+  resetSharedWebGpuDevice();
+  const originalDescriptor = Object.getOwnPropertyDescriptor(globalThis, "navigator");
+
+  try {
+    let adapterFail = true;
+    let deviceFail = false;
+    let adapterRequestCount = 0;
+    let deviceRequestCount = 0;
+    let currentDevice = null;
+
+    setMockNavigator({
+      gpu: {
+        async requestAdapter() {
+          adapterRequestCount++;
+          if (adapterFail) return null;
+          return {
+            async requestDevice() {
+              deviceRequestCount++;
+              if (deviceFail) throw new Error("Mock device creation failure");
+              const dev = makeFakeWebGpuDevice("rgba8unorm").device;
+              currentDevice = dev;
+              return dev;
+            },
+          };
+        },
+        getPreferredCanvasFormat() {
+          return "rgba8unorm";
+        },
+      },
+    });
+
+    // 1. İlk requestAdapter null döner -> ikinci requestWebGpuDevice çağrıldığında adapter düzelmişse yeni sağlıklı handle döner (resetSharedWebGpuDevice çağırmadan!)
+    const firstNull = await requestWebGpuDevice();
+    assert.equal(firstNull, null);
+    assert.equal(adapterRequestCount, 1);
+
+    adapterFail = false;
+    deviceFail = true;
+    // 2. İlk requestDevice hata fırlatır -> ikinci çağrıda sağlıklı handle döner
+    const secondError = await requestWebGpuDevice();
+    assert.equal(secondError, null);
+    assert.equal(adapterRequestCount, 2);
+    assert.equal(deviceRequestCount, 1);
+
+    deviceFail = false;
+    const thirdSuccess = await requestWebGpuDevice();
+    assert.ok(thirdSuccess);
+    assert.equal(thirdSuccess.isLost(), false);
+    assert.equal(adapterRequestCount, 3);
+    assert.equal(deviceRequestCount, 2);
+
+    // 3. İlk edinim başarılı -> device.lost tetiklenir -> sonraki requestWebGpuDevice() çağrısı eski isLost() === true handle'ı döndürmez, yeni cihaz edinir
+    const firstHealthyDevice = currentDevice;
+    firstHealthyDevice._triggerLost({ reason: "destroyed" });
+    await new Promise((resolve) => setTimeout(resolve, 0)); // wait for promise microtasks
+    assert.equal(thirdSuccess.isLost(), true);
+
+    const fourthReacquired = await requestWebGpuDevice();
+    assert.ok(fourthReacquired);
+    assert.notEqual(fourthReacquired, thirdSuccess);
+    assert.equal(fourthReacquired.isLost(), false);
+    assert.equal(adapterRequestCount, 4);
+
+    // 4. Eşzamanlı iki requestWebGpuDevice() çağrısı tek requestAdapter/requestDevice çağrısında birleşir;
+    // eski cihazın geç gelen lost bildirimi yeni edinilmiş sharedHandle'ı silmez.
+    const lateLostDevice = currentDevice;
+    let delayAdapterResolve;
+    const delayedPromise = new Promise((resolve) => { delayAdapterResolve = resolve; });
+    const prevRequestAdapter = globalThis.navigator.gpu.requestAdapter;
+    let concurrentAdapterCalls = 0;
+    globalThis.navigator.gpu.requestAdapter = async function() {
+      concurrentAdapterCalls++;
+      await delayedPromise;
+      return prevRequestAdapter();
+    };
+
+    // Trigger loss on old device
+    lateLostDevice._triggerLost({ reason: "delayed-lost" });
+
+    const p1 = requestWebGpuDevice();
+    const p2 = requestWebGpuDevice();
+    delayAdapterResolve();
+    const [h1, h2] = await Promise.all([p1, p2]);
+    assert.equal(h1, h2, "concurrent calls share the same device handle");
+    assert.equal(concurrentAdapterCalls, 1, "concurrent calls coalesce into a single requestAdapter");
+    assert.ok(h1);
+    assert.equal(h1.isLost(), false);
+
+    // Stale loss notification does not kill h1
+    assert.equal(h1.isLost(), false);
+    const h3 = await requestWebGpuDevice();
+    assert.equal(h3, h1, "cached handle is not invalidated by stale device loss");
+  } finally {
+    restoreNavigator(originalDescriptor);
+    resetSharedWebGpuDevice();
+  }
+});
+
 test("WebGpuQuadPipeline compiles shaders, writes uniforms, dynamic buffer growth and records draws", () => {
   const { device, buffers, passes, writtenBuffers } = makeFakeWebGpuDevice("rgba8unorm");
 

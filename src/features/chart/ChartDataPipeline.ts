@@ -23,6 +23,7 @@ import {
 import { createLoadTrace, logLoadTrace } from "../../core/loadTrace.js";
 import type { ChartDataPipelineServices, PipelineIntegrityReporter, TradeMarketReadiness } from "./ChartDataPipelinePorts.js";
 import { LiveTradeRepairController, type RepairSnapshotInput } from "./LiveTradeRepairController.js";
+import type { LiveRepairRetryReason } from "./recentCoverageRetryPolicy.js";
 import {
   HISTORY_MAX_WINDOW_BARS,
   HISTORY_MAX_WINDOW_CELLS,
@@ -329,6 +330,7 @@ export class ChartDataPipeline {
   private identityConflict: { detail: string; seriesEpoch: number } | null = null;
   private readonly onServerPriceStep?: (step: number) => void | Promise<void>;
   private readonly repair: LiveTradeRepairController;
+  private recentCoverageRetryScheduler: ((attempt: number, retry: () => boolean, reason: LiveRepairRetryReason) => void) | null = null;
   private recentCoverageRepair: RecentCoverageRepairState | null = null;
   private explicitHistoryReconcile: ExplicitHistoryReconcileState | null = null;
 
@@ -464,6 +466,11 @@ export class ChartDataPipeline {
       handleMeta: (meta) => this.handleLiveBootstrapMeta(meta),
       setDataDegraded: (degraded, detail) => this.onDataDegraded?.(degraded, detail),
       reportIdentityConflicts: (count) => this.reportIdentityConflicts(count),
+      scheduleRecentCoverageRetry: (attempt, retry, reason) => {
+        if (!this.recentCoverageRetryScheduler) return false;
+        this.recentCoverageRetryScheduler(attempt, retry, reason);
+        return true;
+      },
       onReconciled: () => {
         this.pendingTradeDataLoss = false;
         this.pendingTradeOverloaded = false;
@@ -491,6 +498,10 @@ export class ChartDataPipeline {
   get market(): string { return this._market; }
   get intervalMs(): number { return this._intervalMs; }
   get liveBootstrapReconciled(): boolean { return this.repair.isReconciled; }
+
+  setRecentCoverageRetryScheduler(scheduler: ((attempt: number, retry: () => boolean, reason: LiveRepairRetryReason) => void) | null): void {
+    this.recentCoverageRetryScheduler = scheduler;
+  }
 
   /** The pipeline-owned part of the chart's data state (#314); see chartDataState.ts. */
   dataStateInputs(): PipelineDataStateInputs {
@@ -1503,6 +1514,7 @@ export class ChartDataPipeline {
     this.disposed = true;
     this.disposal.abort();
     this.cancelRecentFootprintCoverageRepair();
+    this.recentCoverageRetryScheduler = null;
     this.repair.dispose();
     this.generation++;
     this.historyController?.abort();

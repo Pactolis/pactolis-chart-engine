@@ -1,7 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { ChartDataPipeline } from "../dist/features/chart/ChartDataPipeline.js";
-import { registerRecentCoverageRetryScheduler } from "../dist/features/chart/recentCoverageRetryBridge.js";
 import { splitHistoryCellBudgetWindow } from "../dist/features/chart/historyWindowPolicy.js";
 import { bucketStart } from "../dist/core/time.js";
 import { historyBar, useFakeChartDataSource } from "./support/fakeChartDataSource.mjs";
@@ -137,7 +136,8 @@ test("source-unavailable repair retries through the chart scheduler and recovers
     q.onMeta?.(snapshot(q, 3));
     return [repairBar(q.from, 3)];
   });
-  const release = registerRecentCoverageRetryScheduler(f.pipeline.series, (attempt, run, reason) => retry.push({ attempt, run, reason }));
+  f.pipeline.setRecentCoverageRetryScheduler((attempt, run, reason) => retry.push({ attempt, run, reason }));
+  const release = () => f.pipeline.setRecentCoverageRetryScheduler(null);
   try {
     f.session();
     f.emit(3);
@@ -166,7 +166,8 @@ test("degraded snapshot content is not promoted into a retryable source outage",
     q.onMeta?.({ ...snapshot(q, 1), degraded: true });
     return [repairBar(q.from, 1)];
   });
-  const release = registerRecentCoverageRetryScheduler(f.pipeline.series, () => { retries++; });
+  f.pipeline.setRecentCoverageRetryScheduler(() => { retries++; });
+  const release = () => f.pipeline.setRecentCoverageRetryScheduler(null);
   try {
     f.session();
     f.emit(2);

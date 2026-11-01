@@ -1,7 +1,6 @@
 import assert from "node:assert/strict";
 import test, { mock } from "node:test";
 import { ChartDataPipeline } from "../dist/features/chart/ChartDataPipeline.js";
-import { registerRecentCoverageRetryScheduler } from "../dist/features/chart/recentCoverageRetryBridge.js";
 import { evaluateChartDataState } from "../dist/features/chart/chartDataState.js";
 import { bucketStart } from "../dist/core/time.js";
 import { useFakeChartDataSource } from "./support/fakeChartDataSource.mjs";
@@ -105,7 +104,8 @@ test("an unresolved live repair turns from repairing to failed after 4 min, keep
     q.onMeta?.(snapshot(q, 3));
     return [repairBar(q.from, 3)];
   });
-  const release = registerRecentCoverageRetryScheduler(f.pipeline.series, (attempt, run, reason) => retry.push({ attempt, run, reason }));
+  f.pipeline.setRecentCoverageRetryScheduler((attempt, run, reason) => retry.push({ attempt, run, reason }));
+  const release = () => f.pipeline.setRecentCoverageRetryScheduler(null);
   try {
     f.session();
     f.emit(3);
@@ -164,7 +164,8 @@ test("a reconnect starts the failed repair over as repairing", async (t) => {
     q.onMeta?.({ degraded: true, footprint: { allowed: true, available: false }, provenance: [{ error: "down" }] });
     return [];
   });
-  const release = registerRecentCoverageRetryScheduler(f.pipeline.series, (attempt, run, reason) => retry.push({ attempt, run, reason }));
+  f.pipeline.setRecentCoverageRetryScheduler((attempt, run, reason) => retry.push({ attempt, run, reason }));
+  const release = () => f.pipeline.setRecentCoverageRetryScheduler(null);
   try {
     f.session();
     f.emit(3);
@@ -183,5 +184,40 @@ test("a reconnect starts the failed repair over as repairing", async (t) => {
     release();
     f.pipeline.dispose();
     mock.timers.reset();
+  }
+});
+
+test("recentCoverageRetryScheduler returns false when unbound and routes retries when registered", async (t) => {
+  useFakeChartDataSource(t);
+  let calls = 0;
+  const retries = [];
+  const f = fixture(async (q) => {
+    calls++;
+    q.onMeta?.({ degraded: true, footprint: { allowed: true, available: false }, provenance: [{ error: "unavailable" }] });
+    return [];
+  });
+  try {
+    // 1. Without scheduler, repair becomes deferred because scheduleRecentCoverageRetry returned false
+    f.session();
+    f.emit(1);
+    await settle();
+    assert.equal(calls, 1);
+    assert.equal(retries.length, 0, "no retry callback scheduled when unbound");
+
+    // 2. Bind scheduler
+    f.pipeline.setRecentCoverageRetryScheduler((attempt, run, reason) => {
+      retries.push({ attempt, run, reason });
+    });
+
+    // Emitting another trade triggers a new repair check that schedules via the bound scheduler
+    f.pipeline.repair.onSession({ generation: 2, epoch: 1, session: "s2", boundaryAt: Date.now() });
+    f.emit(2);
+    await settle();
+    assert.ok(retries.length > 0, "retry callback was routed to registered scheduler");
+
+    // 3. Unbind scheduler
+    f.pipeline.setRecentCoverageRetryScheduler(null);
+  } finally {
+    f.pipeline.dispose();
   }
 });

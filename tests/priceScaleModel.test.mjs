@@ -22,7 +22,6 @@ test("price scale model defaults follow the reference naming policy", () => {
 
   assert.equal(state.autoScale, true);
   assert.equal(state.mode, PriceScaleMode.Normal);
-  assert.equal(state.isInverted, false);
   assert.deepEqual(state.scaleMargins, { top: 0.2, bottom: 0.1 });
   assert.equal(state.tickMarkDensity, 2.5);
 });

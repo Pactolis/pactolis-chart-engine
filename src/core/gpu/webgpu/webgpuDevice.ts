@@ -95,6 +95,12 @@ export async function requestWebGpuDevice(options?: {
         if (lost) return;
         lost = true;
         recordGpuContextEvent("lost");
+        if (sharedHandle === handle) {
+          sharedHandle = null;
+        }
+        if (sharedDevicePromise === acquirePromise) {
+          sharedDevicePromise = null;
+        }
         for (const listener of [...lostListeners]) {
           try {
             listener(reason);
@@ -161,6 +167,10 @@ export async function requestWebGpuDevice(options?: {
       incrementPerformanceCounter("chart.gpu.contextCreateFailed");
       recordGpuFallback("webgpu", "webgl2", "device_creation_exception");
       return null;
+    } finally {
+      if (sharedDevicePromise === acquirePromise) {
+        sharedDevicePromise = null;
+      }
     }
   })();
 
