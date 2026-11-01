@@ -1207,8 +1207,8 @@ class ChartRuntimeImpl implements ChartRuntime, ChartInputHost {
   clearMagnetSnap(): void {
     if (this.activeMagnetSnap !== null) {
       this.activeMagnetSnap = null;
-      this.setHookAttr("data-magnet-snap", "");
-      this.session.invalidate(ChartChange.Interaction);
+      this.setHookAttr?.("data-magnet-snap", "");
+      this.session?.invalidate(typeof ChartChange !== "undefined" ? ChartChange.Interaction : (1 << 4));
     }
   }
   setPriceAutoScaleFromControl(autoScale: boolean): void { this._setPriceAutoScaleFromControl(autoScale); }
@@ -1276,11 +1276,7 @@ class ChartRuntimeImpl implements ChartRuntime, ChartInputHost {
       return { time: defaultTime, price: snappedPrice };
     }
 
-    if (typeof (this as any)._resolveMagnetSnap === "function") {
-      return this._resolveMagnetSnap(cx, cy, rawPrice, defaultTime, idx, temporaryMagnet);
-    }
-    const snappedPrice = this._magnetSnapPrice(idx, cy, rawPrice, temporaryMagnet);
-    return { time: defaultTime, price: snappedPrice };
+    return this._resolveMagnetSnap(cx, cy, rawPrice, defaultTime, idx, temporaryMagnet);
   }
   private _magnetSnapPrice(idx: number, cy: number, rawPrice: number, forceNearest: boolean): number {
     const bar = this.pipeline.series.at(Math.round(idx));
@@ -1316,7 +1312,7 @@ class ChartRuntimeImpl implements ChartRuntime, ChartInputHost {
     // 1. Drawing anchors
     const drawings = this.analysisContextForChart().drawings;
     if (drawings) {
-      const currentList = drawings.listCurrent?.() ?? [];
+      const currentList = drawings.listCurrentReadonly ? drawings.listCurrentReadonly() : (drawings.listCurrent?.() ?? []);
       const isDragActive = drawings.isPointerDragActive?.() === true;
       const selectedSet = new Set(drawings.getSelectedIds?.() ?? []);
       for (const d of currentList) {
@@ -1340,8 +1336,6 @@ class ChartRuntimeImpl implements ChartRuntime, ChartInputHost {
     const barIdx = Math.round(idx);
     const bar = this.pipeline.series.at(barIdx);
     if (bar) {
-      // Reference _magnetSnapPrice to maintain internal compatibility and usage
-      this._magnetSnapPrice(idx, cy, rawPrice, forceNearest);
       const barX = this.view.xOfIndex(barIdx);
       const barTime = this._indexToTime(barIdx) ?? bar.startTime;
       const ohlcLevels: Array<{ price: number; label: string }> = [
@@ -1394,7 +1388,7 @@ class ChartRuntimeImpl implements ChartRuntime, ChartInputHost {
     }
 
     // 4. Volume Profile levels (PPOC, VAH, VAL)
-    const vpLevels = this.overlay.getActiveVolumeProfileLevels();
+    const vpLevels = this.overlay?.getActiveVolumeProfileLevels?.() ?? null;
     if (vpLevels) {
       const profileItems: Array<{ price: number | null; label: string }> = [
         { price: vpLevels.poc, label: "PPOC" },
@@ -1415,8 +1409,8 @@ class ChartRuntimeImpl implements ChartRuntime, ChartInputHost {
       candidates.sort((a, b) => a.distancePx - b.distancePx);
       const best = candidates[0];
       this.activeMagnetSnap = { x: best.x, y: best.y, price: best.price, time: best.time, label: best.label };
-      this.setHookAttr("data-magnet-snap", best.label);
-      this.session.invalidate(ChartChange.Interaction);
+      this.setHookAttr?.("data-magnet-snap", best.label);
+      this.session?.invalidate(typeof ChartChange !== "undefined" ? ChartChange.Interaction : (1 << 4));
       return { time: best.time, price: best.price };
     }
 

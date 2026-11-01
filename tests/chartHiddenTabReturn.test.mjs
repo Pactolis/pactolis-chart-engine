@@ -7,7 +7,6 @@ import test, { mock } from "node:test";
 globalThis.$state ??= (value) => value;
 
 const { ChartHistoryController } = await import("../dist/features/chart/ChartHistoryController.js");
-const { requestRecentCoverageRetry } = await import("../dist/features/chart/recentCoverageRetryBridge.js");
 
 const MARKET = "BINANCE_FUTURES:btcusdt";
 const INTERVAL = 60_000;
@@ -25,10 +24,12 @@ function setup() {
   globalThis.document = doc;
   mock.timers.enable({ apis: ["setTimeout"] });
   const repairs = [];
+  let retryScheduler = null;
   const pipeline = {
     series: { length: 0, config: { priceStep: 1 } },
     intervalMs: INTERVAL,
     activeHistoryCandleSourceGap: null,
+    setRecentCoverageRetryScheduler(scheduler) { retryScheduler = scheduler; },
     cancelRecentFootprintCoverageRepair() {},
     cancelLiveBarOHLCRefresh() {},
     repairRecentFootprintCoverage: async (from, to) => { repairs.push({ from, to }); return "retry"; },
@@ -45,6 +46,11 @@ function setup() {
   const controller = new ChartHistoryController(host);
   return {
     doc, controller, pipeline, repairs,
+    requestRetry(attempt, retry, reason = "transport") {
+      if (!retryScheduler) return false;
+      retryScheduler(attempt, retry, reason);
+      return true;
+    },
     teardown() {
       controller.dispose();
       mock.timers.reset();
@@ -60,7 +66,7 @@ test("an armed live repair retry runs on return from a hidden tab, once, at its 
   try {
     let retries = 0;
     // Attempt 12 of a transport retry: the ladder's 60 s steady delay.
-    assert.equal(requestRecentCoverageRetry(h.pipeline.series, 12, () => { retries++; return true; }, "transport"), true);
+    assert.equal(h.requestRetry(12, () => { retries++; return true; }, "transport"), true);
     h.doc.set("hidden");
     mock.timers.tick(30_000);
     assert.equal(retries, 0, "hidden: the timer is still the only trigger");
@@ -80,7 +86,7 @@ test("a disposed chart ignores the return to visible", () => {
   const h = setup();
   try {
     let retries = 0;
-    requestRecentCoverageRetry(h.pipeline.series, 12, () => { retries++; return true; }, "transport");
+    h.requestRetry(12, () => { retries++; return true; }, "transport");
     h.controller.dispose();
     h.doc.set("hidden");
     h.doc.set("visible");

@@ -95,6 +95,12 @@ export async function requestWebGpuDevice(options?: {
         if (lost) return;
         lost = true;
         recordGpuContextEvent("lost");
+        if (sharedHandle === handle) {
+          sharedHandle = null;
+        }
+        if (sharedDevicePromise === acquirePromise) {
+          sharedDevicePromise = null;
+        }
         for (const listener of [...lostListeners]) {
           try {
             listener(reason);
@@ -167,6 +173,12 @@ export async function requestWebGpuDevice(options?: {
   if (!options?.forceNew) {
     sharedDevicePromise = acquirePromise;
   }
+
+  void acquirePromise.finally(() => {
+    if (sharedDevicePromise === acquirePromise) {
+      sharedDevicePromise = null;
+    }
+  });
 
   return acquirePromise;
 }

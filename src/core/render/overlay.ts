@@ -1,6 +1,7 @@
 // Canvas2D layer: cell volume numbers, price/time axes, crosshair, HUD.
 import type { View } from "../engine/view.js";
 import type { FootprintBar } from "../types.js";
+import { neighbourBin, quantizeToStep } from "../priceStep.js";
 import { cellImbalance, type FootprintSeries } from "../model/footprint.js";
 import { cellAverageTradeSize, cellAverageTradeSizes, cellDeltaPercent, cellTradeCounts, quoteVolumeForBar } from "../model/footprintCellMetrics.js";
 import { settings, type ChartViewConfig } from "../settings.js";
@@ -667,7 +668,7 @@ export class Overlay {
       // MMT-style red marker: only the latest/current price bin of the session,
       // not every price row touched by the last bracket's full high-low range.
       const lastBar = brackets[g.lastBracketIndex]?.bar;
-      const lastCloseBin = lastBar ? Math.floor(lastBar.close / step) * step : NaN;
+      const lastCloseBin = lastBar ? quantizeToStep(lastBar.close, step) : NaN;
 
       if (lettersMode) {
         for (let i = g.firstBracketIndex; i <= g.lastBracketIndex; i++) {
@@ -676,14 +677,18 @@ export class Overlay {
           const bar = bracket.bar;
           const label = tpoBracketLabel(i - g.firstBracketIndex);
           const cx = (view.xOfIndex(bracket.firstIdx) + view.xOfIndex(bracket.lastIdx + 1)) / 2;
-          const lo = Math.floor(bar.low / step) * step;
-          const hi = Math.floor(bar.high / step) * step;
+          const lo = quantizeToStep(bar.low, step);
+          const hi = quantizeToStep(bar.high, step);
           const isLast = i === g.lastBracketIndex;
-          for (let bin = lo; bin <= hi; bin += step) {
+          const ticks = Math.max(0, Math.round((hi - lo) / step));
+          let bin = lo;
+          for (let tick = 0; tick <= ticks; tick++) {
             const yMid = view.yOfPrice(bin + step / 2);
-            if (yMid < view.area.top || yMid > view.area.top + view.area.height) continue;
-            ctx.fillStyle = isLast && bin === lastCloseBin ? tpoPalette.latest : bin === result.poc ? tpoPalette.pocLetters : tpoPalette.letters;
-            ctx.fillText(label, cx, yMid);
+            if (yMid >= view.area.top && yMid <= view.area.top + view.area.height) {
+              ctx.fillStyle = isLast && bin === lastCloseBin ? tpoPalette.latest : bin === result.poc ? tpoPalette.pocLetters : tpoPalette.letters;
+              ctx.fillText(label, cx, yMid);
+            }
+            bin = neighbourBin(bin, step, 1);
           }
         }
       } else {

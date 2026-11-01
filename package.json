@@ -158,6 +158,10 @@
       "types": "./dist/core/model/footprint.d.ts",
       "default": "./dist/core/model/footprint.js"
     },
+    "./core/model/timeScale": {
+      "types": "./dist/core/model/timeScale.d.ts",
+      "default": "./dist/core/model/timeScale.js"
+    },
     "./core/orderFlowProfileSettings": {
       "types": "./dist/core/orderFlowProfileSettings.d.ts",
       "default": "./dist/core/orderFlowProfileSettings.js"
@@ -194,6 +198,10 @@
       "types": "./dist/core/types.d.ts",
       "default": "./dist/core/types.js"
     },
+    "./core/tzFormat": {
+      "types": "./dist/core/tzFormat.d.ts",
+      "default": "./dist/core/tzFormat.js"
+    },
     "./core/ui/seriesPalette": {
       "types": "./dist/core/ui/seriesPalette.d.ts",
       "default": "./dist/core/ui/seriesPalette.js"
@@ -205,6 +213,10 @@
     "./features/chart/ChartInputController": {
       "types": "./dist/features/chart/ChartInputController.d.ts",
       "default": "./dist/features/chart/ChartInputController.js"
+    },
+    "./features/chart/ChartReplayCoordinator": {
+      "types": "./dist/features/chart/ChartReplayCoordinator.d.ts",
+      "default": "./dist/features/chart/ChartReplayCoordinator.js"
     },
     "./features/chart/ChartRuntime": {
       "types": "./dist/features/chart/ChartRuntime.d.ts",
@@ -274,6 +286,10 @@
       "types": "./dist/features/drawings/drawingManager.d.ts",
       "default": "./dist/features/drawings/drawingManager.js"
     },
+    "./features/drawings/drawingPrimitives": {
+      "types": "./dist/features/drawings/drawingPrimitives.d.ts",
+      "default": "./dist/features/drawings/drawingPrimitives.js"
+    },
     "./features/drawings/toolRegistry": {
       "types": "./dist/features/drawings/toolRegistry.d.ts",
       "default": "./dist/features/drawings/toolRegistry.js"
@@ -309,6 +325,14 @@
     "./features/orderbook/heatmapContracts": {
       "types": "./dist/features/orderbook/heatmapContracts.d.ts",
       "default": "./dist/features/orderbook/heatmapContracts.js"
+    },
+    "./features/orderbook/heatmapModel": {
+      "types": "./dist/features/orderbook/heatmapModel.d.ts",
+      "default": "./dist/features/orderbook/heatmapModel.js"
+    },
+    "./features/orderbook/heatmapOverlay": {
+      "types": "./dist/features/orderbook/heatmapOverlay.d.ts",
+      "default": "./dist/features/orderbook/heatmapOverlay.js"
     },
     "./features/orderbook/heatmapSettingsSource": {
       "types": "./dist/features/orderbook/heatmapSettingsSource.d.ts",

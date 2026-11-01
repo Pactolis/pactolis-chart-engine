@@ -1,5 +1,5 @@
-import type { ChartLayer, RenderStage, RenderSurface } from "./chartScene.js";
-import { surfaceForStage } from "./chartScene.js";
+import type { RenderStage, RenderSurface } from "./chartScene.js";
+import { STAGE_RANK, surfaceForStage } from "./chartScene.js";
 
 export type BuiltInChartType = "footprint" | "footprintProfile" | "candlestick" | "tpo";
 
@@ -52,7 +52,7 @@ export function resolveBuiltInLayerPreset(chartType: BuiltInChartType): BuiltInL
   }
 }
 
-const LAYER_STAGE: Readonly<Record<string, { stage: RenderStage; order: number }>> = {
+export const LAYER_STAGE: Readonly<Record<string, { stage: RenderStage; order: number }>> = {
   grid: { stage: "gpu-background", order: 10 },
   candles: { stage: "gpu-series", order: 20 },
   footprint: { stage: "gpu-series", order: 30 },
@@ -73,44 +73,61 @@ const LAYER_STAGE: Readonly<Record<string, { stage: RenderStage; order: number }
   "interaction-controls": { stage: "interaction", order: 30 },
 };
 
-function layerDescriptor(id: string): ChartLayer {
-  const descriptor = LAYER_STAGE[id];
-  if (!descriptor) throw new Error(`Unknown built-in chart layer '${id}'`);
-  const surface: RenderSurface = surfaceForStage(descriptor.stage);
-  return {
-    id,
-    kind: id,
-    visible: true,
-    passes: [{
-      id: `${id}:pass`,
-      surface,
+export interface ResolvedLayerOrder {
+  readonly gpu: ReadonlySet<string>;
+  readonly annotation: readonly string[];
+  readonly interaction: readonly string[];
+}
+
+export function resolveLayerOrder(
+  chartType: BuiltInChartType,
+  visibleIndicatorIds: readonly string[] = [],
+): ResolvedLayerOrder {
+  const preset = resolveBuiltInLayerPreset(chartType);
+  const entries: Array<{ id: string; passId: string; surface: RenderSurface; stage: RenderStage; order: number }> = [];
+  for (const id of [...preset.gpu, ...preset.annotation, ...preset.interaction]) {
+    if (id === "indicators") continue;
+    const descriptor = LAYER_STAGE[id];
+    if (!descriptor) throw new Error(`Unknown built-in chart layer '${id}'`);
+    entries.push({
+      id,
+      passId: `${id}:pass`,
+      surface: surfaceForStage(descriptor.stage),
       stage: descriptor.stage,
       order: descriptor.order,
-    }],
-  };
-}
-
-/** Build the runtime scene metadata for a built-in chart preset. */
-export function buildBuiltInSceneLayers(chartType: BuiltInChartType): readonly ChartLayer[] {
-  const preset = resolveBuiltInLayerPreset(chartType);
-  // Indicator instances are registered individually by ChartRuntime; the preset's
-  // `indicators` entry remains the compatibility adapter key for Overlay.
-  return [...preset.gpu, ...preset.annotation, ...preset.interaction]
-    .filter((id) => id !== "indicators")
-    .map(layerDescriptor);
-}
-
-export function buildIndicatorSceneLayer(instanceId: string, order: number): ChartLayer {
-  const stage: RenderStage = "annotation-overlay";
-  return {
-    id: `indicator:${instanceId}`,
-    kind: "indicator",
-    visible: true,
-    passes: [{
-      id: `indicator:${instanceId}:pass`,
+    });
+  }
+  for (let index = 0; index < visibleIndicatorIds.length; index++) {
+    const instanceId = visibleIndicatorIds[index];
+    const stage: RenderStage = "annotation-overlay";
+    entries.push({
+      id: `indicator:${instanceId}`,
+      passId: `indicator:${instanceId}:pass`,
       surface: surfaceForStage(stage),
       stage,
-      order: 90_000 + Math.max(0, order),
-    }],
+      order: 90_000 + Math.max(0, index),
+    });
+  }
+  entries.sort((a, b) => {
+    const stageDelta = STAGE_RANK[a.stage] - STAGE_RANK[b.stage];
+    if (stageDelta !== 0) return stageDelta;
+    const orderDelta = a.order - b.order;
+    if (orderDelta !== 0) return orderDelta;
+    return a.passId.localeCompare(b.passId);
+  });
+  const forSurface = (surface: RenderSurface): string[] => {
+    const ids: string[] = [];
+    const seen = new Set<string>();
+    for (const entry of entries) {
+      if (entry.surface !== surface || seen.has(entry.id)) continue;
+      seen.add(entry.id);
+      ids.push(entry.id);
+    }
+    return ids;
+  };
+  return {
+    gpu: new Set(forSurface("gpu-scene")),
+    annotation: forSurface("annotation"),
+    interaction: forSurface("interaction"),
   };
 }

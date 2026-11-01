@@ -43,7 +43,7 @@ export enum ChartSurfaceDirty {
   All = GpuScene | Annotation | Interaction,
 }
 
-const STAGE_RANK: Readonly<Record<RenderStage, number>> = {
+export const STAGE_RANK: Readonly<Record<RenderStage, number>> = {
   "gpu-background": 0,
   "gpu-series": 1,
   "gpu-signal": 2,
@@ -106,95 +106,4 @@ export function surfaceDirtyForChanges(changes: ChartChange): ChartSurfaceDirty 
     dirty |= ChartSurfaceDirty.All;
   }
   return dirty;
-}
-
-export interface ChartRenderPass {
-  readonly id: string;
-  readonly surface: RenderSurface;
-  readonly stage: RenderStage;
-  readonly order: number;
-  readonly interests?: ChartChange;
-}
-
-export interface ChartLayer {
-  readonly id: string;
-  readonly kind: string;
-  readonly visible: boolean;
-  readonly passes: readonly ChartRenderPass[];
-  dispose?(): void;
-}
-
-interface OwnedPass extends ChartRenderPass {
-  readonly ownerLayerId: string;
-}
-
-export class ChartRenderScene {
-  private readonly layers = new Map<string, ChartLayer>();
-  private readonly passIds = new Set<string>();
-
-  addLayer(layer: ChartLayer): void {
-    if (this.layers.has(layer.id)) throw new Error(`ChartRenderScene: duplicate layer id '${layer.id}'`);
-    for (const pass of layer.passes) {
-      if (this.passIds.has(pass.id)) throw new Error(`ChartRenderScene: duplicate pass id '${pass.id}'`);
-      const requiredSurface = surfaceForStage(pass.stage);
-      if (pass.surface !== requiredSurface) {
-        throw new Error(
-          `ChartRenderScene: stage '${pass.stage}' requires surface '${requiredSurface}', got '${pass.surface}'`,
-        );
-      }
-    }
-    this.layers.set(layer.id, layer);
-    for (const pass of layer.passes) this.passIds.add(pass.id);
-  }
-
-  removeLayer(id: string): boolean {
-    const layer = this.layers.get(id);
-    if (!layer) return false;
-    this.layers.delete(id);
-    for (const pass of layer.passes) this.passIds.delete(pass.id);
-    layer.dispose?.();
-    return true;
-  }
-
-  clear(): void {
-    for (const id of [...this.layers.keys()]) this.removeLayer(id);
-  }
-
-  passesForSurface(surface: RenderSurface): readonly OwnedPass[] {
-    const passes: OwnedPass[] = [];
-    for (const layer of this.layers.values()) {
-      if (!layer.visible) continue;
-      for (const pass of layer.passes) {
-        if (pass.surface !== surface) continue;
-        passes.push({ ...pass, ownerLayerId: layer.id });
-      }
-    }
-    passes.sort((a, b) => {
-      const stageDelta = STAGE_RANK[a.stage] - STAGE_RANK[b.stage];
-      if (stageDelta !== 0) return stageDelta;
-      const orderDelta = a.order - b.order;
-      if (orderDelta !== 0) return orderDelta;
-      return a.id.localeCompare(b.id);
-    });
-    return passes;
-  }
-
-  layerIdsForSurface(surface: RenderSurface): readonly string[] {
-    const ids: string[] = [];
-    const seen = new Set<string>();
-    for (const pass of this.passesForSurface(surface)) {
-      if (seen.has(pass.ownerLayerId)) continue;
-      seen.add(pass.ownerLayerId);
-      ids.push(pass.ownerLayerId);
-    }
-    return ids;
-  }
-
-  hasLayer(id: string): boolean {
-    return this.layers.has(id);
-  }
-
-  dispose(): void {
-    this.clear();
-  }
 }

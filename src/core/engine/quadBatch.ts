@@ -7,7 +7,7 @@ import type { QuadSink } from "../gpu/gpuBackend.js";
 const VERT_SRC = `#version 300 es
 in vec2 a_unit;       // static unit-quad corner (0..1)
 in vec4 a_rect;        // instance: x, y, w, h (pixel coords, top-left origin)
-in vec4 a_color;       // instance: r, g, b, a
+in vec4 a_color;       // instance: r, g, b, a (UNORM8 normalized to 0.0..1.0)
 uniform vec2 u_resolution;  // canvas size in CSS pixels
 out vec4 v_color;
 void main() {
@@ -25,7 +25,8 @@ void main() {
   fragColor = v_color;
 }`;
 
-const FLOATS_PER_INSTANCE = 8; // rect.x, rect.y, rect.w, rect.h, r, g, b, a
+const WORDS_PER_INSTANCE = 5; // 4 words for rect (Float32) + 1 word for color (4 x Uint8 UNORM)
+const STRIDE_BYTES = 20; // 20 bytes per instance (37.5% reduction from 32B)
 const UNIT_QUAD = new Float32Array([0, 0, 1, 0, 1, 1, 0, 0, 1, 1, 0, 1]); // two triangles
 
 export class QuadBatch implements QuadSink {
@@ -35,7 +36,8 @@ export class QuadBatch implements QuadSink {
   private readonly instanceBuffer: WebGLBuffer;
   private readonly uResolution: WebGLUniformLocation;
 
-  private data: Float32Array;
+  private floatData: Float32Array;
+  private byteData: Uint8Array;
   private gpuCapacityBytes = 0;
   private count = 0; // number of instances (rects) queued
   private disposed = false;
@@ -67,7 +69,11 @@ export class QuadBatch implements QuadSink {
       this.vao = vao;
       this.unitBuffer = unitBuffer;
       this.instanceBuffer = instanceBuffer;
-      this.data = new Float32Array(capacityQuads * FLOATS_PER_INSTANCE);
+
+      const initialBytes = capacityQuads * STRIDE_BYTES;
+      const buffer = new ArrayBuffer(initialBytes);
+      this.floatData = new Float32Array(buffer);
+      this.byteData = new Uint8Array(buffer);
 
       gl.bindVertexArray(this.vao);
 
@@ -77,14 +83,13 @@ export class QuadBatch implements QuadSink {
       gl.vertexAttribPointer(aUnit, 2, gl.FLOAT, false, 0, 0);
 
       gl.bindBuffer(gl.ARRAY_BUFFER, this.instanceBuffer);
-      this.gpuCapacityBytes = this.data.byteLength;
+      this.gpuCapacityBytes = this.floatData.byteLength;
       gl.bufferData(gl.ARRAY_BUFFER, this.gpuCapacityBytes, gl.DYNAMIC_DRAW);
-      const stride = FLOATS_PER_INSTANCE * 4;
       gl.enableVertexAttribArray(aRect);
-      gl.vertexAttribPointer(aRect, 4, gl.FLOAT, false, stride, 0);
+      gl.vertexAttribPointer(aRect, 4, gl.FLOAT, false, STRIDE_BYTES, 0);
       gl.vertexAttribDivisor(aRect, 1);
       gl.enableVertexAttribArray(aColor);
-      gl.vertexAttribPointer(aColor, 4, gl.FLOAT, false, stride, 4 * 4);
+      gl.vertexAttribPointer(aColor, 4, gl.UNSIGNED_BYTE, true, STRIDE_BYTES, 16);
       gl.vertexAttribDivisor(aColor, 1);
 
       gl.bindVertexArray(null);
@@ -106,27 +111,31 @@ export class QuadBatch implements QuadSink {
   /** Queue an axis-aligned rectangle (CSS pixels). */
   rect(x: number, y: number, w: number, h: number, c: RGBA): void {
     if (this.disposed) return;
-    const need = (this.count + 1) * FLOATS_PER_INSTANCE;
-    if (need > this.data.length) this.grow(need);
+    const needWords = (this.count + 1) * WORDS_PER_INSTANCE;
+    if (needWords > this.floatData.length) this.grow(needWords);
 
-    const o = this.count * FLOATS_PER_INSTANCE;
-    this.data[o] = x;
-    this.data[o + 1] = y;
-    this.data[o + 2] = w;
-    this.data[o + 3] = h;
-    this.data[o + 4] = c.r;
-    this.data[o + 5] = c.g;
-    this.data[o + 6] = c.b;
-    this.data[o + 7] = c.a;
+    const wordOffset = this.count * WORDS_PER_INSTANCE;
+    this.floatData[wordOffset] = x;
+    this.floatData[wordOffset + 1] = y;
+    this.floatData[wordOffset + 2] = w;
+    this.floatData[wordOffset + 3] = h;
+    const byteOffset = wordOffset * 4 + 16;
+    this.byteData[byteOffset] = Math.max(0, Math.min(255, Math.round(c.r * 255)));
+    this.byteData[byteOffset + 1] = Math.max(0, Math.min(255, Math.round(c.g * 255)));
+    this.byteData[byteOffset + 2] = Math.max(0, Math.min(255, Math.round(c.b * 255)));
+    this.byteData[byteOffset + 3] = Math.max(0, Math.min(255, Math.round(c.a * 255)));
     this.count++;
   }
 
-  private grow(min: number): void {
-    let size = this.data.length * 2;
-    while (size < min) size *= 2;
-    const next = new Float32Array(size);
-    next.set(this.data);
-    this.data = next;
+  private grow(minWords: number): void {
+    let size = this.floatData.length * 2;
+    while (size < minWords) size *= 2;
+    const nextBuffer = new ArrayBuffer(size * 4);
+    const nextFloat = new Float32Array(nextBuffer);
+    const nextByte = new Uint8Array(nextBuffer);
+    nextByte.set(this.byteData);
+    this.floatData = nextFloat;
+    this.byteData = nextByte;
   }
 
   flush(canvasWidth: number, canvasHeight: number): void {
@@ -136,11 +145,11 @@ export class QuadBatch implements QuadSink {
     gl.useProgram(this.program);
     gl.bindVertexArray(this.vao);
     gl.bindBuffer(gl.ARRAY_BUFFER, this.instanceBuffer);
-    if (this.data.byteLength > this.gpuCapacityBytes) {
-      this.gpuCapacityBytes = this.data.byteLength;
-      gl.bufferData(gl.ARRAY_BUFFER, this.gpuCapacityBytes, gl.DYNAMIC_DRAW);
+    if (this.floatData.byteLength > this.gpuCapacityBytes) {
+      this.gpuCapacityBytes = this.floatData.byteLength;
     }
-    const upload = this.data.subarray(0, this.count * FLOATS_PER_INSTANCE);
+    gl.bufferData(gl.ARRAY_BUFFER, this.gpuCapacityBytes, gl.DYNAMIC_DRAW);
+    const upload = this.floatData.subarray(0, this.count * WORDS_PER_INSTANCE);
     gl.bufferSubData(gl.ARRAY_BUFFER, 0, upload);
     incrementPerformanceCounter("gpu.upload.bytes", upload.byteLength);
 
@@ -158,8 +167,8 @@ export class QuadBatch implements QuadSink {
     this.disposed = true;
     this.count = 0;
     this.gl.deleteVertexArray(this.vao);
-    this.gl.deleteBuffer(this.unitBuffer);
     this.gl.deleteBuffer(this.instanceBuffer);
+    this.gl.deleteBuffer(this.unitBuffer);
     this.gl.deleteProgram(this.program);
   }
 }

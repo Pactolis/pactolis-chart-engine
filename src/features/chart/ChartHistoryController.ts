@@ -17,7 +17,6 @@ import {
   recordPerformanceDuration,
 } from "../../core/performanceTelemetry.js";
 import type { ReplaySnapshot } from "../replay/replayController.js";
-import { registerRecentCoverageRetryScheduler } from "./recentCoverageRetryBridge.js";
 import {
   liveRepairRetryDelayMs,
   recentCoverageRetryDelayMs,
@@ -123,13 +122,9 @@ export class ChartHistoryController {
   };
   private candleGapRetryTimer: ReturnType<typeof setTimeout> | null = null;
   private candleGapRetryToken = 0;
-  private releaseRecentCoverageRetryScheduler: (() => void) | null = null;
 
   constructor(private readonly host: ChartHistoryControllerHost) {
-    this.releaseRecentCoverageRetryScheduler = registerRecentCoverageRetryScheduler(
-      this.host.pipeline.series,
-      (attempt, retry, reason) => this.queueLiveRepairRetry(attempt, retry, reason),
-    );
+    this.host.pipeline?.setRecentCoverageRetryScheduler?.((attempt, retry, reason) => this.queueLiveRepairRetry(attempt, retry, reason));
     this.bindPipelineUpdates();
     if (typeof document !== "undefined") document.addEventListener("visibilitychange", this.onVisibilityChange);
   }
@@ -368,8 +363,7 @@ export class ChartHistoryController {
 
   dispose(): void {
     if (typeof document !== "undefined") document.removeEventListener("visibilitychange", this.onVisibilityChange);
-    this.releaseRecentCoverageRetryScheduler?.();
-    this.releaseRecentCoverageRetryScheduler = null;
+    this.host.pipeline?.setRecentCoverageRetryScheduler?.(null);
     this.cancelRecentCoverageRetry();
     this.cancelLiveRepairRetry();
     this.cancelCandleGapRetry();

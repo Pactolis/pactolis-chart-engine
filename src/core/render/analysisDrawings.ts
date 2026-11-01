@@ -43,6 +43,8 @@ interface CachedRangeProfileCalculation {
 interface CachedAnchoredVwapEntry {
   series: FootprintSeries;
   revision: number;
+  nonTailRevision: number;
+  resetEpoch: number;
   anchorTime: number;
   barCount: number;
   lastBarStartTime: number;
@@ -61,6 +63,8 @@ function cachedAnchoredVwap(series: FootprintSeries, drawing: Drawing, anchor: n
   if (
     cached &&
     cached.series === series &&
+    cached.resetEpoch === series.resetEpoch &&
+    cached.nonTailRevision === series.nonTailRevision &&
     cached.anchorTime === anchor &&
     cached.barCount === bars.length &&
     bars.length > 0 &&
@@ -110,6 +114,8 @@ function cachedAnchoredVwap(series: FootprintSeries, drawing: Drawing, anchor: n
   anchoredVwapCache.set(drawing, {
     series,
     revision: series.revision,
+    nonTailRevision: series.nonTailRevision,
+    resetEpoch: series.resetEpoch,
     anchorTime: anchor,
     barCount: bars.length,
     lastBarStartTime,

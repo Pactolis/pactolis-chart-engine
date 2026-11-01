@@ -3,7 +3,6 @@ import assert from "node:assert/strict";
 import { ChartDataPipeline } from "../dist/features/chart/ChartDataPipeline.js";
 import { FootprintSeries } from "../dist/core/model/footprint.js";
 import { recordFootprintSupport, resetFootprintSupport } from "../dist/core/syncAllowlist.js";
-import { registerRecentCoverageRetryScheduler } from "../dist/features/chart/recentCoverageRetryBridge.js";
 import { useFakeChartDataSource } from "./support/fakeChartDataSource.mjs";
 
 const flush = async () => { for (let i = 0; i < 4; i++) await new Promise(setImmediate); };
@@ -72,7 +71,8 @@ function harness(metaFactory) {
     reconnect(generation, boundaryAt) { session?.({ generation, epoch: generation, session: `s-${generation}`, boundaryAt }); },
   };
   const pipeline = new ChartDataPipeline({ market: "M", intervalMs: 60_000, priceStep: 1, services });
-  const release = registerRecentCoverageRetryScheduler(pipeline.series, (_attempt, retry) => scheduledRetries.push(retry));
+  pipeline.setRecentCoverageRetryScheduler((_attempt, retry) => scheduledRetries.push(retry));
+  const release = () => pipeline.setRecentCoverageRetryScheduler(null);
   return { services, pipeline, reporterEvents, scheduledRetries, dispose() { release(); pipeline.dispose(); resetFootprintSupport(); } };
 }
 
