@@ -1388,7 +1388,7 @@ class ChartRuntimeImpl implements ChartRuntime, ChartInputHost {
     }
 
     // 4. Volume Profile levels (PPOC, VAH, VAL)
-    const vpLevels = this.overlay.getActiveVolumeProfileLevels();
+    const vpLevels = this.overlay?.getActiveVolumeProfileLevels?.() ?? null;
     if (vpLevels) {
       const profileItems: Array<{ price: number | null; label: string }> = [
         { price: vpLevels.poc, label: "PPOC" },
