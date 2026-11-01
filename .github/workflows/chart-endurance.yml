@@ -30,7 +30,6 @@ on:
     paths:
       - ".github/workflows/chart-endurance.yml"
       - "tests/browser/chart-multi-market-census.spec.ts"
-      - "harness/**"
 
 # Runs of the same declared source SHA serialize; none is cancelled.
 concurrency:
@@ -42,7 +41,7 @@ permissions:
 
 jobs:
   endurance:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: ${{ (github.event_name == 'schedule' || inputs.minutes == '60') && 120 || 60 }}
     env:
       CHART_ENDURANCE_MINUTES: ${{ github.event_name == 'schedule' && '60' || inputs.minutes || '30' }}
@@ -59,7 +58,7 @@ jobs:
           echo "declared source SHA: $CHART_ENDURANCE_SOURCE_SHA"
           printf '%s' "$CHART_ENDURANCE_SOURCE_SHA" | grep -Eq '^[0-9a-f]{40}$' \
             || { echo "::error::source_sha must be an exact 40-hex commit"; exit 1; }
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
         with:
           ref: ${{ env.CHART_ENDURANCE_SOURCE_SHA }}
           persist-credentials: false
@@ -135,8 +134,9 @@ jobs:
           '
       - name: Upload endurance evidence only (failure honest)
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: endurance-evidence-${{ env.CHART_ENDURANCE_SOURCE_SHA }}
           path: test-results/**/endurance-evidence.json
+          retention-days: 3
           if-no-files-found: error
