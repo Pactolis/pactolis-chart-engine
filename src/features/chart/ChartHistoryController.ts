@@ -363,7 +363,7 @@ export class ChartHistoryController {
 
   dispose(): void {
     if (typeof document !== "undefined") document.removeEventListener("visibilitychange", this.onVisibilityChange);
-    this.host.pipeline.setRecentCoverageRetryScheduler(null);
+    this.host.pipeline?.setRecentCoverageRetryScheduler?.(null);
     this.cancelRecentCoverageRetry();
     this.cancelLiveRepairRetry();
     this.cancelCandleGapRetry();
