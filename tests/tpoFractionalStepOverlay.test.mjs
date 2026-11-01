@@ -11,10 +11,11 @@ test("TPO fractional step overlay uses quantizeToStep and neighbourBin matching 
   const close = 0.3;
 
   for (const step of steps) {
+    const barHigh = step === 0.0001 ? 150.3 : high;
     const bar = {
       startTime: 1_000,
       open: low,
-      high,
+      high: barHigh,
       low,
       close,
       volume: 100,

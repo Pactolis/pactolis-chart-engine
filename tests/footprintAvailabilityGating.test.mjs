@@ -62,7 +62,7 @@ test("automatic sync is not started for a footprint read that failed", () => {
   assert.match(source, /recentCoverageRetryDelayMs/, "history retries must use the shared retry policy");
   assert.match(policySource, /RECENT_COVERAGE_RETRY_DELAYS_MS = \[/, "recent retry must keep the fast warmup sequence");
   const reconnectSource = fs.readFileSync(path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../src/features/chart/LiveTradeRepairController.ts"), "utf8");
-  assert.match(reconnectSource, /requestRecentCoverageRetry\(/, "reconnect repair must borrow the history retry scheduler");
+  assert.match(reconnectSource, /scheduleRecentCoverageRetry\(/, "reconnect repair must borrow the history retry scheduler");
   assert.doesNotMatch(reconnectSource, /MAX_REPAIR_RETRIES/, "reconnect repair must not retain an immediate private retry loop");
   assert.match(policySource, /RECENT_COVERAGE_RETRY_STEADY_MS = 60_000/, "recent retry steady cadence must stay capped at one minute");
   assert.doesNotMatch(source, /RECENT_FOOTPRINT_RETRY_DELAYS_MS/, "history controller must not retain a private retry table");

@@ -396,6 +396,10 @@ test("Issue #57: WebGPU device cache retry after failure, loss recovery without 
     // 4. Eşzamanlı iki requestWebGpuDevice() çağrısı tek requestAdapter/requestDevice çağrısında birleşir;
     // eski cihazın geç gelen lost bildirimi yeni edinilmiş sharedHandle'ı silmez.
     const lateLostDevice = currentDevice;
+    lateLostDevice._triggerLost({ reason: "delayed-lost" });
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    assert.equal(fourthReacquired.isLost(), true);
+
     let delayAdapterResolve;
     const delayedPromise = new Promise((resolve) => { delayAdapterResolve = resolve; });
     const prevRequestAdapter = globalThis.navigator.gpu.requestAdapter;
@@ -405,9 +409,6 @@ test("Issue #57: WebGPU device cache retry after failure, loss recovery without 
       await delayedPromise;
       return prevRequestAdapter();
     };
-
-    // Trigger loss on old device
-    lateLostDevice._triggerLost({ reason: "delayed-lost" });
 
     const p1 = requestWebGpuDevice();
     const p2 = requestWebGpuDevice();
