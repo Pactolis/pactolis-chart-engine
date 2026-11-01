@@ -241,6 +241,31 @@ class ChartRuntimeImpl implements ChartRuntime, ChartInputHost {
 
   activeMagnetSnap: MagnetSnapTarget | null = null;
 
+  get heatmapTexturePrototypeEnabled(): boolean {
+    return this.heatmapGpuCoordinator.isHeatmapTexturePrototypeEnabled();
+  }
+  set heatmapTexturePrototypeEnabled(enabled: boolean) {
+    this.heatmapGpuCoordinator.setHeatmapTexturePrototypeEnabled(enabled);
+  }
+
+  get heatmapGpuFrame(): unknown {
+    return this.heatmapGpuCoordinator.getFrame();
+  }
+
+  get npocMarket(): string | null {
+    return this.levelContextController.npocMarket;
+  }
+  set npocMarket(val: string | null) {
+    this.levelContextController.npocMarket = val;
+  }
+
+  get npocLevels(): NakedPocLevel[] {
+    return this.levelContextController.npocLevels;
+  }
+  set npocLevels(val: NakedPocLevel[]) {
+    this.levelContextController.npocLevels = val;
+  }
+
   private setHookAttr(name: string, value: string): void {
     if (this.hookAttrCache.get(name) === value) return;
     this.hookAttrCache.set(name, value);

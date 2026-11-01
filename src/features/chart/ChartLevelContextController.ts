@@ -27,9 +27,9 @@ export interface ChartLevelContextHost {
 export class ChartLevelContextController {
   private npocGeneration = 0;
   private npocController: AbortController | null = null;
-  private npocMarket: string | null = null;
+  npocMarket: string | null = null;
   private npocPending: NakedPocLevel[] | null = null;
-  private npocLevels: NakedPocLevel[] = [];
+  npocLevels: NakedPocLevel[] = [];
   private npocHistoryReady = false;
   private readonly npocListeners = new Set<() => void>();
 

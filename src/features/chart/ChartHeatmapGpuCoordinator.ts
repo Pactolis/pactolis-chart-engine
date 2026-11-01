@@ -33,7 +33,7 @@ export interface ChartHeatmapGpuCoordinatorHost {
  * budget latching, and annotation suppression.
  */
 export class ChartHeatmapGpuCoordinator {
-  private heatmapTexturePrototypeEnabled = false;
+  private _heatmapTexturePrototypeEnabled = false;
   private heatmapTexturePrototypeLastEnabled: boolean | null = null;
   private heatmapGpuRenderer: HeatmapGpuRenderer | null = null;
   private heatmapGpuRendererGl: WebGL2RenderingContext | null = null;
@@ -43,13 +43,21 @@ export class ChartHeatmapGpuCoordinator {
 
   constructor(private readonly host: ChartHeatmapGpuCoordinatorHost) {}
 
+  get heatmapTexturePrototypeEnabled(): boolean {
+    return this._heatmapTexturePrototypeEnabled;
+  }
+
+  set heatmapTexturePrototypeEnabled(enabled: boolean) {
+    this._heatmapTexturePrototypeEnabled = enabled;
+    this.host.invalidateSession();
+  }
+
   isHeatmapTexturePrototypeEnabled(): boolean {
-    return this.heatmapTexturePrototypeEnabled;
+    return this._heatmapTexturePrototypeEnabled;
   }
 
   setHeatmapTexturePrototypeEnabled(enabled: boolean): void {
     this.heatmapTexturePrototypeEnabled = enabled;
-    this.host.invalidateSession();
   }
 
   setResidentHeatmapEnabled(enabled: boolean): void {
