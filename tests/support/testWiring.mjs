@@ -1,4 +1,11 @@
 // @ts-check
+const originalEmitWarning = process.emitWarning.bind(process);
+process.emitWarning = /** @type {typeof process.emitWarning} */ ((warning, ...args) => {
+  const message = typeof warning === "string" ? warning : warning?.message ?? "";
+  if (message.includes("MockTimers API is an experimental feature")) return;
+  return originalEmitWarning(warning, ...args);
+});
+
 // The chart engine asks its host application for locale and text. Unit tests
 // stand in for that host with a fixed English, UTC locale whose translations
 // echo the message key and its parameters, so assertions never depend on an

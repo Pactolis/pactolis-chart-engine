@@ -1,4 +1,4 @@
-import type { FootprintBar } from "../../core/types.js";
+import type { FootprintBar, FootprintCell } from "../../core/types.js";
 
 export type ReplayState = "idle" | "selecting" | "paused" | "playing" | "done";
 
@@ -10,6 +10,32 @@ export interface ReplaySnapshot {
   totalBars: number;
   rangeStart: number;
   rangeEnd: number;
+}
+
+/**
+ * Fast deterministic clone of a FootprintBar for replay snapshots.
+ * Avoids browser structuredClone overhead by performing a shallow clone of the bar
+ * and its cell objects while isolating the Map and nested structures.
+ */
+export function cloneFootprintBarForReplay(bar: FootprintBar): FootprintBar {
+  const clonedCells = new Map<number, FootprintCell>();
+  for (const [price, cell] of bar.cells) {
+    clonedCells.set(price, { ...cell });
+  }
+  const cloned: FootprintBar = {
+    ...bar,
+    cells: clonedCells,
+    deltaBySize: bar.deltaBySize ? [...bar.deltaBySize] : undefined,
+    sources: bar.sources ? [...bar.sources] : undefined,
+  };
+  const extra = bar as unknown as Record<string, unknown>;
+  if (extra.cumulativeDeltaClose) {
+    (cloned as unknown as Record<string, unknown>).cumulativeDeltaClose = { ...(extra.cumulativeDeltaClose as object) };
+  }
+  if (extra.divergenceSignal) {
+    (cloned as unknown as Record<string, unknown>).divergenceSignal = { ...(extra.divergenceSignal as object) };
+  }
+  return cloned;
 }
 
 /**

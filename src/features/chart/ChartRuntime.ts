@@ -6,7 +6,7 @@
  * stable product-facing API and composes those capabilities for one panel.
  */
 
-import { hasChartAutomaticVisibility, type ChartPanelState, type ChartType, type LinkGroupColor, type TpoMode } from "../../core/chartPanelState.js";
+import { type ChartPanelState, type ChartType, type LinkGroupColor, type TpoMode } from "../../core/chartPanelState.js";
 import type { AnalysisContext, AutomaticLevelsAsOf } from "../../core/analysisContext.js";
 import type { ChartAnalysisSnapshot, AnalysisSnapshotOptions } from "../../core/analysisSnapshot.js";
 import type { ChartRuntimeServices } from "./ChartServicePorts.js";
@@ -28,9 +28,7 @@ import { Overlay } from "../../core/render/overlay.js";
 import type { Crosshair } from "../../core/render/overlay.js";
 import { ChartChange, ChartSurfaceDirty } from "../../core/render/scene/chartScene.js";
 import { TIMEFRAMES } from "../../core/timeframes.js";
-import { PERIOD_INTERVAL } from "../../core/analysis/periods.js";
 import type { NakedPocLevel } from "../../core/analysis/nakedPoc.js";
-import { bucketEnd } from "../../core/time.js";
 import type { ReplaySnapshot } from "../replay/replayController.js";
 import { chartHost } from "./chartHost.js";
 import { drawIndicatorPaneBackground } from "../indicators/IndicatorManager.js";
@@ -60,13 +58,18 @@ import { ChartHistoryController } from "./ChartHistoryController.js";
 import { ChartSyncController } from "./ChartSyncController.js";
 import { ChartRenderCoordinator } from "./ChartRenderCoordinator.js";
 import { ChartIndicatorController } from "./ChartIndicatorController.js";
+import { ChartMagnetController, type MagnetSnapTarget } from "./ChartMagnetController.js";
+import { ChartHeatmapGpuCoordinator, type HeatmapGpuRenderFrame } from "./ChartHeatmapGpuCoordinator.js";
+import { ChartLevelContextController } from "./ChartLevelContextController.js";
 import { buildChartAnalysisSnapshot, countClosedBars } from "./analysisSnapshot.js";
 import { decideLiveSameBarAutoFit, type LiveAutoFitSnapshot } from "./liveAutoFit.js";
 import { OrderbookHeatmapOverlay, type LiveHeatmapTailEvent } from "../orderbook/heatmapOverlay.js";
-import { HeatmapGpuRenderer, type HeatmapGpuCellFrame } from "./heatmap/gpu/heatmapGpuRenderer.js";
+import type { HeatmapGpuCellFrame } from "./heatmap/gpu/heatmapGpuRenderer.js";
 import type { FootprintSeries } from "../../core/model/footprint.js";
 import { abortableDelay } from "./abortableDelay.js";
 import type { ChartSurfaceModel } from "./chartSurfaceModel.js";
+
+export type { MagnetSnapTarget, HeatmapGpuRenderFrame };
 
 export interface ChartRuntime {
   updateState(next: ChartPanelState): void;
@@ -180,7 +183,6 @@ class ChartRuntimeImpl implements ChartRuntime, ChartInputHost {
   private readonly _hook: HTMLElement;
   private readonly interactionCanvas: HTMLCanvasElement;
   private readonly crosshair: Crosshair;
-  private activeMagnetSnap: { x: number; y: number; price: number; time: number; label: string } | null = null;
   /** What `ChartHost.displayOptions()` last answered, resolved; WebGL attributes only apply at mount. */
   private displayOptions: ResolvedChartDisplayOptions;
   private disposeInput: () => void = () => undefined;
@@ -197,42 +199,6 @@ class ChartRuntimeImpl implements ChartRuntime, ChartInputHost {
    */
   private requestedChartType: ChartType;
   private readonly orderbookHeatmap: OrderbookHeatmapOverlay | null;
-  /**
-   * Private, default-off prototype opt-in for GPU orderbook heatmap density.
-   * Deliberately a TS-private instance field (no #, no public surface): the
-   * prototype harness flips it on a live runtime instance only. While true, the
-   * density cells for the SAME completed successful GPU frame are painted into
-   * the Session-owned native GPU canvas and the annotation path skips them.
-   */
-  private heatmapTexturePrototypeEnabled = false;
-  private heatmapTexturePrototypeLastEnabled: boolean | null = null;
-  private heatmapGpuRenderer: HeatmapGpuRenderer | null = null;
-  private heatmapGpuRendererGl: WebGL2RenderingContext | null = null;
-  private heatmapGpuFailureLatched = false;
-  private heatmapGpuFrame: {
-    dataKey: string;
-    threshold: number;
-    ceiling: number;
-    colWidth: number;
-    offsetX: number;
-    areaLeft: number;
-    areaTop: number;
-    areaWidth: number;
-    areaHeight: number;
-    priceTop: number;
-    pricePerPx: number;
-    priceScaleMode: string;
-    seriesLength: number;
-    rangeFrom: number;
-    rangeTo: number;
-  } | null = null;
-  /**
-   * Lease covering the prepared frame lists of the current completed GPU
-   * claim. Held while the claim (the retained prepared references) lives;
-   * dropped before an idempotent release whenever the claim is replaced,
-   * fails, is disposed or the runtime goes away.
-   */
-  private heatmapGpuLease: { release(): void } | null = null;
   private readonly tpoMergeLeftSessionStarts = new Set<number>();
   private lastAutoFitSnapshot: LiveAutoFitSnapshot | null = null;
   private analysisSelectionGeneration = 0;
@@ -241,13 +207,6 @@ class ChartRuntimeImpl implements ChartRuntime, ChartInputHost {
   private hookFollowsInvalidation = false;
   /** One hook refresh per task: a burst of invalidations (wheel, pan, live tick) collapses into one write. */
   private hookUpdateQueued = false;
-  private npocGeneration = 0;
-  private npocController: AbortController | null = null;
-  private npocMarket: string | null = null;
-  private npocPending: NakedPocLevel[] | null = null;
-  private npocLevels: NakedPocLevel[] = [];
-  private npocHistoryReady = false;
-  private readonly npocListeners = new Set<() => void>();
 
   private lastAnalysisSnapshotCache: {
     readonly snapshot: ChartAnalysisSnapshot;
@@ -269,33 +228,43 @@ class ChartRuntimeImpl implements ChartRuntime, ChartInputHost {
     readonly optionsSignature: string;
   } | null = null;
   private readonly replayCoordinator: ChartReplayCoordinator;
-  private replayLevelsCache: {
-    key: {
-      market: string;
-      revision: number;
-      asOf: number;
-      previousWeek: AnalysisContext["previousWeekStrategySettings"];
-      monday: AnalysisContext["mondayRangeSettings"];
-    };
-    levels: AutomaticLevelsAsOf;
-  } | null = null;
   private readonly captureCoordinator: ChartCaptureCoordinator;
   private readonly analysisBridge: ChartAnalysisBridge;
   private readonly historyController: ChartHistoryController;
   private readonly syncController: ChartSyncController;
+  private readonly magnetController: ChartMagnetController;
+  private readonly heatmapGpuCoordinator: ChartHeatmapGpuCoordinator;
+  private readonly levelContextController: ChartLevelContextController;
   private readonly hookAttrCache = new Map<string, string>();
   private lastSeriesTailSig: string | null = null;
   private lastSeriesTailJson: string = "[]";
 
-  private cachedAnalysisServiceRaw: AnalysisContext | null = null;
-  private cachedAnalysisRevision = 0;
-  private cachedAnalysisPwSettings: unknown = null;
-  private cachedAnalysisMrSettings: unknown = null;
-  private cachedAnalysisStateRef: ChartPanelState | null = null;
-  private cachedAnalysisNpocLevels: readonly NakedPocLevel[] | null = null;
-  private cachedAnalysisNpocMarket: string | null = null;
-  private cachedAnalysisReplayTime: number | undefined = undefined;
-  private cachedAnalysisContext: AnalysisContext | null = null;
+  activeMagnetSnap: MagnetSnapTarget | null = null;
+
+  get heatmapTexturePrototypeEnabled(): boolean {
+    return this.heatmapGpuCoordinator.isHeatmapTexturePrototypeEnabled();
+  }
+  set heatmapTexturePrototypeEnabled(enabled: boolean) {
+    this.heatmapGpuCoordinator.setHeatmapTexturePrototypeEnabled(enabled);
+  }
+
+  get heatmapGpuFrame(): unknown {
+    return this.heatmapGpuCoordinator.getFrame();
+  }
+
+  get npocMarket(): string | null {
+    return this.levelContextController.npocMarket;
+  }
+  set npocMarket(val: string | null) {
+    this.levelContextController.npocMarket = val;
+  }
+
+  get npocLevels(): NakedPocLevel[] {
+    return this.levelContextController.npocLevels;
+  }
+  set npocLevels(val: NakedPocLevel[]) {
+    this.levelContextController.npocLevels = val;
+  }
 
   private setHookAttr(name: string, value: string): void {
     if (this.hookAttrCache.get(name) === value) return;
@@ -352,9 +321,6 @@ class ChartRuntimeImpl implements ChartRuntime, ChartInputHost {
     this.view.setScaleMode(initialState.scaleMode);
     this.timeViewport = new TimeScaleViewportController(this.view);
     this.renderer = new FootprintRenderer(gpuSurface ?? (gl as WebGL2RenderingContext));
-    // Tracked separately from the private FootprintRenderer context so the
-    // prototype can detect a context swap without touching ChartSession state.
-    this.heatmapGpuRendererGl = gl;
 
     const series = this.pipeline.series;
     this.indicatorController = new ChartIndicatorController({
@@ -391,6 +357,24 @@ class ChartRuntimeImpl implements ChartRuntime, ChartInputHost {
         subscribeLiveTail: subscribeHeatmapLiveTail,
       })
       : null;
+
+    const self = this;
+    this.heatmapGpuCoordinator = new ChartHeatmapGpuCoordinator({
+      orderbookHeatmap: this.orderbookHeatmap,
+      get renderCoordinator() { return self.renderCoordinator; },
+      renderer: this.renderer,
+      invalidateSession: () => this.invalidateSession(),
+    });
+    this.heatmapGpuCoordinator.setGl(gl);
+    this.magnetController = new ChartMagnetController({
+      view: this.view,
+      pipeline: this.pipeline,
+      get state() { return self.state; },
+      get session() { return self.session; },
+      get overlay() { return self.overlay; },
+      setHookAttr: (name, value) => this.setHookAttr(name, value),
+      analysisContextForChart: () => this.analysisContextForChart(),
+    });
 
     this.overlay = new Overlay(
       annotationCtx2d,
@@ -483,9 +467,7 @@ class ChartRuntimeImpl implements ChartRuntime, ChartInputHost {
         if (this.timeViewport.ensurePendingLatestPlacement(s.length)) this._autoFit();
         // Reset the completed-GPU-frame claim BEFORE this attempt; the density
         // decision below owns the whole frame, never a partial GPU+annotation mix.
-        this.heatmapGpuFrame = null;
-        this.releaseHeatmapGpuLease();
-        this.trackHeatmapPrototypeOptIn();
+        this.heatmapGpuCoordinator.beginFrameAttempt();
         if (this.indicatorController.isPaneMaximized()) this.renderer.clear();
         else {
           let heatmapFrame: HeatmapGpuCellFrame | null = null;
@@ -497,10 +479,6 @@ class ChartRuntimeImpl implements ChartRuntime, ChartInputHost {
             // already owns it. Hover/axes/errors stay on the annotation canvas.
             this.renderHeatmapGpuCells(heatmapFrame, v, s);
           } catch (error) {
-            // The prepared lease is adopted only by a completed GPU claim
-            // inside renderHeatmapGpuCells; a candle-layer throw (or any exit
-            // before adoption) must drop the unadopted frame references and
-            // release the idempotent lease exactly once, preserving the error.
             heatmapFrame?.preparedLease?.release();
             heatmapFrame = null;
             throw error;
@@ -510,10 +488,11 @@ class ChartRuntimeImpl implements ChartRuntime, ChartInputHost {
       visibleRange: (v: View, total: number) => this.renderer.visibleRange(v, total),
       setSurface: (nextSurface: GpuSurface) => {
         this.renderer.setSurface(nextSurface);
-        this.heatmapGpuRendererGl =
+        this.heatmapGpuCoordinator.setGl(
           nextSurface.kind === "webgl2"
             ? nextSurface.getGlContext?.() ?? null
-            : null;
+            : null,
+        );
       },
     };
 
@@ -553,27 +532,12 @@ class ChartRuntimeImpl implements ChartRuntime, ChartInputHost {
       onRestoreContext: (restoredGl) => {
         this.renderer.dispose();
         this.renderer = new FootprintRenderer(this.session.getSurface());
-        // The prototype's GPU resources belonged to the lost context; drop them
-        // and let the next enabled frame rebuild against the restored GL.
-        this.disposeHeatmapGpuRenderer();
-        this.heatmapGpuRendererGl = restoredGl;
-        // New resource epoch: a failure latch from the lost context must not
-        // outlive the resources it pointed at; the next enabled frame
-        // re-prepares the prototype against the restored GL.
-        this.heatmapGpuFailureLatched = false;
+        this.heatmapGpuCoordinator.onRestoreContext(restoredGl);
         this.renderCoordinator.applyConfig(this.chartViewConfig());
         this.session.invalidate();
       },
       onLostContext: () => {
-        // Immediate epoch invalidity: the lost context owned the completed GPU
-        // claim's prepared references, its lease and the prototype's GL
-        // resources. Drop the claim refs first, release the owned lease
-        // exactly once and dispose the old prototype GPU owner now, instead of
-        // leaving them charged until restore or dispose.
-        this.disposeHeatmapGpuRenderer();
-        // Fresh epoch: a failure latch from the lost context must not block the
-        // next enabled frame once the context is restored.
-        this.heatmapGpuFailureLatched = false;
+        this.heatmapGpuCoordinator.onLostContext();
       },
       maxDevicePixelRatio: display.maxDevicePixelRatio,
       onResize: (w, h, dpr) => {
@@ -644,6 +608,17 @@ class ChartRuntimeImpl implements ChartRuntime, ChartInputHost {
       },
     });
 
+    this.levelContextController = new ChartLevelContextController({
+      get state() { return self.state; },
+      pipeline: this.pipeline,
+      view: this.view,
+      svc: this.svc,
+      session: this.session,
+      replayCoordinator: this.replayCoordinator,
+      isDisposed: () => self.isDisposed(),
+      updateHook: () => self.updateHook(),
+    });
+
     this.analysisBridge = new ChartAnalysisBridge({
       svc: this.svc,
       session: this.session,
@@ -699,6 +674,18 @@ class ChartRuntimeImpl implements ChartRuntime, ChartInputHost {
         this.session.invalidate(ChartChange.Viewport);
       });
     }
+  }
+
+  isDisposed(): boolean {
+    return this.disposed;
+  }
+
+  invalidateSession(): void {
+    if (!this.disposed) this.session?.invalidate();
+  }
+
+  updateHook(): void {
+    this._updateHook();
   }
 
   get onReplayState(): ((snap: ReplaySnapshot | null) => void) | undefined {
@@ -930,192 +917,31 @@ class ChartRuntimeImpl implements ChartRuntime, ChartInputHost {
   }
 
   private _beginNpocRequest(market: string): void {
-    const generation = ++this.npocGeneration;
-    this.npocController?.abort();
-    const controller = new AbortController();
-    this.npocController = controller;
-    this.npocMarket = market;
-    this.npocPending = null;
-    this.npocLevels = [];
-    this.npocHistoryReady = false;
-    this._notifyNpocListeners();
-    this.session?.invalidate();
-
-    void this.svc.fetchNpocSnapshot(market, controller.signal).then((response) => {
-      if (
-        this.disposed
-        || controller.signal.aborted
-        || generation !== this.npocGeneration
-        || market !== this.state.market
-      ) return;
-      this.npocPending = response.levels.map((level) => ({
-        id: `${market}|${level.period}|${level.periodStart}`,
-        market,
-        period: level.period,
-        periodStart: level.periodStart,
-        periodEnd: bucketEnd(level.periodStart, PERIOD_INTERVAL[level.period]),
-        price: level.pocLower,
-        age: level.age,
-        complete: true as const,
-      }));
-      this._updateHook();
-      this._maybeApplyNpoc();
-    }).catch((error: unknown) => {
-      if (controller.signal.aborted || generation !== this.npocGeneration) return;
-      console.warn("[chart.npoc] snapshot unavailable", error);
-    });
+    this.levelContextController.beginNpocRequest(market);
   }
 
   private _notifyNpocHistorySettled(market: string, timeframe: string): void {
-    if (market !== this.state.market || timeframe !== this.state.timeframe) return;
-    this.npocHistoryReady = true;
-    this._maybeApplyNpoc();
-    this._updateHook();
+    this.levelContextController.notifyNpocHistorySettled(market, timeframe);
   }
 
   private _maybeApplyNpoc(): void {
-    if (
-      this.disposed
-      || !this.npocHistoryReady
-      || this.npocPending === null
-      || this.npocMarket !== this.state.market
-      || this.pipeline.series.length === 0
-      || this.view.area.width <= 1
-      || this.view.area.height <= 1
-      || this.view.priceRange() === null
-    ) return;
-    this.npocLevels = this.npocPending;
-    this.npocPending = null;
-    this._notifyNpocListeners();
-    this.session.invalidate();
+    this.levelContextController.maybeApplyNpoc();
   }
 
-  /** nPOC has no historical state, so a replaying chart shows none. */
   getNpocLevels(): readonly NakedPocLevel[] {
-    if (this.replayCoordinator.isActive()) return [];
-    return this.npocMarket === this.state.market ? this.npocLevels : [];
+    return this.levelContextController.getNpocLevels();
   }
 
   subscribeNpoc(listener: () => void): () => void {
-    this.npocListeners.add(listener);
-    return () => this.npocListeners.delete(listener);
+    return this.levelContextController.subscribeNpoc(listener);
   }
 
-  private _notifyNpocListeners(): void {
-    for (const listener of this.npocListeners) listener();
-  }
-
-  private automaticLevelsAsOf(market: string, asOf: number, context: AnalysisContext): AutomaticLevelsAsOf {
-    // analysisContextForChart runs several times per frame; recompute only when the market,
-    // its analysis revision, the level settings or the replay time change.
-    const revision = this.svc.getAnalysisRevisionSnapshot(market).revision;
-    const key = {
-      market,
-      revision,
-      asOf,
-      previousWeek: context.previousWeekStrategySettings,
-      monday: context.mondayRangeSettings,
-    };
-    const cached = this.replayLevelsCache;
-    if (cached && (Object.keys(key) as (keyof typeof key)[]).every((name) => cached.key[name] === key[name])) {
-      return cached.levels;
-    }
-    const levels = this.svc.getAutomaticLevelsAsOf?.(market, asOf)
-      ?? { previousWeekStrategyLevels: [], mondayRangeLevels: [], referenceLevels: [] };
-    this.replayLevelsCache = { key, levels };
-    return levels;
-  }
-
-  /** The automatic levels this chart draws while it replays, as of its replay time; null when live. */
   getReplayAutomaticLevels(): AutomaticLevelsAsOf | null {
-    return this.replayAutomaticLevels(this.svc.getAnalysisContext(this.state.market, true));
-  }
-
-  private replayAutomaticLevels(context: AnalysisContext): AutomaticLevelsAsOf | null {
-    const replayTime = this.replayCoordinator.isActive() ? this.replayCoordinator.getSnapshot()?.virtualTime : undefined;
-    return replayTime === undefined ? null : this.automaticLevelsAsOf(this.state.market, replayTime, context);
+    return this.levelContextController.getReplayAutomaticLevels();
   }
 
   private analysisContextForChart(): AnalysisContext {
-    const serviceRaw = this.svc.getAnalysisContext(this.state.market, true);
-    const revision = this.svc.getAnalysisRevisionSnapshot(this.state.market).revision;
-    const pwSettings = serviceRaw.previousWeekStrategySettings;
-    const mrSettings = serviceRaw.mondayRangeSettings;
-    const replayTime = this.replayCoordinator.isActive() ? this.replayCoordinator.getSnapshot()?.virtualTime : undefined;
-
-    if (
-      this.cachedAnalysisContext !== null
-      && this.cachedAnalysisServiceRaw === serviceRaw
-      && this.cachedAnalysisRevision === revision
-      && this.cachedAnalysisPwSettings === pwSettings
-      && this.cachedAnalysisMrSettings === mrSettings
-      && this.cachedAnalysisStateRef === this.state
-      && this.cachedAnalysisNpocLevels === this.npocLevels
-      && this.cachedAnalysisNpocMarket === this.npocMarket
-      && this.cachedAnalysisReplayTime === replayTime
-    ) {
-      return this.cachedAnalysisContext;
-    }
-
-    // The market context is computed up to now and shared with live charts, so a replaying
-    // chart takes its own levels as of the replay time. nPOC has no historical state: hidden.
-    const replayLevels = this.replayAutomaticLevels(serviceRaw);
-    const raw: AnalysisContext = replayLevels === null
-      ? { ...serviceRaw, nakedPocs: this.npocMarket === this.state.market ? this.npocLevels : [] }
-      : { ...serviceRaw, ...replayLevels, nakedPocs: [] };
-
-    let result: AnalysisContext;
-    if (!hasChartAutomaticVisibility(this.state)) {
-      result = raw;
-    } else {
-      const previousWeekStrategySettings = {
-        ...raw.previousWeekStrategySettings,
-        visible: {
-          ...raw.previousWeekStrategySettings.visible,
-          ...(this.state.previousWeekStrategyVisibility ?? {}),
-        },
-      };
-      const mondayRangeSettings = {
-        ...raw.mondayRangeSettings,
-        visible: {
-          ...raw.mondayRangeSettings.visible,
-          ...(this.state.mondayRangeVisibility ?? {}),
-        },
-      };
-      const hiddenNakedPocIds = new Set(this.state.hiddenNakedPocIds ?? []);
-      const hiddenReferenceLevelIds = new Set(this.state.hiddenReferenceLevelIds ?? []);
-
-      result = {
-        ...raw,
-        previousWeekStrategySettings,
-        previousWeekStrategyLevels: raw.previousWeekStrategyLevels.filter(
-          (level) => previousWeekStrategySettings.visible[level.id] !== false,
-        ),
-        mondayRangeSettings,
-        mondayRangeLevels: raw.mondayRangeLevels.filter(
-          (level) => mondayRangeSettings.visible[level.id] !== false,
-        ),
-        nakedPocs: raw.nakedPocs.filter(
-          (level) => (this.state.nakedPocVisibility?.[level.period] ?? false) !== false
-            && !hiddenNakedPocIds.has(level.id),
-        ),
-        referenceLevels: raw.referenceLevels.filter(
-          (level) => (this.state.referenceVisibility?.[level.family]?.[level.period] ?? true) !== false
-            && !hiddenReferenceLevelIds.has(level.id),
-        ),
-      };
-    }
-
-    this.cachedAnalysisServiceRaw = serviceRaw;
-    this.cachedAnalysisRevision = revision;
-    this.cachedAnalysisPwSettings = pwSettings;
-    this.cachedAnalysisMrSettings = mrSettings;
-    this.cachedAnalysisStateRef = this.state;
-    this.cachedAnalysisNpocLevels = this.npocLevels;
-    this.cachedAnalysisNpocMarket = this.npocMarket;
-    this.cachedAnalysisReplayTime = replayTime;
-    this.cachedAnalysisContext = result;
-    return result;
+    return this.levelContextController.analysisContextForChart();
   }
 
   private chartViewConfig(): ChartViewConfig {
@@ -1252,6 +1078,7 @@ class ChartRuntimeImpl implements ChartRuntime, ChartInputHost {
     const series = this.pipeline.series;
     return series.length === 0 ? null : series.timeOfIndex(index);
   }
+
   private _screenToDrawingPoint(cx: number, cy: number, temporaryMagnet = false): { time: number; price: number } {
     const idx = this.view.indexOfX(cx);
     const magnetEnabled = isDrawingMagnetEnabled(settings.magnet, temporaryMagnet);
@@ -1278,6 +1105,7 @@ class ChartRuntimeImpl implements ChartRuntime, ChartInputHost {
 
     return this._resolveMagnetSnap(cx, cy, rawPrice, defaultTime, idx, temporaryMagnet);
   }
+
   private _magnetSnapPrice(idx: number, cy: number, rawPrice: number, forceNearest: boolean): number {
     const bar = this.pipeline.series.at(Math.round(idx));
     if (!bar) return rawPrice;
@@ -1414,63 +1242,16 @@ class ChartRuntimeImpl implements ChartRuntime, ChartInputHost {
       return { time: best.time, price: best.price };
     }
 
-    this.clearMagnetSnap();
+    this.clearMagnetSnap?.();
     return { time: defaultTime, price: rawPrice };
   }
 
-  private drawMagnetSnapRing(
+  drawMagnetSnapRing(
     ctx: CanvasRenderingContext2D,
     view: View,
     snap: { x: number; y: number; label: string },
   ): void {
-    const { x, y, label } = snap;
-    if (x < view.area.left - 20 || x > view.area.left + view.area.width + 20) return;
-    if (y < view.area.top - 20 || y > view.area.top + view.area.height + 20) return;
-
-    ctx.save();
-    // Halo
-    ctx.beginPath();
-    ctx.arc(x, y, 7.5, 0, Math.PI * 2);
-    ctx.strokeStyle = "rgba(41, 98, 255, 0.4)";
-    ctx.lineWidth = 3;
-    ctx.stroke();
-
-    // Core ring
-    ctx.beginPath();
-    ctx.arc(x, y, 4.5, 0, Math.PI * 2);
-    ctx.strokeStyle = "#2962ff";
-    ctx.lineWidth = 1.5;
-    ctx.stroke();
-
-    // Center dot
-    ctx.beginPath();
-    ctx.arc(x, y, 1.5, 0, Math.PI * 2);
-    ctx.fillStyle = "#ffffff";
-    ctx.fill();
-
-    // Badge
-    if (label) {
-      ctx.font = "bold 9px -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif";
-      const padX = 4;
-      const metrics = ctx.measureText(label);
-      const badgeW = metrics.width + padX * 2;
-      const badgeH = 13;
-      const bx = x + 10;
-      const by = y - 6;
-
-      ctx.fillStyle = "rgba(24, 28, 38, 0.9)";
-      ctx.beginPath();
-      ctx.roundRect(bx, by, badgeW, badgeH, 2.5);
-      ctx.fill();
-      ctx.strokeStyle = "#2962ff";
-      ctx.lineWidth = 1;
-      ctx.stroke();
-
-      ctx.fillStyle = "#e0e6ed";
-      ctx.textBaseline = "middle";
-      ctx.fillText(label, bx + padX, by + badgeH / 2);
-    }
-    ctx.restore();
+    this.magnetController.drawMagnetSnapRing(ctx, view, snap);
   }
 
   private bindInputController(): void {
@@ -1497,139 +1278,26 @@ class ChartRuntimeImpl implements ChartRuntime, ChartInputHost {
     if (this.view.setDisplayOptions(next.timeScale, next.layout)) this._layoutFromCurrentSize();
   }
 
-  /** Tracks opt-in transitions so a re-enable retries the GPU prototype after a one-shot legacy fallback. */
-  private trackHeatmapPrototypeOptIn(): void {
-    if (this.heatmapTexturePrototypeLastEnabled !== this.heatmapTexturePrototypeEnabled) {
-      this.heatmapTexturePrototypeLastEnabled = this.heatmapTexturePrototypeEnabled;
-      this.heatmapGpuFailureLatched = false;
-    }
-  }
-
-  /** CPU prepare for the GPU density prototype, inside the GPU render callback. */
   private prepareHeatmapGpuCells(v: View, s: FootprintSeries): HeatmapGpuCellFrame | null {
-    if (!this.heatmapTexturePrototypeEnabled || this.heatmapGpuFailureLatched) return null;
-    if (!this.orderbookHeatmap) return null;
-    // Respect the actual annotation layer membership and main-pane visibility
-    // exactly as Overlay.renderAnnotations would: no layer, no density.
-    if (!(this.renderCoordinator?.getAnnotationLayerOrder() ?? []).includes("orderbook-heatmap")) return null;
-    if (v.area.width <= 1 || v.area.height <= 1 || s.length === 0) return null;
-    // Production prepare always reserves through the real renderer ledger:
-    // a missing renderer or a denied reservation yields no prepared frame,
-    // so the legacy annotation path stays authoritative (no unbudgeted
-    // production fallback).
-    if (!this.heatmapGpuRenderer) this.heatmapGpuRenderer = new HeatmapGpuRenderer();
-    const gpuRenderer = this.heatmapGpuRenderer;
-    return this.orderbookHeatmap.prepareGpuCells(
-      v,
-      s,
-      this.renderer.visibleRange(v, s.length),
-      (logicalBytes: number) => gpuRenderer.reservePreparedPayload(logicalBytes),
-    );
+    return this.heatmapGpuCoordinator.prepareHeatmapGpuCells(v, s);
   }
 
-  /** Paints the prepared density frame after the candle flush; latches a one-frame legacy fallback on failure. */
   private renderHeatmapGpuCells(frame: HeatmapGpuCellFrame | null, v: View, s: FootprintSeries): void {
-    if (!frame) return;
-    const gl = this.heatmapGpuRendererGl;
-    if (!gl) {
-      frame.preparedLease?.release();
-      this.disposeHeatmapGpuRenderer();
-      this.heatmapGpuFailureLatched = true;
-      return;
-    }
-    if (!this.heatmapGpuRenderer) this.heatmapGpuRenderer = new HeatmapGpuRenderer();
-    const range = this.renderer.visibleRange(v, s.length);
-    let ok: boolean;
-    try {
-      ok = this.heatmapGpuRenderer.renderFrame(gl, frame, {
-        left: v.area.left,
-        top: v.area.top,
-        width: v.area.width,
-        height: v.area.height,
-        ...(v.pixelRatio !== null && v.pixelRatio > 0 ? { pixelRatio: v.pixelRatio } : {}),
-      });
-    } catch (error) {
-      if (error instanceof Error && error.message === "Heatmap GPU prototype budget exceeded") {
-        // Transient real-budget denial: nothing was allocated and the GL
-        // resources stay intact, so drop the unadopted lease, keep the failure
-        // latch off and let the very next frame retry prepare/render once the
-        // external pressure is freed (no toggle or context restore needed).
-        frame.preparedLease?.release();
-        return;
-      }
-      throw error;
-    }
-    if (!ok) {
-      // Hidden pane, no GL resources or budget: fall back to the legacy
-      // annotation path for this frame and until the opt-in is toggled again.
-      frame.preparedLease?.release();
-      this.disposeHeatmapGpuRenderer();
-      this.heatmapGpuRendererGl = gl; // the context itself stays valid
-      this.heatmapGpuFailureLatched = true;
-      return;
-    }
-    this.heatmapGpuFrame = {
-      dataKey: frame.dataKey,
-      threshold: frame.threshold,
-      ceiling: frame.ceiling,
-      colWidth: v.colWidth,
-      offsetX: v.offsetX,
-      areaLeft: v.area.left,
-      areaTop: v.area.top,
-      areaWidth: v.area.width,
-      areaHeight: v.area.height,
-      priceTop: v.priceTop,
-      pricePerPx: v.pricePerPx,
-      priceScaleMode: v.priceScaleMode,
-      seriesLength: s.length,
-      rangeFrom: range[0],
-      rangeTo: range[1],
-    };
-    // The completed claim owns the prepared lists; hold their lease until
-    // the claim is replaced, fails or is disposed (release is idempotent).
-    this.heatmapGpuLease = frame.preparedLease ?? null;
+    this.heatmapGpuCoordinator.renderHeatmapGpuCells(frame, v, s);
   }
 
-  /** True when the completed GPU frame owns the density for exactly these inputs. */
   private heatmapGpuSuppressedAnnotation(v: View, s: FootprintSeries, range: [number, number]): boolean {
-    const claim = this.heatmapGpuFrame;
-    if (!claim) return false;
-    return claim.dataKey === this.orderbookHeatmap?.currentDataKey()
-      && claim.colWidth === v.colWidth
-      && claim.offsetX === v.offsetX
-      && claim.areaLeft === v.area.left
-      && claim.areaTop === v.area.top
-      && claim.areaWidth === v.area.width
-      && claim.areaHeight === v.area.height
-      && claim.priceTop === v.priceTop
-      && claim.pricePerPx === v.pricePerPx
-      && claim.priceScaleMode === v.priceScaleMode
-      && claim.seriesLength === s.length
-      && claim.rangeFrom === range[0]
-      && claim.rangeTo === range[1];
+    return this.heatmapGpuCoordinator.heatmapGpuSuppressedAnnotation(v, s, range);
   }
 
   private disposeHeatmapGpuRenderer(): void {
-    // Drop the owned prepared references first, then release the lease.
-    this.heatmapGpuFrame = null;
-    this.releaseHeatmapGpuLease();
-    this.heatmapGpuRenderer?.dispose();
-    this.heatmapGpuRenderer = null;
-    this.heatmapGpuRendererGl = null;
-  }
-
-  /** Drops the lease reference, then releases it exactly once; safe to call repeatedly. */
-  private releaseHeatmapGpuLease(): void {
-    const lease = this.heatmapGpuLease;
-    this.heatmapGpuLease = null;
-    lease?.release();
+    this.heatmapGpuCoordinator.dispose();
   }
 
   dispose(): void {
-    this.npocController?.abort();
-    this.npocController = null;
-    this.npocGeneration++;
-    this.npocListeners.clear();
+    this.levelContextController.dispose();
+    this.disposeHeatmapGpuRenderer();
+    this.magnetController.clearMagnetSnap();
     if (this.disposed) return;
     this.disposed = true;
     this.disposal.abort();
@@ -1648,7 +1316,6 @@ class ChartRuntimeImpl implements ChartRuntime, ChartInputHost {
     this.session.destroy();
     this.renderCoordinator.dispose();
     this.renderer.dispose();
-    this.disposeHeatmapGpuRenderer();
     this.pipeline.dispose();
     this.indicatorController.dispose();
     for (const element of this.ownedElements) element.remove();
@@ -1925,10 +1592,10 @@ class ChartRuntimeImpl implements ChartRuntime, ChartInputHost {
     this.setHookAttr("data-market", this.state.market);
     this.setHookAttr("data-analysis-market", analysis.market);
     this.setHookAttr("data-analysis-revision", String(analysisRevision));
-    this.setHookAttr("data-npoc-count", String(this.npocLevels.length));
+    this.setHookAttr("data-npoc-count", String(this.levelContextController.getNpocLevelsRaw().length));
     this.setHookAttr("data-npoc-visible-count", String(analysis.nakedPocs.length));
-    this.setHookAttr("data-npoc-pending", String(this.npocPending?.length ?? 0));
-    this.setHookAttr("data-npoc-history-ready", String(this.npocHistoryReady));
+    this.setHookAttr("data-npoc-pending", String(this.levelContextController.getPendingNpocCount()));
+    this.setHookAttr("data-npoc-history-ready", String(this.levelContextController.isNpocHistoryReady()));
     this.setHookAttr("data-automatic-level-count", String(automaticPriceCount));
     this.setHookAttr("data-automatic-price-min", automaticPriceCount ? String(automaticPriceMin) : "");
     this.setHookAttr("data-automatic-price-max", automaticPriceCount ? String(automaticPriceMax) : "");
@@ -2076,8 +1743,7 @@ class ChartRuntimeImpl implements ChartRuntime, ChartInputHost {
   }
 
   setResidentHeatmapEnabled(enabled: boolean): void {
-    this.heatmapTexturePrototypeEnabled = enabled;
-    this.session?.invalidate();
+    this.heatmapGpuCoordinator.setResidentHeatmapEnabled(enabled);
   }
 }
 

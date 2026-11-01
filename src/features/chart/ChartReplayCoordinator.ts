@@ -5,7 +5,9 @@ import { classifyReplayStepUpdate, makeDataUpdateEvent, snapshotFromSeries } fro
 import type { ChartDataPipeline } from "./ChartDataPipeline.js";
 import type { ChartSession } from "./ChartSession.js";
 import type { TimeScaleViewportController } from "../controllers/timeScaleViewportController.js";
-import { ReplayController, type ReplaySnapshot } from "../replay/replayController.js";
+import { ReplayController, cloneFootprintBarForReplay, type ReplaySnapshot } from "../replay/replayController.js";
+
+export { cloneFootprintBarForReplay };
 
 export interface ChartReplayCoordinatorHost {
   readonly pipeline: ChartDataPipeline;
@@ -49,7 +51,7 @@ export class ChartReplayCoordinator {
     const bars: FootprintBar[] = [];
     for (let index = 0; index < series.length; index++) {
       const bar = series.at(index);
-      if (bar) bars.push(structuredClone(bar));
+      if (bar) bars.push(cloneFootprintBarForReplay(bar));
     }
     if (bars.length === 0) return;
 
@@ -156,7 +158,7 @@ export class ChartReplayCoordinator {
     const series = this.host.pipeline.series;
     for (let index = 0; index < series.length; index++) {
       const bar = series.at(index);
-      if (bar) bars.push(structuredClone(bar));
+      if (bar) bars.push(cloneFootprintBarForReplay(bar));
     }
     const result = this.replay.reconfigure(bars, intervalMs);
     this.replaceSeries(result.visibleBars);
@@ -178,7 +180,7 @@ export class ChartReplayCoordinator {
     if (bars.length === 0) return;
     const series = this.host.pipeline.series;
     const previous = snapshotFromSeries(series);
-    for (const bar of bars) series.upsertBar(structuredClone(bar));
+    for (const bar of bars) series.upsertBar(bar);
     const next = snapshotFromSeries(series);
     const kind = classifyReplayStepUpdate(previous, next);
     this.host.timeViewport.applyDataUpdate(makeDataUpdateEvent(kind, "replay", previous, next));
@@ -189,7 +191,7 @@ export class ChartReplayCoordinator {
   private replaceSeries(visibleBars: FootprintBar[]): void {
     const series = this.host.pipeline.series;
     series.clear();
-    for (const bar of visibleBars) series.upsertBar(structuredClone(bar));
+    for (const bar of visibleBars) series.upsertBar(bar);
     this.host.timeViewport.placeReplayPrefixEnd(series.length);
     this.host.svc.updateAnalysisFromSeries(this.host.getMarket(), series, series.config.priceStep);
     this.host.autoFit();

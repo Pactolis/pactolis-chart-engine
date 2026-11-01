@@ -84,3 +84,15 @@ test('CI partitions the selected census tests and fails closed on incomplete sha
   assert.doesNotMatch(shardBlock, /CHART_ENDURANCE_(?:MINUTES|PROFILE)\s*:/,
     'regular census shards must not activate weekly endurance');
 });
+
+test('CI and release workflows use pinned ubuntu-24.04 runner without ubuntu-latest', () => {
+  const ciYaml = readFileSync(new URL('../.github/workflows/ci.yml', import.meta.url), 'utf8');
+  const releaseYaml = readFileSync(new URL('../.github/workflows/release.yml', import.meta.url), 'utf8');
+  assert.doesNotMatch(ciYaml, /runs-on:\s*ubuntu-latest/, 'ci.yml must not use unpinned ubuntu-latest');
+  assert.doesNotMatch(releaseYaml, /runs-on:\s*ubuntu-latest/, 'release.yml must not use unpinned ubuntu-latest');
+  assert.match(jobBlock('test'), /runs-on:\s*ubuntu-24\.04/);
+  assert.match(jobBlock('browser'), /runs-on:\s*ubuntu-24\.04/);
+  assert.match(jobBlock('census-shards'), /runs-on:\s*ubuntu-24\.04/);
+  assert.match(jobBlock('census'), /runs-on:\s*ubuntu-24\.04/);
+  assert.match(releaseYaml, /runs-on:\s*ubuntu-24\.04/);
+});
