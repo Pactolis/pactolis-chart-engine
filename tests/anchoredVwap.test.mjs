@@ -138,7 +138,7 @@ test("Issue #56: nonTailRevision invalidates AVWAP prefix cache on past bar muta
   series.upsertBar({
     startTime: 120000,
     open: 300,
-    high: 350,
+    high: 370,
     low: 250,
     close: 360,
     volume: 20,

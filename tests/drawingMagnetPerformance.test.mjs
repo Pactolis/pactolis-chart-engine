@@ -10,6 +10,7 @@ import {
   isDrawingMagnetEnabled,
   snapPriceToOhlc,
 } from "../dist/features/chart/ChartInputController.js";
+import { ChartChange } from "../dist/core/render/scene/chartScene.js";
 
 // Extract real private Runtime methods to test magnet snap behavior directly
 const source = await readFile(new URL("../src/features/chart/ChartRuntime.ts", import.meta.url), "utf8");
@@ -27,8 +28,8 @@ for (const name of ["_indexToTime", "_screenToDrawingPoint", "_magnetSnapPrice",
   const compiled = ts.transpileModule(program, {
     compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.None },
   }).outputText;
-  methods[name] = new Function("settings", "isDrawingMagnetEnabled", "snapPriceToOhlc",
-    compiled + "\nreturn extractedMethod;")(settings, isDrawingMagnetEnabled, snapPriceToOhlc);
+  methods[name] = new Function("settings", "isDrawingMagnetEnabled", "snapPriceToOhlc", "ChartChange",
+    compiled + "\nreturn extractedMethod;")(settings, isDrawingMagnetEnabled, snapPriceToOhlc, ChartChange);
   assert.equal(typeof methods[name], "function", "compiled real Runtime method: " + name);
 }
 

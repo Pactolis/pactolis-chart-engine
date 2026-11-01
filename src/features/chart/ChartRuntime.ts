@@ -1208,7 +1208,7 @@ class ChartRuntimeImpl implements ChartRuntime, ChartInputHost {
     if (this.activeMagnetSnap !== null) {
       this.activeMagnetSnap = null;
       this.setHookAttr?.("data-magnet-snap", "");
-      this.session?.invalidate(ChartChange.Interaction);
+      this.session?.invalidate(typeof ChartChange !== "undefined" ? ChartChange.Interaction : (1 << 4));
     }
   }
   setPriceAutoScaleFromControl(autoScale: boolean): void { this._setPriceAutoScaleFromControl(autoScale); }
@@ -1410,7 +1410,7 @@ class ChartRuntimeImpl implements ChartRuntime, ChartInputHost {
       const best = candidates[0];
       this.activeMagnetSnap = { x: best.x, y: best.y, price: best.price, time: best.time, label: best.label };
       this.setHookAttr?.("data-magnet-snap", best.label);
-      this.session?.invalidate(ChartChange.Interaction);
+      this.session?.invalidate(typeof ChartChange !== "undefined" ? ChartChange.Interaction : (1 << 4));
       return { time: best.time, price: best.price };
     }
 
