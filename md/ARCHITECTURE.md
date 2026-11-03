@@ -21,11 +21,11 @@ mutasyon içeren state makineleri capability controller'larda yaşar (`ChartSess
 `ChartHistoryController`, `ChartInputController`, `ChartRenderCoordinator`, `ChartSyncController`).
 Fonksiyonel iş birimleri `src/core/` altında tutulur.
 
-## Render: WebGL2 + Canvas2D, üç surface
+## Render: GpuSurface (WebGPU / WebGL2 / Canvas2D) + Canvas2D, üç surface
 
 `src/core/render/scene/chartScene.ts` üç fiziksel surface tanımlar:
 
-- `gpu-scene` — WebGL2 primary scene (`nativeCapture.ts` `getChartWebGl2Context` ile; WebGL1 fallback yoktur),
+- `gpu-scene` — `GpuSurface` arayüzü arkasında soyutlanmış birincil sahne (`WebGpuSurface`, `WebGl2Surface`, `Canvas2dSurface`; varsayılan ayar `DEFAULT_GPU_SETTINGS.backend = "webgl2"` olup `?gpu=auto|webgpu|webgl2|canvas2d` veya `configureGpuSettingsSource` ile yapılandırılır; `nativeCapture.ts` ise `requestCapture()` veya `getChartWebGl2Context` ile çalışır),
 - `annotation` — Canvas2D annotation/drawing,
 - `interaction` — Canvas2D interaction/HUD.
 
@@ -37,8 +37,10 @@ Render stage → surface eşlemesi `surfaceForStage`, veri güncellemesi → `Ch
 [tests/chartSessionSurfaces.test.mjs](../tests/chartSessionSurfaces.test.mjs); browser tarafı için
 [tests/browser/chart-invalidation-scope.spec.ts](../tests/browser/chart-invalidation-scope.spec.ts)).
 
-WebGL context loss durumunda CPU state korunur, GPU state invalidate edilir ve restore sonrası
-yeniden kurulur ([tests/chartNativeCapture.test.mjs](../tests/chartNativeCapture.test.mjs),
+WebGPU arka ucunda `device.lost` veya `uncapturederror` gerçekleştiğinde sistem otomatik olarak `webgl2`
+arka ucuna düşer. WebGL context loss durumunda CPU state korunur, GPU state invalidate edilir ve restore
+sonrası yeniden kurulur; bağlam geri yükleme zaman aşımına uğrarsa (5 saniye) `replaceSurface` ile
+`Canvas2dSurface` yüzeyine düşüş sağlanır ([tests/chartNativeCapture.test.mjs](../tests/chartNativeCapture.test.mjs),
 [tests/browser/chart-native-capture.spec.ts](../tests/browser/chart-native-capture.spec.ts)).
 
 ## Mount/dispose ownership
@@ -63,7 +65,16 @@ Motorun fiziksel GPU sahnesi tek bir arayüzün (`GpuSurface`) arkasında soyutl
 - `canvas2d` — `Canvas2dSurface`: Başsız veya WebGL/WebGPU desteklemeyen ortamlarda tam işlevsel CPU yedek arka ucu.
 
 ### Seçim ve Otomatik Düşüş (Fallback) Zinciri:
-Arka uç tercihi yapılandırma veya `?gpu=webgpu|webgl2|canvas2d` URL parametresi ile belirlenir:
+Arka uç tercihi yapılandırma veya `?gpu=auto|webgpu|webgl2|canvas2d` URL parametresi ile belirlenir:
 1. `webgpu` seçildiğinde sistem `requestWebGpuDevice()` ile cihaz edinmeyi dener; cihaz edinilemezse veya cihaz kaybı (`device.lost`, `uncapturederror`) gerçekleşirse otomatik olarak `webgl2` arka ucuna düşer.
 2. `webgl2` kullanılamazsa veya bağlam geri yükleme zaman aşımına uğrarsa (5 saniye) `Canvas2dSurface` yüzeyine düşüş sağlanır (`replaceSurface`).
 3. Tüm geçişler, tanılamalar (`GpuDiagnostics`: sayaçlar, p50/p95 kare süreleri, düşüş nedenleri) üzerinden izlenir ve `copyGpuDiagnosticsJson()` ile dışa aktarılabilir.
+
+### WebGPU İmplementasyonunun Mevcut Teknik Sınırları:
+- `WebGpuQuadPipeline` ([src/core/gpu/webgpu/webgpuQuadPipeline.ts](../src/core/gpu/webgpu/webgpuQuadPipeline.ts)) `GPUBufferUsage.VERTEX | COPY_DST` instanced vertex buffer kullanır; `RenderPipeline` ve `BindGroup` nesneleri pipeline oluşturulurken bir kez üretilir ve cache'lenir.
+- Her flush çağrısında `uploadInstances(...)`, CPU'da biriken `Float32Array` quad verisini 0. offsetten itibaren tam `byteLength` olarak `device.queue.writeBuffer` ile GPU'ya gönderir.
+- Mevcut mimaride storage buffer (`GPUBufferUsage.STORAGE`), compute shader veya partial buffer upload bulunmaz; `WebGpuHeatmapLayer` fragment shader texture sampling (`textureSample`) kullanır.
+
+### Performans Telemetrisi ve Sınırları:
+- `src/core/performanceTelemetry.ts` ve `src/features/chart/ChartSession.ts` üzerinden 3 yüzey (`gpu-scene`, `annotation`, `interaction`) ve frame render süreleri (`chart.surface.gpu.draw.ms`, `chart.surface.annotation.draw.ms`, `chart.surface.interaction.draw.ms`, `chart.frame.render.ms`) yalnızca CPU tarafında `performance.now()` ile ölçülür.
+- Donanım seviyesinde GPU `timestamp-query` (WebGPU) veya `EXT_disjoint_timer_query_webgl2` (WebGL2) ve alt-stage (`gpu-background`, `gpu-series`, `gpu-signal`) zaman kırılımı henüz bulunmamaktadır.

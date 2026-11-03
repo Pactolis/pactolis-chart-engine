@@ -14,6 +14,7 @@ referansıdır, yeni API garantisi veya semver davranışı icat etmez.
 | Pointer/keyboard davranışını doğrulamak | [INTERACTIONS.md](INTERACTIONS.md) |
 | History/live/repair veri invariants | [CONTRACTS.md](CONTRACTS.md) |
 | Test kapılarını yorumlamak | [TESTING.md](TESTING.md) |
+| GPU performans baz çizgisi ve donanım modunu incelemek | [GPU_PERFORMANCE_BASELINE.md](GPU_PERFORMANCE_BASELINE.md) |
 | Sürümleme/paketleme/consumer etkisi | [RELEASE_DISTRIBUTION.md](RELEASE_DISTRIBUTION.md) |
 
 ## Ortak kurallar
