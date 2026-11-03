@@ -34,7 +34,7 @@ Testler: `tests/chartAxisInteraction.test.mjs`, `tests/chartInteractionPolicy.te
 | Price axis | Sol-drag | Y scale genişletme/daraltma (`dragScaleFactor`) |
 | Price axis | Wheel / Alt + wheel | Y/price zoom |
 | Price axis | Double click | Y reset + auto-fit |
-| Price axis | Sol tık — fiyat eksenindeki `O` / `L` canvas düğmeleri | Fiyat ekseni üzerinde çizilen `O` (auto-scale) ve `L` (linear/log) düğmelerine klavye/Control modifier olmadan, drag olmayan sol tıklama: auto-scale toggle / linear-log toggle (host action'ları; [axisControlsRenderer.ts](../src/core/render/axisControlsRenderer.ts) :40-46 düğme rect'leri ve `O`/`L` etiketleri, [overlay.ts](../src/core/render/overlay.ts) :128-133 hit-test, [ChartInputController.ts](../src/features/chart/ChartInputController.ts) :715-739 `onPointerUp` handler'ları) |
+| Price axis | Sol tık — fiyat eksenindeki `O` / `L` canvas düğmeleri | Fiyat ekseni üzerinde çizilen `O` (auto-scale) ve `L` (linear/log) düğmelerine klavye/Control modifier olmadan, drag olmayan sol tıklama: auto-scale toggle / linear-log toggle (host action'ları; [axisControlsRenderer.ts](../src/core/render/axisControlsRenderer.ts) :40-46 düğme rect'leri ve `O`/`L` etiketleri, [overlay.ts](../src/core/render/overlay.ts) :158-163 hit-test, [ChartInputController.ts](../src/features/chart/ChartInputController.ts) :744-751 `onPointerUp` handler'ları) |
 | Time axis | Sol-drag | X scale (sıkıştırma/genişletme) |
 | Time axis | Wheel / horizontal wheel | X zoom / X pan |
 | Time axis | Double click | X reset + latest placement |
@@ -103,7 +103,7 @@ Henüz kapsanmayanlar: gösterge (indicator) panellerindeki `O`/`L` düğmeleri 
 | `X` | Time scale | Zaman ölçeğini resetle |
 
 Window-level shortcut'ların sahipliği `ownsWindowShortcut` sırasıyla belirlenir
-([ChartInputController.ts](../src/features/chart/ChartInputController.ts) :893-899): (1) event target,
+([ChartInputController.ts](../src/features/chart/ChartInputController.ts) :904-916): (1) event target,
 bu chart'ın `canvas.parentElement` içinde bir Node ise o chart `true` döndürür; (2) target başka bir
 `.chart-interaction-canvas` içindeyse `false`; (3) diğer durumlarda owner, host'un
 `getKeyboardTargetChartId?.()` sonucudur — bu callback sağlanmamış olsa da callback `undefined`

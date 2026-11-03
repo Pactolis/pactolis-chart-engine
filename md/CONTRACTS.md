@@ -17,7 +17,7 @@ Kaynak: [src/features/chart/historyContracts.ts](../src/features/chart/historyCo
 - **HistoryQuery / HistoryBatch:** `HistoryQuery` market listesi, `from`/`to` (ms epoch bucket
    aralığı), `interval` (**milisaniye**) ve `priceStep` taşır. Birimler source'ta ms'dir:
    pipeline her sorguda `interval: this._intervalMs` gönderir
-   ([ChartDataPipeline.ts](../src/features/chart/ChartDataPipeline.ts) :591/:786/:830/:903),
+   ([ChartDataPipeline.ts](../src/features/chart/ChartDataPipeline.ts) :640 / :838 / :882 / :955 / :1067),
    bucket hesapları `bucketStart`/`bucketEnd` ms parametrelidir
    ([time.ts](../src/core/time.ts)); `AggTrade.time` ve `FootprintBar.startTime` de ms epoch'tur.
    `rebuild`, `includeFootprint`, `preferCache`,

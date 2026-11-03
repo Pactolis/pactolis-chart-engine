@@ -28,7 +28,7 @@ local md dosyalarına link vermez (repo GitHub URL'si `repository` alanından do
   (bkz. [CONTRACTS.md](CONTRACTS.md)). `files`/`exports` dışı modüller internal sayılır ve herhangi bir
   release'te değişebilir.
 - Mevcut tüketici örneği: `Pactolis-Frontend/package.json` bağımlılığı GitHub release tarball URL'siyle
-  (`.../releases/download/v0.1.0/pactolis-chart-engine-0.1.0.tgz`) pinlenmiştir. Bu, sibling checkout
+  (`.../releases/download/v0.2.7/pactolis-chart-engine-0.2.7.tgz`) pinlenmiştir. Bu, sibling checkout
   gerektirmez; tarball `dist/` + `src/` taşıdığı için standalone tüketim mümkündür.
 - Bu belge semver politikası veya yayın garantisi bildirmez; sürüm semantiği için source/manifest dışı
   karar gerekir.

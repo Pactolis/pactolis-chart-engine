@@ -14,6 +14,7 @@ mount'tan **önce** configure edilmelidir.
 | `configureOrderbookHeatmapSettingsSource` | [src/features/orderbook/heatmapSettingsSource.ts](../src/features/orderbook/heatmapSettingsSource.ts) | Orderbook heatmap kullanılıyorsa zorunlu |
 | `configureFootprintBootstrapMarkets` | [src/core/syncAllowlist.ts](../src/core/syncAllowlist.ts) | İsteğe bağlı; footprint varsayımı |
 | `configurePerformanceTelemetry` | [src/core/performanceTelemetry.ts](../src/core/performanceTelemetry.ts) | İsteğe bağlı opt-in telemetri: `{ enabled: boolean }` ile açılır, ölçümler in-memory tutulur ve `snapshotPerformanceTelemetry()` ile snapshot olarak okunur; callback/sink API'si yoktur |
+| `configureGpuSettingsSource` | [src/core/gpu/gpuSettings.ts](../src/core/gpu/gpuSettings.ts) | İsteğe bağlı; GPU arka uç tercihi (`auto`/`webgpu`/`webgl2`/`canvas2d`), `residentHeatmap` ve `asyncCapture` yönetimi |
 
 `ChartDataSource` implementasyonunun tüm üyeleri [src/features/chart/chartDataSource.ts](../src/features/chart/chartDataSource.ts)
 interface'indedir: `streamHistory`/`collectHistory`/`fetchHistory`, open-bar seed için `fetchLiveOhlc`/
@@ -36,7 +37,7 @@ varsayılanına döner, diğer alanlar korunur.
 | `priceAxisWidth`, `timeAxisHeight` | 62 / 22 (`compact`: 62 / 32) | Eksen boyutları (CSS px); yoğunluğun değerini tek tek ezer | aynı |
 | `defaultFitColumns` | 250 | İlk ve reset yatay sığdırmanın hedeflediği sütun sayısı (dar plotta daha az sütun, daha okunur mum) | Yalnız sonraki sığdırma/reset'i etkiler; açık grafiğin zoom'u kendiliğinden değişmez |
 | `maxDevicePixelRatio` | yok (pencerenin `devicePixelRatio`'su) | Üç canvas'ın, footprint ve heatmap çizicilerinin kullandığı en yüksek piksel oranı (≥ 1); düşük sınır keskinlik yerine GPU belleği ve dolgu hızı kazandırır | Sonraki frame'de canvas'lar yeniden boyutlanır |
-| `antialias`, `powerPreference` | `true`, `default` | WebGL2 context özniteliği | Yalnız mount: context ilk `getContext` çağrısında sabitlenir, açık grafik değişmez; sonradan mount edilenler yeni değeri alır |
+| `antialias`, `powerPreference` | `true`, `default` | WebGL2 / WebGPU donanım özniteliği | Yalnız mount: context ilk `getContext` çağrısında sabitlenir, açık grafik değişmez; WebGPU cihaz seçiminde (`requestWebGpuDevice`) `powerPreference` kullanılır; sonradan mount edilenler yeni değeri alır |
 
 Bar özeti (O/H/L/C, Vol, Δ, Trades, Range, Chg) plotun genişliğine sığmıyorsa yoğunluktan bağımsız olarak
 satırlara sarılır ([hudLayout.ts](../src/core/render/hudLayout.ts); plot ≥ 400 px yüksekse en çok 3 satır,
@@ -70,7 +71,7 @@ runtime.dispose(); // tüm listener/timer/RAF ve host kaydını geri alır
 ```
 
 `mountChartRuntime` senkron olarak `ChartMountHandle` döndürür; gerçek kurulum asenkrondur
-([ChartRuntime.ts](../src/features/chart/ChartRuntime.ts) :1886-1927). Runtime hazır olana kadar `updateState` çağrısı (örnekteki `runtime` değişkeni bu handle'dır)
+([ChartRuntime.ts](../src/features/chart/ChartRuntime.ts) :2032-2074). Runtime hazır olana kadar `updateState` çağrısı (örnekteki `runtime` değişkeni bu handle'dır)
 pending olarak saklanır: tek bir pending state slotu tutulur ve en son gelen state geçerli olur;
 kurulum tamamlanınca yalnız bu en son state uygulanır. Kurulum
 tamamlanmadan `dispose()` çağrılırsa eventual olarak kurulmuş runtime dispose edilir.
