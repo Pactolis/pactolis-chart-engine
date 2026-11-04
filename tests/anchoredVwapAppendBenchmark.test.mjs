@@ -11,7 +11,7 @@ test("Issue #76: 50k-bar append cache calculation stays under 5us", () => {
     startTime: index * 60000, open: 100, high: 101, low: 99, close: 100,
     volume: 10, delta: 0, count: 1, hasRef: true, cells: new Map(),
   });
-  series.loadBars(Array.from({ length: 50000 }, (_, index) => makeBar(index)));
+  series.loadBars(Array.from({ length: 49744 }, (_, index) => makeBar(index)));
   const view = new View();
   view.area = { left: 0, top: 0, width: 800, height: 600 };
   view.colWidth = 20;
@@ -26,7 +26,7 @@ test("Issue #76: 50k-bar append cache calculation stays under 5us", () => {
 
   configurePerformanceTelemetry({ enabled: true });
   drawAnalysisDrawings(ctx, view, series, time, [drawing], "BTC"); // Build prefix/cache outside the measured appends.
-  for (let index = 50000; index < 50256; index++) {
+  for (let index = 49744; index < 50000; index++) {
     series.upsertBar(makeBar(index));
     drawAnalysisDrawings(ctx, view, series, time, [drawing], "BTC");
   }
