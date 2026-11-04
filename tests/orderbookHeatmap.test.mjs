@@ -198,7 +198,7 @@ test("raising the threshold reuses cached data without a blank frame or refetch"
       requests.push(req);
       return { schemaVersion: 1, generatedAt: now, base: "BTC", source: req.source,
         resolution: req.resolution, bucketStep: req.bucketStep, from: req.from, to: req.to,
-        bars: [{ t: 0, cells: [[100, 15_000_000, 15_000_000]] }] };
+        bars: [{ t: 0, cells: [[100, 30_000_000, 30_000_000]] }] };
     }, invalidate: () => {}, getMarket: () => "BINANCE_FUTURES:btcusdt", now: () => now,
   });
   const view = makeTestView();
@@ -208,7 +208,7 @@ test("raising the threshold reuses cached data without a blank frame or refetch"
   assert.ok(initialRequests > 0);
   assert.ok(overlay.cachedBarsCount() > 0);
 
-  for (threshold = 21_000_000; threshold <= 30_000_000; threshold += 1_000_000) {
+  for (threshold = 21_000_000; threshold <= 50_000_000; threshold += 1_000_000) {
     overlay.draw(mockCtx, view, series, [0, 0]);
     assert.ok(overlay.cachedBarsCount() > 0, `cache remains populated at ${threshold}`);
     await new Promise((resolve) => setTimeout(resolve, 5));
