@@ -620,9 +620,9 @@ export class OrderbookHeatmapOverlay {
         if (needsLowerThresholdData) {
           // Keep old compatible cells visible while the full chunk refreshes.
         } else {
-        if (!live) continue;
-        if (this.isLiveTailHealthy(now)) continue;
-        if (now - state.fetchedAt < LIVE_REFRESH_MS) continue;
+          if (!live) continue;
+          if (this.isLiveTailHealthy(now)) continue;
+          if (now - state.fetchedAt < LIVE_REFRESH_MS) continue;
         }
       }
       if (this.inFlight.size >= MAX_PARALLEL_CHUNKS) return;
