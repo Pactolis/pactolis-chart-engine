@@ -40,20 +40,30 @@ function makeFootprintRenderer(dpr = 1) {
 
 function makeSeries() {
   const series = new FootprintSeries({ intervalMs: 60_000, priceStep: 1 });
-  series.loadBars(Array.from({ length: 10 }, (_, index) => ({
-    startTime: 1_700_000_000_000 + index * 60_000,
-    open: 100 + index,
-    high: 105 + index,
-    low: 98 + index,
-    close: 103 + index,
-    volume: 50,
-    delta: 10,
-    count: 20,
-    cells: new Map([
-      [100 + index, { priceBin: 100 + index, buyVol: 30, sellVol: 20, count: 20, buyCount: 12, sellCount: 8, liquidationBuyVol: 0, liquidationSellVol: 0 }],
-    ]),
-    hasRef: true,
-  })));
+  const BASE_TIME = 1_699_999_980_000; // 1699999980000 % 60000 === 0
+  series.loadBars(Array.from({ length: 10 }, (_, index) => {
+    const startTime = BASE_TIME + index * 60_000;
+    const open = 100 + index;
+    return {
+      startTime,
+      open,
+      high: open + 5,
+      low: open - 2,
+      close: open + 3,
+      volume: 50,
+      delta: 10,
+      count: 20,
+      liquidationBuyVol: 0,
+      liquidationSellVol: 0,
+      cells: new Map([
+        [open, { priceBin: open, buyVol: 30, sellVol: 20, count: 20, buyCount: 12, sellCount: 8, liquidationBuyVol: 0, liquidationSellVol: 0 }],
+      ]),
+      hasRef: true,
+      completeness: "complete",
+      sources: ["history"],
+      updatedAt: startTime,
+    };
+  }));
   return series;
 }
 
