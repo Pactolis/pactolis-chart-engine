@@ -28,7 +28,6 @@ import {
 import {
   incrementPerformanceCounter,
   isPerformanceTelemetryEnabled,
-  measurePerformance,
   recordPerformanceDuration,
 } from "../../core/performanceTelemetry.js";
 import { LifecycleController } from "../controllers/lifecycleController.js";
@@ -435,10 +434,13 @@ export class ChartSession {
     const useAsyncCapture = this.pendingCapture !== null && Boolean(readGpuSettings(this.ownerDocument.defaultView).asyncCapture || this.gpuSurface.kind === "webgpu");
     if (dirty & ChartSurfaceDirty.GpuScene) {
       incrementPerformanceCounter("chart.surface.gpu.draw");
-      if (telemetryEnabled) {
-        measurePerformance("chart.surface.gpu.draw.ms", () => this.renderer.render(this.view, this.series));
-      } else {
+      const drawStartedAt = telemetryEnabled ? performance.now() : null;
+      try {
         this.renderer.render(this.view, this.series);
+      } finally {
+        if (drawStartedAt !== null) {
+          recordPerformanceDuration("chart.surface.gpu.draw.ms", performance.now() - drawStartedAt);
+        }
       }
       if (this.pendingCapture && !useAsyncCapture) {
         try {
@@ -470,22 +472,24 @@ export class ChartSession {
     const range = this.renderer.visibleRange(this.view, this.series.length);
     if (dirty & ChartSurfaceDirty.Annotation) {
       incrementPerformanceCounter("chart.surface.annotation.draw");
-      if (telemetryEnabled) {
-        measurePerformance("chart.surface.annotation.draw.ms", () => {
-          this.annotationRenderer.render(this.view, this.series, this.crosshair, range);
-        });
-      } else {
+      const drawStartedAt = telemetryEnabled ? performance.now() : null;
+      try {
         this.annotationRenderer.render(this.view, this.series, this.crosshair, range);
+      } finally {
+        if (drawStartedAt !== null) {
+          recordPerformanceDuration("chart.surface.annotation.draw.ms", performance.now() - drawStartedAt);
+        }
       }
     }
     if (dirty & ChartSurfaceDirty.Interaction) {
       incrementPerformanceCounter("chart.surface.interaction.draw");
-      if (telemetryEnabled) {
-        measurePerformance("chart.surface.interaction.draw.ms", () => {
-          this.interactionRenderer.render(this.view, this.series, this.crosshair, range);
-        });
-      } else {
+      const drawStartedAt = telemetryEnabled ? performance.now() : null;
+      try {
         this.interactionRenderer.render(this.view, this.series, this.crosshair, range);
+      } finally {
+        if (drawStartedAt !== null) {
+          recordPerformanceDuration("chart.surface.interaction.draw.ms", performance.now() - drawStartedAt);
+        }
       }
     }
     this.hasRenderedFrame = true;
