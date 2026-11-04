@@ -182,6 +182,79 @@ test("preserves historical chunks while live-tail invalidation updates only the 
   overlay.dispose();
 });
 
+test("raising the threshold reuses cached data without a blank frame or refetch", async () => {
+  let threshold = 20_000_000;
+  configureOrderbookHeatmapSettingsSource({
+    settingsFor: () => ({ mode: "single", unit: "usd", bucketStep: 50,
+      single: { usd: threshold, btc: 1 }, aggregated: { usd: threshold, btc: 1 } }),
+    onChange: () => () => {},
+  });
+  const series = new FootprintSeries({ intervalMs: 60_000, priceStep: 1 });
+  series.loadBars([{ startTime: 0, open: 100, high: 105, low: 95, close: 102, volume: 10, delta: 0, count: 0, cells: new Map(), hasRef: true }]);
+  const requests = [];
+  const now = 60_000;
+  const overlay = new OrderbookHeatmapOverlay({
+    fetch: async (req) => {
+      requests.push(req);
+      return { schemaVersion: 1, generatedAt: now, base: "BTC", source: req.source,
+        resolution: req.resolution, bucketStep: req.bucketStep, from: req.from, to: req.to,
+        bars: [{ t: 0, cells: [[100, 30_000_000, 30_000_000]] }] };
+    }, invalidate: () => {}, getMarket: () => "BINANCE_FUTURES:btcusdt", now: () => now,
+  });
+  const view = makeTestView();
+  overlay.draw(mockCtx, view, series, [0, 0]);
+  await new Promise((resolve) => setTimeout(resolve, 20));
+  const initialRequests = requests.length;
+  assert.ok(initialRequests > 0);
+  assert.ok(overlay.cachedBarsCount() > 0);
+
+  for (threshold = 21_000_000; threshold <= 50_000_000; threshold += 1_000_000) {
+    overlay.draw(mockCtx, view, series, [0, 0]);
+    assert.ok(overlay.cachedBarsCount() > 0, `cache remains populated at ${threshold}`);
+    await new Promise((resolve) => setTimeout(resolve, 5));
+    assert.equal(requests.length, initialRequests, `no request at ${threshold}`);
+  }
+  overlay.dispose();
+});
+
+test("lowering the threshold keeps compatible cached bars visible during revalidation", async () => {
+  let threshold = 20_000_000;
+  configureOrderbookHeatmapSettingsSource({
+    settingsFor: () => ({ mode: "single", unit: "usd", bucketStep: 50,
+      single: { usd: threshold, btc: 1 }, aggregated: { usd: threshold, btc: 1 } }),
+    onChange: () => () => {},
+  });
+  const series = new FootprintSeries({ intervalMs: 60_000, priceStep: 1 });
+  series.loadBars([{ startTime: 0, open: 100, high: 105, low: 95, close: 102, volume: 10, delta: 0, count: 0, cells: new Map(), hasRef: true }]);
+  let finishRefresh;
+  const requests = [];
+  const now = 60_000;
+  const overlay = new OrderbookHeatmapOverlay({
+    fetch: (req) => {
+      requests.push(req);
+      if (requests.length === 1) return Promise.resolve({ schemaVersion: 1, generatedAt: now, base: "BTC", source: req.source,
+        resolution: req.resolution, bucketStep: req.bucketStep, from: req.from, to: req.to,
+        bars: [{ t: 0, cells: [[100, 25_000_000, 25_000_000]] }] });
+      return new Promise((resolve) => { finishRefresh = () => resolve({ schemaVersion: 1, generatedAt: now, base: "BTC", source: req.source,
+        resolution: req.resolution, bucketStep: req.bucketStep, from: req.from, to: req.to,
+        bars: [{ t: 0, cells: [[100, 15_000_000, 15_000_000]] }] }); });
+    }, invalidate: () => {}, getMarket: () => "BINANCE_FUTURES:btcusdt", now: () => now,
+  });
+  const view = makeTestView();
+  overlay.draw(mockCtx, view, series, [0, 0]);
+  await new Promise((resolve) => setTimeout(resolve, 20));
+  assert.equal(overlay.cachedBarsCount(), 1);
+  threshold = 10_000_000;
+  overlay.draw(mockCtx, view, series, [0, 0]);
+  assert.equal(requests.length, 2);
+  assert.equal(requests[1].minUsd, threshold);
+  assert.equal(overlay.cachedBarsCount(), 1, "old compatible data remains while refresh is pending");
+  assert.equal(overlay.chunkStatus(0), "loading");
+  finishRefresh();
+  await new Promise((resolve) => setTimeout(resolve, 20));
+  assert.equal(overlay.cachedBarsCount(), 1);
+  overlay.dispose();
+});
 test("falls back to timer refresh when no live-tail source is provided or when idle", () => {
   let currentTime = 1_000_000;
   const overlay = new OrderbookHeatmapOverlay({
