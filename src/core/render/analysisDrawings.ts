@@ -100,10 +100,27 @@ function cachedAnchoredVwap(series: FootprintSeries, drawing: Drawing, anchor: n
     return measurePerformance("analysis.drawings.avwap.append.ms", () => {
       const completedTail = bars[bars.length - 2];
       const lastBar = bars[bars.length - 1];
-      if (completedTail.startTime >= anchor && completedTail.volume > 0) {
-        cached.prefixPriceVolume += ((completedTail.high + completedTail.low + completedTail.close) / 3) * completedTail.volume;
-        cached.prefixVolume += completedTail.volume;
+      const completedTailIncluded = completedTail.startTime >= anchor && completedTail.volume > 0;
+      const completedTailPriceVol = completedTailIncluded
+        ? ((completedTail.high + completedTail.low + completedTail.close) / 3) * completedTail.volume
+        : 0;
+      const completedTailVol = completedTailIncluded ? completedTail.volume : 0;
+      const points = cached.result.points;
+      const completedTailPoint = points[points.length - 1];
+      if (completedTailPoint?.time === completedTail.startTime) {
+        const completedTotalPv = cached.prefixPriceVolume + completedTailPriceVol;
+        const completedTotalVol = cached.prefixVolume + completedTailVol;
+        completedTailPoint.value = completedTotalVol > 0 ? completedTotalPv / completedTotalVol : null;
+      } else if (completedTail.startTime >= anchor) {
+        points.push({
+          time: completedTail.startTime,
+          value: completedTailIncluded
+            ? (cached.prefixPriceVolume + completedTailPriceVol) / (cached.prefixVolume + completedTailVol)
+            : null,
+        });
       }
+      cached.prefixPriceVolume += completedTailPriceVol;
+      cached.prefixVolume += completedTailVol;
       const tailPriceVol = lastBar.startTime >= anchor && lastBar.volume > 0
         ? ((lastBar.high + lastBar.low + lastBar.close) / 3) * lastBar.volume
         : 0;
