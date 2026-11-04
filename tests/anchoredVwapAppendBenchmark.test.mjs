@@ -5,7 +5,7 @@ import { FootprintSeries } from "../dist/core/model/footprint.js";
 import { View } from "../dist/core/engine/view.js";
 import { configurePerformanceTelemetry, snapshotPerformanceTelemetry } from "../dist/core/performanceTelemetry.js";
 
-test("Issue #76: 50k-bar append cache calculation stays under 5us", () => {
+test("Issue #76: 50k-bar append cache calculation stays under 5us", (t) => {
   const series = new FootprintSeries({ intervalMs: 60000, priceStep: 1 });
   const makeBar = (index) => ({
     startTime: index * 60000, open: 100, high: 101, low: 99, close: 100,
@@ -32,7 +32,7 @@ test("Issue #76: 50k-bar append cache calculation stays under 5us", () => {
   }
   const metric = snapshotPerformanceTelemetry().metrics["analysis.drawings.avwap.append.ms"];
   assert.equal(metric?.count, 256, "every append must take the incremental path");
-  console.log(`50k-bar AVWAP append p50: ${(metric.p50Ms * 1000).toFixed(3)}us`);
+  t.diagnostic(`50k-bar AVWAP append p50: ${(metric.p50Ms * 1000).toFixed(3)}us`);
   assert.ok(metric.p50Ms < 0.005, `50k-bar AVWAP append p50 was ${(metric.p50Ms * 1000).toFixed(3)}us; expected <5us`);
   configurePerformanceTelemetry({ enabled: false });
 });
