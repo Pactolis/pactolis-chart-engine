@@ -154,3 +154,36 @@ test("Issue #56: nonTailRevision invalidates AVWAP prefix cache on past bar muta
   const oracleLastValue = oracle.points[oracle.points.length - 1].value;
   assert.equal(renderedAvwap, oracleLastValue, "O(1) tail update matches full calculation oracle");
 });
+
+test("Issue #76: appending one bar only reads the new tail after priming AVWAP cache", () => {
+  const series = new FootprintSeries({ intervalMs: 60000, priceStep: 1 });
+  const makeBar = (index) => ({
+    startTime: index * 60000, open: 100, high: 101, low: 99, close: 100,
+    volume: 10, delta: 0, count: 1, hasRef: true, cells: new Map(),
+  });
+  series.loadBars(Array.from({ length: 1000 }, (_, index) => makeBar(index)));
+  const view = new View();
+  view.area = { left: 0, top: 0, width: 800, height: 600 };
+  view.colWidth = 20;
+  view.priceTop = 1000;
+  view.pricePerPx = 1;
+  const time = {
+    indexForTime: (t) => series.indexOfTime(t),
+    timeForIndex: (idx) => series.timeOfIndex(idx),
+  };
+  const ctx = { save() {}, restore() {}, beginPath() {}, moveTo() {}, lineTo() {}, stroke() {}, setLineDash() {} };
+  const drawing = { id: "append-cache", type: "anchored-vwap", points: [{ time: 0, price: 100 }], market: "BTC", visible: true, color: "#fff", showPriceLabel: true };
+  const originalListReadonly = series.listReadonly.bind(series);
+  let reads = 0;
+  series.listReadonly = () => new Proxy(originalListReadonly(), {
+    get(target, property, receiver) {
+      if (typeof property === "string" && /^\d+$/.test(property)) reads++;
+      return Reflect.get(target, property, receiver);
+    },
+  });
+  drawAnalysisDrawings(ctx, view, series, time, [drawing], "BTC");
+  reads = 0;
+  series.upsertBar(makeBar(1000));
+  drawAnalysisDrawings(ctx, view, series, time, [drawing], "BTC");
+  assert.ok(reads <= 4, `append should inspect only the current tail, observed ${reads} indexed reads`);
+});
