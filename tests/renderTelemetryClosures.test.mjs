@@ -182,6 +182,8 @@ test("verify render paths avoid measurePerformance closures in footprintRenderer
   );
 });
 
+const sampleCount = (metric) => snapshotPerformanceTelemetry().metrics[metric]?.count ?? 0;
+
 test("footprintRenderer records telemetry metrics only when enabled", () => {
   const renderer = makeFootprintRenderer();
   const view = makeView();
@@ -193,27 +195,41 @@ test("footprintRenderer records telemetry metrics only when enabled", () => {
   try {
     renderer.setChartConfig({ chartType: "footprint", candles: true });
 
+    const beforeOff = {
+      candles: sampleCount("chart.gpu.candles.ms"),
+      clear: sampleCount("chart.gpu.clear.ms"),
+      grid: sampleCount("chart.gpu.grid.ms"),
+      flush: sampleCount("chart.gpu.flush.ms"),
+      footprint: sampleCount("chart.gpu.footprint.ms"),
+    };
+
     withTelemetry(false, () => {
       renderer.renderLayers(view, series, layers);
     });
 
-    const offSnapshot = snapshotPerformanceTelemetry().metrics;
-    assert.equal(offSnapshot["chart.gpu.candles.ms"], undefined);
-    assert.equal(offSnapshot["chart.gpu.clear.ms"], undefined);
-    assert.equal(offSnapshot["chart.gpu.grid.ms"], undefined);
-    assert.equal(offSnapshot["chart.gpu.flush.ms"], undefined);
-    assert.equal(offSnapshot["chart.gpu.footprint.ms"], undefined);
+    assert.equal(sampleCount("chart.gpu.candles.ms") - beforeOff.candles, 0);
+    assert.equal(sampleCount("chart.gpu.clear.ms") - beforeOff.clear, 0);
+    assert.equal(sampleCount("chart.gpu.grid.ms") - beforeOff.grid, 0);
+    assert.equal(sampleCount("chart.gpu.flush.ms") - beforeOff.flush, 0);
+    assert.equal(sampleCount("chart.gpu.footprint.ms") - beforeOff.footprint, 0);
+
+    const beforeOn = {
+      candles: sampleCount("chart.gpu.candles.ms"),
+      clear: sampleCount("chart.gpu.clear.ms"),
+      grid: sampleCount("chart.gpu.grid.ms"),
+      flush: sampleCount("chart.gpu.flush.ms"),
+      footprint: sampleCount("chart.gpu.footprint.ms"),
+    };
 
     withTelemetry(true, () => {
       renderer.renderLayers(view, series, layers);
     });
 
-    const onSnapshot = snapshotPerformanceTelemetry().metrics;
-    assert.ok(onSnapshot["chart.gpu.candles.ms"]?.count >= 1, "chart.gpu.candles.ms recorded");
-    assert.ok(onSnapshot["chart.gpu.clear.ms"]?.count >= 1, "chart.gpu.clear.ms recorded");
-    assert.ok(onSnapshot["chart.gpu.grid.ms"]?.count >= 1, "chart.gpu.grid.ms recorded");
-    assert.ok(onSnapshot["chart.gpu.flush.ms"]?.count >= 1, "chart.gpu.flush.ms recorded");
-    assert.ok(onSnapshot["chart.gpu.footprint.ms"]?.count >= 1, "chart.gpu.footprint.ms recorded");
+    assert.ok(sampleCount("chart.gpu.candles.ms") - beforeOn.candles >= 1, "chart.gpu.candles.ms recorded");
+    assert.ok(sampleCount("chart.gpu.clear.ms") - beforeOn.clear >= 1, "chart.gpu.clear.ms recorded");
+    assert.ok(sampleCount("chart.gpu.grid.ms") - beforeOn.grid >= 1, "chart.gpu.grid.ms recorded");
+    assert.ok(sampleCount("chart.gpu.flush.ms") - beforeOn.flush >= 1, "chart.gpu.flush.ms recorded");
+    assert.ok(sampleCount("chart.gpu.footprint.ms") - beforeOn.footprint >= 1, "chart.gpu.footprint.ms recorded");
   } finally {
     settings.grid = prevGrid;
   }
@@ -223,26 +239,36 @@ test("ChartSession renderDirtySurfaces records surface metrics only when telemet
   const { session, win, counts } = makeFakeSession();
 
   try {
+    const beforeOff = {
+      gpu: sampleCount("chart.surface.gpu.draw.ms"),
+      annotation: sampleCount("chart.surface.annotation.draw.ms"),
+      interaction: sampleCount("chart.surface.interaction.draw.ms"),
+    };
+
     withTelemetry(false, () => {
       session.activate();
       win.runNextFrame();
     });
 
-    const offSnapshot = snapshotPerformanceTelemetry().metrics;
-    assert.equal(offSnapshot["chart.surface.gpu.draw.ms"], undefined);
-    assert.equal(offSnapshot["chart.surface.annotation.draw.ms"], undefined);
-    assert.equal(offSnapshot["chart.surface.interaction.draw.ms"], undefined);
+    assert.equal(sampleCount("chart.surface.gpu.draw.ms") - beforeOff.gpu, 0);
+    assert.equal(sampleCount("chart.surface.annotation.draw.ms") - beforeOff.annotation, 0);
+    assert.equal(sampleCount("chart.surface.interaction.draw.ms") - beforeOff.interaction, 0);
     assert.deepEqual(counts, { gpu: 1, annotation: 1, interaction: 1 });
+
+    const beforeOn = {
+      gpu: sampleCount("chart.surface.gpu.draw.ms"),
+      annotation: sampleCount("chart.surface.annotation.draw.ms"),
+      interaction: sampleCount("chart.surface.interaction.draw.ms"),
+    };
 
     withTelemetry(true, () => {
       session.invalidateSurface(ChartSurfaceDirty.All);
       win.runNextFrame();
     });
 
-    const onSnapshot = snapshotPerformanceTelemetry().metrics;
-    assert.ok(onSnapshot["chart.surface.gpu.draw.ms"]?.count >= 1, "chart.surface.gpu.draw.ms recorded");
-    assert.ok(onSnapshot["chart.surface.annotation.draw.ms"]?.count >= 1, "chart.surface.annotation.draw.ms recorded");
-    assert.ok(onSnapshot["chart.surface.interaction.draw.ms"]?.count >= 1, "chart.surface.interaction.draw.ms recorded");
+    assert.ok(sampleCount("chart.surface.gpu.draw.ms") - beforeOn.gpu >= 1, "chart.surface.gpu.draw.ms recorded");
+    assert.ok(sampleCount("chart.surface.annotation.draw.ms") - beforeOn.annotation >= 1, "chart.surface.annotation.draw.ms recorded");
+    assert.ok(sampleCount("chart.surface.interaction.draw.ms") - beforeOn.interaction >= 1, "chart.surface.interaction.draw.ms recorded");
     assert.deepEqual(counts, { gpu: 2, annotation: 2, interaction: 2 });
   } finally {
     session.destroy();
