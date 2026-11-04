@@ -105,14 +105,14 @@ function cachedAnchoredVwap(series: FootprintSeries, drawing: Drawing, anchor: n
         ? ((completedTail.high + completedTail.low + completedTail.close) / 3) * completedTail.volume
         : 0;
       const completedTailVol = completedTailIncluded ? completedTail.volume : 0;
-      const points = cached.result.points;
-      const completedTailPoint = points[points.length - 1];
+      const completedTailPoints = cached.result.points;
+      const completedTailPoint = completedTailPoints[completedTailPoints.length - 1];
       if (completedTailPoint?.time === completedTail.startTime) {
         const completedTotalPv = cached.prefixPriceVolume + completedTailPriceVol;
         const completedTotalVol = cached.prefixVolume + completedTailVol;
         completedTailPoint.value = completedTotalVol > 0 ? completedTotalPv / completedTotalVol : null;
       } else if (completedTail.startTime >= anchor) {
-        points.push({
+        completedTailPoints.push({
           time: completedTail.startTime,
           value: completedTailIncluded
             ? (cached.prefixPriceVolume + completedTailPriceVol) / (cached.prefixVolume + completedTailVol)
