@@ -1,5 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 
 import {
   copyGpuDiagnosticsJson,
@@ -20,6 +21,9 @@ import { createGpuSurface } from "../dist/core/gpu/selectBackend.js";
 import { Canvas2dQuadSink, Canvas2dSurface } from "../dist/core/gpu/canvas2d/canvas2dSurface.js";
 import { WebGl2Surface } from "../dist/core/gpu/webgl2/webgl2Surface.js";
 import { ChartSession } from "../dist/features/chart/ChartSession.js";
+
+const packageJson = JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf8"));
+const expectedEngineVersion = packageJson.version;
 
 function makeFakeCanvas(contextMap = {}) {
   const listeners = new Map();
@@ -246,7 +250,7 @@ test("GpuDiagnostics snapshot records frames and exports valid JSON", () => {
   recordGpuContextEvent("restored");
 
   const snapshot = getGpuDiagnostics();
-  assert.equal(snapshot.engine, "0.2.7");
+  assert.equal(snapshot.engine, expectedEngineVersion);
   assert.equal(snapshot.counters["gpu.backend.webgl2.frames"], 2);
   assert.equal(snapshot.counters["chart.gpu.contextLost"], 1);
   assert.equal(snapshot.counters["chart.gpu.contextRestored"], 1);
@@ -255,7 +259,7 @@ test("GpuDiagnostics snapshot records frames and exports valid JSON", () => {
 
   const jsonStr = copyGpuDiagnosticsJson();
   const parsed = JSON.parse(jsonStr);
-  assert.equal(parsed.engine, "0.2.7");
+  assert.equal(parsed.engine, expectedEngineVersion);
   assert.equal(parsed.counters["gpu.backend.webgl2.frames"], 2);
 });
 
