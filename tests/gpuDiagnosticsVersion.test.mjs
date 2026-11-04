@@ -23,7 +23,8 @@ test("package version assertion rejects a mismatched built diagnostics module in
     const diagnosticsPath = join(repoRoot, "dist/core/gpu/gpuDiagnostics.js");
     const telemetryPath = join(repoRoot, "dist/core/performanceTelemetry.js");
     const diagnosticsSource = readFileSync(diagnosticsPath, "utf8");
-    const versionLiteral = 'const ENGINE_VERSION = "0.2.7";';
+    const diagnosticsEngineVersion = getGpuDiagnostics().engine;
+    const versionLiteral = `const ENGINE_VERSION = ${JSON.stringify(diagnosticsEngineVersion)};`;
     assert.equal(diagnosticsSource.split(versionLiteral).length - 1, 1, "expected exactly one built ENGINE_VERSION literal");
 
     const tempCorePath = join(tempRoot, "core");
@@ -33,6 +34,7 @@ test("package version assertion rejects a mismatched built diagnostics module in
     const tempDiagnosticsPath = join(tempGpuPath, "gpuDiagnostics.js");
     const tempTelemetryPath = join(tempCorePath, "performanceTelemetry.js");
     const mismatchVersion = "0.0.0-negative-control";
+    assert.notEqual(mismatchVersion, diagnosticsEngineVersion, "negative control must differ from the real diagnostics version");
     writeFileSync(tempDiagnosticsPath, diagnosticsSource.replace(versionLiteral, `const ENGINE_VERSION = "${mismatchVersion}";`), "utf8");
     writeFileSync(tempTelemetryPath, readFileSync(telemetryPath, "utf8"), "utf8");
 
