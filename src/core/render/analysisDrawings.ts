@@ -59,39 +59,62 @@ const rangeProfileCache = new WeakMap<Drawing, CachedRangeProfileCalculation>();
 function cachedAnchoredVwap(series: FootprintSeries, drawing: Drawing, anchor: number): AnchoredVwapResult {
   const bars = series.listReadonly();
   const cached = anchoredVwapCache.get(drawing);
-
-  if (
+  const reusable =
     cached &&
     cached.series === series &&
     cached.resetEpoch === series.resetEpoch &&
     cached.nonTailRevision === series.nonTailRevision &&
     cached.anchorTime === anchor &&
-    cached.barCount === bars.length &&
-    bars.length > 0 &&
-    cached.lastBarStartTime === bars[bars.length - 1].startTime
-  ) {
-    if (cached.revision === series.revision) {
-      return cached.result;
-    }
+    bars.length > 0;
+
+  if (reusable && cached.barCount === bars.length && cached.lastBarStartTime === bars[bars.length - 1].startTime) {
+    if (cached.revision === series.revision) return cached.result;
+
     const lastBar = bars[bars.length - 1];
-    let tailPriceVol = 0;
-    let tailVol = 0;
-    if (lastBar.startTime >= anchor && lastBar.volume > 0) {
-      tailPriceVol = ((lastBar.high + lastBar.low + lastBar.close) / 3) * lastBar.volume;
-      tailVol = lastBar.volume;
-    }
-    const totalPv = cached.prefixPriceVolume + tailPriceVol;
-    const totalVol = cached.prefixVolume + tailVol;
-    const points = cached.result.points;
-    if (points.length > 0 && points[points.length - 1].time === lastBar.startTime) {
-      points[points.length - 1] = {
+    if (cached.result.points.length > 0 && cached.result.points[cached.result.points.length - 1].time === lastBar.startTime) {
+      const tailPriceVol = lastBar.startTime >= anchor && lastBar.volume > 0
+        ? ((lastBar.high + lastBar.low + lastBar.close) / 3) * lastBar.volume
+        : 0;
+      const tailVol = lastBar.startTime >= anchor && lastBar.volume > 0 ? lastBar.volume : 0;
+      const totalPv = cached.prefixPriceVolume + tailPriceVol;
+      const totalVol = cached.prefixVolume + tailVol;
+      cached.result.points[cached.result.points.length - 1] = {
         time: lastBar.startTime,
         value: totalVol > 0 ? totalPv / totalVol : null,
       };
-      cached.result.available = points.some((p) => p.value !== null);
+      cached.result.available = totalVol > 0;
       cached.revision = series.revision;
       return cached.result;
     }
+  }
+
+  if (
+    reusable &&
+    cached.barCount + 1 === bars.length &&
+    cached.lastBarStartTime === bars[bars.length - 2].startTime
+  ) {
+    return measurePerformance("analysis.drawings.avwap.append.ms", () => {
+      const completedTail = bars[bars.length - 2];
+      const lastBar = bars[bars.length - 1];
+      if (completedTail.startTime >= anchor && completedTail.volume > 0) {
+        cached.prefixPriceVolume += ((completedTail.high + completedTail.low + completedTail.close) / 3) * completedTail.volume;
+        cached.prefixVolume += completedTail.volume;
+      }
+      const tailPriceVol = lastBar.startTime >= anchor && lastBar.volume > 0
+        ? ((lastBar.high + lastBar.low + lastBar.close) / 3) * lastBar.volume
+        : 0;
+      const tailVol = lastBar.startTime >= anchor && lastBar.volume > 0 ? lastBar.volume : 0;
+      const totalPv = cached.prefixPriceVolume + tailPriceVol;
+      const totalVol = cached.prefixVolume + tailVol;
+      const value = totalVol > 0 ? totalPv / totalVol : null;
+      const points = cached.result.points;
+      if (lastBar.startTime >= anchor) points.push({ time: lastBar.startTime, value });
+      cached.result.available = cached.result.available || value !== null;
+      cached.revision = series.revision;
+      cached.barCount = bars.length;
+      cached.lastBarStartTime = lastBar.startTime;
+      return cached.result;
+    });
   }
 
   const result = measurePerformance("analysis.drawings.avwap.calculate.ms", () =>
@@ -101,11 +124,12 @@ function cachedAnchoredVwap(series: FootprintSeries, drawing: Drawing, anchor: n
   let prefixPriceVolume = 0;
   let prefixVolume = 0;
   if (bars.length >= 2) {
-    for (let i = 0; i < bars.length - 1; i++) {
-      const b = bars[i];
-      if (b.startTime >= anchor && b.volume > 0) {
-        prefixPriceVolume += ((b.high + b.low + b.close) / 3) * b.volume;
-        prefixVolume += b.volume;
+    const startIndex = lowerBoundBarTime(bars, anchor);
+    for (let i = startIndex; i < bars.length - 1; i++) {
+      const bar = bars[i];
+      if (bar.volume > 0) {
+        prefixPriceVolume += ((bar.high + bar.low + bar.close) / 3) * bar.volume;
+        prefixVolume += bar.volume;
       }
     }
   }

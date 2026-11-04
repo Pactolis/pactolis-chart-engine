@@ -183,7 +183,9 @@ test("Issue #76: appending one bar only reads the new tail after priming AVWAP c
   });
   drawAnalysisDrawings(ctx, view, series, time, [drawing], "BTC");
   reads = 0;
-  series.upsertBar(makeBar(1000));
-  drawAnalysisDrawings(ctx, view, series, time, [drawing], "BTC");
+  series.upsertBar({ ...makeBar(1000), high: 120, low: 120, close: 120 });
+  let renderedValue = null;
+  drawAnalysisDrawings(ctx, view, series, time, [drawing], "BTC", (price) => { renderedValue = price; });
   assert.ok(reads <= 4, `append should inspect only the current tail, observed ${reads} indexed reads`);
+  assert.equal(renderedValue, (1000 * 100 + 120) / 1001, "incremental result matches the direct weighted-price invariant");
 });
