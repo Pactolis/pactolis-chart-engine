@@ -16,6 +16,7 @@ function setupSeries(length = 1) {
   const view = new View();
   view.area = { left: 0, top: 0, width: 800, height: 400 };
   view.colWidth = 10;
+  view.priceTop = 200;
   return { series, view };
 }
 

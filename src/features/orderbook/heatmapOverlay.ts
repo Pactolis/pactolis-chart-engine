@@ -435,7 +435,6 @@ export class OrderbookHeatmapOverlay {
         const yBottom = view.yOfPrice(cell[0]);
         if (yBottom < top || yTop > top + height) continue;
         const value = heatmapValueInUnit(heatmapCellUsd(cell), cell[0], step, frame.settings.unit);
-        if (value < frame.threshold) continue;
         if (value > ceiling) ceiling = value;
         if (cellLimit !== null && emitted >= cellLimit) return ceiling;
         visit({ x, yTop, cellHeight: Math.max(1, yBottom - yTop), value, live });
@@ -497,7 +496,6 @@ export class OrderbookHeatmapOverlay {
         const yBottom = view.yOfPrice(cell[0]);
         if (yBottom < top || yTop > top + height) continue;
         const value = heatmapValueInUnit(heatmapCellUsd(cell), cell[0], step, preamble.settings.unit);
-        if (value < preamble.threshold) continue;
         if (value > ceiling) ceiling = value;
         mainCount++;
         if (live && x + view.colWidth < right) extCount++;
