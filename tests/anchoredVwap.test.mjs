@@ -189,3 +189,50 @@ test("Issue #76: appending one bar only reads the new tail after priming AVWAP c
   assert.ok(reads <= 4, `append should inspect only the current tail, observed ${reads} indexed reads`);
   assert.equal(renderedValue, (1000 * 100 + 120) / 1001, "incremental result matches the direct weighted-price invariant");
 });
+
+test("Issue #76: cached AVWAP append keeps every plotted point equal to full oracle", () => {
+  const series = new FootprintSeries({ intervalMs: 60000, priceStep: 1 });
+  const makeBar = (index, price, volume) => ({
+    startTime: index * 60000, open: price, high: price, low: price, close: price,
+    volume, delta: 0, count: 1, hasRef: true, cells: new Map(),
+  });
+  series.loadBars([makeBar(0, 10, 2), makeBar(1, 20, 3), makeBar(2, 30, 0)]);
+  const view = new View();
+  view.area = { left: 0, top: 0, width: 800, height: 600 };
+  view.colWidth = 20;
+  view.priceTop = 1000;
+  view.pricePerPx = 1;
+  const time = { indexForTime: (t) => series.indexOfTime(t), timeForIndex: (i) => series.timeOfIndex(i) };
+  let path = [];
+  const ctx = {
+    save() {}, restore() {}, beginPath() { path = []; },
+    moveTo(x, y) { path.push([x, y]); }, lineTo(x, y) { path.push([x, y]); },
+    stroke() {}, setLineDash() {},
+  };
+  const drawing = { id: "append-oracle", type: "anchored-vwap", points: [{ time: 0, price: 10 }], market: "BTC", visible: true, color: "#fff" };
+  const renderAndCheck = () => {
+    drawAnalysisDrawings(ctx, view, series, time, [drawing], "BTC");
+    const oracle = calculateAnchoredVwap(series.listReadonly(), 0);
+    const expected = oracle.points.filter((point) => point.value !== null).map((point) => [
+      view.xOfIndex(series.indexOfTime(point.time)) + view.colWidth / 2,
+      view.yOfPrice(point.value),
+    ]);
+    assert.deepEqual(path, expected, "complete rendered segment must match full AVWAP oracle");
+  };
+  renderAndCheck();
+  series.upsertBar(makeBar(3, 40, 4));
+  renderAndCheck();
+  // Correct the completed tail without a redraw, then append; prefix must include correction.
+  series.upsertBar(makeBar(3, 50, 5));
+  series.upsertBar(makeBar(4, 60, 0));
+  renderAndCheck();
+  series.upsertBar(makeBar(1, 25, 3));
+  series.upsertBar(makeBar(5, 70, 7));
+  renderAndCheck();
+  // Changing anchor drawing identity/time invalidates cached prefix; zero-volume boundary stays null.
+  drawing.points[0].time = 6 * 60000;
+  series.upsertBar(makeBar(6, 80, 0));
+  renderAndCheck();
+  series.upsertBar(makeBar(7, 90, 9));
+  renderAndCheck();
+});
