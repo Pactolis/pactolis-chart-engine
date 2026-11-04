@@ -89,7 +89,11 @@ function cachedAnchoredVwap(series: FootprintSeries, drawing: Drawing, anchor: n
   }
 
   if (
-    reusable &&
+    cached &&
+    cached.series === series &&
+    cached.resetEpoch === series.resetEpoch &&
+    cached.nonTailRevision + 1 === series.nonTailRevision &&
+    cached.anchorTime === anchor &&
     cached.barCount + 1 === bars.length &&
     cached.lastBarStartTime === bars[bars.length - 2].startTime
   ) {
@@ -111,6 +115,7 @@ function cachedAnchoredVwap(series: FootprintSeries, drawing: Drawing, anchor: n
       if (lastBar.startTime >= anchor) points.push({ time: lastBar.startTime, value });
       cached.result.available = cached.result.available || value !== null;
       cached.revision = series.revision;
+      cached.nonTailRevision = series.nonTailRevision;
       cached.barCount = bars.length;
       cached.lastBarStartTime = lastBar.startTime;
       return cached.result;
