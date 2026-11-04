@@ -89,6 +89,8 @@ interface ChunkState {
   status: "loading" | "ready" | "error";
   /** When the chunk (or its live tail) was last fetched. */
   fetchedAt: number;
+  /** Minimum value requested from the backend; a lower value is a superset. */
+  threshold: number;
 }
 
 /** What `beginFrame` resolves for an active frame: settings, tier, threshold and the visible bar window. */
@@ -241,13 +243,14 @@ export class OrderbookHeatmapOverlay {
     const state = this.chunks.get(chunkStart);
     if (state?.status === "loading") return;
     if (this.inFlight.size >= MAX_PARALLEL_CHUNKS) return;
+    const threshold = activeOrderbookHeatmapThreshold(this.settings);
 
     const refreshFrom = state?.status === "ready"
       ? Math.max(chunkStart, Math.floor(now / tier.periodMs) * tier.periodMs - 2 * tier.periodMs)
       : chunkStart;
 
     const key = this.dataKey;
-    this.chunks.set(chunkStart, { status: "loading", fetchedAt: state?.fetchedAt ?? 0 });
+    this.chunks.set(chunkStart, { status: "loading", fetchedAt: state?.fetchedAt ?? 0, threshold });
     const controller = new AbortController();
     this.inFlight.add(controller);
     this.fetchHeatmap({
@@ -259,12 +262,12 @@ export class OrderbookHeatmapOverlay {
       if (key !== this.dataKey || controller.signal.aborted) return;
       mergeHeatmapBars(this.bars, response.bars);
       this.barsRevision++;
-      this.chunks.set(chunkStart, { status: "ready", fetchedAt: this.now() });
+      this.chunks.set(chunkStart, { status: "ready", fetchedAt: this.now(), threshold });
       this.evictStaleChunks(tier);
       this.invalidate();
     }, () => {
       if (key !== this.dataKey || controller.signal.aborted) return;
-      this.chunks.set(chunkStart, { status: state?.status === "ready" ? "ready" : "error", fetchedAt: this.now() });
+      this.chunks.set(chunkStart, { status: state?.status === "ready" ? "ready" : "error", fetchedAt: this.now(), threshold: state?.threshold ?? threshold });
     }).finally(() => {
       this.inFlight.delete(controller);
     });
@@ -358,7 +361,9 @@ export class OrderbookHeatmapOverlay {
     this.currentTier = tier;
     const settings = this.settings;
     const threshold = activeOrderbookHeatmapThreshold(settings);
-    const key = `${settings.mode}|${tier.name}|${settings.bucketStep}|${settings.unit}:${threshold}`;
+    // Threshold only filters a compatible unit/mode/tier/step dataset. Raising
+    // it can reuse the less-filtered cache; lowering it revalidates chunks.
+    const key = `${settings.mode}|${tier.name}|${settings.bucketStep}|${settings.unit}`;
     if (key !== this.dataKey) this.reset(key);
     const first = Math.max(0, Math.floor(range[0]));
     const last = Math.min(series.length - 1, Math.ceil(range[1]));
@@ -602,24 +607,30 @@ export class OrderbookHeatmapOverlay {
   private ensureChunks(from: number, to: number, tier: HeatmapTier): void {
     const now = this.now();
     const key = this.dataKey;
+    const threshold = activeOrderbookHeatmapThreshold(this.settings);
     for (const chunkStart of heatmapChunksFor(from, Math.min(to, now), tier)) {
       const chunkEnd = heatmapChunkEnd(chunkStart, tier);
       const state = this.chunks.get(chunkStart);
       const live = now <= chunkEnd + tier.periodMs;
       if (state?.status === "loading") continue;
       if (state?.status === "error" && now - state.fetchedAt < RETRY_MS) continue;
+      const needsLowerThresholdData = state?.status === "ready" && state.threshold > threshold;
       // Live chunk: when live-tail subscription is healthy, suppress blind 20s REST refresh; otherwise refresh every 20s
       if (state?.status === "ready") {
+        if (needsLowerThresholdData) {
+          // Keep old compatible cells visible while the full chunk refreshes.
+        } else {
         if (!live) continue;
         if (this.isLiveTailHealthy(now)) continue;
         if (now - state.fetchedAt < LIVE_REFRESH_MS) continue;
+        }
       }
       if (this.inFlight.size >= MAX_PARALLEL_CHUNKS) return;
       // A live chunk that is already loaded only re-reads its last few bars.
-      const refreshFrom = state?.status === "ready"
+      const refreshFrom = state?.status === "ready" && !needsLowerThresholdData
         ? Math.max(chunkStart, Math.floor(now / tier.periodMs) * tier.periodMs - 2 * tier.periodMs)
         : chunkStart;
-      this.chunks.set(chunkStart, { status: "loading", fetchedAt: state?.fetchedAt ?? 0 });
+      this.chunks.set(chunkStart, { status: "loading", fetchedAt: state?.fetchedAt ?? 0, threshold });
       const controller = new AbortController();
       this.inFlight.add(controller);
       this.fetchHeatmap({
@@ -631,12 +642,12 @@ export class OrderbookHeatmapOverlay {
         if (key !== this.dataKey || controller.signal.aborted) return;
         mergeHeatmapBars(this.bars, response.bars);
         this.barsRevision++;
-        this.chunks.set(chunkStart, { status: "ready", fetchedAt: this.now() });
+        this.chunks.set(chunkStart, { status: "ready", fetchedAt: this.now(), threshold });
         this.evictStaleChunks(tier);
         this.invalidate();
       }, () => {
         if (key !== this.dataKey || controller.signal.aborted) return;
-        this.chunks.set(chunkStart, { status: state?.status === "ready" ? "ready" : "error", fetchedAt: this.now() });
+        this.chunks.set(chunkStart, { status: "error", fetchedAt: this.now(), threshold: state?.threshold ?? threshold });
       }).finally(() => {
         this.inFlight.delete(controller);
       });
