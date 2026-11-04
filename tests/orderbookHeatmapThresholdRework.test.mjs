@@ -40,22 +40,43 @@ test("unit change keeps compatible USD-notional cells visible until replacement 
     onChange: () => () => {},
   });
   const { series, view } = setupSeries();
+  let finishBtcRefresh;
   const requests = [];
   const overlay = new OrderbookHeatmapOverlay({
-    fetch: async (req) => {
+    fetch: (req) => {
       requests.push(req);
-      return response(req, [{ t: 0, cells: [[100, 15_000_000, 0]] }]);
+      if (requests.length === 1) {
+        return Promise.resolve(response(req, [{ t: 0, cells: [[100, 15_000_000, 0]] }]));
+      }
+      return new Promise((resolve) => {
+        finishBtcRefresh = () => resolve(response(req, [{ t: 0, cells: [[100, 20_000_000, 0]] }]));
+      });
     }, invalidate: () => {}, getMarket: () => "BINANCE_FUTURES:btcusdt", now: () => 60 * MINUTE,
   });
   const ctx = context();
   overlay.draw(ctx, view, series, [0, 0]);
   await new Promise((resolve) => setTimeout(resolve, 20));
+  assert.equal(requests.length, 1);
+  assert.equal(requests[0].minUsd, 10_000_000);
   ctx.fills.length = 0;
 
   unit = "btc";
   overlay.draw(ctx, view, series, [0, 0]);
-  assert.ok(ctx.fills.length > 0, "valid USD-notional cache should be converted and drawn during unit transition");
-  assert.equal(requests.length, 1, "an already-valid notional cache needs no unit-only fetch");
+  assert.equal(requests.length, 2, "unit change triggers replacement fetch with new unit");
+  assert.equal(requests[1].minBtc, 100, "replacement fetch requests minBtc threshold");
+  assert.equal(requests[1].from, 0, "replacement fetch re-fetches full chunk");
+  assert.ok(ctx.fills.length > 0, "compatible USD-notional cache remains visible while replacement fetch is pending");
+  assert.equal(overlay.chunkStatus(0), "loading");
+
+  finishBtcRefresh();
+  await new Promise((resolve) => setTimeout(resolve, 20));
+  assert.equal(overlay.chunkStatus(0), "ready");
+
+  ctx.fills.length = 0;
+  overlay.draw(ctx, view, series, [0, 0]);
+  assert.ok(ctx.fills.length > 0, "new replacement data is drawn");
+  assert.equal(requests.length, 2, "no additional fetch on subsequent frames in same unit");
+
   overlay.dispose();
 });
 

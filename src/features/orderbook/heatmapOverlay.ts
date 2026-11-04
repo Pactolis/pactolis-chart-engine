@@ -252,8 +252,10 @@ export class OrderbookHeatmapOverlay {
     if (this.inFlight.size >= MAX_PARALLEL_CHUNKS) return;
     const threshold = activeOrderbookHeatmapThreshold(this.settings);
     const unit = this.settings.unit;
+    const isSameUnit = state?.unit === unit;
+    const needsFullRefetch = state?.status === "ready" && (!isSameUnit || state.fullThreshold > threshold);
 
-    const refreshFrom = state?.status === "ready"
+    const refreshFrom = state?.status === "ready" && !needsFullRefetch
       ? Math.max(chunkStart, Math.floor(now / tier.periodMs) * tier.periodMs - 2 * tier.periodMs)
       : chunkStart;
 
@@ -648,22 +650,13 @@ export class OrderbookHeatmapOverlay {
       if (state?.status === "error" && now - state.fetchedAt < RETRY_MS) continue;
 
       const isSameUnit = state?.unit === unit;
-      const needsLowerFullThreshold = state?.status === "ready" && isSameUnit && state.fullThreshold > threshold;
+      const needsFullRefetch = state?.status === "ready" && (!isSameUnit || state.fullThreshold > threshold);
       const needsLowerTailThreshold = state?.status === "ready" && isSameUnit && state.threshold > threshold;
-      const needsLowerThresholdData = needsLowerFullThreshold || needsLowerTailThreshold;
+      const needsLowerThresholdData = needsFullRefetch || needsLowerTailThreshold;
 
       // Live chunk: when live-tail subscription is healthy, suppress blind 20s REST refresh; otherwise refresh every 20s
       if (state?.status === "ready") {
-        if (!isSameUnit) {
-          // Unit switch reuses existing USD-notional cache; adopt active unit & threshold without blind refetch.
-          state.unit = unit;
-          state.threshold = threshold;
-          state.fullThreshold = threshold;
-          state.fullUnit = unit;
-          if (!live) continue;
-          if (this.isLiveTailHealthy(now)) continue;
-          if (now - state.fetchedAt < LIVE_REFRESH_MS) continue;
-        } else if (needsLowerThresholdData) {
+        if (needsLowerThresholdData) {
           // Keep old compatible cells visible while the chunk refreshes.
         } else {
           if (!live) continue;
@@ -672,8 +665,8 @@ export class OrderbookHeatmapOverlay {
         }
       }
       if (this.inFlight.size >= MAX_PARALLEL_CHUNKS) return;
-      // A live chunk that is already loaded only re-reads its last few bars unless its full-chunk coverage needs lowering.
-      const refreshFrom = state?.status === "ready" && !needsLowerFullThreshold
+      // A live chunk that is already loaded only re-reads its last few bars unless its full-chunk coverage needs lowering or unit changed.
+      const refreshFrom = state?.status === "ready" && !needsFullRefetch
         ? Math.max(chunkStart, Math.floor(now / tier.periodMs) * tier.periodMs - 2 * tier.periodMs)
         : chunkStart;
       const fullThreshold = refreshFrom === chunkStart ? threshold : (state?.fullThreshold ?? threshold);
