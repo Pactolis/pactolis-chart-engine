@@ -212,7 +212,7 @@ test("Issue #76: cached AVWAP append keeps every plotted point equal to full ora
   const drawing = { id: "append-oracle", type: "anchored-vwap", points: [{ time: 0, price: 10 }], market: "BTC", visible: true, color: "#fff" };
   const renderAndCheck = () => {
     drawAnalysisDrawings(ctx, view, series, time, [drawing], "BTC");
-    const oracle = calculateAnchoredVwap(series.listReadonly(), 0);
+    const oracle = calculateAnchoredVwap(series.listReadonly(), drawing.points[0].time);
     const expected = oracle.points.filter((point) => point.value !== null).map((point) => [
       view.xOfIndex(series.indexOfTime(point.time)) + view.colWidth / 2,
       view.yOfPrice(point.value),
