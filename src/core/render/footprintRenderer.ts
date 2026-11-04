@@ -28,7 +28,7 @@ import {
   type PixelCellBucket,
 } from "./chartLod.js";
 import { resolveBuiltInLayerPreset, type BuiltInChartType } from "./scene/chartLayerPreset.js";
-import { measurePerformance } from "../performanceTelemetry.js";
+import { isPerformanceTelemetryEnabled, recordPerformanceDuration } from "../performanceTelemetry.js";
 import {
   cellAverageTradeSize,
   cellAverageTradeSizes,
@@ -231,13 +231,21 @@ export class FootprintRenderer {
   renderLayers(view: View, series: FootprintSeries, activeLayers: ReadonlySet<string>): void {
     const dpr = this.devicePixelRatio(view);
     if (view.area.width <= 0 || view.area.height <= 0) return;
+    const telemetryEnabled = isPerformanceTelemetryEnabled();
 
     if (this.surface) {
       const frame = this.surface.beginFrame({ r: 0.07, g: 0.08, b: 0.1, a: 1 });
       this.currentFrame = frame;
       this.batch = frame.quads;
     } else {
-      measurePerformance("chart.gpu.clear.ms", () => this.clear());
+      const clearStartedAt = telemetryEnabled ? performance.now() : null;
+      try {
+        this.clear();
+      } finally {
+        if (clearStartedAt !== null) {
+          recordPerformanceDuration("chart.gpu.clear.ms", performance.now() - clearStartedAt);
+        }
+      }
       (this.batch as any).begin?.();
     }
 
@@ -259,10 +267,26 @@ export class FootprintRenderer {
 
     // Global grid toggle: the vertical time-grid layer is skipped entirely when off.
     // Read from global `settings`, not per-chart cfg — grid is an app-wide preference.
-    if (settings.grid && activeLayers.has("grid")) measurePerformance("chart.gpu.grid.ms", () => drawTimeGrid(this.batch, view, timeScale.marks(view)));
+    if (settings.grid && activeLayers.has("grid")) {
+      const gridStartedAt = telemetryEnabled ? performance.now() : null;
+      try {
+        drawTimeGrid(this.batch, view, timeScale.marks(view));
+      } finally {
+        if (gridStartedAt !== null) {
+          recordPerformanceDuration("chart.gpu.grid.ms", performance.now() - gridStartedAt);
+        }
+      }
+    }
 
     if (to <= from) {
-      measurePerformance("chart.gpu.flush.ms", () => this.flushCurrent(dpr));
+      const flushStartedAt = telemetryEnabled ? performance.now() : null;
+      try {
+        this.flushCurrent(dpr);
+      } finally {
+        if (flushStartedAt !== null) {
+          recordPerformanceDuration("chart.gpu.flush.ms", performance.now() - flushStartedAt);
+        }
+      }
       return;
     }
 
@@ -272,7 +296,8 @@ export class FootprintRenderer {
     const lod = chartLodForSpacing(view.colWidth);
 
     if (activeLayers.has("candles")) {
-      measurePerformance("chart.gpu.candles.ms", () => {
+      const candlesStartedAt = telemetryEnabled ? performance.now() : null;
+      try {
         if (lod === "pixel-bucket") {
           const buckets = buildPixelCandleBuckets(
             from, to,
@@ -293,30 +318,51 @@ export class FootprintRenderer {
             }
           }
         }
-      });
+      } finally {
+        if (candlesStartedAt !== null) {
+          recordPerformanceDuration("chart.gpu.candles.ms", performance.now() - candlesStartedAt);
+        }
+      }
     }
 
     if (lod === "footprint" && chartType === "footprint" && activeLayers.has("footprint")) {
-      measurePerformance("chart.gpu.footprint.ms", () => {
+      const footprintStartedAt = telemetryEnabled ? performance.now() : null;
+      try {
         for (let i = from; i < to; i++) {
           const bar = series.at(i);
           if (!bar) continue;
           this.drawFootprintCells(view, bar, view.xOfIndex(i), view.colWidth, candleW, step);
         }
-      });
+      } finally {
+        if (footprintStartedAt !== null) {
+          recordPerformanceDuration("chart.gpu.footprint.ms", performance.now() - footprintStartedAt);
+        }
+      }
     }
 
     if (lod === "footprint" && chartType === "footprintProfile" && activeLayers.has("footprint-profile")) {
-      measurePerformance("chart.gpu.footprint-profile.ms", () => {
+      const profileStartedAt = telemetryEnabled ? performance.now() : null;
+      try {
         for (let i = from; i < to; i++) {
           const bar = series.at(i);
           if (!bar) continue;
           this.drawProfile(view, bar, view.xOfIndex(i), view.colWidth, candleW, step);
         }
-      });
+      } finally {
+        if (profileStartedAt !== null) {
+          recordPerformanceDuration("chart.gpu.footprint-profile.ms", performance.now() - profileStartedAt);
+        }
+      }
     }
 
-    measurePerformance("chart.gpu.flush.ms", () => this.flushCurrent(dpr));
+    const flushStartedAt = telemetryEnabled ? performance.now() : null;
+    try {
+      this.flushCurrent(dpr);
+    } finally {
+      if (flushStartedAt !== null) {
+        recordPerformanceDuration("chart.gpu.flush.ms", performance.now() - flushStartedAt);
+      }
+    }
   }
 
   private drawFootprintCells(
