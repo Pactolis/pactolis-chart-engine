@@ -39,6 +39,6 @@ test('RSI pane keeps fixed oscillator range and axis labels while scrolling', as
   expect(evidence.earlier.axis.map(({ text }) => text)).toEqual(['70', '50', '30']);
   expect(evidence.recent.axis.map(({ text }) => text)).toEqual(['70', '50', '30']);
   expect(evidence.earlier.axis[1].y).toBe(evidence.recent.axis[1].y);
-  expect(evidence.manual.axis.map(({ text }) => text)).toEqual(['70', '50']);
+  expect(evidence.manual.axis.map(({ text }) => text)).toEqual(['70', '50', '30']);
   expect(evidence.manual.axis[0].y).not.toBe(evidence.recent.axis[0].y);
 });
