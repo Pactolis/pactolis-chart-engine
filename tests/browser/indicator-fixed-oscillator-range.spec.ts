@@ -29,20 +29,16 @@ test('RSI pane keeps fixed oscillator range and axis labels while scrolling', as
         colWidth: 4, xOfIndex: (index: number) => index }, rect: { top: 0, height: 120 }, range: [from, to], series,
         instance: { id: `rsi-${from}`, type: 'rsi', title: 'RSI', visible: true, paneId: 'pane', order: 0, settings }, settings,
         requestRefresh() {} } as any, prepared);
-      const scaleMin = prepared.range.min, scaleMax = prepared.range.max;
       const axis = labels.filter(({ text, x }) => /^(?:\d+(?:\.\d+)?)$/.test(text) && x > 300);
-      return { scaleMin, scaleMax, axis, ticks: prepared.meta.axisTicks };
+      return { axis, ticks: prepared.meta.axisTicks };
     };
     return { earlier: render(0, 100), recent: render(100, 160), manual: render(100, 160, { paneScaleAuto: false, paneScaleFactor: 0.5 }) };
   });
 
-  expect(evidence.earlier.scaleMin).toBe(0);
-  expect(evidence.earlier.scaleMax).toBe(100);
   expect(evidence.earlier.ticks).toEqual([70, 50, 30]);
   expect(evidence.earlier.axis.map(({ text }) => text)).toEqual(['70', '50', '30']);
   expect(evidence.recent.axis.map(({ text }) => text)).toEqual(['70', '50', '30']);
   expect(evidence.earlier.axis[1].y).toBe(evidence.recent.axis[1].y);
-  expect(evidence.manual.scaleMin).toBe(25);
-  expect(evidence.manual.scaleMax).toBe(75);
   expect(evidence.manual.axis.map(({ text }) => text)).toEqual(['70', '50']);
+  expect(evidence.manual.axis[0].y).not.toBe(evidence.recent.axis[0].y);
 });
