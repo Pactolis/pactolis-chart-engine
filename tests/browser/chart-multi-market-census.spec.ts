@@ -853,6 +853,15 @@ async function attachEnduranceEvidence(testInfo: TestInfo, evidence: Record<stri
   await writeFile(path, json, "utf8");
   await testInfo.attach("endurance-evidence", { path, contentType: "application/json" });
 }
+async function attachCensusEvidence(testInfo: TestInfo, evidence: Record<string, unknown>) {
+  const json = JSON.stringify(evidence);
+  const bytes = Buffer.byteLength(json, "utf8");
+  if (bytes > 256 * 1024) throw new Error(`census evidence exceeds 256 KiB: ${bytes} bytes`);
+  const { writeFile } = await import("node:fs/promises");
+  const path = testInfo.outputPath("census-evidence.json");
+  await writeFile(path, json, "utf8");
+  await testInfo.attach("census-evidence", { path, contentType: "application/json" });
+}
 async function runScenario(scenario: Scenario, page: Page, testInfo?: TestInfo) {
   // Concurrent mounts plus the measured phases take longer than the
   // single-chart census; the phases themselves are bounded below.
@@ -1743,6 +1752,42 @@ async function runScenario(scenario: Scenario, page: Page, testInfo?: TestInfo) 
       catch (error) { provenanceError = error; }
     }
     const terminal = hasPrimary ? "FAIL" : cleanupError || provenanceError ? "PARTIAL" : "PASS";
+    let censusEvidenceError: unknown = null;
+    try {
+      await attachCensusEvidence(testInfo, {
+        schema: "pactolis.census-evidence.v1",
+        test: "chart-multi-market-census",
+        profile: scenario.id,
+        issue: scenario.issue,
+        terminal,
+        stages: {
+          measurement: summary ? "reached" : "not reached",
+          primary: hasPrimary ? "failed" : "passed",
+          cleanup: hasPrimary ? "not reached" : cleanupError ? "failed" : "passed",
+          evidence: "written",
+        },
+        workload: summary ? (summary.workload ?? null) : null,
+        layout: summary ? (summary.layout ?? null) : null,
+        totals: summary ? (summary.totals ?? null) : null,
+        phases: summary ? (summary.phases ?? null) : null,
+        renderTelemetry: summary ? {
+          semantics: "cumulative snapshots; phase keys are snapshots, not phase deltas",
+          cumulative: summary.renderTelemetry ?? null,
+        } : null,
+        environment: summary ? (summary.runnerFixture ?? null) : {
+          project: testInfo.project.name,
+          node: process.version,
+          platform: process.platform,
+          arch: process.arch,
+          ci: process.env.CI ?? null,
+          githubRunner: process.env.RUNNER_NAME ?? null,
+          os: process.env.RUNNER_OS ?? null,
+        },
+        failure: hasPrimary ? String(primaryError) : cleanupError ? String(cleanupError)
+          : provenanceError ? String(provenanceError) : null,
+      });
+    } catch (error) { censusEvidenceError = error; }
+    if (censusEvidenceError) evidenceError = censusEvidenceError;
     const stages = {
       measurement: summary ? "reached" : "not reached",
       financial: hasPrimary ? "not reached" : "passed",
@@ -1831,7 +1876,7 @@ test("census heap trend accurately tracks slope and detects excessive drift (#50
   expect(leakingTrend!.growthBytesPerMinute).toBeGreaterThan(ENDURANCE_MAX_HEAP_GROWTH_BYTES_PER_MINUTE);
 });
 
-for (const scenario of SCENARIOS) test(scenario.title, ({ page }) => runScenario(scenario, page));
+for (const scenario of SCENARIOS) test(scenario.title, ({ page }, testInfo) => runScenario(scenario, page, testInfo));
 
 // Endurance runs only on request: the "Chart endurance" workflow sets
 // CHART_ENDURANCE_MINUTES.
