@@ -515,6 +515,7 @@ self.onmessage = (event) => {
   const burstEnd = burstStart + cfg.burstMs;
   const end = burstEnd + cfg.recoveryMs;
   const due = cfg.markets.map(() => 0);
+  let reportedPhase = -1;
   const generated = cfg.markets.map(() => 0);
   const minutes = cfg.markets.map(() => new Map());
   let lastHeartbeat = 0;
@@ -522,6 +523,7 @@ self.onmessage = (event) => {
   const tick = () => {
     const now = Date.now();
     const phase = now < burstStart ? 0 : now < burstEnd ? 1 : 2;
+    if (phase !== reportedPhase) { self.postMessage({ kind: "phase", phase }); reportedPhase = phase; }
     if (now - lastHeartbeat >= 1000) {
       self.postMessage({ kind: "raw", raw: JSON.stringify({ type: "heartbeat", v: 1, epoch: cfg.epoch, sequence: sequence++, timestamp: now }) });
       lastHeartbeat = now;
@@ -603,6 +605,7 @@ async function runBurst(page: Page, uniqueMarkets: string[], panelIds: string[],
       worker.onerror = (event) => reject(new Error(`burst worker failed: ${event.message}`));
       worker.onmessage = (event) => {
         const data = event.data;
+        if (data.kind === "phase") { state.telemetryPhases[data.phase] = state.telemetry.snapshotPerformanceTelemetry(); return; }
         if (data.kind === "done") { resolve(data); return; }
         emit(data.raw);
         if (data.kind !== "trades") return;
@@ -988,7 +991,10 @@ async function runScenario(scenario: Scenario, page: Page, testInfo?: TestInfo) 
 
     // Frame probe and owned state live on one window key; teardown reads it back.
     await page.evaluate(async ({ markets, panelIds, columns, cellWidth, cellHeight, bars, indicatorCount, drawingCount, burst }) => {
+      const telemetry = await import("/src/core/performanceTelemetry.ts");
+      telemetry.configurePerformanceTelemetry({ enabled: true });
       const state = {
+        telemetry, telemetryPhases: {} as Record<number, unknown>,
         pageErrors: [] as string[],
         fetchHistoryCalls: 0,
         frames: [] as Array<{ at: number; interval: number }>,
@@ -1605,6 +1611,15 @@ async function runScenario(scenario: Scenario, page: Page, testInfo?: TestInfo) 
       mountToReadyMs: load.mountToReadyMs,
       allReadyMs: Math.round(load.endedAt - load.startedAt),
       phases,
+      renderTelemetry: await page.evaluate(() => {
+        const state = (window as any).__multiMarketCensus;
+        return { phases: state.telemetryPhases, final: state.telemetry.snapshotPerformanceTelemetry() };
+      }),
+      runnerFixture: { project: testInfo?.project.name ?? null, node: process.version,
+        platform: process.platform, arch: process.arch, ci: process.env.CI ?? null,
+        githubRunner: process.env.RUNNER_NAME ?? null, os: process.env.RUNNER_OS ?? null,
+        gpuMode: USE_HARDWARE_GPU ? "hardware" : "swiftshader",
+        fixture: { barsPerChart: BAR_COUNT, markets: MARKETS, viewport: `${VIEWPORT.width}x${VIEWPORT.height}` } },
       censusReadMs: quantiles(census.readMs),
       jsHeapBytes: {
         reference: "#308 CI gate: retained heap after a forced GC <= 1 GB per tab; instantaneous and peak are information only",
