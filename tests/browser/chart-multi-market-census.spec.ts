@@ -89,6 +89,41 @@ test.use({ launchOptions: { args: [...FUNCTIONAL_WEBGL_ARGS, ...HEAP_ARGS] }, vi
  */
 const HEAP_CEILING_BYTES = 1024 * 1024 * 1024;
 
+const RENDER_TELEMETRY_METRICS = [
+  "chart.frame.render.ms",
+  "chart.surface.gpu.draw.ms",
+  "chart.surface.annotation.draw.ms",
+  "chart.surface.interaction.draw.ms",
+  "chart.gpu.footprint.ms",
+  "chart.gpu.flush.ms",
+  "chart.liveUpdate.toRenderEnd.ms",
+] as const;
+
+type TelemetrySnapshot = {
+  metrics?: Record<string, { count?: number; totalMs?: number; p50Ms?: number; p95Ms?: number; p99Ms?: number }>;
+};
+
+function phaseTelemetryDelta(before: TelemetrySnapshot | null | undefined, after: TelemetrySnapshot | null | undefined) {
+  const metrics = Object.fromEntries(RENDER_TELEMETRY_METRICS.map((name) => {
+    const start = before?.metrics?.[name];
+    const end = after?.metrics?.[name];
+    const valid = !!before && !!after && (!start || Number.isFinite(start.count) && Number.isFinite(start.totalMs))
+      && (!end || Number.isFinite(end.count) && Number.isFinite(end.totalMs));
+    return [name, {
+      count: valid ? (end?.count ?? 0) - (start?.count ?? 0) : null,
+      totalMs: valid ? Math.round(((end?.totalMs ?? 0) - (start?.totalMs ?? 0)) * 1_000) / 1_000 : null,
+      quantiles: null,
+      quantileUnavailableReason: "cumulative snapshot quantiles cannot be differenced or phase-isolated",
+      ...(valid && !start && !end ? { sampleStatus: "no samples in either boundary snapshot" } : {}),
+      ...(!valid ? { sampleStatus: "one or both phase boundary snapshots unavailable or invalid" } : {}),
+    }];
+  }));
+  return {
+    semantics: "count and totalMs are end-minus-start cumulative counter deltas; p50/p95/p99 are intentionally not derived",
+    metrics,
+  };
+}
+
 interface Scenario {
   id: string;
   issue: number;
@@ -1599,6 +1634,35 @@ async function runScenario(scenario: Scenario, page: Page, testInfo?: TestInfo) 
     expect(unexpectedApiRequests).toEqual([]);
     expect(await page.evaluate(() => (window as any).__multiMarketCensus.fetchHistoryCalls)).toBe(0);
 
+    const telemetryBoundaries = await page.evaluate(() => {
+      const state = (window as any).__multiMarketCensus;
+      return { phases: state.telemetryPhases as Record<number, TelemetrySnapshot>, final: state.telemetry.snapshotPerformanceTelemetry() };
+    });
+    const phaseDeltas = live ? {
+      baseline: phaseTelemetryDelta(telemetryBoundaries.phases[0], telemetryBoundaries.phases[1]),
+      burst: phaseTelemetryDelta(telemetryBoundaries.phases[1], telemetryBoundaries.phases[2]),
+      recovery: phaseTelemetryDelta(telemetryBoundaries.phases[2], telemetryBoundaries.final),
+    } : null;
+    const rendererIdentity = await page.evaluate(() => {
+      let webgl2ContextFound = false;
+      for (const canvas of document.querySelectorAll("canvas")) {
+        let gl: WebGL2RenderingContext | null = null;
+        try { gl = canvas.getContext("webgl2") as WebGL2RenderingContext | null; } catch { /* another context type owns this canvas */ }
+        if (!gl) continue;
+        webgl2ContextFound = true;
+        const debug = gl.getExtension("WEBGL_debug_renderer_info" as any) as any;
+        if (!debug) return { available: false, webgl2ContextFound, reason: "WEBGL_debug_renderer_info extension unavailable" };
+        try {
+          return { available: true, webgl2ContextFound,
+            vendor: gl.getParameter(debug.UNMASKED_VENDOR_WEBGL),
+            renderer: gl.getParameter(debug.UNMASKED_RENDERER_WEBGL) };
+        } catch (error) {
+          return { available: false, webgl2ContextFound, reason: `renderer query failed: ${String(error)}` };
+        }
+      }
+      return { available: false, webgl2ContextFound, reason: "no existing WebGL2 chart context found" };
+    });
+
     summary = {
       test: "chart-multi-market-census",
       profile: scenario.id,
@@ -1620,15 +1684,22 @@ async function runScenario(scenario: Scenario, page: Page, testInfo?: TestInfo) 
       mountToReadyMs: load.mountToReadyMs,
       allReadyMs: Math.round(load.endedAt - load.startedAt),
       phases,
-      renderTelemetry: await page.evaluate(() => {
-        const state = (window as any).__multiMarketCensus;
-        return { phases: state.telemetryPhases, final: state.telemetry.snapshotPerformanceTelemetry() };
-      }),
+      renderTelemetry: {
+        semantics: "cumulative boundary snapshots plus end-minus-start phase deltas; cumulative quantiles are never subtracted",
+        boundaries: telemetryBoundaries.phases,
+        final: telemetryBoundaries.final,
+        phaseDeltas,
+        phaseDeltasUnavailableReason: live ? null : "synchronized telemetry phase boundaries are currently captured by the live/burst worker only",
+      },
       runnerFixture: { project: testInfo?.project.name ?? null, node: process.version,
+        playwright: testInfo?.config.version ?? null, chromium: page.context().browser()?.version() ?? null,
         platform: process.platform, arch: process.arch, ci: process.env.CI ?? null,
         githubRunner: process.env.RUNNER_NAME ?? null, os: process.env.RUNNER_OS ?? null,
+        hardwareConcurrency: await page.evaluate(() => navigator.hardwareConcurrency ?? null),
+        devicePixelRatio: await page.evaluate(() => window.devicePixelRatio),
         gpuMode: USE_HARDWARE_GPU ? "hardware" : "swiftshader",
-        fixture: { barsPerChart: BAR_COUNT, markets: MARKETS, viewport: `${VIEWPORT.width}x${VIEWPORT.height}` } },
+        rendererIdentity,
+        fixture: { barsPerChart: BAR_COUNT, markets: MARKETS, viewport: page.viewportSize() } },
       censusReadMs: quantiles(census.readMs),
       jsHeapBytes: {
         reference: "#308 CI gate: retained heap after a forced GC <= 1 GB per tab; instantaneous and peak are information only",
@@ -1770,10 +1841,7 @@ async function runScenario(scenario: Scenario, page: Page, testInfo?: TestInfo) 
         layout: summary ? (summary.layout ?? null) : null,
         totals: summary ? (summary.totals ?? null) : null,
         phases: summary ? (summary.phases ?? null) : null,
-        renderTelemetry: summary ? {
-          semantics: "cumulative snapshots; phase keys are snapshots, not phase deltas",
-          cumulative: summary.renderTelemetry ?? null,
-        } : null,
+        renderTelemetry: summary ? (summary.renderTelemetry ?? null) : null,
         environment: summary ? (summary.runnerFixture ?? null) : {
           project: testInfo.project.name,
           node: process.version,
@@ -1858,6 +1926,22 @@ test("census minute-sample validator rejects fabricated sets", () => {
   expect(validateEnduranceSamples([{ minute: 1, at: Number.NaN, heapBytes: 1 }, good[1], good[2]], 180_000, 3, 60_000).join()).toContain("non-finite");
   expect(validateEnduranceSamples([{ minute: 1, at: 60_000, heapBytes: 1_000 }, { minute: 2, at: 70_000, heapBytes: 1_000 },
     { minute: 3, at: 80_000, heapBytes: 1_000 }], 180_000, 3, 60_000).join()).toContain("span");
+});
+
+test("render telemetry phase deltas use cumulative count and totalMs differences only", () => {
+  const before = { metrics: {
+    "chart.frame.render.ms": { count: 10, totalMs: 25, p50Ms: 2, p95Ms: 4, p99Ms: 5 },
+    "chart.gpu.flush.ms": { count: 3, totalMs: 9, p50Ms: 3, p95Ms: 4, p99Ms: 5 },
+  } };
+  const after = { metrics: {
+    "chart.frame.render.ms": { count: 16, totalMs: 41.5, p50Ms: 2, p95Ms: 4, p99Ms: 5 },
+    "chart.gpu.flush.ms": { count: 5, totalMs: 14.25, p50Ms: 3, p95Ms: 4, p99Ms: 5 },
+  } };
+  const delta = phaseTelemetryDelta(before, after);
+  expect(delta.metrics["chart.frame.render.ms"]).toMatchObject({ count: 6, totalMs: 16.5, quantiles: null });
+  expect(delta.metrics["chart.gpu.flush.ms"]).toMatchObject({ count: 2, totalMs: 5.25, quantiles: null });
+  expect(delta.metrics["chart.frame.render.ms"].quantileUnavailableReason).toContain("cannot be differenced");
+  expect(phaseTelemetryDelta(before, null).metrics["chart.frame.render.ms"]).toMatchObject({ count: null, totalMs: null });
 });
 
 test("census heap trend accurately tracks slope and detects excessive drift (#50)", () => {
