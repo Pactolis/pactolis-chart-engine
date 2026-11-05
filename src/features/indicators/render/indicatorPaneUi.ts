@@ -196,7 +196,7 @@ export function drawIndicatorAxisTicks(
   canvas.textBaseline = "middle";
   canvas.strokeStyle = uiColor.separatorStrong;
   const ticks = values
-    ? values.filter((value) => scale.contains(value)).map((value) => ({ value, label: scale.format(value), y: scale.y(value) }))
+    ? values.filter((value) => scale.contains(value)).map((value) => ({ value, label: Number.isInteger(value) ? String(value) : scale.format(value), y: scale.y(value) }))
     : scale.ticks(count);
   for (const tick of ticks) {
     // Clamp instead of skipping: min/max ticks land exactly on the pane

@@ -193,7 +193,9 @@ export function asMultiSeriesData(prepared: IndicatorPreparedData | undefined): 
 function multiSeriesScale(ctx: IndicatorDrawContext<MultiSeriesIndicatorSettings>, data: MultiSeriesPreparedData) {
   const { top, bottom } = panePlotBounds(ctx.rect, 8, 5);
   const displayRange = data.meta.fixedRange
-    ? data.meta.fixedRange
+    ? (ctx.settings.paneScaleAuto === false
+      ? indicatorDisplayRange(ctx.settings, data.meta.fixedRange.min, data.meta.fixedRange.max)
+      : data.meta.fixedRange)
     : indicatorDisplayRange(ctx.settings, data.range.min, data.range.max);
   const scale = createIndicatorScale({
     mode: data.meta.scaleMode,
