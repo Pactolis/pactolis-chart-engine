@@ -2,6 +2,9 @@ import type { View } from "../../core/engine/view.js";
 import type { FootprintSeries } from "../../core/model/footprint.js";
 import type { HeatmapGpuRenderer, HeatmapGpuCellFrame } from "./heatmap/gpu/heatmapGpuRenderer.js";
 import type { OrderbookHeatmapOverlay } from "../orderbook/heatmapOverlay.js";
+import { recordGpuFeatureFallback, setGpuFeaturePath } from "../../core/gpu/gpuDiagnostics.js";
+
+const HEATMAP_GPU_FEATURE = "orderbook-heatmap";
 
 export interface HeatmapGpuRenderFrame {
   dataKey: string;
@@ -22,6 +25,7 @@ export interface HeatmapGpuRenderFrame {
 }
 
 export interface ChartHeatmapGpuCoordinatorHost {
+  readonly backendKind?: string;
   readonly orderbookHeatmap: OrderbookHeatmapOverlay | null;
   readonly renderCoordinator?: { getAnnotationLayerOrder(): readonly string[] };
   readonly renderer: { visibleRange(view: View, seriesLength: number): [number, number] };
@@ -39,6 +43,7 @@ export class ChartHeatmapGpuCoordinator {
   private heatmapGpuRendererPromise: Promise<typeof import("./heatmap/gpu/heatmapGpuRenderer.js")> | null = null;
   private heatmapGpuRendererGl: WebGL2RenderingContext | null = null;
   private heatmapGpuFailureLatched = false;
+  private heatmapGpuUnsupportedEpisode = false;
   private heatmapGpuFrame: HeatmapGpuRenderFrame | null = null;
   private heatmapGpuLease: { release(): void } | null = null;
 
@@ -60,6 +65,29 @@ export class ChartHeatmapGpuCoordinator {
 
   setHeatmapTexturePrototypeEnabled(enabled: boolean): void {
     this.heatmapTexturePrototypeEnabled = enabled;
+    if (!enabled) {
+      this.heatmapGpuFrame = null;
+      this.releaseHeatmapGpuLease();
+      setGpuFeaturePath(HEATMAP_GPU_FEATURE, undefined);
+    }
+  }
+
+  private supportsHeatmapGpu(): boolean {
+    if (!this.heatmapTexturePrototypeEnabled) {
+      setGpuFeaturePath(HEATMAP_GPU_FEATURE, undefined);
+      return false;
+    }
+    if ((this.host.backendKind ?? "webgl2") !== "webgl2") {
+      setGpuFeaturePath(HEATMAP_GPU_FEATURE, "cpu");
+      if (!this.heatmapGpuUnsupportedEpisode) {
+        recordGpuFeatureFallback(HEATMAP_GPU_FEATURE, "backend_unsupported");
+        this.heatmapGpuUnsupportedEpisode = true;
+      }
+      return false;
+    }
+    this.heatmapGpuUnsupportedEpisode = false;
+    if (!this.heatmapGpuFrame) setGpuFeaturePath(HEATMAP_GPU_FEATURE, "cpu");
+    return true;
   }
 
   setResidentHeatmapEnabled(enabled: boolean): void {
@@ -67,6 +95,11 @@ export class ChartHeatmapGpuCoordinator {
   }
 
   setGl(gl: WebGL2RenderingContext | null): void {
+    if (this.heatmapGpuRendererGl !== gl) {
+      this.heatmapGpuFrame = null;
+      this.releaseHeatmapGpuLease();
+      setGpuFeaturePath(HEATMAP_GPU_FEATURE, undefined);
+    }
     this.heatmapGpuRendererGl = gl;
   }
 
@@ -115,7 +148,7 @@ export class ChartHeatmapGpuCoordinator {
   }
 
   prepareHeatmapGpuCells(v: View, s: FootprintSeries): HeatmapGpuCellFrame | null {
-    if (!this.heatmapTexturePrototypeEnabled || this.heatmapGpuFailureLatched || !this.heatmapGpuRenderer) return null;
+    if (!this.supportsHeatmapGpu() || this.heatmapGpuFailureLatched || !this.heatmapGpuRenderer) return null;
     if (!this.host.orderbookHeatmap) return null;
     if (!(this.host.renderCoordinator?.getAnnotationLayerOrder() ?? []).includes("orderbook-heatmap")) return null;
     if (v.area.width <= 1 || v.area.height <= 1 || s.length === 0) return null;
@@ -130,12 +163,17 @@ export class ChartHeatmapGpuCoordinator {
   }
 
   renderHeatmapGpuCells(frame: HeatmapGpuCellFrame | null, v: View, s: FootprintSeries): void {
+    if (!this.supportsHeatmapGpu()) {
+      frame?.preparedLease?.release();
+      return;
+    }
     if (!frame) return;
     const gl = this.heatmapGpuRendererGl;
     if (!gl) {
       frame.preparedLease?.release();
       this.disposeHeatmapGpuRenderer();
       this.heatmapGpuFailureLatched = true;
+      setGpuFeaturePath(HEATMAP_GPU_FEATURE, "cpu");
       return;
     }
     if (!this.heatmapGpuRenderer) {
@@ -164,6 +202,7 @@ export class ChartHeatmapGpuCoordinator {
       this.disposeHeatmapGpuRenderer();
       this.heatmapGpuRendererGl = gl;
       this.heatmapGpuFailureLatched = true;
+      setGpuFeaturePath(HEATMAP_GPU_FEATURE, "cpu");
       return;
     }
     this.heatmapGpuFrame = {
@@ -184,6 +223,7 @@ export class ChartHeatmapGpuCoordinator {
       rangeTo: range[1],
     };
     this.heatmapGpuLease = frame.preparedLease ?? null;
+    setGpuFeaturePath(HEATMAP_GPU_FEATURE, "webgl2");
   }
 
   heatmapGpuSuppressedAnnotation(v: View, s: FootprintSeries, range: [number, number]): boolean {
@@ -212,6 +252,7 @@ export class ChartHeatmapGpuCoordinator {
 
   disposeHeatmapGpuRenderer(): void {
     this.heatmapGpuFrame = null;
+    setGpuFeaturePath(HEATMAP_GPU_FEATURE, undefined);
     this.releaseHeatmapGpuLease();
     this.heatmapGpuRenderer?.dispose();
     this.heatmapGpuRenderer = null;

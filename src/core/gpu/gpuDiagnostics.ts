@@ -28,6 +28,7 @@ export interface GpuDiagnosticsSnapshot {
   readonly adapter?: GpuAdapterInfo;
   readonly limits?: Record<string, number>;
   readonly counters: Record<string, number>;
+  readonly featurePaths?: Record<string, string>;
   readonly frame?: GpuFrameMetrics;
 }
 
@@ -46,6 +47,7 @@ const fallbacks: GpuFallbackRecord[] = [];
 let adapterInfo: GpuAdapterInfo | undefined;
 let limits: Record<string, number> | undefined;
 const counters: Record<string, number> = {};
+const featurePaths: Record<string, string> = {};
 
 const renderSamples: number[] = [];
 const intervalSamples: number[] = [];
@@ -86,6 +88,22 @@ export function recordGpuFallback(from: string, to: string, reason: string): voi
     timestamp: Date.now(),
   });
   const counterKey = `gpu.fallback.${from}.${reason}`;
+  counters[counterKey] = (counters[counterKey] ?? 0) + 1;
+  incrementPerformanceCounter(counterKey);
+}
+
+/** Record the active rendering path for a feature. */
+export function setGpuFeaturePath(feature: string, path: string | undefined): void {
+  if (path === undefined) {
+    delete featurePaths[feature];
+  } else {
+    featurePaths[feature] = path;
+  }
+}
+
+/** Record a feature-level GPU fallback without claiming that the whole backend changed. */
+export function recordGpuFeatureFallback(feature: string, reason: string): void {
+  const counterKey = `gpu.featureFallback.${feature}.${reason}`;
   counters[counterKey] = (counters[counterKey] ?? 0) + 1;
   incrementPerformanceCounter(counterKey);
 }
@@ -131,6 +149,7 @@ export function getGpuDiagnostics(): GpuDiagnosticsSnapshot {
     adapter: adapterInfo,
     limits: limits ? { ...limits } : undefined,
     counters: { ...counters },
+    featurePaths: { ...featurePaths },
     frame: frameMetrics,
   };
 }
@@ -145,6 +164,9 @@ export function resetGpuDiagnosticsForTest(): void {
   fallbacks.length = 0;
   adapterInfo = undefined;
   limits = undefined;
+  for (const key of Object.keys(featurePaths)) {
+    delete featurePaths[key];
+  }
   for (const key of Object.keys(counters)) {
     delete counters[key];
   }

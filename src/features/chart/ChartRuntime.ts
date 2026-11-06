@@ -178,6 +178,7 @@ class ChartRuntimeImpl implements ChartRuntime, ChartInputHost {
   private readonly panelRoot: HTMLElement;
   private _lastKnownSize: { width: number; height: number } | null = null;
   private readonly surface: ChartSurfaceModel;
+  private currentGpuSurface: GpuSurface | null = null;
   private readonly ownedElements: readonly HTMLElement[];
   private readonly _hook: HTMLElement;
   private readonly interactionCanvas: HTMLCanvasElement;
@@ -299,6 +300,7 @@ class ChartRuntimeImpl implements ChartRuntime, ChartInputHost {
     this.pipeline = pipeline;
     this.panelRoot = panelRoot;
     this.surface = surface;
+    this.currentGpuSurface = gpuSurface ?? null;
     this.panelId = panelId;
     this._hook = hook;
     this.ownedElements = [hook, gpuCanvas, annotationCanvas, interactionCanvas];
@@ -360,6 +362,7 @@ class ChartRuntimeImpl implements ChartRuntime, ChartInputHost {
     const self = this;
     this.heatmapGpuCoordinator = new ChartHeatmapGpuCoordinator({
       orderbookHeatmap: this.orderbookHeatmap,
+      get backendKind() { return self.currentGpuSurface?.kind ?? (gl ? "webgl2" : "canvas2d"); },
       get renderCoordinator() { return self.renderCoordinator; },
       renderer: this.renderer,
       invalidateSession: () => this.invalidateSession(),
@@ -486,6 +489,7 @@ class ChartRuntimeImpl implements ChartRuntime, ChartInputHost {
       },
       visibleRange: (v: View, total: number) => this.renderer.visibleRange(v, total),
       setSurface: (nextSurface: GpuSurface) => {
+        this.currentGpuSurface = nextSurface;
         this.renderer.setSurface(nextSurface);
         this.heatmapGpuCoordinator.setGl(
           nextSurface.kind === "webgl2"
