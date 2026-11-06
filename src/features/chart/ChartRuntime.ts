@@ -539,6 +539,7 @@ class ChartRuntimeImpl implements ChartRuntime, ChartInputHost {
       onLostContext: () => {
         this.heatmapGpuCoordinator.onLostContext();
       },
+      onBackendChanged: (backend) => this._hook.setAttribute("data-gpu-backend", backend),
       maxDevicePixelRatio: display.maxDevicePixelRatio,
       onResize: (w, h, dpr) => {
         this.view.pixelRatio = dpr;
