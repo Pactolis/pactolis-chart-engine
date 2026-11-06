@@ -1,6 +1,6 @@
 import type { View } from "../../core/engine/view.js";
 import type { FootprintSeries } from "../../core/model/footprint.js";
-import { HeatmapGpuRenderer, type HeatmapGpuCellFrame } from "./heatmap/gpu/heatmapGpuRenderer.js";
+import type { HeatmapGpuRenderer, HeatmapGpuCellFrame } from "./heatmap/gpu/heatmapGpuRenderer.js";
 import type { OrderbookHeatmapOverlay } from "../orderbook/heatmapOverlay.js";
 
 export interface HeatmapGpuRenderFrame {
@@ -36,6 +36,9 @@ export class ChartHeatmapGpuCoordinator {
   private _heatmapTexturePrototypeEnabled = false;
   private heatmapTexturePrototypeLastEnabled: boolean | null = null;
   private heatmapGpuRenderer: HeatmapGpuRenderer | null = null;
+  private heatmapGpuRendererReady = false;
+  private HeatmapGpuRendererClass: typeof HeatmapGpuRenderer | null = null;
+  private heatmapGpuRendererLoading: Promise<void> | null = null;
   private heatmapGpuRendererGl: WebGL2RenderingContext | null = null;
   private heatmapGpuFailureLatched = false;
   private heatmapGpuFrame: HeatmapGpuRenderFrame | null = null;
@@ -49,7 +52,21 @@ export class ChartHeatmapGpuCoordinator {
 
   set heatmapTexturePrototypeEnabled(enabled: boolean) {
     this._heatmapTexturePrototypeEnabled = enabled;
+    if (enabled) this.loadHeatmapGpuRenderer();
     this.host.invalidateSession();
+  }
+
+  private loadHeatmapGpuRenderer(): void {
+    if (this.heatmapGpuRendererReady || this.heatmapGpuRendererLoading) return;
+    this.heatmapGpuRendererLoading = import("./heatmap/gpu/heatmapGpuRenderer.js").then(({ HeatmapGpuRenderer }) => {
+      this.HeatmapGpuRendererClass = HeatmapGpuRenderer;
+      this.heatmapGpuRendererReady = true;
+      this.heatmapGpuRendererLoading = null;
+      if (this._heatmapTexturePrototypeEnabled) this.host.invalidateSession();
+    }).catch(() => {
+      this.heatmapGpuRendererLoading = null;
+      this.heatmapGpuFailureLatched = true;
+    });
   }
 
   isHeatmapTexturePrototypeEnabled(): boolean {
@@ -94,12 +111,12 @@ export class ChartHeatmapGpuCoordinator {
   }
 
   prepareHeatmapGpuCells(v: View, s: FootprintSeries): HeatmapGpuCellFrame | null {
-    if (!this.heatmapTexturePrototypeEnabled || this.heatmapGpuFailureLatched) return null;
+    if (!this.heatmapTexturePrototypeEnabled || this.heatmapGpuFailureLatched || !this.heatmapGpuRendererReady) return null;
     if (!this.host.orderbookHeatmap) return null;
     if (!(this.host.renderCoordinator?.getAnnotationLayerOrder() ?? []).includes("orderbook-heatmap")) return null;
     if (v.area.width <= 1 || v.area.height <= 1 || s.length === 0) return null;
 
-    if (!this.heatmapGpuRenderer) this.heatmapGpuRenderer = new HeatmapGpuRenderer();
+    if (!this.heatmapGpuRenderer && this.HeatmapGpuRendererClass) this.heatmapGpuRenderer = new this.HeatmapGpuRendererClass();
     const gpuRenderer = this.heatmapGpuRenderer;
     return this.host.orderbookHeatmap.prepareGpuCells(
       v,
@@ -118,7 +135,7 @@ export class ChartHeatmapGpuCoordinator {
       this.heatmapGpuFailureLatched = true;
       return;
     }
-    if (!this.heatmapGpuRenderer) this.heatmapGpuRenderer = new HeatmapGpuRenderer();
+    if (!this.heatmapGpuRenderer && this.HeatmapGpuRendererClass) this.heatmapGpuRenderer = new this.HeatmapGpuRendererClass();
     const range = this.host.renderer.visibleRange(v, s.length);
     let ok: boolean;
     try {

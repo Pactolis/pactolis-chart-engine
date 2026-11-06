@@ -89,6 +89,7 @@ export interface ChartSessionOptions {
   onRestoreContext: (gl: WebGL2RenderingContext) => void;
   /** Called when the GPU context is lost, after the session already cancelled RAF, marked GPU invalid, cleared dirty state and rejected any pending capture; symmetric to onRestoreContext. */
   onLostContext?: () => void;
+  onBackendChanged?: (backend: string) => void;
   /** Called after each resize so the caller can recompute view.area. */
   onResize?: (width: number, height: number, dpr: number) => void;
   /**
@@ -131,6 +132,7 @@ export class ChartSession {
   private readonly crosshair: Crosshair;
   private readonly onRestoreContextCb: (gl: WebGL2RenderingContext) => void;
   private readonly onLostContextCb?: () => void;
+  private readonly onBackendChangedCb?: (backend: string) => void;
   private readonly onResizeCb?: (w: number, h: number, dpr: number) => void;
   private readonly onRenderedCb?: (surfaces: ChartSurfaceDirty, changes: ChartChange) => void;
   private readonly onInvalidateCb?: (changes: ChartChange) => void;
@@ -201,6 +203,7 @@ export class ChartSession {
     this.crosshair = opts.crosshair;
     this.onRestoreContextCb = opts.onRestoreContext;
     this.onLostContextCb = opts.onLostContext;
+    this.onBackendChangedCb = opts.onBackendChanged;
     this.onResizeCb = opts.onResize;
     this.onRenderedCb = opts.onRendered;
     this.onInvalidateCb = opts.onInvalidate;
@@ -732,9 +735,11 @@ export class ChartSession {
           const fallbackGl = getChartWebGl2Context(fallbackCanvas);
           if (fallbackGl) {
             this.replaceSurface(new WebGl2Surface(fallbackCanvas, fallbackGl));
+            this.onBackendChangedCb?.("webgl2");
           } else {
             recordGpuFallback("webgl2", "canvas2d", "fallback_context_unavailable");
             this.replaceSurface(new Canvas2dSurface(fallbackCanvas));
+            this.onBackendChangedCb?.("canvas2d");
           }
         } catch (err) {
           console.error("[ChartSession] WebGPU fallback failed", err);
@@ -767,6 +772,7 @@ export class ChartSession {
         const fallbackCanvas = this.ownerDocument.createElement("canvas");
         const fallbackSurface = new Canvas2dSurface(fallbackCanvas);
         this.replaceSurface(fallbackSurface);
+        this.onBackendChangedCb?.("canvas2d");
       }, CONTEXT_RESTORE_TIMEOUT_MS);
     };
 

@@ -667,7 +667,7 @@ test("GpuDiagnostics percentile metrics, counters and copyGpuDiagnosticsJson out
   recordGpuFallback("webgpu", "webgl2", "device_lost");
 
   const diag = getGpuDiagnostics();
-  assert.equal(diag.active, "webgpu");
+  assert.equal(diag.active, "webgl2");
   assert.equal(diag.counters["gpu.backend.webgpu.frames"], 3);
   assert.ok(diag.frame.renderP50Ms > 0);
   assert.ok(diag.frame.renderP95Ms >= diag.frame.renderP50Ms);

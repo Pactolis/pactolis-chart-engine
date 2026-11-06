@@ -52,6 +52,9 @@ export class WebGpuQuadPipeline {
   private instanceBuffer: any;
   private instanceCapacityQuads: number;
   private disposed = false;
+  private readonly resolutionScratch = new Float32Array(4);
+  private lastResolutionWidth = Number.NaN;
+  private lastResolutionHeight = Number.NaN;
 
   constructor(
     private readonly device: any,
@@ -162,8 +165,16 @@ export class WebGpuQuadPipeline {
 
   updateResolution(width: number, height: number): void {
     if (this.disposed) return;
-    const res = new Float32Array([width > 0 ? width : 1, height > 0 ? height : 1, 0, 0]);
-    this.device.queue.writeBuffer(this.uniformBuffer, 0, res);
+    const nextWidth = width > 0 ? width : 1;
+    const nextHeight = height > 0 ? height : 1;
+    if (nextWidth === this.lastResolutionWidth && nextHeight === this.lastResolutionHeight) return;
+    this.lastResolutionWidth = nextWidth;
+    this.lastResolutionHeight = nextHeight;
+    this.resolutionScratch[0] = nextWidth;
+    this.resolutionScratch[1] = nextHeight;
+    this.resolutionScratch[2] = 0;
+    this.resolutionScratch[3] = 0;
+    this.device.queue.writeBuffer(this.uniformBuffer, 0, this.resolutionScratch);
   }
 
   uploadInstances(data: Float32Array, quadCount: number): void {

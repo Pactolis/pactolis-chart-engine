@@ -557,20 +557,24 @@ test("WebGpuQuadPipeline compiles shaders, writes uniforms, dynamic buffer growt
   const writtenFloats = new Float32Array(writtenBuffers[0].data.buffer);
   assert.equal(writtenFloats[0], 1920);
   assert.equal(writtenFloats[1], 1080);
+  pipeline.updateResolution(1920, 1080);
+  assert.equal(writtenBuffers.length, 1, "unchanged resolution must not write the uniform again");
+  pipeline.updateResolution(1920, 1081);
+  assert.equal(writtenBuffers.length, 2, "a changed resolution must update the uniform");
 
   // Upload instances within initial capacity
   const initialQuads = 500;
   const quadData = new Float32Array(initialQuads * FLOATS_PER_INSTANCE);
   pipeline.uploadInstances(quadData, initialQuads);
-  assert.equal(writtenBuffers.length, 2);
-  assert.equal(writtenBuffers[1].byteLength, initialQuads * BYTES_PER_INSTANCE);
+  assert.equal(writtenBuffers.length, 3);
+  assert.equal(writtenBuffers[2].byteLength, initialQuads * BYTES_PER_INSTANCE);
 
   // Upload instances exceeding initial capacity (triggers buffer reallocation)
   const largeQuads = 3000;
   const largeQuadData = new Float32Array(largeQuads * FLOATS_PER_INSTANCE);
   pipeline.uploadInstances(largeQuadData, largeQuads);
-  assert.equal(writtenBuffers.length, 3);
-  assert.equal(writtenBuffers[2].byteLength, largeQuads * BYTES_PER_INSTANCE);
+  assert.equal(writtenBuffers.length, 4);
+  assert.equal(writtenBuffers[3].byteLength, largeQuads * BYTES_PER_INSTANCE);
   // Verify instance buffer was recreated with at least required capacity
   const instanceBuffers = buffers.filter((b) => b.label === "QuadInstanceBuffer");
   assert.ok(instanceBuffers.length >= 2);

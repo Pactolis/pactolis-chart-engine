@@ -43,8 +43,7 @@ import type { ChartCaptureReadiness } from "./captureReadiness.js";
 import { evaluateChartDataState, type ChartDataState } from "./chartDataState.js";
 import { getChartWebGl2Context, type NativeChartCapture } from "./nativeCapture.js";
 import { createGpuSurface, createGpuSurfaceAsync } from "../../core/gpu/selectBackend.js";
-import { isWebGpuSupported } from "../../core/gpu/webgpu/webgpuDevice.js";
-import { onGpuSettingsChange, readGpuSettings } from "../../core/gpu/gpuSettings.js";
+import { isWebGpuSupported, onGpuSettingsChange, readGpuSettings } from "../../core/gpu/gpuSettings.js";
 import type { GpuSurface } from "../../core/gpu/gpuBackend.js";
 import {
   resolveChartDisplayOptions,
@@ -539,6 +538,7 @@ class ChartRuntimeImpl implements ChartRuntime, ChartInputHost {
       onLostContext: () => {
         this.heatmapGpuCoordinator.onLostContext();
       },
+      onBackendChanged: (backend) => this._hook.setAttribute("data-gpu-backend", backend),
       maxDevicePixelRatio: display.maxDevicePixelRatio,
       onResize: (w, h, dpr) => {
         this.view.pixelRatio = dpr;
