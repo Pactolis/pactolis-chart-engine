@@ -118,6 +118,7 @@ export class ChartHeatmapGpuCoordinator {
 
     if (!this.heatmapGpuRenderer && this.HeatmapGpuRendererClass) this.heatmapGpuRenderer = new this.HeatmapGpuRendererClass();
     const gpuRenderer = this.heatmapGpuRenderer;
+    if (!gpuRenderer) return null;
     return this.host.orderbookHeatmap.prepareGpuCells(
       v,
       s,
@@ -136,10 +137,15 @@ export class ChartHeatmapGpuCoordinator {
       return;
     }
     if (!this.heatmapGpuRenderer && this.HeatmapGpuRendererClass) this.heatmapGpuRenderer = new this.HeatmapGpuRendererClass();
+    const gpuRenderer = this.heatmapGpuRenderer;
+    if (!gpuRenderer) {
+      frame.preparedLease?.release();
+      return;
+    }
     const range = this.host.renderer.visibleRange(v, s.length);
     let ok: boolean;
     try {
-      ok = this.heatmapGpuRenderer.renderFrame(gl, frame, {
+      ok = gpuRenderer.renderFrame(gl, frame, {
         left: v.area.left,
         top: v.area.top,
         width: v.area.width,
