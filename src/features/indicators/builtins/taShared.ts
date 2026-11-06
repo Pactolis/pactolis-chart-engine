@@ -46,6 +46,8 @@ export interface MultiSeriesMeta extends Record<string, unknown> {
   formatter?: (value: number) => string;
   baseline?: number;
   horizontalLevels?: Array<{ value: number; color?: string; label?: string }>;
+  axisTicks?: number[];
+  fixedRange?: { min: number; max: number };
   readoutSeries?: PlotSeries[];
 }
 
@@ -125,6 +127,8 @@ export function prepareMultiSeries(
     formatter?: (value: number) => string;
     baseline?: number;
     horizontalLevels?: Array<{ value: number; color?: string; label?: string }>;
+    axisTicks?: number[];
+    fixedRange?: { min: number; max: number };
     readoutSeries?: PlotSeries[];
     message?: string;
   } = {},
@@ -135,9 +139,8 @@ export function prepareMultiSeries(
     return emptyPrepared(start, end, "no-data", options.message ?? "bu görünümde veri yok", options);
   }
 
-  // The pane fits the values of the visible range. The baseline (RSI 50, the zero
-  // of a CVD line) is a reference level only; zero stays in view when histogram
-  // bars are drawn from it.
+  // The default pane range fits visible values; bounded oscillators can opt into
+  // a fixed domain. Baselines otherwise remain references, except histogram zero.
   let min = Infinity;
   let max = -Infinity;
   let histogram = false;
@@ -158,6 +161,10 @@ export function prepareMultiSeries(
     min = Math.min(min, 0);
     max = Math.max(max, 0);
   }
+  if (options.fixedRange && options.fixedRange.max > options.fixedRange.min) {
+    min = options.fixedRange.min;
+    max = options.fixedRange.max;
+  }
   const primary = series[0]?.points ?? [];
   return {
     status: "ok",
@@ -171,6 +178,8 @@ export function prepareMultiSeries(
       formatter: options.formatter,
       baseline: options.baseline,
       horizontalLevels: options.horizontalLevels,
+      axisTicks: options.axisTicks,
+      fixedRange: options.fixedRange,
       readoutSeries: options.readoutSeries,
     },
   };
@@ -183,7 +192,11 @@ export function asMultiSeriesData(prepared: IndicatorPreparedData | undefined): 
 
 function multiSeriesScale(ctx: IndicatorDrawContext<MultiSeriesIndicatorSettings>, data: MultiSeriesPreparedData) {
   const { top, bottom } = panePlotBounds(ctx.rect, 8, 5);
-  const displayRange = indicatorDisplayRange(ctx.settings, data.range.min, data.range.max);
+  const displayRange = data.meta.fixedRange
+    ? (ctx.settings.paneScaleAuto === false
+      ? indicatorDisplayRange(ctx.settings, data.meta.fixedRange.min, data.meta.fixedRange.max)
+      : data.meta.fixedRange)
+    : indicatorDisplayRange(ctx.settings, data.range.min, data.range.max);
   const scale = createIndicatorScale({
     mode: data.meta.scaleMode,
     min: displayRange.min,
@@ -234,7 +247,7 @@ export function drawMultiSeries(ctx: IndicatorDrawContext<MultiSeriesIndicatorSe
     drawSeriesPath(ctx, plot, scale, top, bottom, lineWidth);
   }
 
-  if (settings.showAxisTicks) drawIndicatorAxisTicks(ctx, scale, top, bottom);
+  if (settings.showAxisTicks) drawIndicatorAxisTicks(ctx, scale, top, bottom, 3, data.meta.axisTicks);
 
   const last = lastVisibleValue(data.meta.series[0]);
   if (last && settingEnabled(settings, "showLastValueLabel", "showScaleLabel", true)) {
@@ -390,12 +403,12 @@ function emptyPrepared(
   endIndex: number,
   status: "hidden" | "no-data",
   message: string,
-  options: { scaleMode?: IndicatorScaleMode; formatter?: (value: number) => string; baseline?: number; horizontalLevels?: Array<{ value: number; color?: string; label?: string }> } = {},
+  options: { scaleMode?: IndicatorScaleMode; formatter?: (value: number) => string; baseline?: number; horizontalLevels?: Array<{ value: number; color?: string; label?: string }>; axisTicks?: number[]; fixedRange?: { min: number; max: number } } = {},
 ): MultiSeriesPreparedData {
   return {
     status,
     points: [],
-    range: { min: 0, max: 1, baseline: options.baseline },
+    range: { min: options.fixedRange?.min ?? 0, max: options.fixedRange?.max ?? 1, baseline: options.baseline },
     meta: {
       startIndex,
       endIndex,
@@ -404,6 +417,8 @@ function emptyPrepared(
       formatter: options.formatter,
       baseline: options.baseline,
       horizontalLevels: options.horizontalLevels,
+      axisTicks: options.axisTicks,
+      fixedRange: options.fixedRange,
     },
     message,
   };

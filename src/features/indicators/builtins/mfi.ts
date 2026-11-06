@@ -8,7 +8,7 @@ function prepareMfi(ctx: IndicatorDrawContext<MfiSettings>) {
   const { start, end } = visibleIndexRange(ctx); const bars = ctx.series.listReadonly();
   const values = moneyFlowIndex(seriesOhlcv(ctx.series), numericSetting(ctx.settings, "period", 14, 1, 200));
   const series: PlotSeries[] = [{ key: "mfi", label: "MFI", color: stringSetting(ctx.settings, "color", mfiColorDefault), points: makeNumberPoints(values, bars, start, end) }];
-  return prepareMultiSeries(ctx, series, { scaleMode: "percent", baseline: 50, horizontalLevels: [{ value: 80, label: "OB" }, { value: 20, label: "OS" }] });
+  return prepareMultiSeries(ctx, series, { scaleMode: "percent", baseline: 50, horizontalLevels: [{ value: 80, label: "OB" }, { value: 20, label: "OS" }], axisTicks: [80, 50, 20], fixedRange: { min: 0, max: 100 } });
 }
 export const mfiIndicatorDefinition: IndicatorDefinition<MfiSettings> = {
   type: "mfi", name: "MFI", category: "custom", defaultPane: "separate", canOverlay: false, defaultPlacement: "separate-pane", supportedPlacements: ["separate-pane"], paneHeight: 112,
