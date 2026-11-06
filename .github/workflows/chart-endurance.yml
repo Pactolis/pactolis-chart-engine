@@ -26,7 +26,7 @@ on:
         required: true
   # A change to this workflow or the census spec proves itself with a 30 min run.
   pull_request:
-    branches: [main]
+    branches: [main, integration/approved-prs]
     paths:
       - ".github/workflows/chart-endurance.yml"
       - "tests/browser/chart-multi-market-census.spec.ts"
