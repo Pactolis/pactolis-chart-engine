@@ -347,7 +347,7 @@ export class Overlay {
           if (!mainSuppressed && !empty) {
             this.drawLineLabels(view);
             drawPriceAxis(ctx, view, series.config.priceStep, series.config.pricePrecision, this.priceAxisKeepOut(view, crosshair), this.displayOptions);
-            drawPriceMarkers(ctx, view, this.priceMarkers, series.config.priceStep, series.config.pricePrecision);
+            drawPriceMarkers(ctx, view, this.priceMarkers, series.config.priceStep, series.config.pricePrecision, this.displayOptions);
           }
           drawTimeAxis(ctx, view, series, undefined, this.timeMarkers);
           continue;
@@ -433,7 +433,7 @@ export class Overlay {
           }
           if (crosshair.visible) {
             this.drawCrosshair(ctx, view, crosshair);
-            drawCrosshairPriceLabel(ctx, view, series, crosshair);
+            drawCrosshairPriceLabel(ctx, view, series, crosshair, this.displayOptions);
             drawCrosshairTimeLabel(ctx, view, series, crosshair);
           }
           break;
