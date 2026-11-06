@@ -119,7 +119,8 @@ jobs:
               if (!Number.isFinite(s.heapBytes) || s.heapBytes < 0 || s.heapBytes > 1073741824) fail("sample " + (i + 1) + " heap");
               if (i) { const gap = s.at - samples[i - 1].at; if (!(gap > 0) || gap > 1.5 * sampleMs) fail("sample " + (i + 1) + " interval spacing"); }
             });
-            if (!spanValid(samples)) fail("sample span under expected span minus total jitter bound");`n            // #345: match writer cadence count, numbering, interval spacing and total span.
+            if (!spanValid(samples)) fail("sample span under expected span minus total jitter bound");
+            // #345: match writer cadence count, numbering, interval spacing and total span.
             if (e.stages?.financial !== "passed" || e.stages?.cleanup !== "passed" || e.stages?.evidence !== "written") fail("stages");
             const served = e.provenance?.servedSources ?? [];
             if (!served.length || !served.every((r) => r.status === 200 && /^[0-9a-f]{64}$/.test(r.bodySha256 ?? ""))) fail("served provenance");
