@@ -1271,7 +1271,7 @@ export class Overlay {
         { text: `H ${fmtFixed(bar.high, pd, locale)}`, color: uiColor.textHeading, dropOrder: 0 },
         { text: `L ${fmtFixed(bar.low, pd, locale)}`, color: uiColor.textHeading, dropOrder: 0 },
         { text: `C ${fmtFixed(bar.close, pd, locale)}`, color: uiColor.textHeading, dropOrder: 0 },
-        { text: `Vol ${unit}${volTxt}`, color: uiColor.textHeading, dropOrder: 2 },
+        { text: `${labels.volume} ${unit}${volTxt}`, color: uiColor.textHeading, dropOrder: 2 },
         { text: deltaPart, color: bar.delta >= 0 ? uiColor.buy : uiColor.sell, dropOrder: 3 },
         { text: tradesPart, color: uiColor.textSecondary, dropOrder: 4 },
         { text: rangePart, color: uiColor.textSecondary, dropOrder: 5 },

@@ -20,7 +20,7 @@ test("a host that answers nothing gets the desktop defaults", () => {
     assert.equal(resolved.maxDevicePixelRatio, null, "follows the window's devicePixelRatio");
     assert.deepEqual({ ...resolved.webgl }, { antialias: true, powerPreference: "default" });
     assert.deepEqual({ ...resolved.webgl }, { ...DEFAULT_CHART_WEBGL_OPTIONS });
-    assert.deepEqual({ ...resolved.labels }, { trades: "Trades", range: "Range", change: "Change", volume: "Volume", price: "Price" });
+    assert.deepEqual({ ...resolved.labels }, { trades: "Trades", range: "Range", change: "Chg", volume: "Vol", price: "Price" });
     assert.equal(resolved.numberLocale, "en-US");
   }
   assert.equal(DEFAULT_CHART_LAYOUT_OPTIONS.density, "regular");
@@ -29,10 +29,10 @@ test("a host that answers nothing gets the desktop defaults", () => {
 
 test("host HUD labels and number locale resolve independently and compare structurally", () => {
   const resolved = resolveChartDisplayOptions({ labels: { trades: "İşlemler", price: "Fiyat" }, numberLocale: "tr-tr" });
-  assert.deepEqual({ ...resolved.labels }, { trades: "İşlemler", range: "Range", change: "Change", volume: "Volume", price: "Fiyat" });
+  assert.deepEqual({ ...resolved.labels }, { trades: "İşlemler", range: "Range", change: "Chg", volume: "Vol", price: "Fiyat" });
   assert.equal(resolved.numberLocale, "tr-TR");
   assert.deepEqual({ ...resolveChartDisplayOptions({ labels: { trades: "İşlemler" } }).labels },
-    { trades: "İşlemler", range: "Range", change: "Change", volume: "Volume", price: "Price" });
+    { trades: "İşlemler", range: "Range", change: "Chg", volume: "Vol", price: "Price" });
   for (const bad of ["", "not a locale", "en_US", undefined, null]) {
     assert.equal(resolveChartDisplayOptions({ numberLocale: bad }).numberLocale, "en-US");
   }

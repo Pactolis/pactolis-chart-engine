@@ -66,8 +66,8 @@ const MAX_FIT_COLUMNS = 4000;
 const DEFAULT_CHART_DISPLAY_LABELS: ChartDisplayLabels = Object.freeze({
   trades: "Trades",
   range: "Range",
-  change: "Change",
-  volume: "Volume",
+  change: "Chg",
+  volume: "Vol",
   price: "Price",
 });
 
