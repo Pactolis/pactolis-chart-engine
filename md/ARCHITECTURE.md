@@ -69,10 +69,11 @@ Arka uç tercihi yapılandırma veya `?gpu=auto|webgpu|webgl2|canvas2d` URL para
 1. `webgpu` seçildiğinde sistem `requestWebGpuDevice()` ile cihaz edinmeyi dener; cihaz edinilemezse veya cihaz kaybı (`device.lost`, `uncapturederror`) gerçekleşirse otomatik olarak `webgl2` arka ucuna düşer.
 2. `webgl2` kullanılamazsa veya bağlam geri yükleme zaman aşımına uğrarsa (5 saniye) `Canvas2dSurface` yüzeyine düşüş sağlanır (`replaceSurface`).
 3. Tüm geçişler, tanılamalar (`GpuDiagnostics`: sayaçlar, p50/p95 kare süreleri, düşüş nedenleri) üzerinden izlenir ve `copyGpuDiagnosticsJson()` ile dışa aktarılabilir.
+4. Yalnız tek bir özelliğin yavaş yola düşmesi arka ucun düşüşü sayılmaz: resident heatmap yalnız WebGL2'de çalışır; WebGPU/Canvas2D'de hazırlık yapılmaz, heatmap Canvas2D annotation yolunda çizilir ve bu durum `recordGpuFeatureFallback("resident-heatmap", "canvas2d", "backend_unsupported")` ile (aktif arka uç değişmeden) bir kez kaydedilir. Etkin yol `GpuDiagnosticsSnapshot.features["resident-heatmap"]` (`gpu` | `cpu`) alanında okunur.
 
 ### WebGPU İmplementasyonunun Mevcut Teknik Sınırları:
 - `WebGpuQuadPipeline` ([src/core/gpu/webgpu/webgpuQuadPipeline.ts](../src/core/gpu/webgpu/webgpuQuadPipeline.ts)) `GPUBufferUsage.VERTEX | COPY_DST` instanced vertex buffer kullanır; `RenderPipeline` ve `BindGroup` nesneleri pipeline oluşturulurken bir kez üretilir ve cache'lenir.
-- Her flush çağrısında `uploadInstances(...)`, CPU'da biriken `Float32Array` quad verisini 0. offsetten itibaren tam `byteLength` olarak `device.queue.writeBuffer` ile GPU'ya gönderir.
+- Her flush çağrısında `uploadInstances(...)`, CPU'da biriken quad verisini 0. offsetten itibaren tam `byteLength` olarak `device.queue.writeBuffer` ile GPU'ya gönderir. Instance düzeni WebGL2 `QuadBatch` ile aynı 20 bayttır: rect `float32x4` + renk `unorm8x4` (`WebGpuQuadSink` rengi 0-255'e yuvarlayıp bayt olarak yazar); iki arka uç aynı sahne için quad başına aynı bayt sayısını yükler.
 - Mevcut mimaride storage buffer (`GPUBufferUsage.STORAGE`), compute shader veya partial buffer upload bulunmaz; `WebGpuHeatmapLayer` fragment shader texture sampling (`textureSample`) kullanır.
 
 ### Performans Telemetrisi ve Sınırları:

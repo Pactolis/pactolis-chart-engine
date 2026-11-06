@@ -369,6 +369,7 @@ class ChartRuntimeImpl implements ChartRuntime, ChartInputHost {
       invalidateSession: () => this.invalidateSession(),
     });
     this.heatmapGpuCoordinator.setGl(gl);
+    this.heatmapGpuCoordinator.setBackendKind(gpuSurface?.kind ?? "webgl2");
     this.magnetController = new ChartMagnetController({
       view: this.view,
       pipeline: this.pipeline,
@@ -491,6 +492,7 @@ class ChartRuntimeImpl implements ChartRuntime, ChartInputHost {
       visibleRange: (v: View, total: number) => this.renderer.visibleRange(v, total),
       setSurface: (nextSurface: GpuSurface) => {
         this.renderer.setSurface(nextSurface);
+        this.heatmapGpuCoordinator.setBackendKind(nextSurface.kind);
         this.heatmapGpuCoordinator.setGl(
           nextSurface.kind === "webgl2"
             ? nextSurface.getGlContext?.() ?? null

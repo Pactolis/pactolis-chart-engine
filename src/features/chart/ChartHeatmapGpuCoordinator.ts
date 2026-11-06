@@ -1,4 +1,5 @@
 import type { View } from "../../core/engine/view.js";
+import { recordGpuFeatureFallback, setGpuFeaturePath } from "../../core/gpu/gpuDiagnostics.js";
 import type { FootprintSeries } from "../../core/model/footprint.js";
 import type { HeatmapGpuRenderer, HeatmapGpuCellFrame } from "./heatmap/gpu/heatmapGpuRenderer.js";
 import type { OrderbookHeatmapOverlay } from "../orderbook/heatmapOverlay.js";
@@ -28,12 +29,20 @@ export interface ChartHeatmapGpuCoordinatorHost {
   invalidateSession(): void;
 }
 
+const RESIDENT_HEATMAP_FEATURE = "resident-heatmap";
+
 /**
  * Coordinates GPU-accelerated orderbook heatmap texture lifecycle, preparation, rendering,
  * budget latching, and annotation suppression.
+ *
+ * The resident heatmap renderer only exists for WebGL2. On any other backend the heatmap stays on the
+ * Canvas2D annotation path, and that is reported once through GPU diagnostics instead of preparing
+ * cells that can never be drawn.
  */
 export class ChartHeatmapGpuCoordinator {
   private _heatmapTexturePrototypeEnabled = false;
+  private backendKind = "webgl2";
+  private backendUnsupportedReported = false;
   private heatmapTexturePrototypeLastEnabled: boolean | null = null;
   private heatmapGpuRenderer: HeatmapGpuRenderer | null = null;
   private heatmapGpuRendererReady = false;
@@ -53,10 +62,13 @@ export class ChartHeatmapGpuCoordinator {
   set heatmapTexturePrototypeEnabled(enabled: boolean) {
     this._heatmapTexturePrototypeEnabled = enabled;
     if (enabled) this.loadHeatmapGpuRenderer();
+    else setGpuFeaturePath(RESIDENT_HEATMAP_FEATURE, null);
+    this.backendUnsupportedReported = false;
     this.host.invalidateSession();
   }
 
   private loadHeatmapGpuRenderer(): void {
+    if (this.backendKind !== "webgl2") return;
     if (this.heatmapGpuRendererReady || this.heatmapGpuRendererLoading) return;
     this.heatmapGpuRendererLoading = import("./heatmap/gpu/heatmapGpuRenderer.js").then(({ HeatmapGpuRenderer }) => {
       this.HeatmapGpuRendererClass = HeatmapGpuRenderer;
@@ -95,6 +107,22 @@ export class ChartHeatmapGpuCoordinator {
     this.heatmapGpuRendererGl = gl;
   }
 
+  /** Tells the coordinator which backend draws the chart; only `webgl2` can host the resident heatmap. */
+  setBackendKind(kind: string): void {
+    if (this.backendKind === kind) return;
+    this.backendKind = kind;
+    this.backendUnsupportedReported = false;
+    if (kind !== "webgl2") this.disposeHeatmapGpuRenderer();
+    else if (this._heatmapTexturePrototypeEnabled) this.loadHeatmapGpuRenderer();
+  }
+
+  private reportBackendUnsupported(): void {
+    if (this.backendUnsupportedReported) return;
+    this.backendUnsupportedReported = true;
+    recordGpuFeatureFallback(RESIDENT_HEATMAP_FEATURE, "canvas2d", "backend_unsupported");
+    setGpuFeaturePath(RESIDENT_HEATMAP_FEATURE, "cpu");
+  }
+
   resetFailureLatch(): void {
     this.heatmapGpuFailureLatched = false;
   }
@@ -121,7 +149,12 @@ export class ChartHeatmapGpuCoordinator {
   }
 
   prepareHeatmapGpuCells(v: View, s: FootprintSeries): HeatmapGpuCellFrame | null {
-    if (!this.heatmapTexturePrototypeEnabled || this.heatmapGpuFailureLatched || !this.heatmapGpuRendererReady) return null;
+    if (!this.heatmapTexturePrototypeEnabled) return null;
+    if (this.backendKind !== "webgl2") {
+      this.reportBackendUnsupported();
+      return null;
+    }
+    if (this.heatmapGpuFailureLatched || !this.heatmapGpuRendererReady) return null;
     if (!this.host.orderbookHeatmap) return null;
     if (!(this.host.renderCoordinator?.getAnnotationLayerOrder() ?? []).includes("orderbook-heatmap")) return null;
     if (v.area.width <= 1 || v.area.height <= 1 || s.length === 0) return null;
@@ -144,6 +177,7 @@ export class ChartHeatmapGpuCoordinator {
       frame.preparedLease?.release();
       this.disposeHeatmapGpuRenderer();
       this.heatmapGpuFailureLatched = true;
+      setGpuFeaturePath(RESIDENT_HEATMAP_FEATURE, "cpu");
       return;
     }
     if (!this.heatmapGpuRenderer && this.HeatmapGpuRendererClass) this.heatmapGpuRenderer = new this.HeatmapGpuRendererClass();
@@ -174,8 +208,10 @@ export class ChartHeatmapGpuCoordinator {
       this.disposeHeatmapGpuRenderer();
       this.heatmapGpuRendererGl = gl;
       this.heatmapGpuFailureLatched = true;
+      setGpuFeaturePath(RESIDENT_HEATMAP_FEATURE, "cpu");
       return;
     }
+    setGpuFeaturePath(RESIDENT_HEATMAP_FEATURE, "gpu");
     this.heatmapGpuFrame = {
       dataKey: frame.dataKey,
       threshold: frame.threshold,

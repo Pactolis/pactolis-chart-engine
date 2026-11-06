@@ -42,7 +42,12 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
 }
 `;
 
-export const FLOATS_PER_INSTANCE = 8;
+/**
+ * One instance is 20 bytes, the same packing as the WebGL2 `QuadBatch`: rect as four float32 followed by the
+ * colour as four unorm8 bytes (read as `vec4<f32>` in the shader). `FLOATS_PER_INSTANCE` counts the 32-bit
+ * words per instance so a `Float32Array` view (rect + one word holding the packed colour) maps 1:1 onto it.
+ */
+export const FLOATS_PER_INSTANCE = 5;
 export const BYTES_PER_INSTANCE = FLOATS_PER_INSTANCE * 4;
 
 export class WebGpuQuadPipeline {
@@ -120,7 +125,7 @@ export class WebGpuQuadPipeline {
               {
                 shaderLocation: 1,
                 offset: 16,
-                format: "float32x4", // color: r, g, b, a
+                format: "unorm8x4", // color: r, g, b, a (normalized to 0..1 in the shader)
               },
             ],
           },

@@ -9,14 +9,24 @@ import type {
   RgbaFrame,
 } from "../gpuBackend.js";
 import type { WebGpuDeviceHandle } from "./webgpuDevice.js";
-import { WebGpuQuadPipeline } from "./webgpuQuadPipeline.js";
+import { FLOATS_PER_INSTANCE, WebGpuQuadPipeline } from "./webgpuQuadPipeline.js";
 
+function colorByte(channel: number): number {
+  return Math.max(0, Math.min(255, Math.round(channel * 255)));
+}
+
+/**
+ * Collects quads in the 20-byte instance layout of `WebGpuQuadPipeline` (rect as float32x4 + colour as
+ * unorm8x4), written the same way as the WebGL2 `QuadBatch` so both backends upload the same bytes per quad.
+ */
 export class WebGpuQuadSink implements QuadSink {
   data: Float32Array;
+  private bytes: Uint8Array;
   count = 0;
 
   constructor(initialCapacity = 10000) {
-    this.data = new Float32Array(initialCapacity * 8);
+    this.data = new Float32Array(initialCapacity * FLOATS_PER_INSTANCE);
+    this.bytes = new Uint8Array(this.data.buffer);
   }
 
   reset(): void {
@@ -24,21 +34,25 @@ export class WebGpuQuadSink implements QuadSink {
   }
 
   rect(x: number, y: number, w: number, h: number, c: RGBA): void {
-    const requiredLength = (this.count + 1) * 8;
+    const requiredLength = (this.count + 1) * FLOATS_PER_INSTANCE;
     if (requiredLength > this.data.length) {
       const next = new Float32Array(Math.max(requiredLength, this.data.length * 2));
-      next.set(this.data);
+      // Copy bytes, not floats: the colour word is packed bytes, not a meaningful float32.
+      const nextBytes = new Uint8Array(next.buffer);
+      nextBytes.set(this.bytes);
       this.data = next;
+      this.bytes = nextBytes;
     }
-    const offset = this.count * 8;
+    const offset = this.count * FLOATS_PER_INSTANCE;
     this.data[offset] = x;
     this.data[offset + 1] = y;
     this.data[offset + 2] = w;
     this.data[offset + 3] = h;
-    this.data[offset + 4] = c.r;
-    this.data[offset + 5] = c.g;
-    this.data[offset + 6] = c.b;
-    this.data[offset + 7] = c.a;
+    const colorOffset = (offset + 4) * 4;
+    this.bytes[colorOffset] = colorByte(c.r);
+    this.bytes[colorOffset + 1] = colorByte(c.g);
+    this.bytes[colorOffset + 2] = colorByte(c.b);
+    this.bytes[colorOffset + 3] = colorByte(c.a);
     this.count++;
   }
 }

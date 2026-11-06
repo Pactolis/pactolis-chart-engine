@@ -596,6 +596,35 @@ test("WebGpuQuadPipeline compiles shaders, writes uniforms, dynamic buffer growt
   assert.equal(pipeline.uniformBuffer.destroyed, true);
 });
 
+test("WebGpuQuadPipeline uses the 20-byte instance layout of the WebGL2 QuadBatch (rect float32x4 + color unorm8x4)", () => {
+  assert.equal(FLOATS_PER_INSTANCE, 5);
+  assert.equal(BYTES_PER_INSTANCE, 20);
+  const { device } = makeFakeWebGpuDevice("rgba8unorm");
+  const pipeline = new WebGpuQuadPipeline(device, "rgba8unorm", 1024);
+  const layout = pipeline.pipeline.vertex.buffers[0];
+  assert.equal(layout.arrayStride, 20);
+  assert.deepEqual(
+    layout.attributes.map((attribute) => [attribute.shaderLocation, attribute.offset, attribute.format]),
+    [[0, 0, "float32x4"], [1, 16, "unorm8x4"]],
+  );
+  pipeline.dispose();
+});
+
+test("WebGpuQuadSink packs colours as clamped unorm8 bytes after the rect and keeps them when it grows", () => {
+  const sink = new WebGpuQuadSink(2);
+  sink.rect(1, 2, 3, 4, { r: 1, g: 0, b: 0.5, a: 1 });
+  sink.rect(5, 6, 7, 8, { r: 2, g: -1, b: 0, a: 0.2 });
+  sink.rect(9, 10, 11, 12, { r: 0, g: 0, b: 0, a: 0 });
+  assert.equal(sink.count, 3);
+  assert.ok(sink.data.length >= 3 * FLOATS_PER_INSTANCE);
+  const bytes = new Uint8Array(sink.data.buffer);
+  assert.deepEqual([...bytes.subarray(16, 20)], [255, 0, 128, 255]);
+  assert.deepEqual([...bytes.subarray(36, 40)], [255, 0, 0, 51]);
+  assert.deepEqual([...sink.data.subarray(0, 4)], [1, 2, 3, 4]);
+  assert.deepEqual([...sink.data.subarray(5, 9)], [5, 6, 7, 8]);
+  assert.deepEqual([...sink.data.subarray(10, 14)], [9, 10, 11, 12]);
+});
+
 test("WebGpuSurface renders frame lifecycle and writes instance data via WebGpuQuadSink", () => {
   const { device, passes, writtenBuffers, submittedCommands } = makeFakeWebGpuDevice("rgba8unorm");
   const ctx = makeFakeWebGpuContext(device, "rgba8unorm");
@@ -636,6 +665,8 @@ test("WebGpuSurface renders frame lifecycle and writes instance data via WebGpuQ
   assert.ok(passes.length >= 1);
   assert.ok(submittedCommands.length >= 1);
   assert.equal(passes[0].draws[0].instanceCount, 2);
+  const instanceWrites = writtenBuffers.filter((wb) => wb.buffer.label === "QuadInstanceBuffer");
+  assert.equal(instanceWrites.at(-1).byteLength, 2 * BYTES_PER_INSTANCE, "two quads upload 2 x 20 bytes");
 
   // Check uniform resolution was set to logical bounds (500x250)
   const uniformWrites = writtenBuffers.filter((wb) => wb.buffer.label === "QuadResolutionUniform");

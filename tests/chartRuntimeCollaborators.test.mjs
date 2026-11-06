@@ -4,6 +4,7 @@ import assert from "node:assert/strict";
 const { View } = await import("../dist/core/engine/view.js");
 const { FootprintSeries } = await import("../dist/core/model/footprint.js");
 const { settings } = await import("../dist/core/settings.js");
+const { getGpuDiagnostics, resetGpuDiagnosticsForTest } = await import("../dist/core/gpu/gpuDiagnostics.js");
 const {
   ChartMagnetController,
   MAGNET_SNAP_THRESHOLD_CSS_PX,
@@ -211,6 +212,56 @@ test("ChartHeatmapGpuCoordinator: manages lifecycle, lease, and annotation suppr
 
   // Cleanup
   coordinator.dispose();
+});
+
+test("ChartHeatmapGpuCoordinator: a non-WebGL2 backend skips resident heatmap preparation and reports backend_unsupported once", async () => {
+  resetGpuDiagnosticsForTest();
+  let prepareCalls = 0;
+  const host = {
+    orderbookHeatmap: {
+      currentDataKey: () => "data-key-1",
+      prepareGpuCells: () => {
+        prepareCalls++;
+        return { dataKey: "data-key-1", threshold: 10, ceiling: 100, preparedLease: { release: () => {} } };
+      },
+    },
+    renderCoordinator: { getAnnotationLayerOrder: () => ["orderbook-heatmap", "candles"] },
+    renderer: { visibleRange: () => [0, 10] },
+    invalidateSession: () => {},
+  };
+  const view = new View();
+  view.area = { left: 0, top: 0, width: 800, height: 600 };
+  view.colWidth = 20;
+  view.priceTop = 50000;
+  view.pricePerPx = 1;
+  const series = new FootprintSeries({ intervalMs: 60000, priceStep: 1 });
+  series.loadBars([{ startTime: 0, open: 10, high: 20, low: 5, close: 15, volume: 10, delta: 0, count: 1, cells: new Map() }]);
+
+  const coordinator = new ChartHeatmapGpuCoordinator(host);
+  coordinator.setBackendKind("webgpu");
+  coordinator.setHeatmapTexturePrototypeEnabled(true);
+  await coordinator.whenHeatmapGpuRendererReady();
+
+  assert.equal(coordinator.prepareHeatmapGpuCells(view, series), null);
+  assert.equal(coordinator.prepareHeatmapGpuCells(view, series), null);
+  assert.equal(prepareCalls, 0, "no cells are prepared for a backend that cannot draw them");
+  assert.equal(coordinator.heatmapGpuSuppressedAnnotation(view, series, [0, 10]), false, "the annotation heatmap keeps drawing");
+
+  const diagnostics = getGpuDiagnostics();
+  assert.equal(diagnostics.counters["gpu.fallback.resident-heatmap.backend_unsupported"], 1, "reported once, not per frame");
+  assert.equal(diagnostics.features?.["resident-heatmap"], "cpu");
+  assert.equal(diagnostics.active, "webgl2", "a feature fallback must not change the active backend");
+  assert.deepEqual(diagnostics.fallbacks.map((record) => [record.from, record.to, record.reason]), [["resident-heatmap", "canvas2d", "backend_unsupported"]]);
+
+  coordinator.setBackendKind("webgl2");
+  await coordinator.whenHeatmapGpuRendererReady();
+  assert.ok(coordinator.prepareHeatmapGpuCells(view, series), "WebGL2 prepares cells as before");
+  assert.equal(prepareCalls, 1);
+
+  coordinator.setHeatmapTexturePrototypeEnabled(false);
+  assert.equal(getGpuDiagnostics().features, undefined, "disabling the heatmap clears the published path");
+  coordinator.dispose();
+  resetGpuDiagnosticsForTest();
 });
 
 // ---------------------------------------------------------------------------
