@@ -5,6 +5,10 @@ const { View } = await import("../dist/core/engine/view.js");
 const { FootprintSeries } = await import("../dist/core/model/footprint.js");
 const { settings } = await import("../dist/core/settings.js");
 const {
+  getGpuDiagnostics,
+  resetGpuDiagnosticsForTest,
+} = await import("../dist/core/gpu/gpuDiagnostics.js");
+const {
   ChartMagnetController,
   MAGNET_SNAP_THRESHOLD_CSS_PX,
 } = await import("../dist/features/chart/ChartMagnetController.js");
@@ -204,6 +208,47 @@ test("ChartHeatmapGpuCoordinator: manages lifecycle, lease, and annotation suppr
 
   // Cleanup
   coordinator.dispose();
+});
+
+test("ChartHeatmapGpuCoordinator: backend changes scope feature fallback episodes", () => {
+  resetGpuDiagnosticsForTest();
+  let backendKind = "webgl2";
+  const host = {
+    get backendKind() { return backendKind; },
+    orderbookHeatmap: null,
+    renderer: { visibleRange: () => [0, 0] },
+    invalidateSession: () => Promise.resolve(),
+  };
+  const coordinator = new ChartHeatmapGpuCoordinator(host);
+  const view = new View();
+  const series = new FootprintSeries({ intervalMs: 60000, priceStep: 1 });
+  coordinator.setHeatmapTexturePrototypeEnabled(true);
+
+  try {
+    backendKind = "webgpu";
+    coordinator.prepareHeatmapGpuCells(view, series);
+    coordinator.renderHeatmapGpuCells(null, view, series);
+    coordinator.prepareHeatmapGpuCells(view, series);
+    let diagnostics = getGpuDiagnostics();
+    assert.equal(diagnostics.featurePaths?.["orderbook-heatmap"], undefined);
+    assert.equal(diagnostics.counters["gpu.featureFallback.orderbook-heatmap.backend_unsupported"], 1);
+    assert.equal(diagnostics.active, "webgl2", "feature fallback must not change the selected backend");
+
+    backendKind = "webgl2";
+    coordinator.prepareHeatmapGpuCells(view, series);
+    backendKind = "webgpu";
+    coordinator.prepareHeatmapGpuCells(view, series);
+    diagnostics = getGpuDiagnostics();
+    assert.equal(diagnostics.counters["gpu.featureFallback.orderbook-heatmap.backend_unsupported"], 2,
+      "returning to WebGL2 ends the unsupported episode; re-entry counts a new episode");
+    assert.equal(diagnostics.active, "webgl2");
+
+    coordinator.setHeatmapTexturePrototypeEnabled(false);
+    assert.equal(getGpuDiagnostics().featurePaths?.["orderbook-heatmap"], undefined);
+  } finally {
+    coordinator.dispose();
+    resetGpuDiagnosticsForTest();
+  }
 });
 
 // ---------------------------------------------------------------------------
