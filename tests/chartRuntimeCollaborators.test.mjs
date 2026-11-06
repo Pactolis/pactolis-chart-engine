@@ -138,7 +138,7 @@ test("ChartMagnetController: drawMagnetSnapRing executes without canvas errors",
 // 2. ChartHeatmapGpuCoordinator Tests
 // ---------------------------------------------------------------------------
 
-test("ChartHeatmapGpuCoordinator: manages lifecycle, lease, and annotation suppression", () => {
+test("ChartHeatmapGpuCoordinator: manages lifecycle, lease, and annotation suppression", async () => {
   let sessionInvalidated = false;
   let leasedReleased = false;
 
@@ -172,6 +172,7 @@ test("ChartHeatmapGpuCoordinator: manages lifecycle, lease, and annotation suppr
 
   // Toggle prototype
   coordinator.setHeatmapTexturePrototypeEnabled(true);
+  await coordinator.whenHeatmapGpuRendererReady();
   assert.equal(coordinator.isHeatmapTexturePrototypeEnabled(), true);
   assert.equal(sessionInvalidated, true);
 
