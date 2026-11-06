@@ -219,6 +219,9 @@ test("ChartHeatmapGpuCoordinator: backend changes update fallback and feature pa
     invalidateSession() {},
   };
   const coordinator = new ChartHeatmapGpuCoordinator(host);
+  assert.equal(getGpuDiagnostics().features?.["resident-heatmap"], undefined);
+  coordinator.setGl({});
+  assert.equal(getGpuDiagnostics().features?.["resident-heatmap"], undefined);
   coordinator.setHeatmapTexturePrototypeEnabled(true);
   const view = new View(); view.area = { left: 0, top: 0, width: 100, height: 100 };
   const series = new FootprintSeries({ intervalMs: 60_000, priceStep: 1 });
@@ -228,10 +231,15 @@ test("ChartHeatmapGpuCoordinator: backend changes update fallback and feature pa
   assert.equal(prepares, 0);
   assert.equal(getGpuDiagnostics().features?.["resident-heatmap"], "cpu");
   assert.equal(getGpuDiagnostics().fallbacks.filter((item) => item.from === "resident-heatmap").length, 1);
-  backendKind = "webgl2"; coordinator.setGl({});
+  assert.equal(getGpuDiagnostics().fallbacks.at(-1)?.reason, "backend_unsupported");
+  coordinator.setHeatmapTexturePrototypeEnabled(false);
+  assert.equal(getGpuDiagnostics().features?.["resident-heatmap"], undefined);
+  coordinator.prepareHeatmapGpuCells(view, series);
+  assert.equal(getGpuDiagnostics().features?.["resident-heatmap"], undefined);
+  backendKind = "webgl2"; coordinator.setHeatmapTexturePrototypeEnabled(true); coordinator.setGl({});
   coordinator.prepareHeatmapGpuCells(view, series);
   assert.equal(prepares, 1);
-  assert.equal(getGpuDiagnostics().features?.["resident-heatmap"], "gpu");
+  assert.notEqual(getGpuDiagnostics().features?.["resident-heatmap"], "gpu");
   coordinator.dispose();
 });
 // 3. ChartLevelContextController Tests

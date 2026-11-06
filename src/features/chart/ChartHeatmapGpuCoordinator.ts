@@ -61,6 +61,7 @@ export class ChartHeatmapGpuCoordinator {
 
   setHeatmapTexturePrototypeEnabled(enabled: boolean): void {
     this.heatmapTexturePrototypeEnabled = enabled;
+    if (!enabled) setGpuFeaturePath("resident-heatmap", null);
   }
 
   setResidentHeatmapEnabled(enabled: boolean): void {
@@ -69,7 +70,12 @@ export class ChartHeatmapGpuCoordinator {
 
   setGl(gl: WebGL2RenderingContext | null): void {
     this.heatmapGpuRendererGl = gl;
-    if (gl) { setGpuFeaturePath("resident-heatmap", "gpu"); this.fallbackRecorded = false; }
+    if (!this.heatmapTexturePrototypeEnabled) {
+      setGpuFeaturePath("resident-heatmap", null);
+    } else if (!gl || (this.host.backendKind && this.host.backendKind !== "webgl2")) {
+      setGpuFeaturePath("resident-heatmap", "cpu");
+    }
+    if (gl) this.fallbackRecorded = false;
   }
 
   resetFailureLatch(): void {
@@ -98,10 +104,14 @@ export class ChartHeatmapGpuCoordinator {
   }
 
   prepareHeatmapGpuCells(v: View, s: FootprintSeries): HeatmapGpuCellFrame | null {
-    if (!this.heatmapTexturePrototypeEnabled || this.heatmapGpuFailureLatched) return null;
+    if (!this.heatmapTexturePrototypeEnabled) {
+      setGpuFeaturePath("resident-heatmap", null);
+      return null;
+    }
+    if (this.heatmapGpuFailureLatched) return null;
     if (this.host.backendKind && this.host.backendKind !== "webgl2") {
       setGpuFeaturePath("resident-heatmap", "cpu");
-      if (!this.fallbackRecorded) { recordGpuFeatureFallback("resident-heatmap", "cpu", "backend-unavailable"); this.fallbackRecorded = true; }
+      if (!this.fallbackRecorded) { recordGpuFeatureFallback("resident-heatmap", "cpu", "backend_unsupported"); this.fallbackRecorded = true; }
       return null;
     }
     if (!this.host.orderbookHeatmap) return null;
@@ -152,6 +162,7 @@ export class ChartHeatmapGpuCoordinator {
       this.heatmapGpuFailureLatched = true;
       return;
     }
+    setGpuFeaturePath("resident-heatmap", "gpu");
     this.heatmapGpuFrame = {
       dataKey: frame.dataKey,
       threshold: frame.threshold,

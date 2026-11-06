@@ -606,11 +606,17 @@ test("WebGpuQuadPipeline uses 20-byte rect-float/color-unorm instance layout", (
   pipeline.dispose();
 });
 
-test("WebGpuQuadSink packs clamped color bytes after each rect and grows without data loss", () => {
+test("WebGpuQuadSink reuses packed-color view and refreshes it on growth", () => {
   const sink = new WebGpuQuadSink(2);
+  const initialColorView = sink.colorBytes;
   sink.rect(1, 2, 3, 4, { r: 1, g: 0, b: 0.5, a: 1 });
   sink.rect(5, 6, 7, 8, { r: 2, g: -1, b: 0, a: 0.2 });
+  assert.equal(sink.colorBytes, initialColorView);
   sink.rect(9, 10, 11, 12, { r: 0, g: 0, b: 0, a: 0 });
+  assert.notEqual(sink.colorBytes, initialColorView);
+  const grownColorView = sink.colorBytes;
+  sink.rect(13, 14, 15, 16, { r: 1, g: 0.5, b: 0.25, a: 0.75 });
+  assert.equal(sink.colorBytes, grownColorView);
   assert.equal(sink.count, 3);
   assert.ok(sink.data.length >= 3 * FLOATS_PER_INSTANCE);
   const bytes = new Uint8Array(sink.data.buffer, sink.data.byteOffset, sink.data.byteLength);
