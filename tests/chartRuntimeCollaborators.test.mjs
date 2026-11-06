@@ -251,6 +251,70 @@ test("ChartHeatmapGpuCoordinator: backend changes scope feature fallback episode
   }
 });
 
+test("ChartHeatmapGpuCoordinator: publishes successful WebGL2 render and clears stale GPU claims", async () => {
+  resetGpuDiagnosticsForTest();
+  const host = {
+    backendKind: "webgl2",
+    orderbookHeatmap: null,
+    renderer: { visibleRange: () => [0, 1] },
+    invalidateSession: () => Promise.resolve(),
+  };
+  const coordinator = new ChartHeatmapGpuCoordinator(host);
+  const view = new View();
+  view.area = { left: 0, top: 0, width: 100, height: 100 };
+  const series = new FootprintSeries({ intervalMs: 60000, priceStep: 1 });
+  series.loadBars([{ startTime: 0, open: 10, high: 20, low: 5, close: 15, volume: 10, delta: 0, count: 1, cells: new Map() }]);
+  const lease = { releases: 0, release() { this.releases++; } };
+  const frame = { dataKey: "gpu-frame", threshold: 1, ceiling: 10, preparedLease: lease };
+  try {
+    coordinator.setHeatmapTexturePrototypeEnabled(true);
+    await coordinator.whenHeatmapGpuRendererReady();
+    const gpuRenderer = coordinator.heatmapGpuRenderer;
+    let renderResult = true;
+    let renderCalls = 0;
+    gpuRenderer.renderFrame = () => { renderCalls++; return renderResult; };
+    coordinator.setGl({});
+    coordinator.renderHeatmapGpuCells(frame, view, series);
+    assert.equal(renderCalls, 1, "WebGL2 renderer is invoked");
+    assert.equal(getGpuDiagnostics().featurePaths["orderbook-heatmap"], "webgl2");
+    assert.equal(coordinator.getFrame().dataKey, "gpu-frame");
+    coordinator.setHeatmapTexturePrototypeEnabled(false);
+    assert.equal(coordinator.getFrame(), null, "disabling clears an actual GPU claim");
+    assert.equal(lease.releases, 1, "disabling releases the resident frame lease");
+    coordinator.setHeatmapTexturePrototypeEnabled(true);
+    await coordinator.whenHeatmapGpuRendererReady();
+    const reenabledRenderer = coordinator.heatmapGpuRenderer;
+    reenabledRenderer.renderFrame = () => { renderCalls++; return renderResult; };
+    coordinator.setGl({});
+    coordinator.renderHeatmapGpuCells({ ...frame, preparedLease: { releases: 0, release() {} } }, view, series);
+    assert.equal(coordinator.getFrame().dataKey, "gpu-frame", "reenabling permits a fresh GPU claim");
+
+    coordinator.setGl({});
+    assert.equal(coordinator.getFrame(), null);
+    assert.equal(lease.releases, 1);
+    assert.equal(getGpuDiagnostics().featurePaths?.["orderbook-heatmap"], undefined);
+
+    const nextLease = { releases: 0, release() { this.releases++; } };
+    renderResult = false;
+    coordinator.renderHeatmapGpuCells({ ...frame, dataKey: "failed-frame", preparedLease: nextLease }, view, series);
+    assert.equal(nextLease.releases, 1);
+    assert.equal(coordinator.getFrame(), null);
+    assert.equal(getGpuDiagnostics().featurePaths["orderbook-heatmap"], "cpu");
+
+    coordinator.resetFailureLatch();
+    coordinator.setHeatmapTexturePrototypeEnabled(false);
+    assert.equal(coordinator.getFrame(), null);
+    assert.equal(getGpuDiagnostics().featurePaths?.["orderbook-heatmap"], undefined);
+    coordinator.setHeatmapTexturePrototypeEnabled(true);
+    await coordinator.whenHeatmapGpuRendererReady();
+    assert.equal(coordinator.isHeatmapTexturePrototypeEnabled(), true);
+    assert.equal(coordinator.getFrame(), null);
+  } finally {
+    coordinator.dispose();
+    resetGpuDiagnosticsForTest();
+  }
+});
+
 // ---------------------------------------------------------------------------
 // 3. ChartLevelContextController Tests
 // ---------------------------------------------------------------------------

@@ -65,7 +65,11 @@ export class ChartHeatmapGpuCoordinator {
 
   setHeatmapTexturePrototypeEnabled(enabled: boolean): void {
     this.heatmapTexturePrototypeEnabled = enabled;
-    if (!enabled) setGpuFeaturePath(HEATMAP_GPU_FEATURE, undefined);
+    if (!enabled) {
+      this.heatmapGpuFrame = null;
+      this.releaseHeatmapGpuLease();
+      setGpuFeaturePath(HEATMAP_GPU_FEATURE, undefined);
+    }
   }
 
   private supportsHeatmapGpu(): boolean {
