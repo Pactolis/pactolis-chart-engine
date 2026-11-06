@@ -4,7 +4,13 @@ Bu doküman, `@pactolis/chart-engine` çoklu market grafik ızgaralarında (`tes
 
 ## 1. Çalıştırma Metodolojisi ve Donanım Modu
 
-Varsayılan CI ortamında (`ubuntu-latest` GitHub Actions PR runner) fiziksel GPU bulunmadığından, Playwright testleri Chromium'u SwiftShader CPU rasterizer ile başlatır (`--use-gl=angle --use-angle=swiftshader-webgl --enable-unsafe-swiftshader`).
+PR census'in CI ortamı `.github/workflows/ci.yml` içindeki `census-shards` job'udur: GitHub-hosted `ubuntu-24.04`, Node.js 24, Playwright tarafından kurulan headless Chromium, `census` projesi ve shard başına tek worker. Her test viewport'u `1280x720`'dir; çalıştırılan senaryo, grafik sayısı/marketler, bar, indicator ve drawing sayıları JSON `runnerFixture`/`workload` alanlarında yazılır. Runner adı/OS/arch, Chromium ve Node sürümleri, `hardwareConcurrency`, GPU modu ve fixture bilgisi de kanıta eklenir. `hardwareConcurrency`, tarayıcının bildirdiği mantıksal işlemci sayısıdır; fiziksel CPU tahsisi garantisi değildir.
+
+Varsayılan CI ortamında fiziksel GPU kullanılmaz. Playwright census Chromium'u SwiftShader yazılım rasterizer'ı ile başlatır: `--use-gl=angle --use-angle=swiftshader-webgl --enable-unsafe-swiftshader`. Kanıttaki `rendererIdentity`, mevcut WebGL2 chart context'inden `WEBGL_debug_renderer_info` ile unmasked vendor/renderer'ı okur. Context/extension/parameter sorgusu kullanılamıyorsa başarılı ama `available: false` ve neden alanıyla raporlanır; donanım modeli tahmin edilmez. Donanım modu yalnız `CHART_CENSUS_GPU_MODE=hardware` ile açılır ve CI varsayılanı değildir.
+
+Canlı/burst profilinin telemetry faz sınırları worker'ın baseline, burst başlangıcı ve recovery başlangıcı mesajlarının işlendiği anlardır; `phaseDeltas` içindeki `count` ve `totalMs` bitiş snapshot'ı eksi başlangıç snapshot'ıdır. Snapshot p50/p95/p99 değerleri kümülatif olduğundan faz quantile'ı olarak çıkarılmaz; JSON'da `quantiles: null` ve gerekçesi yer alır. Baseline/burst/recovery için eşzamanlı sınır snapshot'ları olmayan diğer profillerde telemetry phase deltas unavailable olarak açıkça yazılır.
+
+Bu PR yalnız `CE(#89 Aşama 1)` kanıt kapsamıdır: mevcut RAF ve diğer eşikler/gates değişmez; SwiftShader canlı/burst kapısı motor telemetrisiyle ikame edilmez. Baseline tablosu ve Issue #89'un tamamı bu aşamayla onaylanmış sayılmaz; Issue açık kalır.
 
 Yerel geliştirici makinelerinde veya GPU donanımına sahip runner'larda gerçek GPU hızlandırmasını devreye almak için `CHART_CENSUS_GPU_MODE=hardware` ortam değişkeni kullanılır:
 
