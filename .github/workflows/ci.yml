@@ -30,6 +30,7 @@ jobs:
       - run: npm run check
       - run: npm test
       - run: npm run check:exports
+      - run: npm run check:default-import-graph
       - run: npm pack --dry-run
 
   browser:

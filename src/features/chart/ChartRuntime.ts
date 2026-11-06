@@ -43,8 +43,7 @@ import type { ChartCaptureReadiness } from "./captureReadiness.js";
 import { evaluateChartDataState, type ChartDataState } from "./chartDataState.js";
 import { getChartWebGl2Context, type NativeChartCapture } from "./nativeCapture.js";
 import { createGpuSurface, createGpuSurfaceAsync } from "../../core/gpu/selectBackend.js";
-import { isWebGpuSupported } from "../../core/gpu/webgpu/webgpuDevice.js";
-import { onGpuSettingsChange, readGpuSettings } from "../../core/gpu/gpuSettings.js";
+import { isWebGpuSupported, onGpuSettingsChange, readGpuSettings } from "../../core/gpu/gpuSettings.js";
 import type { GpuSurface } from "../../core/gpu/gpuBackend.js";
 import {
   resolveChartDisplayOptions,
@@ -1744,6 +1743,10 @@ class ChartRuntimeImpl implements ChartRuntime, ChartInputHost {
 
   setResidentHeatmapEnabled(enabled: boolean): void {
     this.heatmapGpuCoordinator.setResidentHeatmapEnabled(enabled);
+  }
+
+  whenHeatmapGpuRendererReady(): Promise<void> {
+    return this.heatmapGpuCoordinator.whenHeatmapGpuRendererReady();
   }
 }
 

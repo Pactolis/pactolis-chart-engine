@@ -25,6 +25,7 @@ type RuntimeProbe = {
   subscribeCaptureReadiness(cb: (snapshot: ChartCaptureReadiness) => void): () => void;
   setVisibleTimeRange(range: { from: number; to: number }): void;
   invalidate(): void;
+  whenHeatmapGpuRendererReady(): Promise<void>;
   orderbookHeatmap: {
     bars: Map<number, { t: number; cells: number[][] }>;
     chunks: Map<number, { status: string }>;
@@ -316,7 +317,10 @@ async function nativeFrame(page: Page, id: string, oracle: Oracle, enable?: bool
   return page.evaluate(async ({ id, oracle, enable }) => {
     const { getChartRuntime } = await import("/harness/chart.ts");
     const r = getChartRuntime(id) as unknown as RuntimeProbe;
-    if (enable !== undefined) r.heatmapTexturePrototypeEnabled = enable;
+    if (enable !== undefined) {
+      r.heatmapTexturePrototypeEnabled = enable;
+      if (enable && typeof r.whenHeatmapGpuRendererReady === "function") await r.whenHeatmapGpuRendererReady();
+    }
     const root = document.querySelector('[data-testid="chart-hook"][data-panel-id="' + id + '"]')?.parentElement;
     const gpu = root?.querySelector<HTMLCanvasElement>('canvas[data-chart-surface="gpu-scene"]');
     const ann = root?.querySelector<HTMLCanvasElement>('canvas[data-chart-surface="annotation"]');
