@@ -1,5 +1,9 @@
 export type GpuBackendPreference = "auto" | "webgpu" | "webgl2" | "canvas2d";
 
+export function isWebGpuSupported(): boolean {
+  return typeof navigator !== "undefined" && Boolean((navigator as any).gpu);
+}
+
 export interface GpuSettings {
   readonly backend: GpuBackendPreference;
   readonly residentHeatmap: boolean;

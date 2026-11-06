@@ -10,9 +10,9 @@ import {
   createGpuSurfaceAsync,
 } from "../dist/core/gpu/selectBackend.js";
 import {
-  isWebGpuSupported,
   requestWebGpuDevice,
   resetSharedWebGpuDevice,
+  isWebGpuSupported,
 } from "../dist/core/gpu/webgpu/webgpuDevice.js";
 import {
   WebGpuQuadPipeline,
