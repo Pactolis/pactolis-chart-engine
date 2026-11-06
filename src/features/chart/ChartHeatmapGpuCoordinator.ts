@@ -2,6 +2,7 @@ import type { View } from "../../core/engine/view.js";
 import type { FootprintSeries } from "../../core/model/footprint.js";
 import { HeatmapGpuRenderer, type HeatmapGpuCellFrame } from "./heatmap/gpu/heatmapGpuRenderer.js";
 import type { OrderbookHeatmapOverlay } from "../orderbook/heatmapOverlay.js";
+import { recordGpuFeatureFallback, setGpuFeaturePath } from "../../core/gpu/gpuDiagnostics.js";
 
 export interface HeatmapGpuRenderFrame {
   dataKey: string;
@@ -26,6 +27,7 @@ export interface ChartHeatmapGpuCoordinatorHost {
   readonly renderCoordinator?: { getAnnotationLayerOrder(): readonly string[] };
   readonly renderer: { visibleRange(view: View, seriesLength: number): [number, number] };
   invalidateSession(): void;
+  readonly backendKind?: string;
 }
 
 /**
@@ -40,6 +42,7 @@ export class ChartHeatmapGpuCoordinator {
   private heatmapGpuFailureLatched = false;
   private heatmapGpuFrame: HeatmapGpuRenderFrame | null = null;
   private heatmapGpuLease: { release(): void } | null = null;
+  private fallbackRecorded = false;
 
   constructor(private readonly host: ChartHeatmapGpuCoordinatorHost) {}
 
@@ -66,6 +69,7 @@ export class ChartHeatmapGpuCoordinator {
 
   setGl(gl: WebGL2RenderingContext | null): void {
     this.heatmapGpuRendererGl = gl;
+    if (gl) { setGpuFeaturePath("resident-heatmap", "gpu"); this.fallbackRecorded = false; }
   }
 
   resetFailureLatch(): void {
@@ -95,6 +99,11 @@ export class ChartHeatmapGpuCoordinator {
 
   prepareHeatmapGpuCells(v: View, s: FootprintSeries): HeatmapGpuCellFrame | null {
     if (!this.heatmapTexturePrototypeEnabled || this.heatmapGpuFailureLatched) return null;
+    if (this.host.backendKind && this.host.backendKind !== "webgl2") {
+      setGpuFeaturePath("resident-heatmap", "cpu");
+      if (!this.fallbackRecorded) { recordGpuFeatureFallback("resident-heatmap", "cpu", "backend-unavailable"); this.fallbackRecorded = true; }
+      return null;
+    }
     if (!this.host.orderbookHeatmap) return null;
     if (!(this.host.renderCoordinator?.getAnnotationLayerOrder() ?? []).includes("orderbook-heatmap")) return null;
     if (v.area.width <= 1 || v.area.height <= 1 || s.length === 0) return null;
@@ -193,6 +202,7 @@ export class ChartHeatmapGpuCoordinator {
     this.heatmapGpuRenderer?.dispose();
     this.heatmapGpuRenderer = null;
     this.heatmapGpuRendererGl = null;
+    setGpuFeaturePath("resident-heatmap", null);
   }
 
   dispose(): void {

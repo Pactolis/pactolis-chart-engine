@@ -4,6 +4,7 @@ import assert from "node:assert/strict";
 const { View } = await import("../dist/core/engine/view.js");
 const { FootprintSeries } = await import("../dist/core/model/footprint.js");
 const { settings } = await import("../dist/core/settings.js");
+const { getGpuDiagnostics, resetGpuDiagnosticsForTest } = await import("../dist/core/gpu/gpuDiagnostics.js");
 const {
   ChartMagnetController,
   MAGNET_SNAP_THRESHOLD_CSS_PX,
@@ -206,6 +207,33 @@ test("ChartHeatmapGpuCoordinator: manages lifecycle, lease, and annotation suppr
 });
 
 // ---------------------------------------------------------------------------
+test("ChartHeatmapGpuCoordinator: backend changes update fallback and feature path", () => {
+  resetGpuDiagnosticsForTest();
+  let backendKind = "webgl2";
+  let prepares = 0;
+  const host = {
+    get backendKind() { return backendKind; },
+    orderbookHeatmap: { currentDataKey: () => "key", prepareGpuCells: () => { prepares++; return { dataKey: "key", threshold: 1, ceiling: 2 }; } },
+    renderCoordinator: { getAnnotationLayerOrder: () => ["orderbook-heatmap"] },
+    renderer: { visibleRange: () => [0, 1] },
+    invalidateSession() {},
+  };
+  const coordinator = new ChartHeatmapGpuCoordinator(host);
+  coordinator.setHeatmapTexturePrototypeEnabled(true);
+  const view = new View(); view.area = { left: 0, top: 0, width: 100, height: 100 };
+  const series = new FootprintSeries({ intervalMs: 60_000, priceStep: 1 });
+  series.loadBars([{ startTime: 0, open: 1, high: 2, low: 0, close: 1, volume: 1, delta: 0, count: 1, cells: new Map() }]);
+  backendKind = "webgpu";
+  coordinator.prepareHeatmapGpuCells(view, series); coordinator.prepareHeatmapGpuCells(view, series);
+  assert.equal(prepares, 0);
+  assert.equal(getGpuDiagnostics().features?.["resident-heatmap"], "cpu");
+  assert.equal(getGpuDiagnostics().fallbacks.filter((item) => item.from === "resident-heatmap").length, 1);
+  backendKind = "webgl2"; coordinator.setGl({});
+  coordinator.prepareHeatmapGpuCells(view, series);
+  assert.equal(prepares, 1);
+  assert.equal(getGpuDiagnostics().features?.["resident-heatmap"], "gpu");
+  coordinator.dispose();
+});
 // 3. ChartLevelContextController Tests
 // ---------------------------------------------------------------------------
 

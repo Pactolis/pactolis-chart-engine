@@ -234,6 +234,7 @@ class ChartRuntimeImpl implements ChartRuntime, ChartInputHost {
   private readonly syncController: ChartSyncController;
   private readonly magnetController: ChartMagnetController;
   private readonly heatmapGpuCoordinator: ChartHeatmapGpuCoordinator;
+  private currentGpuSurface: GpuSurface | undefined;
   private readonly levelContextController: ChartLevelContextController;
   private readonly hookAttrCache = new Map<string, string>();
   private lastSeriesTailSig: string | null = null;
@@ -291,6 +292,7 @@ class ChartRuntimeImpl implements ChartRuntime, ChartInputHost {
     display: ResolvedChartDisplayOptions,
     gpuSurface?: GpuSurface,
   ) {
+    this.currentGpuSurface = gpuSurface;
     this.requestedChartType = initialState.chartType ?? settings.chartType;
     this.state = {
       ...initialState,
@@ -363,6 +365,7 @@ class ChartRuntimeImpl implements ChartRuntime, ChartInputHost {
       orderbookHeatmap: this.orderbookHeatmap,
       get renderCoordinator() { return self.renderCoordinator; },
       renderer: this.renderer,
+      get backendKind() { return self.currentGpuSurface?.kind ?? "webgl2"; },
       invalidateSession: () => this.invalidateSession(),
     });
     this.heatmapGpuCoordinator.setGl(gl);
@@ -487,6 +490,7 @@ class ChartRuntimeImpl implements ChartRuntime, ChartInputHost {
       },
       visibleRange: (v: View, total: number) => this.renderer.visibleRange(v, total),
       setSurface: (nextSurface: GpuSurface) => {
+        this.currentGpuSurface = nextSurface;
         this.renderer.setSurface(nextSurface);
         this.heatmapGpuCoordinator.setGl(
           nextSurface.kind === "webgl2"
