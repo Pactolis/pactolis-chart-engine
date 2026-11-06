@@ -230,7 +230,7 @@ test("ChartHeatmapGpuCoordinator: backend changes scope feature fallback episode
     coordinator.renderHeatmapGpuCells(null, view, series);
     coordinator.prepareHeatmapGpuCells(view, series);
     let diagnostics = getGpuDiagnostics();
-    assert.equal(diagnostics.featurePaths?.["orderbook-heatmap"], undefined);
+    assert.equal(diagnostics.featurePaths?.["orderbook-heatmap"], "cpu", "enabled heatmap uses CPU on WebGPU");
     assert.equal(diagnostics.counters["gpu.featureFallback.orderbook-heatmap.backend_unsupported"], 1);
     assert.equal(diagnostics.active, "webgl2", "feature fallback must not change the selected backend");
 

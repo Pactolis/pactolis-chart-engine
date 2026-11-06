@@ -78,7 +78,7 @@ export class ChartHeatmapGpuCoordinator {
       return false;
     }
     if ((this.host.backendKind ?? "webgl2") !== "webgl2") {
-      setGpuFeaturePath(HEATMAP_GPU_FEATURE, undefined);
+      setGpuFeaturePath(HEATMAP_GPU_FEATURE, "cpu");
       if (!this.heatmapGpuUnsupportedEpisode) {
         recordGpuFeatureFallback(HEATMAP_GPU_FEATURE, "backend_unsupported");
         this.heatmapGpuUnsupportedEpisode = true;
@@ -86,6 +86,7 @@ export class ChartHeatmapGpuCoordinator {
       return false;
     }
     this.heatmapGpuUnsupportedEpisode = false;
+    if (!this.heatmapGpuFrame) setGpuFeaturePath(HEATMAP_GPU_FEATURE, "cpu");
     return true;
   }
 

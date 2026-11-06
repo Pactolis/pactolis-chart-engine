@@ -54,6 +54,10 @@ Davranışı değiştirmezler; telefonda `?perf` ile gerçek cihaz ölçümünü
 Harness bu seçenekleri URL'den okur: `?density=compact&fit=70&axisw=62&axish=32&dprcap=2&antialias=0&power=low-power`
 ([harness/chart.ts](../harness/chart.ts)); `setDisplayOptions(...)` aynı cevabı çalışırken değiştirir.
 
+## GPU diagnostics feature paths
+
+The diagnostics snapshot `featurePaths` reports the active path for enabled features. `featurePaths["orderbook-heatmap"]` is `"webgl2"` after a successful WebGL2 heatmap GPU frame and `"cpu"` while CPU rendering is active, including enabled WebGPU/Canvas2D operation and pending/failed GPU rendering. The key is absent (`undefined`) only while the heatmap feature is disabled or unregistered. Consumers (including FE/#703) should rely on these stable values rather than infer the path from the global backend.
+
 ## Generic host mount/dispose wiring (minimal)
 
 ```ts
