@@ -156,8 +156,6 @@ test("ChartHeatmapGpuCoordinator: manages lifecycle, lease, and annotation suppr
     }),
   };
 
-  let resolveRendererReady;
-  const rendererReady = new Promise((resolve) => { resolveRendererReady = resolve; });
   let invalidationCount = 0;
   const host = {
     orderbookHeatmap: mockOverlay,
@@ -170,18 +168,19 @@ test("ChartHeatmapGpuCoordinator: manages lifecycle, lease, and annotation suppr
     invalidateSession: () => {
       sessionInvalidated = true;
       invalidationCount++;
-      if (invalidationCount === 2) resolveRendererReady();
     },
   };
 
   const coordinator = new ChartHeatmapGpuCoordinator(host);
   assert.equal(coordinator.isHeatmapTexturePrototypeEnabled(), false);
+  await coordinator.whenHeatmapGpuRendererReady();
+  assert.equal(invalidationCount, 0, "disabled heatmap must not trigger a lazy renderer load");
 
   // Toggle prototype
   coordinator.setHeatmapTexturePrototypeEnabled(true);
   assert.equal(coordinator.isHeatmapTexturePrototypeEnabled(), true);
   assert.equal(sessionInvalidated, true);
-  await rendererReady;
+  await coordinator.whenHeatmapGpuRendererReady();
   assert.equal(invalidationCount, 2, "lazy renderer load invalidates the session when ready");
 
   const view = new View();

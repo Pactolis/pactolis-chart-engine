@@ -17,6 +17,7 @@ test.use({ launchOptions: { args: [...FUNCTIONAL_WEBGL_ARGS] } });
  */
 type RuntimeProbe = {
   heatmapTexturePrototypeEnabled?: boolean;
+  whenHeatmapGpuRendererReady?(): Promise<void>;
   view: View;
   pipeline: { series: FootprintSeries };
   getState(): ChartPanelState;
@@ -317,6 +318,8 @@ async function nativeFrame(page: Page, id: string, oracle: Oracle, enable?: bool
     const { getChartRuntime } = await import("/harness/chart.ts");
     const r = getChartRuntime(id) as unknown as RuntimeProbe;
     if (enable !== undefined) r.heatmapTexturePrototypeEnabled = enable;
+    // The heatmap renderer is imported lazily; frames before it is ready use the CPU fallback by design.
+    if (enable) await r.whenHeatmapGpuRendererReady?.();
     const root = document.querySelector('[data-testid="chart-hook"][data-panel-id="' + id + '"]')?.parentElement;
     const gpu = root?.querySelector<HTMLCanvasElement>('canvas[data-chart-surface="gpu-scene"]');
     const ann = root?.querySelector<HTMLCanvasElement>('canvas[data-chart-surface="annotation"]');

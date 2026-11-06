@@ -69,6 +69,16 @@ export class ChartHeatmapGpuCoordinator {
     });
   }
 
+  /**
+   * Resolves once the lazily imported heatmap GPU renderer is available (after the session was invalidated
+   * for it) or the load failed. Resolves immediately when the heatmap is disabled or already loaded.
+   */
+  whenHeatmapGpuRendererReady(): Promise<void> {
+    if (!this._heatmapTexturePrototypeEnabled || this.heatmapGpuRendererReady) return Promise.resolve();
+    this.loadHeatmapGpuRenderer();
+    return this.heatmapGpuRendererLoading ?? Promise.resolve();
+  }
+
   isHeatmapTexturePrototypeEnabled(): boolean {
     return this._heatmapTexturePrototypeEnabled;
   }

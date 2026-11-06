@@ -247,6 +247,10 @@ class ChartRuntimeImpl implements ChartRuntime, ChartInputHost {
     this.heatmapGpuCoordinator.setHeatmapTexturePrototypeEnabled(enabled);
   }
 
+  whenHeatmapGpuRendererReady(): Promise<void> {
+    return this.heatmapGpuCoordinator.whenHeatmapGpuRendererReady();
+  }
+
   get heatmapGpuFrame(): unknown {
     return this.heatmapGpuCoordinator.getFrame();
   }
