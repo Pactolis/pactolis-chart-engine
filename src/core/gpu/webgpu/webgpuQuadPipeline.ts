@@ -42,7 +42,8 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
 }
 `;
 
-export const FLOATS_PER_INSTANCE = 8;
+/** One instance is rect float32x4 followed by RGBA unorm8x4 (20 bytes total). */
+export const FLOATS_PER_INSTANCE = 5;
 export const BYTES_PER_INSTANCE = FLOATS_PER_INSTANCE * 4;
 
 export class WebGpuQuadPipeline {
@@ -117,7 +118,7 @@ export class WebGpuQuadPipeline {
               {
                 shaderLocation: 1,
                 offset: 16,
-                format: "float32x4", // color: r, g, b, a
+                format: "unorm8x4", // color: r, g, b, a normalized to 0..1
               },
             ],
           },
