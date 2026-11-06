@@ -28,6 +28,8 @@ export interface GpuDiagnosticsSnapshot {
   readonly adapter?: GpuAdapterInfo;
   readonly limits?: Record<string, number>;
   readonly counters: Record<string, number>;
+  /** Active path of features that can run on the GPU or the CPU, e.g. `resident-heatmap` -> `gpu` | `cpu`. */
+  readonly features?: Record<string, string>;
   readonly frame?: GpuFrameMetrics;
 }
 
@@ -46,6 +48,7 @@ const fallbacks: GpuFallbackRecord[] = [];
 let adapterInfo: GpuAdapterInfo | undefined;
 let limits: Record<string, number> | undefined;
 const counters: Record<string, number> = {};
+const featurePaths: Record<string, string> = {};
 
 const renderSamples: number[] = [];
 const intervalSamples: number[] = [];
@@ -89,6 +92,24 @@ export function recordGpuFallback(from: string, to: string, reason: string): voi
   incrementPerformanceCounter(counterKey);
 }
 
+/**
+ * Records that a single feature (not the whole backend) runs on a slower path. Unlike `recordGpuFallback`
+ * it leaves the active backend untouched, so a WebGPU session that only lacks one GPU feature still
+ * reports `webgpu`.
+ */
+export function recordGpuFeatureFallback(feature: string, to: string, reason: string): void {
+  fallbacks.push({ from: feature, to, reason, timestamp: Date.now() });
+  const counterKey = `gpu.fallback.${feature}.${reason}`;
+  counters[counterKey] = (counters[counterKey] ?? 0) + 1;
+  incrementPerformanceCounter(counterKey);
+}
+
+/** Publishes (or, with `null`, clears) the path a GPU-capable feature currently runs on. */
+export function setGpuFeaturePath(feature: string, path: string | null): void {
+  if (path === null) delete featurePaths[feature];
+  else featurePaths[feature] = path;
+}
+
 export function recordGpuContextEvent(kind: "lost" | "restored" | "createFailed"): void {
   let counterKey: string;
   if (kind === "lost") {
@@ -130,6 +151,7 @@ export function getGpuDiagnostics(): GpuDiagnosticsSnapshot {
     adapter: adapterInfo,
     limits: limits ? { ...limits } : undefined,
     counters: { ...counters },
+    features: Object.keys(featurePaths).length > 0 ? { ...featurePaths } : undefined,
     frame: frameMetrics,
   };
 }
@@ -146,6 +168,9 @@ export function resetGpuDiagnosticsForTest(): void {
   limits = undefined;
   for (const key of Object.keys(counters)) {
     delete counters[key];
+  }
+  for (const key of Object.keys(featurePaths)) {
+    delete featurePaths[key];
   }
   renderSamples.length = 0;
   intervalSamples.length = 0;
