@@ -156,6 +156,9 @@ test("ChartHeatmapGpuCoordinator: manages lifecycle, lease, and annotation suppr
     }),
   };
 
+  let resolveRendererReady;
+  const rendererReady = new Promise((resolve) => { resolveRendererReady = resolve; });
+  let invalidationCount = 0;
   const host = {
     orderbookHeatmap: mockOverlay,
     renderCoordinator: {
@@ -164,7 +167,11 @@ test("ChartHeatmapGpuCoordinator: manages lifecycle, lease, and annotation suppr
     renderer: {
       visibleRange: () => [0, 10],
     },
-    invalidateSession: () => { sessionInvalidated = true; },
+    invalidateSession: () => {
+      sessionInvalidated = true;
+      invalidationCount++;
+      if (invalidationCount === 2) resolveRendererReady();
+    },
   };
 
   const coordinator = new ChartHeatmapGpuCoordinator(host);
@@ -174,7 +181,8 @@ test("ChartHeatmapGpuCoordinator: manages lifecycle, lease, and annotation suppr
   coordinator.setHeatmapTexturePrototypeEnabled(true);
   assert.equal(coordinator.isHeatmapTexturePrototypeEnabled(), true);
   assert.equal(sessionInvalidated, true);
-  await new Promise((resolve) => setImmediate(resolve));
+  await rendererReady;
+  assert.equal(invalidationCount, 2, "lazy renderer load invalidates the session when ready");
 
   const view = new View();
   view.area = { left: 0, top: 0, width: 800, height: 600 };

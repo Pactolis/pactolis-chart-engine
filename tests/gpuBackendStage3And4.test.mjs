@@ -676,5 +676,7 @@ test("GpuDiagnostics percentile metrics, counters and copyGpuDiagnosticsJson out
   const parsed = JSON.parse(jsonStr);
   assert.equal(parsed.active, "webgl2");
   assert.equal(parsed.counters["gpu.backend.webgpu.frames"], 3);
+  assert.equal(parsed.fallbacks[0].from, "webgpu");
+  assert.equal(parsed.fallbacks[0].to, "webgl2");
   assert.equal(parsed.fallbacks[0].reason, "device_lost");
 });
