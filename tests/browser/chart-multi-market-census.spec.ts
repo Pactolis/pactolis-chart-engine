@@ -1925,7 +1925,12 @@ test("census minute-sample validator rejects fabricated sets", () => {
   expect(validateEnduranceSamples(good, 180_000, 3, 60_000)).toEqual([]);
   const workloadStartBaseline = Array.from({ length: 4 }, (_, index) => ({ minute: index + 1, at: 60_000 * index, heapBytes: 1_000 }));
   expect(validateEnduranceSamples(workloadStartBaseline, 180_000, 3, 60_000)).toEqual([]);
-  expect(validateEnduranceSamples([{ ...good[0], at: 9 }, ...good.slice(1)], 180_000, 3, 60_000).join()).toContain("span");
+  const spanUnderByNineMs = Array.from({ length: 30 }, (_, index) => ({
+    minute: index + 1,
+    at: Math.floor(index * 1_739_991 / 29),
+    heapBytes: 1_000,
+  }));
+  expect(validateEnduranceSamples(spanUnderByNineMs, 1_800_000, 30, 60_000).join()).toContain("span");
   expect(validateEnduranceSamples(good.slice(0, 2), 180_000, 3, 60_000).join()).toContain("count");
   expect(validateEnduranceSamples([good[0], { minute: 2, at: 60_000, heapBytes: 1_000 }, good[2]], 180_000, 3, 60_000).join()).toContain("non-monotonic");
   expect(validateEnduranceSamples([good[0], { minute: 2, at: 90_000, heapBytes: null }, good[2]], 180_000, 3, 60_000).join()).toContain("invalid heap");
