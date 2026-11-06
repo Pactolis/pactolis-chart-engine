@@ -78,6 +78,7 @@ export function recordGpuFrame(kind: string, renderMs?: number, intervalMs?: num
 }
 
 export function recordGpuFallback(from: string, to: string, reason: string): void {
+  activeBackend = to;
   fallbacks.push({
     from,
     to,
