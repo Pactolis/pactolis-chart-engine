@@ -5,6 +5,30 @@ import type { Crosshair } from "./overlay.js";
 import { clampLabelY, configDecimals, placeVerticalLabels, priceDecimals } from "../axisLabelUtils.js";
 import { uiColor, axisGridLineColor, axisMajorLabelColor, axisLabelBorderColor } from "../ui/seriesPalette.js";
 import { settings } from "../settings.js";
+import type { ResolvedChartDisplayOptions } from "../model/chartDisplayOptions.js";
+
+const priceAxisFormatterCache = new Map<string, Intl.NumberFormat | null>();
+
+function formatPriceAxisMark(price: number, label: string, decimals: number, options?: ResolvedChartDisplayOptions): string {
+  const locale = options?.numberLocale;
+  if (!locale || locale === "en-US" || !Number.isInteger(decimals) || decimals < 0 || decimals > 100) return label;
+  const key = locale + "|" + decimals;
+  let formatter = priceAxisFormatterCache.get(key);
+  if (formatter === undefined) {
+    try {
+      formatter = new Intl.NumberFormat(locale, {
+        minimumFractionDigits: decimals,
+        maximumFractionDigits: decimals,
+        useGrouping: false,
+      });
+    } catch {
+      formatter = null;
+    }
+    if (priceAxisFormatterCache.size >= 32) priceAxisFormatterCache.delete(priceAxisFormatterCache.keys().next().value!);
+    priceAxisFormatterCache.set(key, formatter);
+  }
+  return formatter?.format(price) ?? label;
+}
 
 const PRICE_AXIS_FONT = "12px ui-monospace, monospace";
 const PRICE_LABEL_FONT = "11px ui-monospace, monospace";
@@ -29,6 +53,7 @@ export function drawPriceAxis(
   priceStep: number,
   pricePrecision?: number,
   keepOut: readonly PriceAxisKeepOut[] = [],
+  displayOptions?: ResolvedChartDisplayOptions,
 ): void {
   const dec = pricePrecision ?? priceDecimals(priceStep);
   const layout = axisLayoutForChartView(view);
@@ -64,7 +89,7 @@ export function drawPriceAxis(
       ctx.lineTo(axisX, y);
       ctx.stroke();
     }
-    const label = mark.label;
+    const label = formatPriceAxisMark(mark.price, mark.label, dec, displayOptions);
     const boxH = 16;
     const labelY = clampLabelY(view, y, boxH);
     if (keepOut.some((zone) => labelY + boxH / 2 > zone.y && labelY - boxH / 2 < zone.y + zone.h)) continue;

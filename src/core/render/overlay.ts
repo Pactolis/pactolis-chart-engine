@@ -346,7 +346,7 @@ export class Overlay {
         if (layerId === "axis") {
           if (!mainSuppressed && !empty) {
             this.drawLineLabels(view);
-            drawPriceAxis(ctx, view, series.config.priceStep, series.config.pricePrecision, this.priceAxisKeepOut(view, crosshair));
+            drawPriceAxis(ctx, view, series.config.priceStep, series.config.pricePrecision, this.priceAxisKeepOut(view, crosshair), this.displayOptions);
             drawPriceMarkers(ctx, view, this.priceMarkers, series.config.priceStep, series.config.pricePrecision);
           }
           drawTimeAxis(ctx, view, series, undefined, this.timeMarkers);
