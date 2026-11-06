@@ -790,6 +790,9 @@ async function runEndurance(page: Page, uniqueMarkets: string[], panelIds: strin
             current.delivered.push(Date.now() - data.time);
             awaitingFrame.push(data.time);
           };
+          // Record a real workload-start baseline before the worker can emit trades.
+          // The following samples remain the actual interval ticks.
+          takeSample();
           worker.postMessage({
             normalTradesPerSecond: config.normalTradesPerSecond, multiplier: 1,
             baselineMs: config.durationMs, burstMs: 0, recoveryMs: 0,
@@ -1920,6 +1923,9 @@ async function runScenario(scenario: Scenario, page: Page, testInfo?: TestInfo) 
 test("census minute-sample validator rejects fabricated sets", () => {
   const good = Array.from({ length: 3 }, (_, index) => ({ minute: index + 1, at: 60_000 * (index + 1), heapBytes: 1_000 }));
   expect(validateEnduranceSamples(good, 180_000, 3, 60_000)).toEqual([]);
+  const workloadStartBaseline = Array.from({ length: 4 }, (_, index) => ({ minute: index + 1, at: 60_000 * index, heapBytes: 1_000 }));
+  expect(validateEnduranceSamples(workloadStartBaseline, 180_000, 3, 60_000)).toEqual([]);
+  expect(validateEnduranceSamples([{ ...good[0], at: 9 }, ...good.slice(1)], 180_000, 3, 60_000).join()).toContain("span");
   expect(validateEnduranceSamples(good.slice(0, 2), 180_000, 3, 60_000).join()).toContain("count");
   expect(validateEnduranceSamples([good[0], { minute: 2, at: 60_000, heapBytes: 1_000 }, good[2]], 180_000, 3, 60_000).join()).toContain("non-monotonic");
   expect(validateEnduranceSamples([good[0], { minute: 2, at: 90_000, heapBytes: null }, good[2]], 180_000, 3, 60_000).join()).toContain("invalid heap");
