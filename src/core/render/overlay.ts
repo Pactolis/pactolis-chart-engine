@@ -49,6 +49,7 @@ import { periodPrefix, periodUnit } from "../analysis/periods.js";
 import { uiColor, tpoPalette, cellDimSell, cellDimBuy, nakedPocPalette, lineLabelPillBg, crosshairLineColor, syncCrosshairLineColor } from "../ui/seriesPalette.js";
 import { levelStartX } from "./levelAnchor.js";
 import { isPerformanceTelemetryEnabled, recordPerformanceDuration } from "../performanceTelemetry.js";
+import { resolveChartDisplayOptions, type ResolvedChartDisplayOptions } from "../model/chartDisplayOptions.js";
 
 export interface Crosshair {
   x: number;
@@ -269,7 +270,14 @@ export class Overlay {
       series: FootprintSeries,
       crosshair: Crosshair,
     ) => void,
+    private readonly getDisplayOptions?: () => ResolvedChartDisplayOptions,
   ) {}
+
+  private readonly defaultDisplayOptions = resolveChartDisplayOptions(undefined);
+
+  private get displayOptions(): ResolvedChartDisplayOptions {
+    return this.getDisplayOptions?.() ?? this.defaultDisplayOptions;
+  }
 
   /** Static/semi-static Canvas2D surface. Scene layer order is the render authority. */
   renderAnnotations(

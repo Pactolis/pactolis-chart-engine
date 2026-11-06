@@ -461,6 +461,7 @@ class ChartRuntimeImpl implements ChartRuntime, ChartInputHost {
       },
       (ctx, activeView, activeSeries, activeCrosshair) =>
         this.orderbookHeatmap?.drawHover(ctx, activeView, activeSeries, activeCrosshair),
+      () => this.displayOptions,
     );
 
     const view = this.view;
@@ -1280,6 +1281,8 @@ class ChartRuntimeImpl implements ChartRuntime, ChartInputHost {
     // antialias and powerPreference belong to the WebGL2 / WebGPU context, which exists already; they apply to charts mounted later.
     this.session.setMaxDevicePixelRatio(next.maxDevicePixelRatio);
     if (this.view.setDisplayOptions(next.timeScale, next.layout)) this._layoutFromCurrentSize();
+    // HUD/overlay labels also depend on display options even when layout is unchanged.
+    this.session.invalidate();
   }
 
   private prepareHeatmapGpuCells(v: View, s: FootprintSeries): HeatmapGpuCellFrame | null {

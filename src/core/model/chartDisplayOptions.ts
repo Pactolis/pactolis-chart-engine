@@ -10,7 +10,19 @@ export type ChartPowerPreference = "default" | "low-power" | "high-performance";
  * unset field keeps the engine's desktop behavior, so a host that never answers
  * `ChartHost.displayOptions` gets exactly what it got before these options existed.
  */
+export interface ChartDisplayLabels {
+  readonly trades: string;
+  readonly range: string;
+  readonly change: string;
+  readonly volume: string;
+  readonly price: string;
+}
+
 export interface ChartDisplayOptions {
+  /** Optional host-supplied labels for the chart HUD. Unset labels keep the English defaults. */
+  labels?: Partial<ChartDisplayLabels>;
+  /** BCP 47 number-formatting locale. Invalid or unset values use `en-US`. */
+  numberLocale?: string;
   /** `compact` is for phones and small panes (see ChartDensity). Default `regular`. */
   density?: ChartDensity;
   /** Price-axis gutter width in CSS px. Default: the density's width (62). */
@@ -38,6 +50,8 @@ export interface ChartWebGlOptions {
 }
 
 export interface ResolvedChartDisplayOptions {
+  readonly labels: ChartDisplayLabels;
+  readonly numberLocale: string;
   readonly layout: ChartLayoutOptions;
   /** Only the time-scale fields a host set; the rest stay the engine's. */
   readonly timeScale: Partial<TimeScaleOptions>;
@@ -49,6 +63,22 @@ export interface ResolvedChartDisplayOptions {
 const POWER_PREFERENCES: readonly ChartPowerPreference[] = ["default", "low-power", "high-performance"];
 /** Fits no screen today; a larger request is a typo, not a wish. */
 const MAX_FIT_COLUMNS = 4000;
+const DEFAULT_CHART_DISPLAY_LABELS: ChartDisplayLabels = Object.freeze({
+  trades: "Trades",
+  range: "Range",
+  change: "Change",
+  volume: "Volume",
+  price: "Price",
+});
+
+function normalizeNumberLocale(locale: unknown): string {
+  if (typeof locale !== "string" || locale.length === 0) return "en-US";
+  try {
+    return Intl.getCanonicalLocales(locale)[0] ?? "en-US";
+  } catch {
+    return "en-US";
+  }
+}
 
 export const DEFAULT_CHART_WEBGL_OPTIONS: ChartWebGlOptions = Object.freeze({
   antialias: true,
@@ -60,7 +90,16 @@ export function resolveChartDisplayOptions(input: ChartDisplayOptions | null | u
   const options = input ?? {};
   const fit = Number(options.defaultFitColumns);
   const cap = Number(options.maxDevicePixelRatio);
+  const labels = options.labels ?? {};
   return Object.freeze({
+    labels: Object.freeze({
+      trades: typeof labels.trades === "string" ? labels.trades : DEFAULT_CHART_DISPLAY_LABELS.trades,
+      range: typeof labels.range === "string" ? labels.range : DEFAULT_CHART_DISPLAY_LABELS.range,
+      change: typeof labels.change === "string" ? labels.change : DEFAULT_CHART_DISPLAY_LABELS.change,
+      volume: typeof labels.volume === "string" ? labels.volume : DEFAULT_CHART_DISPLAY_LABELS.volume,
+      price: typeof labels.price === "string" ? labels.price : DEFAULT_CHART_DISPLAY_LABELS.price,
+    }),
+    numberLocale: normalizeNumberLocale(options.numberLocale),
     layout: normalizeChartLayoutOptions({
       density: options.density === "compact" ? "compact" : "regular",
       priceAxisWidth: options.priceAxisWidth,
@@ -87,7 +126,13 @@ export function effectivePixelRatio(devicePixelRatio: number, maxDevicePixelRati
 
 /** Two resolved option sets would render the same chart. */
 export function sameChartDisplayOptions(a: ResolvedChartDisplayOptions, b: ResolvedChartDisplayOptions): boolean {
-  return a.layout.priceAxisWidth === b.layout.priceAxisWidth
+  return a.labels.trades === b.labels.trades
+    && a.labels.range === b.labels.range
+    && a.labels.change === b.labels.change
+    && a.labels.volume === b.labels.volume
+    && a.labels.price === b.labels.price
+    && a.numberLocale === b.numberLocale
+    && a.layout.priceAxisWidth === b.layout.priceAxisWidth
     && a.layout.timeAxisHeight === b.layout.timeAxisHeight
     && a.layout.density === b.layout.density
     && a.timeScale.defaultFitColumns === b.timeScale.defaultFitColumns
