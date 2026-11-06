@@ -592,6 +592,24 @@ test("WebGpuQuadPipeline compiles shaders, writes uniforms, dynamic buffer growt
   assert.equal(pipeline.uniformBuffer.destroyed, true);
 });
 
+test("WebGpuQuadPipeline skips unchanged resolution writes and updates after resize", () => {
+  const { device, writtenBuffers } = makeFakeWebGpuDevice("rgba8unorm");
+  const pipeline = new WebGpuQuadPipeline(device, "rgba8unorm", 1024);
+
+  pipeline.updateResolution(1920, 1080);
+  assert.equal(writtenBuffers.length, 1);
+  const scratchBuffer = writtenBuffers[0].data.buffer;
+  pipeline.updateResolution(1920, 1080);
+  assert.equal(writtenBuffers.length, 1);
+  assert.equal(writtenBuffers[0].data.buffer, scratchBuffer);
+
+  pipeline.updateResolution(1280, 720);
+  assert.equal(writtenBuffers.length, 2);
+  const resizedFloats = new Float32Array(writtenBuffers[1].data.buffer);
+  assert.equal(resizedFloats[0], 1280);
+  assert.equal(resizedFloats[1], 720);
+  pipeline.dispose();
+});
 test("WebGpuSurface renders frame lifecycle and writes instance data via WebGpuQuadSink", () => {
   const { device, passes, writtenBuffers, submittedCommands } = makeFakeWebGpuDevice("rgba8unorm");
   const ctx = makeFakeWebGpuContext(device, "rgba8unorm");
