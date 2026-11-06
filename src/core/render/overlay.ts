@@ -71,18 +71,32 @@ interface TpoProfileHitZone extends TpoProfileHit {
   right: number;
 }
 
-function fmtVol(v: number): string {
-  if (v >= 1000) return (v / 1000).toFixed(1) + "k";
-  if (v >= 100) return v.toFixed(0);
-  if (v >= 1) return v.toFixed(1);
-  return v.toFixed(3);
+const hudNumberFormatters = new Map<string, Intl.NumberFormat>();
+
+function fmtFixed(v: number, digits: number, locale?: string, grouping = false): string {
+  if (!locale || (locale === "en-US" && !grouping) || !Number.isInteger(digits) || digits < 0 || digits > 100) return v.toFixed(digits);
+  const key = `${locale}:${digits}:${grouping}`;
+  let formatter = hudNumberFormatters.get(key);
+  if (!formatter) {
+    formatter = new Intl.NumberFormat(locale, { useGrouping: grouping, minimumFractionDigits: digits, maximumFractionDigits: digits });
+    if (hudNumberFormatters.size >= 32) hudNumberFormatters.clear();
+    hudNumberFormatters.set(key, formatter);
+  }
+  return formatter.format(v);
+}
+
+function fmtVol(v: number, locale?: string): string {
+  if (v >= 1000) return fmtFixed(v / 1000, 1, locale) + "k";
+  if (v >= 100) return fmtFixed(v, 0, locale);
+  if (v >= 1) return fmtFixed(v, 1, locale);
+  return fmtFixed(v, 3, locale);
 }
 
 /** Format a USDT notional value (qty * price) compactly. */
-function fmtNotional(v: number): string {
-  if (v >= 1e6) return (v / 1e6).toFixed(2) + "M";
-  if (v >= 1e3) return (v / 1e3).toFixed(1) + "k";
-  return v.toFixed(0);
+function fmtNotional(v: number, locale?: string): string {
+  if (v >= 1e6) return fmtFixed(v / 1e6, 2, locale) + "M";
+  if (v >= 1e3) return fmtFixed(v / 1e3, 1, locale) + "k";
+  return fmtFixed(v, 0, locale);
 }
 
 function lineLabelPriority(text: string): number {
@@ -1211,11 +1225,13 @@ export class Overlay {
     }
 
     const unit = this.showNotional ? "$" : "₿";
-    const labels = this.displayOptions.labels;
-    const volTxt = this.showNotional ? fmtNotional(quoteVolumeForBar(bar)) : fmtVol(bar.volume);
+    const displayOptions = this.displayOptions;
+    const locale = displayOptions.numberLocale;
+    const labels = displayOptions.labels;
+    const volTxt = this.showNotional ? fmtNotional(quoteVolumeForBar(bar), locale) : fmtVol(bar.volume, locale);
     const deltaTxt = this.showNotional
-      ? fmtNotional(Math.abs(bar.delta) * bar.close)
-      : Math.abs(bar.delta).toFixed(2);
+      ? fmtNotional(Math.abs(bar.delta) * bar.close, locale)
+      : fmtFixed(Math.abs(bar.delta), 2, locale);
     const rangePct = bar.low > 0 ? ((bar.high - bar.low) / bar.low) * 100 : 0;
     const changePct = bar.open > 0 ? ((bar.close - bar.open) / bar.open) * 100 : 0;
     const pd = configDecimals(series.config);
@@ -1225,23 +1241,23 @@ export class Overlay {
     ctx.textAlign = "left";
     ctx.textBaseline = "top";
     ctx.fillStyle = uiColor.textHeading;
-    const hudText = `O ${bar.open.toFixed(pd)} H ${bar.high.toFixed(pd)} L ${bar.low.toFixed(pd)} `
-      + `C ${bar.close.toFixed(pd)} ${labels.volume} ${unit}${volTxt} Δ ${bar.delta >= 0 ? "+" : "-"}${unit}${deltaTxt} `
-      + `${labels.trades} ${bar.count} ${labels.range} ${rangePct.toFixed(2)}% ${labels.change} ${changePct >= 0 ? "+" : ""}${changePct.toFixed(2)}%`;
+    const hudText = `O ${fmtFixed(bar.open, pd, locale)} H ${fmtFixed(bar.high, pd, locale)} L ${fmtFixed(bar.low, pd, locale)} `
+      + `C ${fmtFixed(bar.close, pd, locale)} ${labels.volume} ${unit}${volTxt} Δ ${bar.delta >= 0 ? "+" : "-"}${unit}${deltaTxt} `
+      + `${labels.trades} ${bar.count} ${labels.range} ${fmtFixed(rangePct, 2, locale)}% ${labels.change} ${changePct >= 0 ? "+" : ""}${fmtFixed(changePct, 2, locale)}%`;
     this.onHudText?.(hudText);
 
-    const prefix = `${hovered ? "◆ " : ""}O ${bar.open.toFixed(pd)}  H ${bar.high.toFixed(pd)}  L ${bar.low.toFixed(pd)}  C ${bar.close.toFixed(pd)}  ${labels.volume} ${unit}${volTxt}`;
+    const prefix = `${hovered ? "◆ " : ""}O ${fmtFixed(bar.open, pd, locale)}  H ${fmtFixed(bar.high, pd, locale)}  L ${fmtFixed(bar.low, pd, locale)}  C ${fmtFixed(bar.close, pd, locale)}  ${labels.volume} ${unit}${volTxt}`;
     const prefixWidth = ctx.measureText(prefix + "   ").width;
     const deltaPart = `Δ ${bar.delta >= 0 ? "+" : "-"}${unit}${deltaTxt}`;
     const deltaWidth = ctx.measureText(deltaPart + "   ").width;
-    const tradesPart = `${labels.trades} ${bar.count.toLocaleString("en-US")}`;
+    const tradesPart = `${labels.trades} ${fmtFixed(bar.count, 0, locale, true)}`;
     const tradesWidth = ctx.measureText(tradesPart + "   ").width;
 
-    const rangePart = `${labels.range} ${rangePct.toFixed(2)}%`;
+    const rangePart = `${labels.range} ${fmtFixed(rangePct, 2, locale)}%`;
     const rangeX = x + prefixWidth + deltaWidth + tradesWidth;
     const rangeWidth = ctx.measureText(rangePart + "   ").width;
 
-    const chgPart = `${labels.change} ${changePct >= 0 ? "+" : ""}${changePct.toFixed(2)}%`;
+    const chgPart = `${labels.change} ${changePct >= 0 ? "+" : ""}${fmtFixed(changePct, 2, locale)}%`;
     const chgWidth = ctx.measureText(chgPart).width;
 
     // A plot too narrow for one line (a phone, a small pane) gets the readout in rows instead of
@@ -1251,10 +1267,10 @@ export class Overlay {
     if (prefixWidth + deltaWidth + tradesWidth + rangeWidth + chgWidth > maxWidth) {
       const hover = hovered ? "◆ " : "";
       const parts: HudPart[] = [
-        { text: `${hover}O ${bar.open.toFixed(pd)}`, color: uiColor.textHeading, dropOrder: 0 },
-        { text: `H ${bar.high.toFixed(pd)}`, color: uiColor.textHeading, dropOrder: 0 },
-        { text: `L ${bar.low.toFixed(pd)}`, color: uiColor.textHeading, dropOrder: 0 },
-        { text: `C ${bar.close.toFixed(pd)}`, color: uiColor.textHeading, dropOrder: 0 },
+        { text: `${hover}O ${fmtFixed(bar.open, pd, locale)}`, color: uiColor.textHeading, dropOrder: 0 },
+        { text: `H ${fmtFixed(bar.high, pd, locale)}`, color: uiColor.textHeading, dropOrder: 0 },
+        { text: `L ${fmtFixed(bar.low, pd, locale)}`, color: uiColor.textHeading, dropOrder: 0 },
+        { text: `C ${fmtFixed(bar.close, pd, locale)}`, color: uiColor.textHeading, dropOrder: 0 },
         { text: `Vol ${unit}${volTxt}`, color: uiColor.textHeading, dropOrder: 2 },
         { text: deltaPart, color: bar.delta >= 0 ? uiColor.buy : uiColor.sell, dropOrder: 3 },
         { text: tradesPart, color: uiColor.textSecondary, dropOrder: 4 },
