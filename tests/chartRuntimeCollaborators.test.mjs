@@ -195,6 +195,8 @@ test("ChartHeatmapGpuCoordinator: manages lifecycle, lease, and annotation suppr
   leasedReleased = false;
   coordinator.renderHeatmapGpuCells(frame, view, series);
   assert.equal(leasedReleased, true, "lease released on render without valid GL");
+  assert.notEqual(getGpuDiagnostics().features?.["resident-heatmap"], "gpu", "failed render must not retain a GPU claim");
+  assert.equal(getGpuDiagnostics().features?.["resident-heatmap"], "cpu", "failed render reports CPU fallback");
 
   // On context loss & restore
   coordinator.onLostContext();

@@ -70,6 +70,7 @@ export class ChartHeatmapGpuCoordinator {
 
   setGl(gl: WebGL2RenderingContext | null): void {
     this.heatmapGpuRendererGl = gl;
+    setGpuFeaturePath("resident-heatmap", null);
     if (!this.heatmapTexturePrototypeEnabled) {
       setGpuFeaturePath("resident-heatmap", null);
     } else if (!gl || (this.host.backendKind && this.host.backendKind !== "webgl2")) {
@@ -135,6 +136,7 @@ export class ChartHeatmapGpuCoordinator {
       frame.preparedLease?.release();
       this.disposeHeatmapGpuRenderer();
       this.heatmapGpuFailureLatched = true;
+      setGpuFeaturePath("resident-heatmap", "cpu");
       return;
     }
     if (!this.heatmapGpuRenderer) this.heatmapGpuRenderer = new HeatmapGpuRenderer();
@@ -160,6 +162,7 @@ export class ChartHeatmapGpuCoordinator {
       this.disposeHeatmapGpuRenderer();
       this.heatmapGpuRendererGl = gl;
       this.heatmapGpuFailureLatched = true;
+      setGpuFeaturePath("resident-heatmap", "cpu");
       return;
     }
     setGpuFeaturePath("resident-heatmap", "gpu");
