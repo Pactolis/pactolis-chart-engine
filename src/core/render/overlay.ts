@@ -1211,6 +1211,7 @@ export class Overlay {
     }
 
     const unit = this.showNotional ? "$" : "₿";
+    const labels = this.displayOptions.labels;
     const volTxt = this.showNotional ? fmtNotional(quoteVolumeForBar(bar)) : fmtVol(bar.volume);
     const deltaTxt = this.showNotional
       ? fmtNotional(Math.abs(bar.delta) * bar.close)
@@ -1225,22 +1226,22 @@ export class Overlay {
     ctx.textBaseline = "top";
     ctx.fillStyle = uiColor.textHeading;
     const hudText = `O ${bar.open.toFixed(pd)} H ${bar.high.toFixed(pd)} L ${bar.low.toFixed(pd)} `
-      + `C ${bar.close.toFixed(pd)} Vol ${unit}${volTxt} Δ ${bar.delta >= 0 ? "+" : "-"}${unit}${deltaTxt} `
-      + `Trades ${bar.count} Range ${rangePct.toFixed(2)}% Chg ${changePct >= 0 ? "+" : ""}${changePct.toFixed(2)}%`;
+      + `C ${bar.close.toFixed(pd)} ${labels.volume} ${unit}${volTxt} Δ ${bar.delta >= 0 ? "+" : "-"}${unit}${deltaTxt} `
+      + `${labels.trades} ${bar.count} ${labels.range} ${rangePct.toFixed(2)}% ${labels.change} ${changePct >= 0 ? "+" : ""}${changePct.toFixed(2)}%`;
     this.onHudText?.(hudText);
 
-    const prefix = `${hovered ? "◆ " : ""}O ${bar.open.toFixed(pd)}  H ${bar.high.toFixed(pd)}  L ${bar.low.toFixed(pd)}  C ${bar.close.toFixed(pd)}  Vol ${unit}${volTxt}`;
+    const prefix = `${hovered ? "◆ " : ""}O ${bar.open.toFixed(pd)}  H ${bar.high.toFixed(pd)}  L ${bar.low.toFixed(pd)}  C ${bar.close.toFixed(pd)}  ${labels.volume} ${unit}${volTxt}`;
     const prefixWidth = ctx.measureText(prefix + "   ").width;
     const deltaPart = `Δ ${bar.delta >= 0 ? "+" : "-"}${unit}${deltaTxt}`;
     const deltaWidth = ctx.measureText(deltaPart + "   ").width;
-    const tradesPart = `Trades ${bar.count.toLocaleString("en-US")}`;
+    const tradesPart = `${labels.trades} ${bar.count.toLocaleString("en-US")}`;
     const tradesWidth = ctx.measureText(tradesPart + "   ").width;
 
-    const rangePart = `Range ${rangePct.toFixed(2)}%`;
+    const rangePart = `${labels.range} ${rangePct.toFixed(2)}%`;
     const rangeX = x + prefixWidth + deltaWidth + tradesWidth;
     const rangeWidth = ctx.measureText(rangePart + "   ").width;
 
-    const chgPart = `Chg ${changePct >= 0 ? "+" : ""}${changePct.toFixed(2)}%`;
+    const chgPart = `${labels.change} ${changePct >= 0 ? "+" : ""}${changePct.toFixed(2)}%`;
     const chgWidth = ctx.measureText(chgPart).width;
 
     // A plot too narrow for one line (a phone, a small pane) gets the readout in rows instead of
