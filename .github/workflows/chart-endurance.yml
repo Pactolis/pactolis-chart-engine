@@ -70,6 +70,22 @@ jobs:
       - run: npm ci --no-audit --no-fund
       - name: Install Chromium browser
         run: npx --no-install playwright install --with-deps chromium
+      - name: Preflight shared endurance span validator
+        run: |
+          node --check scripts/endurance-span-validation.mjs
+          node --input-type=module -e '
+            import { spanValid, totalJitterMs } from "./scripts/endurance-span-validation.mjs";
+            const sampleMs = 60000;
+            const jitter = totalJitterMs(sampleMs);
+            const fixture = (offset) => [{minute: 1, at: 0}, {minute: 2, at: sampleMs - offset}, {minute: 3, at: 2 * sampleMs - offset}];
+            const rejects = (values) => !spanValid(values, sampleMs);
+            if (!spanValid(fixture(jitter), sampleMs) || spanValid(fixture(jitter + 1), sampleMs)) throw new Error("span-jitter fixture parity");
+            if (!rejects([{minute: 1, at: 0}, {minute: 2, at: 0}, {minute: 3, at: 2 * sampleMs}])) throw new Error("duplicate timestamp accepted");
+            if (!rejects([{minute: 1, at: 0}, {minute: 2, at: sampleMs}, {minute: 3, at: sampleMs - 1}])) throw new Error("nonmonotonic timestamp accepted");
+            if (!rejects([{minute: 1, at: 0}, {minute: 3, at: 2 * sampleMs}])) throw new Error("missing minute fixture accepted");
+            if (!rejects([{minute: 1, at: 0}, {minute: 2, at: sampleMs - jitter - 1}])) throw new Error("span beyond bound accepted");
+            console.log("shared endurance span validator fixtures: PASS");
+          '
       - name: Endurance browser run
         run: npx --no-install playwright test --project=census --grep endurance --workers=1 --retries=0 --reporter=line
       - name: Assert HEAD still equals the declared SHA (always)
@@ -81,6 +97,7 @@ jobs:
           node --input-type=module -e '
             import { readdirSync, readFileSync, statSync } from "node:fs";
             import { join } from "node:path";
+            import { spanValid, totalJitterMs } from "./scripts/endurance-span-validation.mjs";
             const fail = (why) => { console.error("::error::endurance evidence invalid: " + why); process.exit(1); };
             const found = [];
             try {
@@ -106,12 +123,10 @@ jobs:
             const samples = e.samples ?? [];
             const sampleMs = 60000;
             if (!Number.isFinite(sampleMs) || sampleMs <= 0) fail("sampleMs must be finite and positive");
-            const expectedSpan = (values) => (values.length - 1) * sampleMs;
-            const totalJitter = Math.min(1000, sampleMs * 0.02);
-            const spanValid = (values) => values.length < 2 || values.at(-1).at - values[0].at >= expectedSpan(values) - totalJitter;
+            const totalJitter = totalJitterMs(sampleMs);
             const fixture = (offset) => [{minute: 1, at: 0, heapBytes: 1}, {minute: 2, at: sampleMs - offset, heapBytes: 1}, {minute: 3, at: 2 * sampleMs - offset, heapBytes: 1}];
-            if (!spanValid(fixture(totalJitter)) || spanValid(fixture(totalJitter + 1))) fail("span-jitter fixture parity");
-            if (spanValid([{minute: 1, at: 0}, {minute: 2, at: 0}, {minute: 3, at: 2 * sampleMs}])) fail("monotonic fixture parity");
+            if (!spanValid(fixture(totalJitter), sampleMs) || spanValid(fixture(totalJitter + 1), sampleMs)) fail("span-jitter fixture parity");
+            if (spanValid([{minute: 1, at: 0}, {minute: 2, at: 0}, {minute: 3, at: 2 * sampleMs}], sampleMs)) fail("monotonic fixture parity");
             if (samples.length < Math.floor(e.elapsedMs / sampleMs)) fail("sample count under floor(elapsedMs / sampleMs)");
             samples.forEach((s, i) => {
               if (s.minute !== i + 1) fail("sample " + (i + 1) + " minute numbering");
