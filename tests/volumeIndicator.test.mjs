@@ -171,10 +171,10 @@ test("HUD callback preserves the full legacy default text and formats localized 
   view.area = { left: 0, top: 0, width: 800, height: 500 };
   const captureHud = (options) => {
     let callbackText;
-    const args = Array(19).fill(undefined);
+    const args = Array(20).fill(undefined);
     args[0] = makeHudContext();
     args[12] = (text) => { callbackText = text; };
-    if (options) args[18] = () => options;
+    if (options) args[19] = () => options;
     new Overlay(...args).renderInteraction(view, series, { x: 0, y: 0, visible: false }, [0, 1], ["hud"]);
     return callbackText;
   };
