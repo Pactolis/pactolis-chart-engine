@@ -74,7 +74,8 @@ interface TpoProfileHitZone extends TpoProfileHit {
 const hudNumberFormatters = new Map<string, Intl.NumberFormat>();
 
 function fmtFixed(v: number, digits: number, locale?: string, grouping = false): string {
-  if (!locale || (locale === "en-US" && !grouping) || !Number.isInteger(digits) || digits < 0 || digits > 100) return v.toFixed(digits);
+  const legacyValue = v.toFixed(digits);
+  if (!locale || (locale === "en-US" && !grouping) || !Number.isInteger(digits) || digits < 0 || digits > 100) return legacyValue;
   const key = `${locale}:${digits}:${grouping}`;
   let formatter = hudNumberFormatters.get(key);
   if (!formatter) {
@@ -82,7 +83,7 @@ function fmtFixed(v: number, digits: number, locale?: string, grouping = false):
     if (hudNumberFormatters.size >= 32) hudNumberFormatters.clear();
     hudNumberFormatters.set(key, formatter);
   }
-  return formatter.format(v);
+  return formatter.format(Number(legacyValue));
 }
 
 function fmtVol(v: number, locale?: string): string {
