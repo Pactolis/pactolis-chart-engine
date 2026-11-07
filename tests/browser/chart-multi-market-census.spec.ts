@@ -745,8 +745,9 @@ async function runEndurance(page: Page, uniqueMarkets: string[], panelIds: strin
     };
     const samples: unknown[] = [];
     const takeSample = () => {
+      const at = performance.now();
       (window as any).gc?.();
-      const now = performance.now();
+      const now = at;
       // Endurance frames are folded here and dropped; load frames stay.
       const frames = state.frames.filter((frame: any) => frame.at > sampleStartedAt && frame.at <= now);
       const longTasks = state.longTasks.filter((task: any) => task.at >= sampleStartedAt && task.at < now);
@@ -790,6 +791,9 @@ async function runEndurance(page: Page, uniqueMarkets: string[], panelIds: strin
             current.delivered.push(Date.now() - data.time);
             awaitingFrame.push(data.time);
           };
+          // Record a real workload-start baseline before the worker can emit trades.
+          // The following samples remain the actual interval ticks.
+          takeSample();
           worker.postMessage({
             normalTradesPerSecond: config.normalTradesPerSecond, multiplier: 1,
             baselineMs: config.durationMs, burstMs: 0, recoveryMs: 0,
@@ -836,6 +840,7 @@ async function runEndurance(page: Page, uniqueMarkets: string[], panelIds: strin
 
 // Median heap of the first and last few one-minute samples. The first minute
 // is skipped: it still settles the load and the indicators' first refetch.
+// The baseline includes one trade-free minute, so this is not steady-state leak proof.
 function heapTrend(samples: Array<{ heapBytes: number | null }>) {
   const heaps = samples.map((sample) => sample.heapBytes).filter((value): value is number => value !== null);
   if (heaps.length < 4) return null;
@@ -872,7 +877,11 @@ function validateEnduranceSamples(samples: Array<{ minute: number; at: number; h
     if (!(intervalMs > 0)) violations.push(`non-monotonic/duplicate timestamp before minute ${sample.minute}`);
     else if (intervalMs > sampleMs * 1.5) violations.push(`gap ${Math.round(intervalMs)}ms before minute ${sample.minute} (missing sample)`);
   });
-  if (samples.length >= 2 && samples[samples.length - 1].at - samples[0].at < (samples.length - 1) * sampleMs) violations.push(`sample span under ${(samples.length - 1) * sampleMs}ms`);
+  const spanJitterBoundMs = Math.min(1_000, sampleMs * 0.02);
+  const expectedSpanMs = (samples.length - 1) * sampleMs;
+  if (samples.length >= 2 && samples[samples.length - 1].at - samples[0].at < expectedSpanMs - spanJitterBoundMs) {
+    violations.push(`sample span under ${expectedSpanMs - spanJitterBoundMs}ms (total span jitter bound ${spanJitterBoundMs}ms)`);
+  }
   return violations;
 }
 
@@ -1920,6 +1929,26 @@ async function runScenario(scenario: Scenario, page: Page, testInfo?: TestInfo) 
 test("census minute-sample validator rejects fabricated sets", () => {
   const good = Array.from({ length: 3 }, (_, index) => ({ minute: index + 1, at: 60_000 * (index + 1), heapBytes: 1_000 }));
   expect(validateEnduranceSamples(good, 180_000, 3, 60_000)).toEqual([]);
+  const workloadStartBaseline = Array.from({ length: 4 }, (_, index) => ({ minute: index + 1, at: 60_000 * index, heapBytes: 1_000 }));
+  expect(validateEnduranceSamples(workloadStartBaseline, 180_000, 3, 60_000)).toEqual([]);
+  const jitteredEndpointSamples = Array.from({ length: 30 }, (_, index) => ({
+    minute: index + 1,
+    at: Math.round(index * 60_000 + (index % 2 === 0 ? 4 : -4)),
+    heapBytes: 1_000,
+  }));
+  expect(validateEnduranceSamples(jitteredEndpointSamples, 1_800_000, 30, 60_000)).toEqual([]);
+  const spanUnderByNineMs = Array.from({ length: 30 }, (_, index) => ({
+    minute: index + 1,
+    at: Math.floor(index * 1_739_991 / 29),
+    heapBytes: 1_000,
+  }));
+  expect(validateEnduranceSamples(spanUnderByNineMs, 1_800_000, 30, 60_000)).toEqual([]); // 9 ms short is within the single 1,000 ms total-span bound.
+  const spanOverBound = Array.from({ length: 30 }, (_, index) => ({
+    minute: index + 1,
+    at: Math.floor(index * 1_738_990 / 29),
+    heapBytes: 1_000,
+  }));
+  expect(validateEnduranceSamples(spanOverBound, 1_800_000, 30, 60_000).join()).toContain("span");
   expect(validateEnduranceSamples(good.slice(0, 2), 180_000, 3, 60_000).join()).toContain("count");
   expect(validateEnduranceSamples([good[0], { minute: 2, at: 60_000, heapBytes: 1_000 }, good[2]], 180_000, 3, 60_000).join()).toContain("non-monotonic");
   expect(validateEnduranceSamples([good[0], { minute: 2, at: 90_000, heapBytes: null }, good[2]], 180_000, 3, 60_000).join()).toContain("invalid heap");

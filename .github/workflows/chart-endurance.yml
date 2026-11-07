@@ -26,7 +26,7 @@ on:
         required: true
   # A change to this workflow or the census spec proves itself with a 30 min run.
   pull_request:
-    branches: [main]
+    branches: [main, integration/approved-prs]
     paths:
       - ".github/workflows/chart-endurance.yml"
       - "tests/browser/chart-multi-market-census.spec.ts"
@@ -70,6 +70,22 @@ jobs:
       - run: npm ci --no-audit --no-fund
       - name: Install Chromium browser
         run: npx --no-install playwright install --with-deps chromium
+      - name: Preflight shared endurance span validator
+        run: |
+          node --check scripts/endurance-span-validation.mjs
+          node --input-type=module -e '
+            import { spanValid, totalJitterMs } from "./scripts/endurance-span-validation.mjs";
+            const sampleMs = 60000;
+            const jitter = totalJitterMs(sampleMs);
+            const fixture = (offset) => [{minute: 1, at: 0}, {minute: 2, at: sampleMs - offset}, {minute: 3, at: 2 * sampleMs - offset}];
+            const rejects = (values) => !spanValid(values, sampleMs);
+            if (!spanValid(fixture(jitter), sampleMs) || spanValid(fixture(jitter + 1), sampleMs)) throw new Error("span-jitter fixture parity");
+            if (!rejects([{minute: 1, at: 0}, {minute: 2, at: 0}, {minute: 3, at: 2 * sampleMs}])) throw new Error("duplicate timestamp accepted");
+            if (!rejects([{minute: 1, at: 0}, {minute: 2, at: sampleMs}, {minute: 3, at: sampleMs - 1}])) throw new Error("nonmonotonic timestamp accepted");
+            if (!rejects([{minute: 1, at: 0}, {minute: 3, at: 2 * sampleMs}])) throw new Error("missing minute fixture accepted");
+            if (!rejects([{minute: 1, at: 0}, {minute: 2, at: sampleMs - jitter - 1}])) throw new Error("span beyond bound accepted");
+            console.log("shared endurance span validator fixtures: PASS");
+          '
       - name: Endurance browser run
         run: npx --no-install playwright test --project=census --grep endurance --workers=1 --retries=0 --reporter=line
       - name: Assert HEAD still equals the declared SHA (always)
@@ -81,6 +97,7 @@ jobs:
           node --input-type=module -e '
             import { readdirSync, readFileSync, statSync } from "node:fs";
             import { join } from "node:path";
+            import { spanValid, totalJitterMs } from "./scripts/endurance-span-validation.mjs";
             const fail = (why) => { console.error("::error::endurance evidence invalid: " + why); process.exit(1); };
             const found = [];
             try {
@@ -105,22 +122,20 @@ jobs:
             if (!Number.isFinite(e.elapsedMs) || e.elapsedMs < minutes * 60000) fail("elapsedMs under the full run");
             const samples = e.samples ?? [];
             const sampleMs = 60000;
-            // #345: match the writer sampling contract, not just a count:
-            // floor(actual duration / sampleMs) derived count, 1-based minute
-            // numbering, positive intervals spaced at most 1.5 * sampleMs and
-            // a full (N - 1) * sampleMs span, so compressed timestamps fail.
+            if (!Number.isFinite(sampleMs) || sampleMs <= 0) fail("sampleMs must be finite and positive");
+            const totalJitter = totalJitterMs(sampleMs);
+            const fixture = (offset) => [{minute: 1, at: 0, heapBytes: 1}, {minute: 2, at: sampleMs - offset, heapBytes: 1}, {minute: 3, at: 2 * sampleMs - offset, heapBytes: 1}];
+            if (!spanValid(fixture(totalJitter), sampleMs) || spanValid(fixture(totalJitter + 1), sampleMs)) fail("span-jitter fixture parity");
+            if (spanValid([{minute: 1, at: 0}, {minute: 2, at: 0}, {minute: 3, at: 2 * sampleMs}], sampleMs)) fail("monotonic fixture parity");
             if (samples.length < Math.floor(e.elapsedMs / sampleMs)) fail("sample count under floor(elapsedMs / sampleMs)");
             samples.forEach((s, i) => {
               if (s.minute !== i + 1) fail("sample " + (i + 1) + " minute numbering");
               if (!Number.isFinite(s.at) || s.at < 0) fail("sample " + (i + 1) + " timestamp");
               if (!Number.isFinite(s.heapBytes) || s.heapBytes < 0 || s.heapBytes > 1073741824) fail("sample " + (i + 1) + " heap");
-              if (i) {
-                const gap = s.at - samples[i - 1].at;
-                if (!(gap > 0) || gap > 1.5 * sampleMs) fail("sample " + (i + 1) + " interval spacing");
-              }
+              if (i) { const gap = s.at - samples[i - 1].at; if (!(gap > 0) || gap > 1.5 * sampleMs) fail("sample " + (i + 1) + " interval spacing"); }
             });
-            if (samples.length > 1 && samples[samples.length - 1].at - samples[0].at < (samples.length - 1) * sampleMs)
-              fail("sample span under (N - 1) * sampleMs");
+            if (!spanValid(samples, sampleMs)) fail("sample span under expected span minus total jitter bound");
+            // #345: match writer cadence count, numbering, interval spacing and total span.
             if (e.stages?.financial !== "passed" || e.stages?.cleanup !== "passed" || e.stages?.evidence !== "written") fail("stages");
             const served = e.provenance?.servedSources ?? [];
             if (!served.length || !served.every((r) => r.status === 200 && /^[0-9a-f]{64}$/.test(r.bodySha256 ?? ""))) fail("served provenance");
