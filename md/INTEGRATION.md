@@ -35,7 +35,7 @@ varsayılanına döner, diğer alanlar korunur.
 |---|---|---|---|
 | `density` | `regular` | `compact`: zaman ekseni şeridi 22 → 32 px (etiketler şeritte ortalı kalır), canlı fiyat etiketi "Price" başlığını bırakıp fiyat eksenini kaplar | `refreshDisplayOptions()` yeniden yerleşim yapar; zoom ve konum oynamaz |
 | `priceAxisWidth`, `timeAxisHeight` | 62 / 22 (`compact`: 62 / 32) | Eksen boyutları (CSS px); yoğunluğun değerini tek tek ezer | aynı |
-| `labels` | İngilizce (`Trades`, `Range`, `Change`, `Volume`, `Price`) | HUD alan başlıklarını kısmi olarak değiştirir; belirtilmeyen başlıklar İngilizce kalır | `refreshDisplayOptions()` sonraki çizimde uygular |
+| `labels` | İngilizce (`Trades`, `Range`, `Chg`, `Vol`, `Price`) | HUD alan başlıklarını kısmi olarak değiştirir; belirtilmeyen başlıklar İngilizce kalır | `refreshDisplayOptions()` sonraki çizimde uygular |
 | `numberLocale` | `en-US` | HUD sayıları, fiyat ekseni tick'leri, canlı fiyat marker'ı ve crosshair fiyatını BCP 47 locale ile biçimler; geçersiz locale `en-US`'a döner ve varsayılan hassasiyet korunur | `refreshDisplayOptions()` sonraki çizimde uygular |
 | `defaultFitColumns` | 250 | İlk ve reset yatay sığdırmanın hedeflediği sütun sayısı (dar plotta daha az sütun, daha okunur mum) | Yalnız sonraki sığdırma/reset'i etkiler; açık grafiğin zoom'u kendiliğinden değişmez |
 | `maxDevicePixelRatio` | yok (pencerenin `devicePixelRatio`'su) | Üç canvas'ın, footprint ve heatmap çizicilerinin kullandığı en yüksek piksel oranı (≥ 1); düşük sınır keskinlik yerine GPU belleği ve dolgu hızı kazandırır | Sonraki frame'de canvas'lar yeniden boyutlanır |

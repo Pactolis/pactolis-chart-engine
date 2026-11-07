@@ -162,6 +162,31 @@ test("HUD notional volume and Volume indicator quoteVolume stay consistent acros
   }
 });
 
+test("HUD callback preserves the full legacy default text and formats localized custom labels", async () => {
+  const { Overlay } = await import("../dist/core/render/overlay.js");
+  const { View } = await import("../dist/core/engine/view.js");
+  const bar = { startTime: 60_000, open: 100, high: 110, low: 90, close: 105, volume: 150, delta: 30, count: 10, cells: new Map(), hasRef: true };
+  const series = { length: 1, config: { intervalMs: 60_000, priceStep: 0.1, pricePrecision: 1 }, list: () => [bar], listReadonly: () => [bar], at: () => bar };
+  const view = new View();
+  view.area = { left: 0, top: 0, width: 800, height: 500 };
+  const captureHud = (options) => {
+    let callbackText;
+    const args = Array(19).fill(undefined);
+    args[0] = makeHudContext();
+    args[12] = (text) => { callbackText = text; };
+    if (options) args[18] = () => options;
+    new Overlay(...args).renderInteraction(view, series, { x: 0, y: 0, visible: false }, [0, 1], ["hud"]);
+    return callbackText;
+  };
+
+  assert.equal(captureHud(), "O 100.0  H 110.0  L 90.0  C 105.0  Vol $15.8k Δ $3.2k Trades 10 Range 20.00% Chg +5.00%");
+  assert.equal(captureHud({
+    density: "regular", priceAxisWidth: 62, timeAxisHeight: 22,
+    labels: { trades: "İşlem", range: "Aralık", change: "Değişim", volume: "Hacim", price: "Fiyat" },
+    numberLocale: "tr-TR",
+  }), "O 100,0  H 110,0  L 90,0  C 105,0  Hacim $15,8k Δ $3,2k İşlem 10 Aralık 20,00% Değişim +5,00%");
+});
+
 test("volume defaults use canonical theme colors", async () => {
   const { volumeIndicatorDefinition } = await volumeModule();
   const settings = volumeIndicatorDefinition.defaultSettings();
