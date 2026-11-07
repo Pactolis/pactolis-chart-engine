@@ -134,7 +134,7 @@ jobs:
               if (!Number.isFinite(s.heapBytes) || s.heapBytes < 0 || s.heapBytes > 1073741824) fail("sample " + (i + 1) + " heap");
               if (i) { const gap = s.at - samples[i - 1].at; if (!(gap > 0) || gap > 1.5 * sampleMs) fail("sample " + (i + 1) + " interval spacing"); }
             });
-            if (!spanValid(samples)) fail("sample span under expected span minus total jitter bound");
+            if (!spanValid(samples, sampleMs)) fail("sample span under expected span minus total jitter bound");
             // #345: match writer cadence count, numbering, interval spacing and total span.
             if (e.stages?.financial !== "passed" || e.stages?.cleanup !== "passed" || e.stages?.evidence !== "written") fail("stages");
             const served = e.provenance?.servedSources ?? [];
