@@ -185,6 +185,7 @@ export function drawIndicatorAxisTicks(
   top: number,
   bottom: number,
   count = 3,
+  values?: readonly number[],
 ): void {
   const { ctx: canvas, view } = ctx;
   const axisX = view.area.left + view.area.width;
@@ -194,7 +195,10 @@ export function drawIndicatorAxisTicks(
   canvas.textAlign = "right";
   canvas.textBaseline = "middle";
   canvas.strokeStyle = uiColor.separatorStrong;
-  for (const tick of scale.ticks(count)) {
+  const ticks = values
+    ? values.filter((value) => scale.contains(value)).map((value) => ({ value, label: Number.isInteger(value) ? String(value) : scale.format(value), y: scale.y(value) }))
+    : scale.ticks(count);
+  for (const tick of ticks) {
     // Clamp instead of skipping: min/max ticks land exactly on the pane
     // bounds, so a skip filter would always drop them (only $0 survived).
     const y = Math.max(top + 8, Math.min(bottom - 8, tick.y));

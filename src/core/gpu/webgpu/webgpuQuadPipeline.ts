@@ -42,7 +42,8 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
 }
 `;
 
-export const FLOATS_PER_INSTANCE = 8;
+/** One instance is rect float32x4 followed by RGBA unorm8x4 (20 bytes total). */
+export const FLOATS_PER_INSTANCE = 5;
 export const BYTES_PER_INSTANCE = FLOATS_PER_INSTANCE * 4;
 
 export class WebGpuQuadPipeline {
@@ -51,6 +52,9 @@ export class WebGpuQuadPipeline {
   readonly bindGroup: any;
   private instanceBuffer: any;
   private instanceCapacityQuads: number;
+  private readonly resolutionScratch = new Float32Array(4);
+  private lastResolutionWidth = Number.NaN;
+  private lastResolutionHeight = Number.NaN;
   private disposed = false;
 
   constructor(
@@ -117,7 +121,7 @@ export class WebGpuQuadPipeline {
               {
                 shaderLocation: 1,
                 offset: 16,
-                format: "float32x4", // color: r, g, b, a
+                format: "unorm8x4", // color: r, g, b, a normalized to 0..1
               },
             ],
           },
@@ -162,8 +166,21 @@ export class WebGpuQuadPipeline {
 
   updateResolution(width: number, height: number): void {
     if (this.disposed) return;
-    const res = new Float32Array([width > 0 ? width : 1, height > 0 ? height : 1, 0, 0]);
-    this.device.queue.writeBuffer(this.uniformBuffer, 0, res);
+    const resolutionWidth = width > 0 ? width : 1;
+    const resolutionHeight = height > 0 ? height : 1;
+    if (
+      resolutionWidth === this.lastResolutionWidth &&
+      resolutionHeight === this.lastResolutionHeight
+    ) {
+      return;
+    }
+    this.lastResolutionWidth = resolutionWidth;
+    this.lastResolutionHeight = resolutionHeight;
+    this.resolutionScratch[0] = resolutionWidth;
+    this.resolutionScratch[1] = resolutionHeight;
+    this.resolutionScratch[2] = 0;
+    this.resolutionScratch[3] = 0;
+    this.device.queue.writeBuffer(this.uniformBuffer, 0, this.resolutionScratch);
   }
 
   uploadInstances(data: Float32Array, quadCount: number): void {

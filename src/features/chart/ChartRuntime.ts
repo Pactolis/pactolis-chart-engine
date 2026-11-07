@@ -43,8 +43,7 @@ import type { ChartCaptureReadiness } from "./captureReadiness.js";
 import { evaluateChartDataState, type ChartDataState } from "./chartDataState.js";
 import { getChartWebGl2Context, type NativeChartCapture } from "./nativeCapture.js";
 import { createGpuSurface, createGpuSurfaceAsync } from "../../core/gpu/selectBackend.js";
-import { isWebGpuSupported } from "../../core/gpu/webgpu/webgpuDevice.js";
-import { onGpuSettingsChange, readGpuSettings } from "../../core/gpu/gpuSettings.js";
+import { isWebGpuSupported, onGpuSettingsChange, readGpuSettings } from "../../core/gpu/gpuSettings.js";
 import type { GpuSurface } from "../../core/gpu/gpuBackend.js";
 import {
   resolveChartDisplayOptions,
@@ -179,6 +178,7 @@ class ChartRuntimeImpl implements ChartRuntime, ChartInputHost {
   private readonly panelRoot: HTMLElement;
   private _lastKnownSize: { width: number; height: number } | null = null;
   private readonly surface: ChartSurfaceModel;
+  private currentGpuSurface: GpuSurface | null = null;
   private readonly ownedElements: readonly HTMLElement[];
   private readonly _hook: HTMLElement;
   private readonly interactionCanvas: HTMLCanvasElement;
@@ -300,6 +300,7 @@ class ChartRuntimeImpl implements ChartRuntime, ChartInputHost {
     this.pipeline = pipeline;
     this.panelRoot = panelRoot;
     this.surface = surface;
+    this.currentGpuSurface = gpuSurface ?? null;
     this.panelId = panelId;
     this._hook = hook;
     this.ownedElements = [hook, gpuCanvas, annotationCanvas, interactionCanvas];
@@ -361,6 +362,7 @@ class ChartRuntimeImpl implements ChartRuntime, ChartInputHost {
     const self = this;
     this.heatmapGpuCoordinator = new ChartHeatmapGpuCoordinator({
       orderbookHeatmap: this.orderbookHeatmap,
+      get backendKind() { return self.currentGpuSurface?.kind ?? (gl ? "webgl2" : "canvas2d"); },
       get renderCoordinator() { return self.renderCoordinator; },
       renderer: this.renderer,
       invalidateSession: () => this.invalidateSession(),
@@ -459,6 +461,7 @@ class ChartRuntimeImpl implements ChartRuntime, ChartInputHost {
       },
       (ctx, activeView, activeSeries, activeCrosshair) =>
         this.orderbookHeatmap?.drawHover(ctx, activeView, activeSeries, activeCrosshair),
+      () => this.displayOptions,
     );
 
     const view = this.view;
@@ -487,6 +490,7 @@ class ChartRuntimeImpl implements ChartRuntime, ChartInputHost {
       },
       visibleRange: (v: View, total: number) => this.renderer.visibleRange(v, total),
       setSurface: (nextSurface: GpuSurface) => {
+        this.currentGpuSurface = nextSurface;
         this.renderer.setSurface(nextSurface);
         this.heatmapGpuCoordinator.setGl(
           nextSurface.kind === "webgl2"
@@ -539,6 +543,7 @@ class ChartRuntimeImpl implements ChartRuntime, ChartInputHost {
       onLostContext: () => {
         this.heatmapGpuCoordinator.onLostContext();
       },
+      onBackendChanged: (backend) => this._hook.setAttribute("data-gpu-backend", backend),
       maxDevicePixelRatio: display.maxDevicePixelRatio,
       onResize: (w, h, dpr) => {
         this.view.pixelRatio = dpr;
@@ -1276,6 +1281,8 @@ class ChartRuntimeImpl implements ChartRuntime, ChartInputHost {
     // antialias and powerPreference belong to the WebGL2 / WebGPU context, which exists already; they apply to charts mounted later.
     this.session.setMaxDevicePixelRatio(next.maxDevicePixelRatio);
     if (this.view.setDisplayOptions(next.timeScale, next.layout)) this._layoutFromCurrentSize();
+    // HUD/overlay labels also depend on display options even when layout is unchanged.
+    this.session.invalidate();
   }
 
   private prepareHeatmapGpuCells(v: View, s: FootprintSeries): HeatmapGpuCellFrame | null {
@@ -1744,6 +1751,10 @@ class ChartRuntimeImpl implements ChartRuntime, ChartInputHost {
 
   setResidentHeatmapEnabled(enabled: boolean): void {
     this.heatmapGpuCoordinator.setResidentHeatmapEnabled(enabled);
+  }
+
+  whenHeatmapGpuRendererReady(): Promise<void> {
+    return this.heatmapGpuCoordinator.whenHeatmapGpuRendererReady();
   }
 }
 

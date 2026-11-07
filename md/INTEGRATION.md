@@ -35,6 +35,8 @@ varsayılanına döner, diğer alanlar korunur.
 |---|---|---|---|
 | `density` | `regular` | `compact`: zaman ekseni şeridi 22 → 32 px (etiketler şeritte ortalı kalır), canlı fiyat etiketi "Price" başlığını bırakıp fiyat eksenini kaplar | `refreshDisplayOptions()` yeniden yerleşim yapar; zoom ve konum oynamaz |
 | `priceAxisWidth`, `timeAxisHeight` | 62 / 22 (`compact`: 62 / 32) | Eksen boyutları (CSS px); yoğunluğun değerini tek tek ezer | aynı |
+| `labels` | İngilizce (`Trades`, `Range`, `Chg`, `Vol`, `Price`) | HUD alan başlıklarını kısmi olarak değiştirir; belirtilmeyen başlıklar İngilizce kalır | `refreshDisplayOptions()` sonraki çizimde uygular |
+| `numberLocale` | `en-US` | HUD sayıları, fiyat ekseni tick'leri, canlı fiyat marker'ı ve crosshair fiyatını BCP 47 locale ile biçimler; geçersiz locale `en-US`'a döner ve varsayılan hassasiyet korunur | `refreshDisplayOptions()` sonraki çizimde uygular |
 | `defaultFitColumns` | 250 | İlk ve reset yatay sığdırmanın hedeflediği sütun sayısı (dar plotta daha az sütun, daha okunur mum) | Yalnız sonraki sığdırma/reset'i etkiler; açık grafiğin zoom'u kendiliğinden değişmez |
 | `maxDevicePixelRatio` | yok (pencerenin `devicePixelRatio`'su) | Üç canvas'ın, footprint ve heatmap çizicilerinin kullandığı en yüksek piksel oranı (≥ 1); düşük sınır keskinlik yerine GPU belleği ve dolgu hızı kazandırır | Sonraki frame'de canvas'lar yeniden boyutlanır |
 | `antialias`, `powerPreference` | `true`, `default` | WebGL2 / WebGPU donanım özniteliği | Yalnız mount: context ilk `getContext` çağrısında sabitlenir, açık grafik değişmez; WebGPU cihaz seçiminde (`requestWebGpuDevice`) `powerPreference` kullanılır; sonradan mount edilenler yeni değeri alır |
@@ -53,6 +55,10 @@ Davranışı değiştirmezler; telefonda `?perf` ile gerçek cihaz ölçümünü
 
 Harness bu seçenekleri URL'den okur: `?density=compact&fit=70&axisw=62&axish=32&dprcap=2&antialias=0&power=low-power`
 ([harness/chart.ts](../harness/chart.ts)); `setDisplayOptions(...)` aynı cevabı çalışırken değiştirir.
+
+## GPU diagnostics feature paths
+
+The diagnostics snapshot `featurePaths` reports the active path for enabled features. `featurePaths["orderbook-heatmap"]` is `"webgl2"` after a successful WebGL2 heatmap GPU frame and `"cpu"` while CPU rendering is active, including enabled WebGPU/Canvas2D operation and pending/failed GPU rendering. The key is absent (`undefined`) only while the heatmap feature is disabled or unregistered. Consumers (including FE/#703) should rely on these stable values rather than infer the path from the global backend.
 
 ## Generic host mount/dispose wiring (minimal)
 

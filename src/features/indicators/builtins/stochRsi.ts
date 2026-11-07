@@ -11,7 +11,7 @@ function prepareStochRsi(ctx: IndicatorDrawContext<StochRsiSettings>) {
     { key: "k", label: "%K", color: stringSetting(ctx.settings, "kColor", uiColor.info), points: makeSeriesPoints(values.map((point) => point.k), bars, start, end) },
     { key: "d", label: "%D", color: stringSetting(ctx.settings, "dColor", uiColor.warn), points: makeSeriesPoints(values.map((point) => point.d), bars, start, end) },
   ];
-  return prepareMultiSeries(ctx, series, { scaleMode: "percent", baseline: 50, horizontalLevels: [{ value: 80, label: "OB" }, { value: 20, label: "OS" }] });
+  return prepareMultiSeries(ctx, series, { scaleMode: "percent", baseline: 50, horizontalLevels: [{ value: 80, label: "OB" }, { value: 20, label: "OS" }], axisTicks: [80, 50, 20], fixedRange: { min: 0, max: 100 } });
 }
 export const stochRsiIndicatorDefinition: IndicatorDefinition<StochRsiSettings> = {
   type: "stoch-rsi", name: "StochRSI", category: "custom", defaultPane: "separate", canOverlay: false, defaultPlacement: "separate-pane", supportedPlacements: ["separate-pane"], paneHeight: 112,

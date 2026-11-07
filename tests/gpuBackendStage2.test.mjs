@@ -10,9 +10,9 @@ import {
   createGpuSurfaceAsync,
 } from "../dist/core/gpu/selectBackend.js";
 import {
-  isWebGpuSupported,
   requestWebGpuDevice,
   resetSharedWebGpuDevice,
+  isWebGpuSupported,
 } from "../dist/core/gpu/webgpu/webgpuDevice.js";
 import {
   WebGpuQuadPipeline,
@@ -541,6 +541,20 @@ test("WebGPU powerPreference adapter option negotiation and cache behavior (#67)
   }
 });
 
+test("WebGpuQuadSink packs clamped RGBA bytes and refreshes its view on growth", () => {
+  const sink = new WebGpuQuadSink(1);
+  sink.rect(1, 2, 3, 4, { r: 1, g: 0.5, b: -1, a: 2 });
+  assert.equal(sink.data.length, FLOATS_PER_INSTANCE);
+  assert.deepEqual(Array.from(new Uint8Array(sink.data.buffer, 16, 4)), [255, 128, 0, 255]);
+  const initial = sink.data.buffer;
+  sink.rect(5, 6, 7, 8, { r: 0, g: 1, b: 0, a: 1 });
+  assert.notEqual(sink.data.buffer, initial);
+  assert.deepEqual(Array.from(new Uint8Array(sink.data.buffer, 36, 4)), [0, 255, 0, 255]);
+  sink.reset();
+  sink.rect(9, 10, 11, 12, { r: 0.25, g: 0.75, b: 0.1, a: 0.5 });
+  assert.deepEqual(Array.from(new Uint8Array(sink.data.buffer, 16, 4)), [64, 191, 26, 128]);
+});
+
 test("WebGpuQuadPipeline compiles shaders, writes uniforms, dynamic buffer growth and records draws", () => {
   const { device, buffers, passes, writtenBuffers } = makeFakeWebGpuDevice("rgba8unorm");
 
@@ -592,6 +606,24 @@ test("WebGpuQuadPipeline compiles shaders, writes uniforms, dynamic buffer growt
   assert.equal(pipeline.uniformBuffer.destroyed, true);
 });
 
+test("WebGpuQuadPipeline skips unchanged resolution writes and updates after resize", () => {
+  const { device, writtenBuffers } = makeFakeWebGpuDevice("rgba8unorm");
+  const pipeline = new WebGpuQuadPipeline(device, "rgba8unorm", 1024);
+
+  pipeline.updateResolution(1920, 1080);
+  assert.equal(writtenBuffers.length, 1);
+  const scratchBuffer = writtenBuffers[0].data.buffer;
+  pipeline.updateResolution(1920, 1080);
+  assert.equal(writtenBuffers.length, 1);
+  assert.equal(writtenBuffers[0].data.buffer, scratchBuffer);
+
+  pipeline.updateResolution(1280, 720);
+  assert.equal(writtenBuffers.length, 2);
+  const resizedFloats = new Float32Array(writtenBuffers[1].data.buffer);
+  assert.equal(resizedFloats[0], 1280);
+  assert.equal(resizedFloats[1], 720);
+  pipeline.dispose();
+});
 test("WebGpuSurface renders frame lifecycle and writes instance data via WebGpuQuadSink", () => {
   const { device, passes, writtenBuffers, submittedCommands } = makeFakeWebGpuDevice("rgba8unorm");
   const ctx = makeFakeWebGpuContext(device, "rgba8unorm");
