@@ -2,11 +2,41 @@ import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import { mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { dirname, join, resolve } from "node:path";
+import { basename, dirname, join, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import { test } from "node:test";
 
 const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
+export function packedTarballPath(packDir, packOutput) {
+
+  const result = JSON.parse(packOutput);
+
+  assert.ok(Array.isArray(result) && result.length === 1 && typeof result[0].filename === "string", "npm pack --json must report exactly one filename");
+
+  const filename = result[0].filename;
+
+  assert.equal(filename, basename(filename), "npm pack filename must be a basename");
+
+  assert.match(filename, /^[a-zA-Z0-9@._+-]+\.tgz$/, "npm pack filename must be a safe tarball basename");
+
+  const path = resolve(packDir, filename);
+
+  assert.ok(path.startsWith(resolve(packDir) + sep), "npm pack filename must stay inside the pack directory");
+
+  return path;
+
+}
+
+
+
+test("pack filename resolver accepts stable and prerelease npm filenames and rejects traversal", () => {
+  for (const version of ["0.2.7", "0.3.0-rc.1"]) {
+    const filename = `pactolis-chart-engine-${version}.tgz`;
+    assert.equal(packedTarballPath("C:/tmp/pack", JSON.stringify([{ filename }])), resolve("C:/tmp/pack", filename));
+  }
+  assert.throws(() => packedTarballPath("C:/tmp/pack", JSON.stringify([{ filename: "../escape.tgz" }])), /basename/);
+});
+
 const testingSubpaths = [
   "core/dataUpdateEvent",
   "core/analysis/calc/ta",
@@ -26,11 +56,12 @@ test("testing exports resolve from the packed consumer package at runtime and in
     mkdirSync(packDir, { recursive: true });
     mkdirSync(consumer, { recursive: true });
 
-    execFileSync("npm", ["pack", "--ignore-scripts", "--pack-destination", packDir], {
+    const packOutput = execFileSync("npm", ["pack", "--json", "--ignore-scripts", "--pack-destination", packDir], {
       cwd: repoRoot,
-      stdio: "pipe",
+      encoding: "utf8",
+      stdio: ["ignore", "pipe", "pipe"],
     });
-    const tarball = join(packDir, "pactolis-chart-engine-0.2.7.tgz");
+    const tarball = packedTarballPath(packDir, packOutput);
     assert.ok(readFileSync(tarball).length > 0, "npm pack must produce a tarball");
     mkdirSync(packageDir, { recursive: true });
     execFileSync("tar", ["-xzf", tarball, "-C", packageDir, "--strip-components=1"], { stdio: "pipe" });
