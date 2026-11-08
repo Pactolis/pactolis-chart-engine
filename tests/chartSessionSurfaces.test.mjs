@@ -442,11 +442,16 @@ test("each update kind reaches its frame with its own scope and the same surface
 
 test("tail invalidation forwards renderer context and preserves conservative default when absent", () => {
   const explicit = makeSession({ getTailDependencyContext: () => ({ annotation: false, interaction: false }) });
+  // Drain constructor's initial full-surface paint before asserting an isolated invalidation.
+  explicit.session.activate();
+  explicit.win.runNextFrame();
   explicit.session.invalidate(ChartChange.DataTail);
   assert.equal(explicit.session.pendingInvalidation.surfaces, ChartSurfaceDirty.GpuScene);
   explicit.session.destroy();
 
   const absent = makeSession();
+  absent.session.activate();
+  absent.win.runNextFrame();
   absent.session.invalidate(ChartChange.DataTail);
   assert.equal(absent.session.pendingInvalidation.surfaces, ChartSurfaceDirty.All);
   absent.session.destroy();
