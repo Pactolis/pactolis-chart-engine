@@ -14,6 +14,8 @@ export const MAX_CAPTURE_BYTES = 8 * 1024 * 1024;
 export const CHART_WEBGL_CONTEXT_ATTRIBUTES: WebGLContextAttributes = Object.freeze({
   antialias: true,
   alpha: false,
+  depth: false,
+  premultipliedAlpha: false,
   preserveDrawingBuffer: false,
 });
 
