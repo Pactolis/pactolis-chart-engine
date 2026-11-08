@@ -25,6 +25,7 @@ import {
   ChartSurfaceDirty,
   surfaceDirtyForChanges,
   type ChartInvalidationScope,
+  type TailDependencyContext,
 } from "../../core/render/scene/chartScene.js";
 import {
   incrementPerformanceCounter,
@@ -51,6 +52,7 @@ const CONTEXT_RESTORE_TIMEOUT_MS = 5000;
 export interface ChartSessionRenderer {
   render(view: View, series: FootprintSeries): void;
   visibleRange(view: View, total: number): [number, number];
+  getTailDependencyContext?(): TailDependencyContext;
   setSurface?(surface: GpuSurface): void;
 }
 
@@ -251,7 +253,7 @@ export class ChartSession {
   }
 
   invalidate(changes: ChartChange = ChartChange.All): void {
-    let dirty = surfaceDirtyForChanges(changes);
+    let dirty = surfaceDirtyForChanges(changes, this.renderer.getTailDependencyContext?.());
     if ((changes & ChartChange.Interaction) && this.annotationRenderer.requiresInteractionRedraw?.()) {
       dirty |= ChartSurfaceDirty.Annotation;
     }
