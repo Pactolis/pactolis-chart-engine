@@ -34,6 +34,16 @@ test("interaction-only changes dirty only the interaction surface", () => {
   );
 });
 
+test("stable-viewport live-tail updates leave axes and interaction surfaces clean", () => {
+  const dirty = surfaceDirtyForChanges(chartChangeForDataUpdate("same-bar-update"));
+  assert.equal(dirty, ChartSurfaceDirty.GpuScene);
+
+  // Axis/indicator geometry or presentation changes still require the existing full redraw.
+  assert.equal(surfaceDirtyForChanges(ChartChange.Viewport), ChartSurfaceDirty.All);
+  assert.equal(surfaceDirtyForChanges(ChartChange.Layout), ChartSurfaceDirty.All);
+  assert.equal(surfaceDirtyForChanges(ChartChange.Visibility), ChartSurfaceDirty.All);
+});
+
 // T05-A (#316) oracle, written from the issue rather than from the implementation: each kind of
 // update names its own change, and this first stage keeps every surface decision exactly as it was.
 const ALL_SURFACES = ChartSurfaceDirty.GpuScene | ChartSurfaceDirty.Annotation | ChartSurfaceDirty.Interaction;
