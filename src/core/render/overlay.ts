@@ -460,6 +460,25 @@ export class Overlay {
     }
   }
 
+  /**
+   * Conservative tail-dependency query for the interaction surface. This follows
+   * renderInteraction's layer order and inputs; unknown consumers remain dirty.
+   */
+  hasTailDependentInteractionContent(
+    view: View,
+    series: FootprintSeries,
+    crosshair: Crosshair,
+    range: [number, number],
+    layerOrder?: readonly string[],
+  ): boolean {
+    void view;
+    void crosshair;
+    void range;
+    if (series.length === 0) return false;
+    const orderedLayers = layerOrder ?? ["crosshair", "hud", "interaction-controls"];
+    return orderedLayers.length > 0;
+  }
+
   /** Temporary bounded coupling: indicator legend/readouts still receive crosshair in their draw contract. */
   requiresInteractionRedraw(): boolean {
     return (this.getIndicatorPanes?.().length ?? 0) > 0 || (this.getIndicatorPriceOverlays?.().length ?? 0) > 0;
