@@ -46,6 +46,7 @@ test("testing exports resolve from the packed consumer package at runtime and in
     ).join("\n"));
     execFileSync(process.execPath, [runtimeScript], { cwd: consumer, stdio: "pipe" });
 
+    writeFileSync(join(consumer, "package.json"), JSON.stringify({ type: "module" }));
     const typesScript = join(consumer, "consumer.ts");
     writeFileSync(typesScript, [
       'import type { ChartDataUpdateKind } from "@pactolis/chart-engine/testing/core/dataUpdateEvent";',
@@ -62,10 +63,17 @@ test("testing exports resolve from the packed consumer package at runtime and in
       'export type { ConsumerTypes };',
     ].join("\n"));
     const tsc = resolve(repoRoot, "node_modules/typescript/bin/tsc");
-    execFileSync(process.execPath, [
-      tsc, "--noEmit", "--strict", "--skipLibCheck", "--target", "ES2022",
-      "--module", "NodeNext", "--moduleResolution", "NodeNext", typesScript,
-    ], { cwd: consumer, stdio: "pipe" });
+    try {
+      execFileSync(process.execPath, [
+        tsc, "--noEmit", "--strict", "--skipLibCheck", "--target", "ES2022",
+        "--module", "NodeNext", "--moduleResolution", "NodeNext", typesScript,
+      ], { cwd: consumer, stdio: "pipe" });
+    } catch (error) {
+      const stdout = String(error.stdout ?? "").slice(0, 8000);
+      const stderr = String(error.stderr ?? "").slice(0, 8000);
+      const fixture = JSON.stringify(JSON.parse(readFileSync(join(consumer, "package.json"), "utf8")));
+      assert.fail(`TypeScript consumer failed (exit ${error.status}); consumer package.json=${fixture}; stdout:\n${stdout}\nstderr:\n${stderr}`);
+    }
   } finally {
     rmSync(tempRoot, { recursive: true, force: true });
   }
