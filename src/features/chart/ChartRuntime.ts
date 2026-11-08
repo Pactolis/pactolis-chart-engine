@@ -545,6 +545,7 @@ class ChartRuntimeImpl implements ChartRuntime, ChartInputHost {
       },
       onBackendChanged: (backend) => this._hook.setAttribute("data-gpu-backend", backend),
       maxDevicePixelRatio: display.maxDevicePixelRatio,
+      webglOptions: display.webgl,
       onResize: (w, h, dpr) => {
         this.view.pixelRatio = dpr;
         this._lastKnownSize = { width: w, height: h };
