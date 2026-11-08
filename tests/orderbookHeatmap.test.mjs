@@ -273,6 +273,30 @@ test("falls back to timer refresh when no live-tail source is provided or when i
   overlay.dispose();
 });
 
+test("live-tail stays healthy between 60s samples and falls back after 90s idle", () => {
+  let currentTime = 1_000_000;
+  let eventListener = null;
+  const overlay = new OrderbookHeatmapOverlay({
+    fetch: async () => ({
+      schemaVersion: 1, generatedAt: currentTime, base: "BTC", source: "single", resolution: "1m",
+      bucketStep: 50, from: 0, to: 0, bars: [],
+    }),
+    invalidate: () => {},
+    getMarket: () => "BINANCE_FUTURES:btcusdt",
+    now: () => currentTime,
+    subscribeLiveTail: (listener) => { eventListener = listener; return () => {}; },
+  });
+
+  eventListener();
+  currentTime += 60_000;
+  assert.equal(overlay.isLiveTailHealthyForTest(), true, "60s sampler interval must not trigger REST fallback");
+  eventListener();
+  currentTime += 89_999;
+  assert.equal(overlay.isLiveTailHealthyForTest(), true, "tail remains healthy before the idle threshold");
+  currentTime += 1;
+  assert.equal(overlay.isLiveTailHealthyForTest(), false, "fallback activates at 90s idle");
+  overlay.dispose();
+});
 test("subscribes to live-tail and performs proper cleanup on dispose", () => {
   let unsubscribed = false;
   let eventListener = null;
