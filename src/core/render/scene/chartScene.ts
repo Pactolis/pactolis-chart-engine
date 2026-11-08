@@ -86,8 +86,17 @@ export function chartChangeForDataUpdate(kind: ChartDataUpdateKind): ChartChange
 }
 
 /**
- * The redraw a set of changes asks for. First stage of T05-A: the vocabulary is narrow, the
- * surfaces are not — every non-interaction change still redraws all three surfaces in full.
+ * Optional evidence from a renderer consumer that explicitly declares which non-GPU surfaces
+ * depend on a tail-only data update. Absent evidence, tail updates retain the conservative default.
+ */
+export interface TailDependencyContext {
+  readonly annotation: boolean;
+  readonly interaction: boolean;
+}
+
+/**
+ * The redraw a set of changes asks for. Tail-only narrowing is opt-in and requires explicit
+ * consumer dependency evidence; other changes retain the conservative full-surface behavior.
  */
 export interface ChartInvalidationScope {
   readonly changes: ChartChange;
@@ -98,7 +107,17 @@ export function invalidationScopeForChanges(changes: ChartChange): ChartInvalida
   return { changes, surfaces: surfaceDirtyForChanges(changes) };
 }
 
-export function surfaceDirtyForChanges(changes: ChartChange): ChartSurfaceDirty {
+export function surfaceDirtyForChanges(
+  changes: ChartChange,
+  tailDependencyContext?: TailDependencyContext,
+): ChartSurfaceDirty {
+  if (changes === ChartChange.DataTail && tailDependencyContext !== undefined) {
+    let dirty = ChartSurfaceDirty.GpuScene;
+    if (tailDependencyContext.annotation) dirty |= ChartSurfaceDirty.Annotation;
+    if (tailDependencyContext.interaction) dirty |= ChartSurfaceDirty.Interaction;
+    return dirty;
+  }
+
   let dirty = ChartSurfaceDirty.None;
   if (changes & ChartChange.GpuContext) dirty |= ChartSurfaceDirty.GpuScene;
   if (changes & ChartChange.Interaction) dirty |= ChartSurfaceDirty.Interaction;
