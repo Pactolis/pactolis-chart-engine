@@ -17,6 +17,7 @@
 
 import type { View } from "../../core/engine/view.js";
 import { effectivePixelRatio } from "../../core/model/chartDisplayOptions.js";
+import type { ChartWebGlOptions } from "../../core/model/chartDisplayOptions.js";
 import type { FootprintSeries } from "../../core/model/footprint.js";
 import type { Crosshair } from "../../core/render/overlay.js";
 import {
@@ -100,6 +101,8 @@ export interface ChartSessionOptions {
   onInvalidate?: (changes: ChartChange) => void;
   /** Highest pixel ratio the canvases render at; null (default) follows the window's devicePixelRatio. */
   maxDevicePixelRatio?: number | null;
+  /** WebGL context attributes used for every session-owned context acquisition. */
+  webglOptions?: ChartWebGlOptions;
 }
 
 export class ChartSession {
@@ -137,6 +140,7 @@ export class ChartSession {
   private readonly onInvalidateCb?: (changes: ChartChange) => void;
   private disposeDprWatcher: (() => void) | null = null;
   private maxDevicePixelRatio: number | null;
+  private readonly webglOptions?: ChartWebGlOptions;
 
   private dirtySurfaces = ChartSurfaceDirty.All;
   /** Semantic changes waiting for the next frame; travels with `dirtySurfaces`, never narrows it. */
@@ -207,6 +211,7 @@ export class ChartSession {
     this.onRenderedCb = opts.onRendered;
     this.onInvalidateCb = opts.onInvalidate;
     this.maxDevicePixelRatio = opts.maxDevicePixelRatio ?? null;
+    this.webglOptions = opts.webglOptions;
 
     this.lifecycle.start();
     this.setupContextLossHandling();
@@ -259,7 +264,7 @@ export class ChartSession {
   }
 
   restoreContext(): void {
-    const freshGl = getChartWebGl2Context(this.gpuCanvas);
+    const freshGl = getChartWebGl2Context(this.gpuCanvas, this.webglOptions);
     if (!freshGl) return;
     this.gl = freshGl;
     this.onRestoreContextCb(freshGl);
@@ -736,7 +741,7 @@ export class ChartSession {
         recordGpuFallback("webgpu", "webgl2", reason);
         try {
           const fallbackCanvas = this.ownerDocument.createElement("canvas");
-          const fallbackGl = getChartWebGl2Context(fallbackCanvas);
+          const fallbackGl = getChartWebGl2Context(fallbackCanvas, this.webglOptions);
           if (fallbackGl) {
             this.replaceSurface(new WebGl2Surface(fallbackCanvas, fallbackGl));
             this.onBackendChangedCb?.("webgl2");
@@ -785,7 +790,7 @@ export class ChartSession {
         clearTimeout(this.restoreTimeoutId);
         this.restoreTimeoutId = null;
       }
-      const freshGl = getChartWebGl2Context(this.gpuCanvas);
+      const freshGl = getChartWebGl2Context(this.gpuCanvas, this.webglOptions);
       if (!freshGl) {
         incrementPerformanceCounter("chart.gpu.contextCreateFailed");
         return;
