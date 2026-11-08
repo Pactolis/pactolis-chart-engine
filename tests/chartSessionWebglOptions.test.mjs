@@ -67,6 +67,5 @@ test("ChartSession forwards runtime WebGL options when acquiring fallback and re
     powerPreference: "low-power",
     premultipliedAlpha: false,
     preserveDrawingBuffer: false,
-    stencil: false,
   });
 });
