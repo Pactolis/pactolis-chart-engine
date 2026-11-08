@@ -56,7 +56,7 @@ const HOVER_CACHE_LIMIT = 40;
 /** Bounded live tail invalidation coalescing window (ms). */
 const DEFAULT_LIVE_DEBOUNCE_MS = 200;
 /** Timeout after which an idle/silent live-tail subscription falls back to timer refreshes (ms). */
-const LIVE_TAIL_IDLE_FALLBACK_MS = 45_000;
+const LIVE_TAIL_IDLE_FALLBACK_MS = 90_000;
 
 /**
  * Known CPU payload per prepared GPU cell (visible entry + main/extension
