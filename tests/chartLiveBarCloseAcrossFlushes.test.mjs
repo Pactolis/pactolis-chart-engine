@@ -1,6 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { ChartDataPipeline } from "../dist/features/chart/ChartDataPipeline.js";
+import { createBarCloseNotifier } from "../dist/features/chart/ChartServicePorts.js";
 
 const MARKET = "BINANCE_FUTURES:btcusdt";
 
@@ -74,6 +75,60 @@ test("bar-close callbacks fire once and in order across separate live flushes", 
   services.emit(120_002);
   scheduler.flush();
   assert.deepEqual(closed, [0, 60_000]);
+
+  pipeline.dispose();
+});
+
+test("notifyBarClose port forwards market, closed bar, priceStep, intervalMs and timeframe", () => {
+  const services = makeServices();
+  const scheduler = makeManualScheduler();
+  const calls = [];
+  const state = {
+    market: MARKET,
+    timeframe: "15m",
+  };
+  const pipeline = new ChartDataPipeline({
+    market: state.market,
+    intervalMs: 900_000,
+    priceStep: 0.5,
+    services,
+    scheduler: scheduler.scheduler,
+  });
+  pipeline.onBarClose = createBarCloseNotifier(
+    {
+      notifyBarClose(market, bar, priceStep, intervalMs, timeframe) {
+        calls.push({
+          market,
+          startTime: bar.startTime,
+          priceStep,
+          intervalMs,
+          timeframe,
+        });
+      },
+    },
+    {
+      getMarket: () => state.market,
+      getPriceStep: () => pipeline.series.config.priceStep,
+      getIntervalMs: () => pipeline.intervalMs,
+      getTimeframe: () => state.timeframe,
+    },
+  );
+
+  services.emit(10_000);
+  scheduler.flush();
+  assert.equal(calls.length, 0);
+
+  services.emit(900_001);
+  scheduler.flush();
+  assert.deepEqual(calls, [
+    {
+      market: MARKET,
+      startTime: 0,
+      priceStep: 0.5,
+      intervalMs: 900_000,
+      timeframe: "15m",
+    },
+  ]);
 
   pipeline.dispose();
 });

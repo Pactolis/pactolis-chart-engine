@@ -9,7 +9,7 @@
 import { type ChartPanelState, type ChartType, type LinkGroupColor, type TpoMode } from "../../core/chartPanelState.js";
 import type { AnalysisContext, AutomaticLevelsAsOf } from "../../core/analysisContext.js";
 import type { ChartAnalysisSnapshot, AnalysisSnapshotOptions } from "../../core/analysisSnapshot.js";
-import type { ChartRuntimeServices } from "./ChartServicePorts.js";
+import { createBarCloseNotifier, type ChartRuntimeServices } from "./ChartServicePorts.js";
 import {
   constrainChartTypeForMarket,
   isFootprintSyncAllowed,
@@ -656,9 +656,12 @@ class ChartRuntimeImpl implements ChartRuntime, ChartInputHost {
 
     this.hookFollowsInvalidation = true;
 
-    pipeline.onBarClose = (closed) => {
-      this.svc.notifyBarClose(this.state.market, closed, series.config.priceStep);
-    };
+    pipeline.onBarClose = createBarCloseNotifier(this.svc, {
+      getMarket: () => this.state.market,
+      getPriceStep: () => series.config.priceStep,
+      getIntervalMs: () => this.pipeline.intervalMs,
+      getTimeframe: () => this.state.timeframe,
+    });
     pipeline.onHistoryCandlesReady = () => {
       if (!this.disposed) this.svc.notifyInteractiveCandlesReady(this.state.market, series.config.priceStep);
     };

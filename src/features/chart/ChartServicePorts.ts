@@ -53,9 +53,37 @@ export interface ChartRuntimeServices
     ChartAnalysisServices,
     ChartCaptureServices,
     ChartHistoryServices {
-  notifyBarClose(market: string, bar: FootprintBar, priceStep: number): void;
+  notifyBarClose(
+    market: string,
+    bar: FootprintBar,
+    priceStep: number,
+    intervalMs?: number,
+    timeframe?: string,
+  ): void;
   /** Stored orderbook heatmap for the BTCUSDT perp chart overlay; absent in hosts without it. */
   fetchOrderbookHeatmap?: OrderbookHeatmapFetch;
   /** Optional live tail subscription for orderbook heatmap live-tail invalidation / push. */
   subscribeOrderbookHeatmapLiveTail?: (listener: (event?: LiveHeatmapTailEvent) => void) => () => void;
+}
+
+export interface BarCloseSourceContext {
+  getMarket(): string;
+  getPriceStep(): number;
+  getIntervalMs(): number;
+  getTimeframe(): string;
+}
+
+export function createBarCloseNotifier(
+  svc: Pick<ChartRuntimeServices, "notifyBarClose">,
+  context: BarCloseSourceContext,
+): (closed: FootprintBar) => void {
+  return (closed: FootprintBar) => {
+    svc.notifyBarClose(
+      context.getMarket(),
+      closed,
+      context.getPriceStep(),
+      context.getIntervalMs(),
+      context.getTimeframe(),
+    );
+  };
 }
