@@ -59,7 +59,8 @@ test("testing exports resolve from the packed consumer package at runtime and in
       'const kind: ChartDataUpdateKind = "history-loaded";',
       'const bar: OhlcvInput = { time: 1, open: 1, high: 1, low: 1, close: 1, volume: 1 };',
       'type ConsumerTypes = [ChartDataPipeline, ChartSession, ChartSyncController, HeatmapGpuRenderer, IndicatorSeriesMutationSummary];',
-      'void [kind, bar] satisfies [ChartDataUpdateKind, OhlcvInput];',
+      'const typedValues: [ChartDataUpdateKind, OhlcvInput] = [kind, bar];',
+      'void typedValues;',
       'export type { ConsumerTypes };',
     ].join("\n"));
     const tsc = resolve(repoRoot, "node_modules/typescript/bin/tsc");
