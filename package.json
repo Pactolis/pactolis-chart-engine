@@ -342,6 +342,34 @@
       "types": "./dist/features/replay/replayController.d.ts",
       "default": "./dist/features/replay/replayController.js"
     },
+    "./testing/core/dataUpdateEvent": {
+      "types": "./dist/core/dataUpdateEvent.d.ts",
+      "default": "./dist/core/dataUpdateEvent.js"
+    },
+    "./testing/core/analysis/calc/ta": {
+      "types": "./dist/core/analysis/calc/ta.d.ts",
+      "default": "./dist/core/analysis/calc/ta.js"
+    },
+    "./testing/features/chart/ChartDataPipeline": {
+      "types": "./dist/features/chart/ChartDataPipeline.d.ts",
+      "default": "./dist/features/chart/ChartDataPipeline.js"
+    },
+    "./testing/features/chart/ChartSession": {
+      "types": "./dist/features/chart/ChartSession.d.ts",
+      "default": "./dist/features/chart/ChartSession.js"
+    },
+    "./testing/features/chart/ChartSyncController": {
+      "types": "./dist/features/chart/ChartSyncController.d.ts",
+      "default": "./dist/features/chart/ChartSyncController.js"
+    },
+    "./testing/features/chart/heatmap/gpu/heatmapGpuRenderer": {
+      "types": "./dist/features/chart/heatmap/gpu/heatmapGpuRenderer.d.ts",
+      "default": "./dist/features/chart/heatmap/gpu/heatmapGpuRenderer.js"
+    },
+    "./testing/features/indicators/seriesMutationSummary": {
+      "types": "./dist/features/indicators/seriesMutationSummary.d.ts",
+      "default": "./dist/features/indicators/seriesMutationSummary.js"
+    },
     "./package.json": "./package.json"
   },
   "files": [
