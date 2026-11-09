@@ -22,6 +22,7 @@ jobs:
     steps:
       - uses: actions/checkout@v7
         with:
+          ref: ${{ github.sha }}
           persist-credentials: false
       - name: Find the version to release
         id: version
@@ -55,4 +56,9 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           TAG: ${{ steps.version.outputs.tag }}
-        run: gh release create "$TAG" pactolis-chart-engine-*.tgz --repo "$GITHUB_REPOSITORY" --target "$GITHUB_SHA" --title "$TAG" --generate-notes
+        run: |
+          release_flags=()
+          if [[ "$TAG" == *-* ]]; then
+            release_flags+=(--prerelease)
+          fi
+          gh release create "$TAG" pactolis-chart-engine-*.tgz --repo "$GITHUB_REPOSITORY" --target "$GITHUB_SHA" --title "$TAG" --notes './testing/* subpaths are for testing only; no stable API is promised.' --generate-notes "${release_flags[@]}"
