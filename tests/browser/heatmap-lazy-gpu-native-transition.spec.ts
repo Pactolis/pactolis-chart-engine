@@ -81,11 +81,13 @@ async function installFixture(page: Page): Promise<string> {
     const selection = r.getState();
     await new Promise<void>((resolve, reject) => {
       const timeout = setTimeout(() => reject(new Error("history settlement deadline exceeded")), 15000);
-      const stop = r.subscribeCaptureReadiness((snapshot) => {
+      let stop = () => {};
+      let completed = false;
+      stop = r.subscribeCaptureReadiness((snapshot) => {
         if (snapshot.disposed || snapshot.market !== selection.market || snapshot.timeframe !== selection.timeframe) {
-          clearTimeout(timeout); stop(); reject(new Error("history selection changed"));
+          clearTimeout(timeout); completed = true; stop(); reject(new Error("history selection changed"));
         } else if (snapshot.history.status === "settled" && snapshot.ready && snapshot.priceStep === 25) {
-          clearTimeout(timeout); stop(); resolve();
+          clearTimeout(timeout); completed = true; stop(); resolve();
         }
       });
     });
