@@ -4,6 +4,7 @@ import type { View } from "../../src/core/engine/view.js";
 import type { FootprintSeries } from "../../src/core/model/footprint.js";
 import type { ChartPanelState } from "../../src/core/chartPanelState.js";
 import { buildBars, FROZEN_NOW, FUNCTIONAL_WEBGL_ARGS, openHarness } from "./support/history.js";
+import { HEATMAP_GPU_FRAG_SRC, HEATMAP_GPU_VERT_SRC } from "../../src/features/chart/heatmap/gpu/heatmapGpuShaders.js";
 
 test.use({ launchOptions: { args: [...FUNCTIONAL_WEBGL_ARGS] } });
 
@@ -29,6 +30,26 @@ type RuntimeProbe = {
     captureCompositePng(): Promise<{ blob: Blob; width: number; height: number }>;
   };
 };
+
+declare global {
+  interface Window {
+    __heatmapNativeProbe: {
+      captureActive: boolean;
+      heatmapPrograms: number;
+      heatmapDraws: number;
+      otherDraws: number;
+      reads: number;
+      startCapture(): void;
+      resetCapture(): void;
+      readCapture(): { heatmapPrograms: number; heatmapDraws: number; otherDraws: number; reads: number };
+      shaderSources: WeakMap<WebGLShader, string>;
+      programShaders: WeakMap<WebGLProgram, WebGLShader[]>;
+      currentByContext: WeakMap<WebGL2RenderingContext, WebGLProgram | null>;
+      vertex: string;
+      fragment: string;
+    };
+  }
+}
 
 const hookSelector = '[data-testid="chart-hook"]:not([data-ft-synthetic="1"])';
 
@@ -64,6 +85,62 @@ async function installFixture(page: Page): Promise<string> {
       },
     }) });
   });
+  await page.addInitScript(({ vertex, fragment }) => {
+    const state = {
+      vertex, fragment, shaderSources: new WeakMap<WebGLShader, string>(),
+      programShaders: new WeakMap<WebGLProgram, WebGLShader[]>(),
+      currentByContext: new WeakMap<WebGL2RenderingContext, WebGLProgram | null>(),
+      captureActive: false, heatmapPrograms: 0, heatmapDraws: 0, otherDraws: 0, reads: 0,
+      captureHeatmapPrograms: new Set<WebGLProgram>(),
+      resetCapture() {
+        this.heatmapPrograms = 0; this.heatmapDraws = 0; this.otherDraws = 0; this.reads = 0;
+        this.captureHeatmapPrograms.clear();
+      },
+      startCapture() { this.resetCapture(); this.captureActive = true; },
+      readCapture() {
+        this.captureActive = false;
+        return { heatmapPrograms: this.heatmapPrograms, heatmapDraws: this.heatmapDraws,
+          otherDraws: this.otherDraws, reads: this.reads };
+      },
+    };
+    Object.defineProperty(window, "__heatmapNativeProbe", { value: state, configurable: false });
+    const proto = WebGL2RenderingContext.prototype;
+    const shaderSource = proto.shaderSource, attachShader = proto.attachShader;
+    const useProgram = proto.useProgram, draw = proto.drawArraysInstanced, readPixels = proto.readPixels;
+    proto.shaderSource = function (shader, source) {
+      state.shaderSources.set(shader, source);
+      return shaderSource.call(this, shader, source);
+    };
+    proto.attachShader = function (program, shader) {
+      const shaders = state.programShaders.get(program) ?? [];
+      shaders.push(shader); state.programShaders.set(program, shaders);
+      return attachShader.call(this, program, shader);
+    };
+    proto.useProgram = function (program) {
+      state.currentByContext.set(this, program);
+      const sources = program ? (state.programShaders.get(program) ?? []).map((shader) => state.shaderSources.get(shader) ?? "") : [];
+      if (state.captureActive && program && sources.includes(state.vertex) && sources.includes(state.fragment)
+        && !state.captureHeatmapPrograms.has(program)) {
+        state.captureHeatmapPrograms.add(program);
+        state.heatmapPrograms++;
+      }
+      return useProgram.call(this, program);
+    };
+    proto.drawArraysInstanced = function (...args) {
+      const p = state.currentByContext.get(this);
+      const sources = p ? (state.programShaders.get(p) ?? []).map((s) => state.shaderSources.get(s) ?? "") : [];
+      if (state.captureActive) {
+        if (sources.includes(state.vertex) && sources.includes(state.fragment)) state.heatmapDraws++;
+        else state.otherDraws++;
+      }
+      return draw.apply(this, args);
+    };
+    proto.readPixels = function (...args) {
+      const result = readPixels.apply(this, args);
+      if (state.captureActive) state.reads++;
+      return result;
+    };
+  }, { vertex: HEATMAP_GPU_VERT_SRC, fragment: HEATMAP_GPU_FRAG_SRC });
   await openHarness(page, "?chart=BINANCE_FUTURES:btcusdt&timeframe=15m&priceStep=50&priceStepResolved=0");
   const hook = page.locator(hookSelector);
   await expect(hook).toHaveCount(1);
@@ -82,12 +159,11 @@ async function installFixture(page: Page): Promise<string> {
     await new Promise<void>((resolve, reject) => {
       const timeout = setTimeout(() => reject(new Error("history settlement deadline exceeded")), 15000);
       let stop = () => {};
-      let completed = false;
       stop = r.subscribeCaptureReadiness((snapshot) => {
         if (snapshot.disposed || snapshot.market !== selection.market || snapshot.timeframe !== selection.timeframe) {
-          clearTimeout(timeout); completed = true; stop(); reject(new Error("history selection changed"));
+          clearTimeout(timeout); stop(); reject(new Error("history selection changed"));
         } else if (snapshot.history.status === "settled" && snapshot.ready && snapshot.priceStep === 25) {
-          clearTimeout(timeout); completed = true; stop(); resolve();
+          clearTimeout(timeout); stop(); resolve();
         }
       });
     });
@@ -177,41 +253,31 @@ test("native capture keeps real CPU heatmap ownership while the lazy GPU module 
       const annotation = root?.querySelector<HTMLCanvasElement>('canvas[data-chart-surface="annotation"]');
       if (!gpuCanvas || !annotation || gpuCanvas.width <= 1 || annotation.width !== gpuCanvas.width)
         throw new Error("Fixture: actual chart-owned render surfaces unavailable");
-      const gl = r.session.gl;
       const series = r.pipeline.series, last = series.length - 1;
       const sample = { x: Math.floor(r.view.xOfIndex(last) + r.view.colWidth / 2),
         y: Math.floor(r.view.yOfPrice(125)) };
       if (sample.x < 0 || sample.y < 0 || sample.x >= annotation.width || sample.y >= annotation.height)
         throw new Error("Fixture: heatmap sample is outside the owned annotation surface");
-      const originalRead = gl.readPixels, originalDraw = gl.drawArraysInstanced;
-      let reads = 0, heatmapDraws = 0;
-      gl.readPixels = function (...args: Parameters<WebGL2RenderingContext["readPixels"]>) {
-        const result = originalRead.apply(this, args);
-        if (r.session.pendingCapture) reads++;
-        return result;
-      } as WebGL2RenderingContext["readPixels"];
-      gl.drawArraysInstanced = function (...args: Parameters<WebGL2RenderingContext["drawArraysInstanced"]>) {
-        const result = originalDraw.apply(this, args);
-        if (r.session.pendingCapture) heatmapDraws++;
-        return result;
-      } as WebGL2RenderingContext["drawArraysInstanced"];
+      const probe = window.__heatmapNativeProbe;
+      probe.startCapture();
       try {
         r.invalidate();
         const frame = await r.session.captureCompositePng();
+        const counts = probe.readCapture();
         const ctx = annotation.getContext("2d");
         if (!ctx) throw new Error("annotation context unavailable");
         const image = ctx.getImageData(0, 0, annotation.width, annotation.height);
         let annotationInk = 0;
         for (let i = 3; i < image.data.length; i += 4) if (image.data[i] > 0) annotationInk++;
         const samplePixel = Array.from(ctx.getImageData(sample.x, sample.y, 1, 1).data);
-        return { reads, heatmapDraws, annotationInk, samplePixel, sample,
+        return { ...counts, annotationInk, samplePixel, sample,
           bytes: frame.blob.size, width: frame.width, height: frame.height, surfaceWidth: gpuCanvas.width };
       } finally {
-        gl.readPixels = originalRead;
-        gl.drawArraysInstanced = originalDraw;
+        probe.readCapture();
       }
     }, { id });
     expect(pending.reads, "one actual native framebuffer read during pending import").toBe(1);
+    expect(pending.heatmapPrograms, "no heatmap shader program is used before import resolves").toBe(0);
     expect(pending.heatmapDraws, "GPU heatmap must not own a frame before import resolves").toBe(0);
     expect(pending.annotationInk, "real annotation fallback must remain painted").toBeGreaterThan(0);
     expect(pending.samplePixel[3], "target cell belongs to annotation before module resolution").toBeGreaterThan(0);
@@ -230,21 +296,12 @@ test("native capture keeps real CPU heatmap ownership while the lazy GPU module 
       const series = r.pipeline.series, last = series.length - 1;
       const x = Math.floor(r.view.xOfIndex(last) + r.view.colWidth / 2);
       const y = Math.floor(r.view.yOfPrice(125));
-      const gl = r.session.gl, originalRead = gl.readPixels, originalDraw = gl.drawArraysInstanced;
-      let reads = 0, heatmapDraws = 0;
-      gl.readPixels = function (...args: Parameters<WebGL2RenderingContext["readPixels"]>) {
-        const result = originalRead.apply(this, args);
-        if (r.session.pendingCapture) reads++;
-        return result;
-      } as WebGL2RenderingContext["readPixels"];
-      gl.drawArraysInstanced = function (...args: Parameters<WebGL2RenderingContext["drawArraysInstanced"]>) {
-        const result = originalDraw.apply(this, args);
-        if (r.session.pendingCapture) heatmapDraws++;
-        return result;
-      } as WebGL2RenderingContext["drawArraysInstanced"];
+      const probe = window.__heatmapNativeProbe;
+      probe.startCapture();
       try {
         r.invalidate();
         const capture = await r.session.captureCompositePng();
+        const counts = probe.readCapture();
         const ctx = annotation.getContext("2d");
         if (!ctx) throw new Error("annotation context unavailable after import");
         const annotationPixel = Array.from(ctx.getImageData(x, y, 1, 1).data);
@@ -255,13 +312,13 @@ test("native capture keeps real CPU heatmap ownership while the lazy GPU module 
         if (!output) throw new Error("native image decode context unavailable");
         output.drawImage(bitmap, 0, 0); bitmap.close();
         const nativePixel = Array.from(output.getImageData(x, y, 1, 1).data);
-        return { reads, heatmapDraws, annotationPixel, nativePixel, bytes: capture.blob.size };
+        return { ...counts, annotationPixel, nativePixel, bytes: capture.blob.size };
       } finally {
-        gl.readPixels = originalRead;
-        gl.drawArraysInstanced = originalDraw;
+        probe.readCapture();
       }
     }, { id });
     expect(recovered.reads, "one native framebuffer read after import").toBe(1);
+    expect(recovered.heatmapPrograms, "the exact heatmap shader pair is used after import").toBeGreaterThan(0);
     expect(recovered.heatmapDraws, "real GPU heatmap renderer owns the recovered frame").toBeGreaterThan(0);
     expect(recovered.annotationPixel[3], "GPU-owned cell is not duplicated in annotation").toBe(0);
     recovered.nativePixel.forEach((channel, index) => {
