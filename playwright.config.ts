@@ -20,12 +20,12 @@ export default defineConfig({
     {
       name: "census",
       testMatch: ["**/chart-multi-market-census.spec.ts"],
-      grepInvert: /#308 L[2-9]/,
+      grepInvert: /#308 (L[2-9]|Tam)/,
     },
     {
       name: "census-load",
       testMatch: ["**/chart-multi-market-census.spec.ts"],
-      grep: /#308 L[2-9]/,
+      grep: /#308 (L[2-9]|Tam)/,
     },
   ],
   webServer: {

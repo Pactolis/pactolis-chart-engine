@@ -1,11 +1,14 @@
 name: Census Load
 
-# Weekly/nightly scheduled run and manual trigger for the heavy #308 L2-L9
+# Weekly/nightly scheduled run and manual trigger for the heavy #308 L2-L9 and Tam
 # report-only census load profiles (moved out of PR CI per #61).
 on:
   schedule:
     - cron: "0 2 * * *"
   workflow_dispatch:
+  # Schedules only run the default branch, which is stale until release.
+  push:
+    branches: [integration/approved-prs]
 
 permissions:
   contents: read
