@@ -415,13 +415,13 @@ for (const deviceScaleFactor of [1, 2]) {
             canvas.dispatchEvent(new PointerEvent("pointerleave", { bubbles: false, pointerId: 9, pointerType: "mouse" }));
           }, () => isBase ? invalidations.length > 0 : invalidations.some((change) => (change & ChartChange.Interaction) !== 0),
           () => ({ hud: hook()?.getAttribute("data-hud") ?? "" }));
-          await run("sync time activation", () => runtime.showSyncCrosshair(TAIL_TIME), () =>
+          await run("sync time activation", () => runtime.showSyncCrosshair(opts.frozenNow), () =>
             isBase ? invalidations.length > 0 : invalidations.some((change) => (change & ChartChange.Interaction) !== 0),
           () => ({ hud: hook()?.getAttribute("data-hud") ?? "" }));
-          await run("sync time unchanged", () => runtime.showSyncCrosshair(TAIL_TIME), () =>
+          await run("sync time unchanged", () => runtime.showSyncCrosshair(opts.frozenNow), () =>
             isBase ? invalidations.length > 0 : invalidations.some((change) => (change & ChartChange.Interaction) !== 0),
           () => ({ hud: hook()?.getAttribute("data-hud") ?? "" }));
-          await run("sync time changed", () => runtime.showSyncCrosshair(TAIL_TIME - 60_000), () =>
+          await run("sync time changed", () => runtime.showSyncCrosshair(opts.frozenNow - 60_000), () =>
             isBase ? invalidations.length > 0 : invalidations.some((change) => (change & ChartChange.Interaction) !== 0),
           () => ({ hud: hook()?.getAttribute("data-hud") ?? "" }));
           await run("sync time cleared", () => runtime.hideSyncCrosshair(), () =>
