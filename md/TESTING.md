@@ -1,7 +1,7 @@
 # TESTING.md — Test ve doğrulama kapıları
 
 Komut kaynakları: [package.json](../package.json) scripts, [scripts/run-tests.mjs](../scripts/run-tests.mjs),
-[scripts/check-exports.mjs](../scripts/check-exports.mjs), [playwright.config.ts](../playwright.config.ts).
+[scripts/check-exports.mjs](../scripts/check-exports.mjs), [scripts/check-default-import-graph.mjs](../scripts/check-default-import-graph.mjs), [playwright.config.ts](../playwright.config.ts).
 
 ## Kapılar
 
@@ -10,6 +10,7 @@ Komut kaynakları: [package.json](../package.json) scripts, [scripts/run-tests.m
 | `npm run check` | `tsc --noEmit` tip kontrolü |
 | `npm test` | Önce `npm run build` (`tsc -p tsconfig.build.json`), sonra `node --test` ile `tests/**/*.test.mjs` unit suite'i; Node 22/23+ isolation flag farkını `scripts/run-tests.mjs` çözümler |
 | `npm run check:exports` | `exports` listesindeki her entry'nin var olduğunu ve yüklendiğini doğrular |
+| `npm run check:default-import-graph` | Varsayılan giriş grafiklerinde (`src/index.ts` vb.) ağır/yasaklı statik import bulunmadığını doğrular |
 | `npm run check:browser` | `tsc -p tsconfig.browser.json` |
 | `npm run test:browser` | Playwright; `default` project `chart-multi-market-census.spec.ts` hariç tüm `tests/browser/*.spec.ts`, `census` project core census spec'i, `census-load` project yüklü senaryolar (`/#308 L[2-9]/`) |
 | `npm run harness` | Vite ile `harness/index.html`'i servis eder |
