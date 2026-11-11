@@ -84,3 +84,38 @@ export function wilderFull(values: readonly number[], period: number): { out: Ar
 export function wilderAdvance(values: readonly number[], period: number, before: WilderState): number | null {
   return wilderStep({ ...before }, values[values.length - 1], period1(period));
 }
+
+export interface SuperTrendState { finalUpper: number; finalLower: number; direction: 1 | -1 | 0 }
+interface BarLike { high: number; low: number; close: number }
+
+/**
+ * One step of superTrend()'s loop for bar `i`. `range` is atr[i] and `prevRangeNull` is
+ * `atr[i - 1] === null`. Mutates `state` and returns the plotted point, matching ta.ts exactly.
+ */
+export function superTrendStep(state: SuperTrendState, i: number, bar: BarLike, previousClose: number | undefined, range: number | null, prevRangeNull: boolean, multiplier: number): { trend: number | null; direction: 1 | -1 | 0 } {
+  if (range === null) return { trend: null, direction: 0 };
+  const hl2 = (bar.high + bar.low) / 2;
+  const basicUpper = hl2 + multiplier * range;
+  const basicLower = hl2 - multiplier * range;
+  if (i === 0 || prevRangeNull) {
+    state.finalUpper = basicUpper;
+    state.finalLower = basicLower;
+    state.direction = bar.close >= hl2 ? 1 : -1;
+  } else {
+    const prev = previousClose as number;
+    state.finalUpper = basicUpper < state.finalUpper || prev > state.finalUpper ? basicUpper : state.finalUpper;
+    state.finalLower = basicLower > state.finalLower || prev < state.finalLower ? basicLower : state.finalLower;
+    if (state.direction === -1 && bar.close > state.finalUpper) state.direction = 1;
+    else if (state.direction === 1 && bar.close < state.finalLower) state.direction = -1;
+  }
+  return { trend: state.direction === 1 ? state.finalLower : state.finalUpper, direction: state.direction };
+}
+
+/** SuperTrend recursion state after every bar except the last (resume point for a tail tick). */
+export function superTrendBeforeLast(bars: readonly BarLike[], atr: ReadonlyArray<number | null>, multiplier: number): SuperTrendState {
+  const state: SuperTrendState = { finalUpper: 0, finalLower: 0, direction: 0 };
+  for (let i = 0; i < bars.length - 1; i++) {
+    superTrendStep(state, i, bars[i], i > 0 ? bars[i - 1].close : undefined, atr[i], i === 0 ? true : atr[i - 1] === null, multiplier);
+  }
+  return state;
+}
