@@ -1,5 +1,7 @@
 import type { IndicatorDefinition, IndicatorDrawContext, IndicatorPreparedData, IndicatorSettings } from "../types.js";
-import { seriesOhlcv, ichimoku } from "../../../core/analysis/calc/ta.js";
+import { ichimoku, rollingMax, rollingMin, seriesOhlcv } from "../../../core/analysis/calc/ta.js";
+import { windowExtreme } from "../../../core/analysis/calc/tailState.js";
+import { resolveIncremental, type IncrementalBase } from "./incrementalSeries.js";
 import { asOverlayData, drawPriceOverlayLines, makeOverlayPoints, overlayAppearanceFields, prepareOverlayData } from "./priceOverlayShared.js";
 import { numericSetting, stringSetting, visibleIndexRange, type PlotSeries } from "./taShared.js";
 import { ichimokuCloudSegments } from "./ichimokuCloud.js";
@@ -20,22 +22,59 @@ export interface IchimokuSettings extends IndicatorSettings {
   showPlotLabel: boolean;
 }
 
+interface IchimokuState extends IncrementalBase {
+  tenkan: Array<number | null>; kijun: Array<number | null>; senkouA: Array<number | null>; senkouB: Array<number | null>; chikou: Array<number | null>;
+  baseA: Array<number | null>; baseB: Array<number | null>;
+}
+const midpoint = (a: number | null, b: number | null): number | null => (a === null || b === null ? null : (a + b) / 2);
+
+/**
+ * Cached per-index outputs. A tail change at index t only alters the undisplaced values at
+ * t, which land in: tenkan/kijun[t], senkouA/B[t + displacement] (inside the series only when
+ * displacement is 0) and chikou[t - displacement]. min/max have no float history, so every
+ * one of these equals the full computation exactly.
+ */
 function prepareIchimoku(ctx: IndicatorDrawContext<IchimokuSettings>) {
   const { start, end } = visibleIndexRange(ctx);
   const bars = ctx.series.listReadonly();
-  const values = ichimoku(
-    seriesOhlcv(ctx.series),
-    numericSetting(ctx.settings, "tenkanPeriod", 9, 1, 200),
-    numericSetting(ctx.settings, "kijunPeriod", 26, 1, 300),
-    numericSetting(ctx.settings, "senkouBPeriod", 52, 1, 500),
-    numericSetting(ctx.settings, "displacement", 26, 0, 200),
-  );
+  const tenkanPeriod = numericSetting(ctx.settings, "tenkanPeriod", 9, 1, 200);
+  const kijunPeriod = numericSetting(ctx.settings, "kijunPeriod", 26, 1, 300);
+  const senkouBPeriod = numericSetting(ctx.settings, "senkouBPeriod", 52, 1, 500);
+  const displacement = numericSetting(ctx.settings, "displacement", 26, 0, 200);
+  const state = resolveIncremental<IchimokuState>("ichimoku", ctx, `${tenkanPeriod}|${kijunPeriod}|${senkouBPeriod}|${displacement}`, () => {
+    const rows = seriesOhlcv(ctx.series);
+    const values = ichimoku(rows, tenkanPeriod, kijunPeriod, senkouBPeriod, displacement);
+    const bHigh = rollingMax(rows.map((bar) => bar.high), senkouBPeriod);
+    const bLow = rollingMin(rows.map((bar) => bar.low), senkouBPeriod);
+    return {
+      tenkan: values.map((p) => p.tenkan), kijun: values.map((p) => p.kijun), senkouA: values.map((p) => p.senkouA), senkouB: values.map((p) => p.senkouB), chikou: values.map((p) => p.chikou),
+      baseA: values.map((p) => (p.tenkan !== null && p.kijun !== null ? (p.tenkan + p.kijun) / 2 : null)),
+      baseB: values.map((_, i) => midpoint(bHigh[i], bLow[i])),
+    };
+  }, (cached) => {
+    const t = bars.length - 1;
+    const hi = (i: number) => bars[i].high; const lo = (i: number) => bars[i].low;
+    const tenkan = midpoint(windowExtreme(hi, t, tenkanPeriod, "max"), windowExtreme(lo, t, tenkanPeriod, "min"));
+    const kijun = midpoint(windowExtreme(hi, t, kijunPeriod, "max"), windowExtreme(lo, t, kijunPeriod, "min"));
+    cached.tenkan[t] = tenkan; cached.kijun[t] = kijun;
+    cached.baseA[t] = tenkan !== null && kijun !== null ? (tenkan + kijun) / 2 : null;
+    cached.baseB[t] = midpoint(windowExtreme(hi, t, senkouBPeriod, "max"), windowExtreme(lo, t, senkouBPeriod, "min"));
+    const refresh = (i: number): void => {
+      if (i < 0 || i > t) return;
+      cached.senkouA[i] = cached.baseA[i - displacement] ?? null;
+      cached.senkouB[i] = cached.baseB[i - displacement] ?? null;
+      cached.chikou[i] = bars[i + displacement]?.close ?? null;
+    };
+    refresh(t);
+    if (Number.isInteger(displacement)) refresh(t - displacement);
+    return true;
+  });
   const series: PlotSeries[] = [
-    { key: "tenkan", label: "Tenkan", color: stringSetting(ctx.settings, "tenkanColor", uiColor.info), points: makeOverlayPoints(values.map((point) => point.tenkan), bars, start, end) },
-    { key: "kijun", label: "Kijun", color: stringSetting(ctx.settings, "kijunColor", uiColor.warn), points: makeOverlayPoints(values.map((point) => point.kijun), bars, start, end) },
-    { key: "senkouA", label: "Senkou A", color: stringSetting(ctx.settings, "senkouAColor", uiColor.buy), points: makeOverlayPoints(values.map((point) => point.senkouA), bars, start, end) },
-    { key: "senkouB", label: "Senkou B", color: stringSetting(ctx.settings, "senkouBColor", uiColor.sell), points: makeOverlayPoints(values.map((point) => point.senkouB), bars, start, end) },
-    { key: "chikou", label: "Chikou", color: stringSetting(ctx.settings, "chikouColor", uiColor.special), points: makeOverlayPoints(values.map((point) => point.chikou), bars, start, end) },
+    { key: "tenkan", label: "Tenkan", color: stringSetting(ctx.settings, "tenkanColor", uiColor.info), points: makeOverlayPoints(state.tenkan, bars, start, end) },
+    { key: "kijun", label: "Kijun", color: stringSetting(ctx.settings, "kijunColor", uiColor.warn), points: makeOverlayPoints(state.kijun, bars, start, end) },
+    { key: "senkouA", label: "Senkou A", color: stringSetting(ctx.settings, "senkouAColor", uiColor.buy), points: makeOverlayPoints(state.senkouA, bars, start, end) },
+    { key: "senkouB", label: "Senkou B", color: stringSetting(ctx.settings, "senkouBColor", uiColor.sell), points: makeOverlayPoints(state.senkouB, bars, start, end) },
+    { key: "chikou", label: "Chikou", color: stringSetting(ctx.settings, "chikouColor", uiColor.special), points: makeOverlayPoints(state.chikou, bars, start, end) },
   ];
   return prepareOverlayData(ctx, series);
 }
