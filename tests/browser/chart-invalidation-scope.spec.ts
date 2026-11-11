@@ -85,7 +85,7 @@ interface ScenarioEvidence {
   surfaceTiming: { scoped: Record<string, { count: number; totalMs: number; avgMs: number }>; full: Record<string, { count: number; totalMs: number; avgMs: number }> };
 }
 interface RangeProbe { autoScale: boolean; min: number; max: number }
-interface TailProbe { time: number; close: number; volume: number; delta: number; count: number }
+interface TailProbe { time: number; open: number; high: number; low: number; close: number; volume: number; delta: number; count: number }
 interface CorrectedProbe { close: number; volume: number; count: number }
 
 // Worker-scoped browser launch options belong to the whole file, not to one DPR group.
@@ -334,7 +334,7 @@ for (const deviceScaleFactor of [1, 2]) {
           // Fixture probes: prove the real pipeline actually loaded this spec's fixed data.
           const barAt = (index: number): TailProbe | null => {
             const bar = runtime.pipeline.series.at(index);
-            return bar ? { time: bar.startTime, close: bar.close, volume: bar.volume, delta: bar.delta, count: bar.count } : null;
+            return bar ? { time: bar.startTime, open: bar.open, high: bar.high, low: bar.low, close: bar.close, volume: bar.volume, delta: bar.delta, count: bar.count } : null;
           };
           const seriesLen = () => runtime.pipeline.series.length;
           fixtureProbes.tailBefore = barAt(seriesLen() - 1);
@@ -400,7 +400,8 @@ for (const deviceScaleFactor of [1, 2]) {
           runtime.setPriceAutoScaleFromControl(true);
           await settle();
           await run("auto-scale widen", () => {
-            pushTrade!({ time: opts.frozenNow, price: 65_000, qty: 1, isBuy: true, market: BTC });
+            // Historical reference bars keep OHLC immutable; widen with the next live 1m bucket.
+            pushTrade!({ time: opts.frozenNow + 60_000, price: 65_000, qty: 1, isBuy: true, market: BTC });
           }, () => isBase ? invalidations.length > 0 : invalidations.some((change) => (change & ChartChange.DataTail) !== 0 && (change & ChartChange.Viewport) !== 0), rangeProbe);
           await run("non-tail correction", async () => {
             await (window as unknown as Record<string, () => Promise<void>>).__serveCorrectedHistory();
@@ -544,7 +545,7 @@ for (const deviceScaleFactor of [1, 2]) {
       // Fixture probes derive their expectations independently
       // from the fixed fixtures (not from values the runtime happens to report after a mask).
       expect(result.fixtureProbes.indicatorVisibleBefore, "fixture probe: overlay indicator starts visible").toBe(true);
-      expect(result.fixtureProbes.tailBefore, "fixture probe: initial tail bar matches the fixed fixture").toEqual({ time: TAIL_TIME, close: TAIL_CLOSE, volume: 12.5, delta: 3.25, count: 42 });
+      expect(result.fixtureProbes.tailBefore, "fixture probe: initial tail bar matches the fixed fixture").toEqual({ time: TAIL_TIME, open: 60_000, high: 60_500, low: 59_800, close: TAIL_CLOSE, volume: 12.5, delta: 3.25, count: 42 });
       expect(result.fixtureProbes.correctedBefore!.close, "fixture probe: initial corrected bar close").toBe(INITIAL_CLOSE_10);
       expect(result.fixtureProbes.correctedBefore!.volume, "fixture probe: initial corrected bar volume").toBeCloseTo(BAR10_VOLUME, 9);
       expect(result.fixtureProbes.correctedBefore!.count, "fixture probe: initial corrected bar count").toBe(BAR10_COUNT);
@@ -558,7 +559,7 @@ for (const deviceScaleFactor of [1, 2]) {
       expect(viewport.after, "viewport: reset restored the exact baseline transform").toEqual(viewport.baseline);
       expect(scenarioState("layout"), "layout: root really resized to 480px").toEqual({ height: 480 });
       const tailState = scenarioState("tail data") as { bar: TailProbe; hud: string };
-      expect(tailState.bar, "tail: raw last bar really mutated by the owned trade").toEqual({ time: TAIL_TIME, close: TAIL_CLOSE, volume: TAIL_VOLUME, delta: TAIL_DELTA, count: TAIL_COUNT });
+      expect(tailState.bar, "tail: raw last bar really mutated by the owned trade").toEqual({ time: TAIL_TIME, open: 60_000, high: 60_500, low: 59_800, close: TAIL_CLOSE, volume: TAIL_VOLUME, delta: TAIL_DELTA, count: TAIL_COUNT });
       expect(tailState.hud, "tail: annotation HUD refreshed from the updated latest bar").not.toBe(result.fixtureProbes.hudBefore);
       expect(tailState.hud, "tail: HUD readout contains updated tail close").toContain(String(TAIL_CLOSE));
       expect((scenarioState("auto-scale widen") as RangeProbe).max, "auto-scale: outlying tail trade widens the price range").toBeGreaterThan(common.price.max);
