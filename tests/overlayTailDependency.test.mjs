@@ -8,22 +8,16 @@ function makeOverlay() {
 }
 
 const crosshair = { x: 0, y: 0, visible: false };
-const view = {};
 const range = [0, 1];
 const emptySeries = { length: 0 };
 const nonEmptySeries = { length: 1 };
 
-test("interaction tail dependency is false only when renderInteraction has no content", () => {
+test("interaction tail dependency only covers a visible crosshair on the changing tail bar", () => {
   const overlay = makeOverlay();
-  assert.equal(overlay.hasTailDependentInteractionContent(view, emptySeries, crosshair, range), false);
-  assert.equal(overlay.hasTailDependentInteractionContent(view, nonEmptySeries, crosshair, range, []), false);
-  assert.equal(overlay.hasTailDependentInteractionContent(view, nonEmptySeries, crosshair, range, ["unrecognized"]), true);
-});
-
-test("every recognized interaction layer conservatively depends on live tail inputs", () => {
-  const overlay = makeOverlay();
-  for (const layer of ["crosshair", "hud", "interaction-controls"]) {
-    assert.equal(overlay.hasTailDependentInteractionContent(view, nonEmptySeries, crosshair, range, [layer]), true, layer);
-  }
-  assert.equal(overlay.hasTailDependentInteractionContent(view, nonEmptySeries, crosshair, range), true);
+  const indexedView = { indexOfX: (x) => x };
+  assert.equal(overlay.hasTailDependentInteractionContent(indexedView, emptySeries, { x: 0, visible: true }, range), false);
+  assert.equal(overlay.hasTailDependentInteractionContent(indexedView, nonEmptySeries, crosshair, range), false, "inactive crosshair needs no tail redraw");
+  assert.equal(overlay.hasTailDependentInteractionContent(indexedView, nonEmptySeries, { x: 0, visible: true }, range, ["hud"]), false, "HUD no longer belongs to interaction");
+  assert.equal(overlay.hasTailDependentInteractionContent(indexedView, nonEmptySeries, { x: 0, visible: true }, range, ["crosshair"]), true, "active tail crosshair label depends on updated tail");
+  assert.equal(overlay.hasTailDependentInteractionContent(indexedView, nonEmptySeries, { x: 1, visible: true }, range, ["crosshair"]), false, "a non-tail crosshair does not depend on tail data");
 });

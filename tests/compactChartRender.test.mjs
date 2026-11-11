@@ -51,7 +51,7 @@ function seriesWithOneBar() {
 /** What the bar readout drew: its texts with their rows and right edges, and its background pill. */
 function drawReadout(view, crosshair = { x: 0, y: 0, visible: false }) {
   const ctx = makeContext();
-  new Overlay(ctx).renderInteraction(view, seriesWithOneBar(), crosshair, [0, 1], ["hud"]);
+  new Overlay(ctx).renderAnnotations(view, seriesWithOneBar(), crosshair, [0, 1], ["hud"]);
   const texts = ctx.calls
     .filter((call) => call.op === "fillText")
     .map(({ args: [text, x, y] }) => ({ text, x, y, right: x + text.length * 7 }));

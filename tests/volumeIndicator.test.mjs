@@ -17,6 +17,8 @@ function makeHudContext() {
     fillStyle: "",
     texts,
     clearRect() {},
+    save() {},
+    restore() {},
     fillText(text) {
       texts.push(String(text));
     },
@@ -156,7 +158,7 @@ test("HUD notional volume and Volume indicator quoteVolume stay consistent acros
         hudText = text;
       },
     );
-    overlay.renderInteraction(view, series, { x: 0, y: 0, visible: false }, [0, i + 1], ["hud"]);
+    overlay.renderAnnotations(view, series, { x: 0, y: 0, visible: false }, [0, i + 1], ["hud"]);
     assert.ok(hudText?.includes(expectedHudVol[i]), `bar ${i} HUD should include ${expectedHudVol[i]}, got: ${hudText}`);
     assert.ok(ctx.texts[0]?.includes(expectedHudVol[i]), `bar ${i} drawn HUD prefix should include ${expectedHudVol[i]}, got: ${ctx.texts[0]}`);
   }
@@ -175,7 +177,7 @@ test("HUD callback preserves the full legacy default text and formats localized 
     args[0] = makeHudContext();
     args[12] = (text) => { callbackText = text; };
     if (options) args[19] = () => options;
-    new Overlay(...args).renderInteraction(view, series, { x: 0, y: 0, visible: false }, [0, 1], ["hud"]);
+    new Overlay(...args).renderAnnotations(view, series, { x: 0, y: 0, visible: false }, [0, 1], ["hud"]);
     return callbackText;
   };
 

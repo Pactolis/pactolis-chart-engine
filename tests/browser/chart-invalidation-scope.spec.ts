@@ -92,8 +92,7 @@ interface CorrectedProbe { close: number; volume: number; count: number }
 test.use({ launchOptions: { args: FUNCTIONAL_WEBGL_ARGS } });
 
 for (const deviceScaleFactor of [1, 2]) {
-  test.describe(
-ative compositor DPR=${deviceScaleFactor}`, () => {
+  test.describe(`native compositor DPR=${deviceScaleFactor}`, () => {
     test.use({ viewport: { width: 1280, height: 720 }, deviceScaleFactor });
 
     test("each update names its invalidation scope while native composed output stays a full redraw's", async ({ page }, testInfo) => {
