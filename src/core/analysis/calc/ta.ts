@@ -208,27 +208,55 @@ export function seriesOhlcv(series: OhlcvSeriesSource): OhlcvInput[] {
   return rows;
 }
 
+/** Rolling state of simpleMovingAverage after some index, enough to resume at the next one. */
+export interface SmaState { sum: number; correction: number; valid: number }
+
+function smaStep(values: readonly number[], i: number, n: number, rolling: CompensatedSum, valid: number): number {
+  const next = finiteOrNull(values[i]);
+  if (next !== null) {
+    addCompensated(rolling, next);
+    valid++;
+  }
+  if (i >= n) {
+    const old = finiteOrNull(values[i - n]);
+    if (old !== null) {
+      addCompensated(rolling, -old);
+      valid--;
+    }
+  }
+  return valid;
+}
+
 export function simpleMovingAverage(values: readonly number[], period: number): Array<number | null> {
+  return simpleMovingAverageWithState(values, period).out;
+}
+
+/**
+ * Same output as simpleMovingAverage, plus the rolling state *before* the last index so a
+ * live tail update can re-run just that index (see simpleMovingAverageAdvance). Resuming
+ * from the saved state repeats the identical float operations, so the result is bit-exact.
+ */
+export function simpleMovingAverageWithState(values: readonly number[], period: number): { out: Array<number | null>; beforeLast: SmaState | null } {
   const n = positivePeriod(period, 1);
   const out: Array<number | null> = [];
   const rolling = createCompensatedSum(); // see addCompensated doc -- plain add/subtract drifts over long series
   let valid = 0;
+  let beforeLast: SmaState | null = null;
   for (let i = 0; i < values.length; i++) {
-    const next = finiteOrNull(values[i]);
-    if (next !== null) {
-      addCompensated(rolling, next);
-      valid++;
-    }
-    if (i >= n) {
-      const old = finiteOrNull(values[i - n]);
-      if (old !== null) {
-        addCompensated(rolling, -old);
-        valid--;
-      }
-    }
+    if (i === values.length - 1) beforeLast = { sum: rolling.sum, correction: rolling.correction, valid };
+    valid = smaStep(values, i, n, rolling, valid);
     out.push(i + 1 >= n && valid === n ? rolling.sum / n : null);
   }
-  return out;
+  return { out, beforeLast };
+}
+
+/** Recomputes the value at the last index of `values` from the state saved before it. */
+export function simpleMovingAverageAdvance(values: readonly number[], period: number, beforeLast: SmaState): number | null {
+  const n = positivePeriod(period, 1);
+  const rolling: CompensatedSum = { sum: beforeLast.sum, correction: beforeLast.correction };
+  const i = values.length - 1;
+  const valid = smaStep(values, i, n, rolling, beforeLast.valid);
+  return i + 1 >= n && valid === n ? rolling.sum / n : null;
 }
 
 export function exponentialMovingAverage(values: readonly number[], period: number): Array<number | null> {
