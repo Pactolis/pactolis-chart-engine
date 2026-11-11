@@ -592,9 +592,9 @@ export function volumeSeries(bars: readonly OhlcvInput[]): NumberPoint[] {
 
 export function deltaValue(bar: Pick<OhlcvInput, "volume" | "delta">, percent: boolean): number | null {
   // Zero volume means delta% is undefined (nothing traded), not a genuinely balanced
-    // 0% reading -- render it as a gap instead of a real zero. Raw (non-percent) delta is
-    // unaffected: 0 there is a legitimate value (buy volume == sell volume), not a marker
-    // for missing data.
+  // 0% reading -- render it as a gap instead of a real zero. Raw (non-percent) delta is
+  // unaffected: 0 there is a legitimate value (buy volume == sell volume), not a marker
+  // for missing data.
   return percent ? (bar.volume > 0 ? (bar.delta ?? 0) / bar.volume * 100 : null) : (bar.delta ?? 0);
 }
 
