@@ -282,7 +282,7 @@ test.describe("on a phone", () => {
     await setDisplayOptions(page, { density: "compact", defaultFitColumns: 71 });
     await settle(page);
 
-    const hud = (await textDraws(page)).filter((draw) => draw.surface === "interaction" && draw.x < area.width && draw.y < 60);
+    const hud = (await textDraws(page)).filter((draw) => draw.surface === "annotation" && draw.x < area.width && draw.y < 60);
     expect(hud.length).toBeGreaterThanOrEqual(5);
     const rows = [...new Set(hud.map((draw) => draw.y))].sort((a, b) => a - b);
     expect(rows.length).toBeGreaterThanOrEqual(2);
