@@ -167,6 +167,8 @@ export class Overlay {
   private indicatorAxisRects: Array<{ paneId: string; plotX: number; x: number; y: number; w: number; h: number }> = [];
   private tpoMergeLeftSessionStarts: ReadonlySet<number> = new Set();
   private tpoProfileHitZones: TpoProfileHitZone[] = [];
+  private interactionHudWasActive = false;
+  private interactionHudSyncTime: number | null = null;
   /** Per-chart görünüm config'i (runtime set eder); null ise global settings. */
   private chartConfig: ChartViewConfig | null = null;
   private readonly cellTextCache = new WeakMap<FootprintBar, { key: string; cellRevision: number; entries: Map<number, FormattedCellText> }>();
@@ -392,6 +394,11 @@ export class Overlay {
       }
     }
 
+    if (empty || mainSuppressed) this.onHudText?.(null);
+    else if (!crosshair.visible) {
+      // The default latest-bar HUD depends on tail data, so keep it on Annotation.
+      this.drawHud(ctx, view, series, crosshair, range);
+    }
     ctx.restore();
   }
 
@@ -403,6 +410,7 @@ export class Overlay {
     range: [number, number],
     layerOrder?: readonly string[],
   ): void {
+    void range;
     const ctx = this.interactionCtx ?? this.ctx;
     const orderedLayers = layerOrder ?? ["crosshair", "hud", "interaction-controls"];
     ctx.clearRect(0, 0, ctx.canvas.width, ctx.canvas.height);
@@ -440,11 +448,9 @@ export class Overlay {
           break;
         }
         case "hud":
-          if (mainSuppressed) this.onHudText?.(null);
-          else {
-            this.drawHud(ctx, view, series, crosshair, range);
-            this.drawOrderbookHover?.(ctx, view, series, crosshair);
-          }
+          // Hovered HUD remains above the crosshair on Interaction; default HUD lives on Annotation.
+          if (!mainSuppressed && crosshair.visible) this.drawHud(ctx, view, series, crosshair, range);
+          if (!mainSuppressed) this.drawOrderbookHover?.(ctx, view, series, crosshair);
           break;
         case "interaction-controls":
           if (!mainSuppressed) this.drawInteractionForeground?.(ctx, view, series);
@@ -458,6 +464,30 @@ export class Overlay {
           break;
       }
     }
+  }
+
+  /** Whether an interaction changed Annotation-owned HUD visibility or synchronized selection. */
+  hasInteractionDependentHudContent(crosshair: Crosshair): boolean {
+    const syncTime = this.getSyncCrosshairTime?.() ?? null;
+    const redraw = crosshair.visible !== this.interactionHudWasActive || syncTime !== this.interactionHudSyncTime;
+    this.interactionHudWasActive = crosshair.visible;
+    this.interactionHudSyncTime = syncTime;
+    return redraw;
+  }
+
+  /** Whether an active crosshair selects the changing tail bar and needs a refreshed label. */
+  hasTailDependentInteractionContent(
+    view: View,
+    series: FootprintSeries,
+    crosshair: Crosshair,
+    range: [number, number],
+    layerOrder?: readonly string[],
+  ): boolean {
+    void range;
+    if (series.length === 0 || !crosshair.visible) return false;
+    const orderedLayers = layerOrder ?? ["crosshair", "hud", "interaction-controls"];
+    if (!orderedLayers.includes("crosshair")) return false;
+    return Math.floor(view.indexOfX(crosshair.x)) === series.length - 1;
   }
 
   /** Temporary bounded coupling: indicator legend/readouts still receive crosshair in their draw contract. */

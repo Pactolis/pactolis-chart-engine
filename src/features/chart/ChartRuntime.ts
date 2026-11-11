@@ -488,6 +488,17 @@ class ChartRuntimeImpl implements ChartRuntime, ChartInputHost {
           }
         }
       },
+      interactionAffectsAnnotation: () => this.overlay.hasInteractionDependentHudContent(crosshair),
+      getTailDependencyContext: () => ({
+        annotation: true,
+        interaction: this.overlay.hasTailDependentInteractionContent(
+          view,
+          series,
+          crosshair,
+          this.renderer.visibleRange(view, series.length),
+          this.renderCoordinator?.getInteractionLayerOrder() ?? [],
+        ),
+      }),
       visibleRange: (v: View, total: number) => this.renderer.visibleRange(v, total),
       setSurface: (nextSurface: GpuSurface) => {
         this.currentGpuSurface = nextSurface;
@@ -511,6 +522,7 @@ class ChartRuntimeImpl implements ChartRuntime, ChartInputHost {
       annotationCtx2d,
       interactionCtx2d,
       renderer,
+
       annotation: {
         render: (v, s, c, r) => {
           this.overlay.setTpoMergeLeftSessionStarts(this.tpoMergeLeftSessionStarts);

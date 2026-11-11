@@ -82,9 +82,10 @@ interface ScenarioEvidence {
   full: NativeSample;
   state: unknown;
   geometry: unknown;
+  surfaceTiming: { scoped: Record<string, { count: number; totalMs: number; avgMs: number }>; full: Record<string, { count: number; totalMs: number; avgMs: number }> };
 }
 interface RangeProbe { autoScale: boolean; min: number; max: number }
-interface TailProbe { time: number; close: number; volume: number; delta: number; count: number }
+interface TailProbe { time: number; open: number; high: number; low: number; close: number; volume: number; delta: number; count: number }
 interface CorrectedProbe { close: number; volume: number; count: number }
 
 // Worker-scoped browser launch options belong to the whole file, not to one DPR group.
@@ -131,7 +132,7 @@ for (const deviceScaleFactor of [1, 2]) {
       }, FROZEN_NOW);
       await openHarness(page);
 
-      const result = await page.evaluate(async (opts: { source: string; bindingName: string; rootSelector: string; frozenNow: number; chartId: string; correctedTime: number; commonRange: { from: number; to: number } }) => {
+      const result = await page.evaluate(async (opts: { source: string; bindingName: string; rootSelector: string; frozenNow: number; tailTime: number; chartId: string; correctedTime: number; commonRange: { from: number; to: number } }) => {
         const isBase = opts.source === "base";
         const engineModule = (path: string) => import(/* @vite-ignore */ `/src/${path}`);
         const [
@@ -281,16 +282,29 @@ for (const deviceScaleFactor of [1, 2]) {
           setCellData(mode: string): void;
           setIndicatorVisible(id: string, visible: boolean): void;
           setPriceAutoScaleFromControl(autoScale: boolean): void;
+          showSyncCrosshair(time: number): void;
+          hideSyncCrosshair(): void;
           resetPriceScale(): void;
           getState(): { clusterCellData: string };
           listIndicators(): { id: string; visible: boolean }[];
           isPriceAutoScale(): boolean;
-          view: { colWidth: number; offsetX: number; area: { left: number; top: number; width: number; height: number }; priceRange(): { minValue(): number; maxValue(): number }; setPriceRange(range: unknown): void };
+          view: { colWidth: number; offsetX: number; xOfIndex(index: number): number; area: { left: number; top: number; width: number; height: number }; priceRange(): { minValue(): number; maxValue(): number }; setPriceRange(range: unknown): void };
         };
         let runtime = null as unknown as Runtime;
         const scenarios: ScenarioEvidence[] = [];
+        const telemetry = await import("/src/core/performanceTelemetry.ts");
+        telemetry.configurePerformanceTelemetry({ enabled: true });
+        const surfaceMetricNames = ["chart.surface.gpu.draw.ms", "chart.surface.annotation.draw.ms", "chart.surface.interaction.draw.ms"];
+        const surfaceTimingSince = (before: ReturnType<typeof telemetry.snapshotPerformanceTelemetry>, after: ReturnType<typeof telemetry.snapshotPerformanceTelemetry>) =>
+          Object.fromEntries(surfaceMetricNames.map((name) => {
+            const start = before.metrics[name];
+            const end = after.metrics[name];
+            const count = (end?.count ?? 0) - (start?.count ?? 0);
+            const totalMs = (end?.totalMs ?? 0) - (start?.totalMs ?? 0);
+            return [name, { count, totalMs, avgMs: count > 0 ? totalMs / count : 0 }];
+          }));
         let ghostControl = { ghostDrawn: false, frameQuiet: false, sentinelDiffers: false, cleanBefore: null as NativeSample | null, ghostSample: null as NativeSample | null, cleanRef: null as NativeSample | null, width: 0, height: 0 };
-        let fixtureProbes: { tailBefore: TailProbe | null; correctedBefore: CorrectedProbe | null; indicatorVisibleBefore: boolean } = { tailBefore: null, correctedBefore: null, indicatorVisibleBefore: false };
+        let fixtureProbes: { tailBefore: TailProbe | null; correctedBefore: CorrectedProbe | null; indicatorVisibleBefore: boolean; hudBefore: string } = { tailBefore: null, correctedBefore: null, indicatorVisibleBefore: false, hudBefore: "" };
         let viewportEvidence: { baseline: RangeProbe; zoomed: RangeProbe; after: RangeProbe } | null = null;
         const geometryProbe = () => {
           const price = runtime.view.priceRange();
@@ -322,27 +336,32 @@ for (const deviceScaleFactor of [1, 2]) {
           // Fixture probes: prove the real pipeline actually loaded this spec's fixed data.
           const barAt = (index: number): TailProbe | null => {
             const bar = runtime.pipeline.series.at(index);
-            return bar ? { time: bar.startTime, close: bar.close, volume: bar.volume, delta: bar.delta, count: bar.count } : null;
+            return bar ? { time: bar.startTime, open: bar.open, high: bar.high, low: bar.low, close: bar.close, volume: bar.volume, delta: bar.delta, count: bar.count } : null;
           };
           const seriesLen = () => runtime.pipeline.series.length;
           fixtureProbes.tailBefore = barAt(seriesLen() - 1);
           const correctedInitial = runtime.pipeline.series.get(opts.correctedTime);
           fixtureProbes.correctedBefore = correctedInitial ? { close: correctedInitial.close, volume: correctedInitial.volume, count: correctedInitial.count } : null;
           fixtureProbes.indicatorVisibleBefore = runtime.listIndicators().find((indicator) => indicator.id === "ma-scope")?.visible === true;
+          fixtureProbes.hudBefore = hook()?.getAttribute("data-hud") ?? "";
 
           const run = async (name: string, act: () => unknown | Promise<unknown>, done: () => boolean = () => true, read: () => unknown = () => null) => {
             await settle();
+            const timingBefore = telemetry.snapshotPerformanceTelemetry();
             invalidations = [];
             frames = [];
             await act();
-            await waitFor(done, `${name} to land`);
+            await waitFor(done, `${name} to land${name === "auto-scale widen" ? `; invalidations=${JSON.stringify(invalidations)}; tail=${JSON.stringify(barAt(seriesLen() - 1))}; range=${JSON.stringify(rangeProbe())}` : ""}`);
             await settle();
             const scenarioState = read();
+            const scopedTiming = surfaceTimingSince(timingBefore, telemetry.snapshotPerformanceTelemetry());
             const scoped = await sampleNative();
+            const fullTimingBefore = telemetry.snapshotPerformanceTelemetry();
             runtime.session.invalidate(ChartChange.All);
             await settle();
+            const fullTiming = surfaceTimingSince(fullTimingBefore, telemetry.snapshotPerformanceTelemetry());
             const full = await sampleNative();
-            scenarios.push({ name, invalidations: [...invalidations], frames: [...frames], scoped, full, state: scenarioState, geometry: geometryProbe() });
+            scenarios.push({ name, invalidations: [...invalidations], frames: [...frames], scoped, full, state: scenarioState, geometry: geometryProbe(), surfaceTiming: { scoped: scopedTiming, full: fullTiming } });
           };
 
           await run("style", () => runtime.setCellData("volume"), undefined, () => ({ cellMode: runtime.getState().clusterCellData }));
@@ -366,8 +385,54 @@ for (const deviceScaleFactor of [1, 2]) {
           await run("tail data", () => {
             const series = runtime.pipeline.series;
             const last = series.at(series.length - 1)!;
-            pushTrade!({ time: opts.frozenNow, price: last.close, qty: 1, isBuy: true, market: BTC });
-          }, () => isBase ? invalidations.length > 0 : invalidations.some((change) => (change & ChartChange.DataTail) !== 0), () => barAt(seriesLen() - 1));
+            pushTrade!({ time: opts.tailTime, price: last.close, qty: 1, isBuy: true, market: BTC });
+          }, () => isBase ? invalidations.length > 0 : invalidations.some((change) => (change & ChartChange.DataTail) !== 0), () => ({ bar: barAt(seriesLen() - 1), hud: hook()?.getAttribute("data-hud") ?? "" }));
+          const dispatchHover = (xOffset = 0) => {
+            const canvas = root.querySelector('canvas[data-chart-surface="interaction"]') as HTMLCanvasElement | null;
+            if (!canvas) throw new Error("pointer hover: interaction canvas missing");
+            const rect = canvas.getBoundingClientRect();
+            const x = runtime.view.xOfIndex(seriesLen() - 1) + runtime.view.colWidth / 2 + xOffset;
+            const y = runtime.view.area.top + runtime.view.area.height / 2;
+            canvas.dispatchEvent(new PointerEvent("pointermove", { bubbles: true, pointerId: 9, pointerType: "mouse", clientX: rect.left + x, clientY: rect.top + y }));
+          };
+          await run("pointer hover activation", () => dispatchHover(), () =>
+            isBase ? invalidations.length > 0 : invalidations.some((change) => (change & ChartChange.Interaction) !== 0),
+          () => ({ hud: hook()?.getAttribute("data-hud") ?? "" }));
+          await run("pointer hover successive", () => dispatchHover(2), () =>
+            isBase ? invalidations.length > 0 : invalidations.some((change) => (change & ChartChange.Interaction) !== 0),
+          () => ({ hud: hook()?.getAttribute("data-hud") ?? "" }));
+          await run("pointer hover successive 2", () => dispatchHover(4), () =>
+            isBase ? invalidations.length > 0 : invalidations.some((change) => (change & ChartChange.Interaction) !== 0),
+          () => ({ hud: hook()?.getAttribute("data-hud") ?? "" }));
+          await run("tail while hovered", () => {
+            const last = runtime.pipeline.series.at(seriesLen() - 1)!;
+            pushTrade!({ time: opts.tailTime, price: last.close, qty: 1, isBuy: true, market: BTC });
+          }, () => isBase ? invalidations.length > 0 : invalidations.some((change) => (change & ChartChange.DataTail) !== 0),
+          () => ({ bar: barAt(seriesLen() - 1), hud: hook()?.getAttribute("data-hud") ?? "" }));
+          await run("pointer leave", () => {
+            const canvas = root.querySelector('canvas[data-chart-surface="interaction"]') as HTMLCanvasElement | null;
+            if (!canvas) throw new Error("pointer leave: interaction canvas missing");
+            canvas.dispatchEvent(new PointerEvent("pointerleave", { bubbles: false, pointerId: 9, pointerType: "mouse" }));
+          }, () => isBase ? invalidations.length > 0 : invalidations.some((change) => (change & ChartChange.Interaction) !== 0),
+          () => ({ hud: hook()?.getAttribute("data-hud") ?? "" }));
+          await run("sync time activation", () => runtime.showSyncCrosshair(opts.tailTime), () =>
+            isBase ? invalidations.length > 0 : invalidations.some((change) => (change & ChartChange.Interaction) !== 0),
+          () => ({ hud: hook()?.getAttribute("data-hud") ?? "" }));
+          await run("sync time unchanged", () => runtime.showSyncCrosshair(opts.tailTime), () =>
+            isBase ? invalidations.length > 0 : invalidations.some((change) => (change & ChartChange.Interaction) !== 0),
+          () => ({ hud: hook()?.getAttribute("data-hud") ?? "" }));
+          await run("sync time changed", () => runtime.showSyncCrosshair(opts.tailTime - 60_000), () =>
+            isBase ? invalidations.length > 0 : invalidations.some((change) => (change & ChartChange.Interaction) !== 0),
+          () => ({ hud: hook()?.getAttribute("data-hud") ?? "" }));
+          await run("sync time cleared", () => runtime.hideSyncCrosshair(), () =>
+            isBase ? invalidations.length > 0 : invalidations.some((change) => (change & ChartChange.Interaction) !== 0),
+          () => ({ hud: hook()?.getAttribute("data-hud") ?? "" }));
+          runtime.setPriceAutoScaleFromControl(true);
+          await settle();
+          await run("auto-scale widen", () => {
+            // Historical reference bars keep OHLC immutable; widen with the next live 1m bucket.
+            pushTrade!({ time: opts.tailTime + 60_000, price: 65_000, qty: 1, isBuy: true, market: BTC });
+          }, () => isBase ? invalidations.length > 0 : invalidations.some((change) => (change & ChartChange.DataTail) !== 0 && (change & ChartChange.Viewport) !== 0), rangeProbe);
           await run("non-tail correction", async () => {
             await (window as unknown as Record<string, () => Promise<void>>).__serveCorrectedHistory();
             const series = runtime.pipeline.series;
@@ -471,16 +536,24 @@ for (const deviceScaleFactor of [1, 2]) {
           },
           allSurfaces: ChartSurfaceDirty.All,
           interactionSurface: ChartSurfaceDirty.Interaction,
+          annotationInteractionSurfaces: ChartSurfaceDirty.Annotation | ChartSurfaceDirty.Interaction,
           hasPendingScope,
         };
-      }, { source: SOURCE, bindingName, rootSelector: ROOT_SELECTOR, frozenNow: FROZEN_NOW, chartId: CHART_ID, correctedTime: CORRECTED_TIME, commonRange: { from: INITIAL_BARS[0].t, to: TAIL_TIME + 2 * 60_000 } });
+      }, { source: SOURCE, bindingName, rootSelector: ROOT_SELECTOR, frozenNow: FROZEN_NOW, tailTime: TAIL_TIME, chartId: CHART_ID, correctedTime: CORRECTED_TIME, commonRange: { from: INITIAL_BARS[0].t, to: TAIL_TIME + 2 * 60_000 } });
 
       const isBase = SOURCE === "base";
       const { names } = result;
       const byName = new Map<string, ScenarioEvidence>(result.scenarios.map((scenario) => [scenario.name, scenario]));
-      expect([...byName.keys()]).toEqual(["style", "visibility", "viewport", "layout", "tail data", "non-tail correction"]);
+      expect([...byName.keys()]).toEqual(["style", "visibility", "viewport", "layout", "tail data", "pointer hover activation", "pointer hover successive", "pointer hover successive 2", "tail while hovered", "pointer leave", "sync time activation", "sync time unchanged", "sync time changed", "sync time cleared", "auto-scale widen", "non-tail correction"]);
 
       const common = result.commonGeometry!;
+      const tailTiming = byName.get("tail data")!.surfaceTiming;
+      console.log("chart.surface.*.draw.ms scoped tail vs same-state full reference", JSON.stringify(tailTiming));
+      const hoverTiming = Object.fromEntries(
+        ["pointer hover activation", "pointer hover successive", "pointer hover successive 2", "pointer leave", "sync time activation", "sync time unchanged", "sync time changed", "sync time cleared"]
+          .map((name) => [name, byName.get(name)!.surfaceTiming]),
+      );
+      console.log("chart.surface.annotation.draw.ms hover edge/successive/sync scoped vs same-state full reference", JSON.stringify(hoverTiming));
       console.log("native common fixture", JSON.stringify({ source: SOURCE, sourceSHA: SOURCE_SHA, dpr: deviceScaleFactor, commonGeometry: common, scenarios: result.scenarios.map(({ name, geometry }) => ({ name, geometry })) }));
       expect(common, "common fixture: settled geometry is available").not.toBeNull();
       expect(common.root, "common fixture: fixed native root box").toEqual({ x: 16, y: 16, width: 900, height: 520 });
@@ -508,7 +581,7 @@ for (const deviceScaleFactor of [1, 2]) {
       // Fixture probes derive their expectations independently
       // from the fixed fixtures (not from values the runtime happens to report after a mask).
       expect(result.fixtureProbes.indicatorVisibleBefore, "fixture probe: overlay indicator starts visible").toBe(true);
-      expect(result.fixtureProbes.tailBefore, "fixture probe: initial tail bar matches the fixed fixture").toEqual({ time: TAIL_TIME, close: TAIL_CLOSE, volume: 12.5, delta: 3.25, count: 42 });
+      expect(result.fixtureProbes.tailBefore, "fixture probe: initial tail bar matches the fixed fixture").toEqual({ time: TAIL_TIME, open: 60_000, high: 60_500, low: 59_800, close: TAIL_CLOSE, volume: 12.5, delta: 3.25, count: 42 });
       expect(result.fixtureProbes.correctedBefore!.close, "fixture probe: initial corrected bar close").toBe(INITIAL_CLOSE_10);
       expect(result.fixtureProbes.correctedBefore!.volume, "fixture probe: initial corrected bar volume").toBeCloseTo(BAR10_VOLUME, 9);
       expect(result.fixtureProbes.correctedBefore!.count, "fixture probe: initial corrected bar count").toBe(BAR10_COUNT);
@@ -521,7 +594,12 @@ for (const deviceScaleFactor of [1, 2]) {
       expect(viewport.zoomed.min !== viewport.baseline.min || viewport.zoomed.max !== viewport.baseline.max, "viewport: zoom provably moved the live transform").toBe(true);
       expect(viewport.after, "viewport: reset restored the exact baseline transform").toEqual(viewport.baseline);
       expect(scenarioState("layout"), "layout: root really resized to 480px").toEqual({ height: 480 });
-      expect(scenarioState("tail data"), "tail: raw last bar really mutated by the owned trade").toEqual({ time: TAIL_TIME, close: TAIL_CLOSE, volume: TAIL_VOLUME, delta: TAIL_DELTA, count: TAIL_COUNT });
+      const tailState = scenarioState("tail data") as { bar: TailProbe; hud: string };
+      expect(tailState.bar, "tail: raw last bar really mutated by the owned trade").toEqual({ time: TAIL_TIME, open: 60_000, high: 60_500, low: 59_800, close: TAIL_CLOSE, volume: TAIL_VOLUME, delta: TAIL_DELTA, count: TAIL_COUNT });
+      expect(tailState.hud, "tail: annotation HUD refreshed from the updated latest bar").not.toBe(result.fixtureProbes.hudBefore);
+      expect(tailState.hud, "tail: HUD readout contains updated tail close").toContain(String(TAIL_CLOSE));
+      expect((scenarioState("pointer leave") as { hud: string }).hud, "pointer leave: latest HUD pixel/text ownership is restored").toBe((scenarioState("tail while hovered") as { hud: string }).hud);
+      expect((scenarioState("auto-scale widen") as RangeProbe).max, "auto-scale: outlying tail trade widens the price range").toBeGreaterThan(common.price.max);
       const correctedAfter = scenarioState("non-tail correction") as CorrectedProbe;
       expect(correctedAfter!.close, "non-tail: corrected closed bar really replaced").toBe(CORRECTED_CLOSE_10);
       expect(correctedAfter!.volume, "non-tail: corrected bar volume coherent").toBeCloseTo(BAR10_VOLUME, 9);
@@ -533,12 +611,22 @@ for (const deviceScaleFactor of [1, 2]) {
           visibility: names.Visibility,
           viewport: names.Viewport,
           "tail data": names.DataTail,
+          "pointer hover activation": names.Interaction,
+          "pointer hover successive": names.Interaction,
+          "pointer hover successive 2": names.Interaction,
+          "tail while hovered": names.DataTail,
+          "pointer leave": names.Interaction,
+          "sync time activation": names.Interaction,
+          "sync time unchanged": names.Interaction,
+          "sync time changed": names.Interaction,
+          "sync time cleared": names.Interaction,
+          "auto-scale widen": names.DataTail | names.Viewport,
           "non-tail correction": names.DataNonTail,
         };
         for (const [name, change] of Object.entries(expected)) {
           const scenario = byName.get(name)!;
           // The update's own invalidation names its change and is not a bare full invalidation.
-          expect(scenario.invalidations.some((mask) => (mask & change) !== 0 && mask !== names.All), `${name}: ${JSON.stringify(scenario.invalidations)}`).toBe(true);
+          expect(scenario.invalidations.some((mask) => (mask & change) === change && mask !== names.All), `${name}: ${JSON.stringify(scenario.invalidations)}`).toBe(true);
         }
         // A tail update never claims a non-tail correction and vice versa.
         for (const [name, other] of [["tail data", names.DataNonTail], ["non-tail correction", names.DataTail]] as const) {
@@ -551,10 +639,14 @@ for (const deviceScaleFactor of [1, 2]) {
       for (const scenario of result.scenarios) {
         expect(scenario.frames.length, `${scenario.name}: drew at least one frame`).toBeGreaterThan(0);
         for (const frame of scenario.frames) {
-          // Interaction-only frames keep their narrow surface; anything else redraws every
-          // surface. In BASE mode the change mask is unknown, and this spec never issues
-          // interaction updates, so the full-surface redraw is asserted directly.
-          const expectedSurfaces = !isBase && frame.changes === names.Interaction ? result.interactionSurface : result.allSurfaces;
+          // Local hover edge frames must restore/clear Annotation; successive moves are
+          // Interaction-only. Sync annotation is dirty only when its selected time changes.
+          const annotationEdge = ["pointer hover activation", "pointer leave", "sync time activation", "sync time changed", "sync time cleared"].includes(scenario.name);
+          const expectedSurfaces = !isBase && frame.changes === names.Interaction
+            ? annotationEdge ? result.annotationInteractionSurfaces : result.interactionSurface
+            : !isBase && frame.changes === names.DataTail && scenario.name === "tail data"
+              ? result.allSurfaces & ~result.interactionSurface
+              : result.allSurfaces;
           if (frame.changes === 0) continue;
           expect(frame.surfaces, `${scenario.name}: frame ${JSON.stringify(frame)}`).toBe(expectedSurfaces);
         }
@@ -583,7 +675,7 @@ for (const deviceScaleFactor of [1, 2]) {
       records.push({ caseName: "ghost-control", kind: "clean", dpr: deviceScaleFactor, mode: SOURCE, sourceSHA: SOURCE_SHA, width: ghost.cleanRef!.width, height: ghost.cleanRef!.height, hash: ghost.cleanRef!.hash });
 
       await testInfo.attach("invalidation-scope-hashes.json", {
-        body: JSON.stringify({ mode: SOURCE, sourceSHA: SOURCE_SHA, dpr: deviceScaleFactor, hasPendingScope: result.hasPendingScope, commonGeometry: result.commonGeometry, scenarios: result.scenarios.map(({ name, scoped, full, state, geometry }) => ({ name, state, geometry, scoped, full })), ghostControl: ghost }, null, 2),
+        body: JSON.stringify({ mode: SOURCE, sourceSHA: SOURCE_SHA, dpr: deviceScaleFactor, hasPendingScope: result.hasPendingScope, commonGeometry: result.commonGeometry, scenarios: result.scenarios.map(({ name, scoped, full, state, geometry, surfaceTiming }) => ({ name, state, geometry, scoped, full, surfaceTiming })), ghostControl: ghost }, null, 2),
         contentType: "application/json",
       });
     });

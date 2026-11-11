@@ -91,7 +91,7 @@ function makeContext2d() {
   };
 }
 
-function makeSession({ annotationInteractionCoupled = false, onInvalidate, onRendered, viewValues = {}, barBase = 101 } = {}) {
+function makeSession({ annotationInteractionCoupled = false, onInvalidate, onRendered, getTailDependencyContext, viewValues = {}, barBase = 101 } = {}) {
   latestResizeObserver = null;
   const win = makeWindow(2);
   const ownerDocument = { defaultView: win };
@@ -135,6 +135,7 @@ function makeSession({ annotationInteractionCoupled = false, onInvalidate, onRen
   const renderer = {
     render(actualView, actualSeries) { counts.gpu++; rendered.gpu.push({ view: snapshotView(actualView), series: snapshotSeries(actualSeries) }); },
     visibleRange() { return [2, 9]; },
+    getTailDependencyContext,
   };
   const annotation = {
     render(actualView, actualSeries, actualCrosshair) { counts.annotation++; rendered.annotation.push({ view: snapshotView(actualView), series: snapshotSeries(actualSeries), crosshair: snapshotCrosshair(actualCrosshair) }); },
@@ -437,6 +438,23 @@ test("each update kind reaches its frame with its own scope and the same surface
     assert.deepEqual(session.pendingInvalidation, { changes: ChartChange.None, surfaces: ChartSurfaceDirty.None }, `${label}: scope consumed`);
   }
   session.destroy();
+});
+
+test("tail invalidation forwards renderer context and preserves conservative default when absent", () => {
+  const explicit = makeSession({ getTailDependencyContext: () => ({ annotation: false, interaction: false }) });
+  // Drain constructor's initial full-surface paint before asserting an isolated invalidation.
+  explicit.session.activate();
+  explicit.win.runNextFrame();
+  explicit.session.invalidate(ChartChange.DataTail);
+  assert.equal(explicit.session.pendingInvalidation.surfaces, ChartSurfaceDirty.GpuScene);
+  explicit.session.destroy();
+
+  const absent = makeSession();
+  absent.session.activate();
+  absent.win.runNextFrame();
+  absent.session.invalidate(ChartChange.DataTail);
+  assert.equal(absent.session.pendingInvalidation.surfaces, ChartSurfaceDirty.All);
+  absent.session.destroy();
 });
 
 test("changes coalesced into one frame are reported together", () => {

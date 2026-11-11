@@ -26,8 +26,8 @@ Fonksiyonel iş birimleri `src/core/` altında tutulur.
 `src/core/render/scene/chartScene.ts` üç fiziksel surface tanımlar:
 
 - `gpu-scene` — `GpuSurface` arayüzü arkasında soyutlanmış birincil sahne (`WebGpuSurface`, `WebGl2Surface`, `Canvas2dSurface`; varsayılan ayar `DEFAULT_GPU_SETTINGS.backend = "webgl2"` olup `?gpu=auto|webgpu|webgl2|canvas2d` veya `configureGpuSettingsSource` ile yapılandırılır; `nativeCapture.ts` ise `requestCapture()` veya `getChartWebGl2Context` ile çalışır),
-- `annotation` — Canvas2D annotation/drawing,
-- `interaction` — Canvas2D interaction/HUD.
+- `annotation` — Canvas2D annotations/drawings and latest-bar HUD (tail-dependent).
+- `interaction` — Canvas2D crosshair and pointer controls; fixed-viewport tail updates keep it clean unless the active crosshair selects the changing tail bar.
 
 Render stage → surface eşlemesi `surfaceForStage`, veri güncellemesi → `ChartChange` eşlemesi
 `chartChangeForDataUpdate`, değişim kümesi → dirty scope `invalidationScopeForChanges`/

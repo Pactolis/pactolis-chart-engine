@@ -25,6 +25,7 @@ import {
   ChartSurfaceDirty,
   surfaceDirtyForChanges,
   type ChartInvalidationScope,
+  type TailDependencyContext,
 } from "../../core/render/scene/chartScene.js";
 import {
   incrementPerformanceCounter,
@@ -51,6 +52,9 @@ const CONTEXT_RESTORE_TIMEOUT_MS = 5000;
 export interface ChartSessionRenderer {
   render(view: View, series: FootprintSeries): void;
   visibleRange(view: View, total: number): [number, number];
+  getTailDependencyContext?(): TailDependencyContext;
+  /** Hovered HUD readouts live on Annotation, so pointer changes must repaint it while active. */
+  interactionAffectsAnnotation?(): boolean;
   setSurface?(surface: GpuSurface): void;
 }
 
@@ -251,8 +255,8 @@ export class ChartSession {
   }
 
   invalidate(changes: ChartChange = ChartChange.All): void {
-    let dirty = surfaceDirtyForChanges(changes);
-    if ((changes & ChartChange.Interaction) && this.annotationRenderer.requiresInteractionRedraw?.()) {
+    let dirty = surfaceDirtyForChanges(changes, this.renderer.getTailDependencyContext?.());
+    if ((changes & ChartChange.Interaction) && (this.annotationRenderer.requiresInteractionRedraw?.() || this.renderer.interactionAffectsAnnotation?.())) {
       dirty |= ChartSurfaceDirty.Annotation;
     }
     this.dirtySurfaces |= dirty;

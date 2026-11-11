@@ -2635,10 +2635,23 @@ nativeTest("native lifecycle qualification: repeated mounted owner census", asyn
               id + ": live bar-close -> real Bridge -> capture revision missing");
             const live = o.runtime.getAnalysisSnapshot({ now: tail + 3 * 60000, maxLevelsAndDrawings: 0,
               maxIndicatorSamples: 1 }).candles.filter((b: any) => b.time > tail);
-            assert(live.length === 2 && live.every((b: any, i: number) =>
-              JSON.stringify([b.open, b.high, b.low, b.close, b.volume, b.delta, b.count])
-                === JSON.stringify([102, 102, 102, 102, 1, i === 0 ? 1 : -1, 1])),
-              id + ": final live literal finance mismatch");
+            const expectedLive = [
+              [tail + 60000, 102, 102, 102, 102, 1, 1, 1],
+              [tail + 120000, 102, 102, 102, 102, 1, -1, 1],
+            ];
+            const actualLive = live.map((b: any) =>
+              [b.time, b.open, b.high, b.low, b.close, b.volume, b.delta, b.count]);
+            assert(live.length === 2 && actualLive.every((row: any[], i: number) =>
+              JSON.stringify(row) === JSON.stringify(expectedLive[i])),
+              id + ": final live literal finance mismatch; expected=" + JSON.stringify(expectedLive)
+                + "; actual=" + JSON.stringify(actualLive)
+                + "; tail=" + tail + "; snapshotNow=" + (tail + 3 * 60000)
+                + "; pendingTrades=" + o.runtime.pipeline.pendingTrades.length
+                + "; seriesLength=" + o.runtime.pipeline.series.length
+                + "; seriesRevision=" + o.runtime.pipeline.series.revision
+                + "; appliedFlushes=" + o.appliedFlushes
+                + "; barCloseInputs=" + o.barCloseInputs
+                + "; ownerRevision=" + o.revision + "; paintedRevision=" + o.paintedRevision);
           }
           for (const id of ids) await cleanupOwner(id);
           await delay(300); // final native late-fire interval, after every terminal owner cleanup
