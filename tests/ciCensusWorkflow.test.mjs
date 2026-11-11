@@ -36,13 +36,18 @@ function listedTests(project) {
 test('PR CI runs one census job without the Tam/L2-L9 load profiles', () => {
   assert.doesNotMatch(workflow, /census-shards/, 'shard matrix and aggregator are removed');
   const censusBlock = jobBlock('census');
-  assert.match(censusBlock, /if:\s*github\.event_name\s*==\s*'pull_request'/);
+  assert.match(censusBlock, /if:\s*github\.event_name\s*==\s*'pull_request' && needs\.changes\.outputs\.census == 'true'/);
   assert.match(censusBlock, /--project=census\b/);
   assert.match(censusBlock, /--workers=1/);
   assert.match(censusBlock, /npm ci --no-audit --no-fund/);
   assert.match(censusBlock, /if: failure\(\)/);
-  assert.doesNotMatch(censusBlock, /needs:/, 'census starts immediately, in parallel with the other jobs');
-  assert.match(jobBlock('browser'), /if:\s*github\.event_name\s*==\s*'pull_request'/);
+  assert.match(censusBlock, /needs: changes$/m, 'census waits only for the short selection job, not for the test matrix');
+  assert.match(jobBlock('browser'), /if:\s*github\.event_name\s*==\s*'pull_request' && needs\.changes\.outputs\.browser != 'none'/);
+  assert.match(jobBlock('browser'), /--project=default \$SPECS/);
+  assert.match(jobBlock('changes'), /fetch-depth: 2/, 'selection diffs the merge commit against its base parent');
+  assert.match(jobBlock('changes'), /node scripts\/select-ci-tests\.mjs/);
+  assert.match(jobBlock('ci-result'), /needs: \[test, changes, browser, census\]/);
+  assert.match(jobBlock('ci-result'), /if: always\(\)/);
 
   const all = listedTests('census');
   assert.ok(all.length > 0, 'census must select tests');
