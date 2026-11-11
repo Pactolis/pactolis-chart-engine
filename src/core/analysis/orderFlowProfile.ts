@@ -65,7 +65,7 @@ interface ResolvedCounts {
   valid: boolean;
 }
 
-interface AccumulatedLevel {
+export interface AccumulatedLevel {
   priceBin: number;
   buyVol: number;
   sellVol: number;
@@ -93,48 +93,96 @@ interface ProfileSnapshot {
   dataComplete: boolean;
 }
 
+interface ResolvedProfileOptions {
+  profileMetric: ProfileMetric;
+  profileSide: ProfileSide;
+  valueAreaPercent: number;
+  developing: boolean;
+}
+
+/**
+ * Running state of a profile build: the per-price histogram plus the developing series so
+ * far. Cells are accumulated bar by bar in time order, so a state that holds every bar of
+ * a window except its last one, cloned and fed that last bar, is bit-identical to a full
+ * build over the whole window (same float additions in the same order). The indicator
+ * uses this to answer a live tail tick without re-walking the window.
+ */
+export interface OrderFlowProfileAccumulator {
+  byPrice: Map<number, AccumulatedLevel>;
+  developing: DevelopingProfilePoint[];
+  fromTime: number | null;
+  toTime: number | null;
+}
+
+function resolveProfileOptions(options: OrderFlowProfileOptions): ResolvedProfileOptions {
+  const profileMetric = normalizeMetric(options.profileMetric);
+  const requestedSide = normalizeSide(options.profileSide);
+  return {
+    profileMetric,
+    profileSide: profileMetric === "delta" ? "total" : requestedSide,
+    valueAreaPercent: clamp(options.valueAreaPercent ?? 0.7, 0.01, 0.99),
+    developing: options.developing === true,
+  };
+}
+
+export function createOrderFlowProfileAccumulator(): OrderFlowProfileAccumulator {
+  return { byPrice: new Map(), developing: [], fromTime: null, toTime: null };
+}
+
+export function cloneOrderFlowProfileAccumulator(acc: OrderFlowProfileAccumulator): OrderFlowProfileAccumulator {
+  const byPrice = new Map<number, AccumulatedLevel>();
+  for (const [price, level] of acc.byPrice) byPrice.set(price, { ...level });
+  return { byPrice, developing: acc.developing.slice(), fromTime: acc.fromTime, toTime: acc.toTime };
+}
+
+/** Feeds one bar; bars must arrive in ascending startTime order to match a full build. */
+export function accumulateOrderFlowProfileBar(
+  acc: OrderFlowProfileAccumulator,
+  bar: FootprintBar,
+  options: OrderFlowProfileOptions = {},
+): void {
+  const resolved = resolveProfileOptions(options);
+  acc.fromTime = acc.fromTime === null ? bar.startTime : Math.min(acc.fromTime, bar.startTime);
+  acc.toTime = acc.toTime === null ? bar.startTime : Math.max(acc.toTime, bar.startTime);
+  for (const cell of bar.cells.values()) {
+    accumulateCell(acc.byPrice, cell);
+  }
+  if (resolved.developing) {
+    const snapshot = buildSnapshot(acc.byPrice, resolved.profileMetric, resolved.profileSide, resolved.valueAreaPercent);
+    acc.developing.push({
+      time: bar.startTime,
+      poc: snapshot.dataComplete ? snapshot.poc : null,
+      vah: snapshot.dataComplete ? snapshot.vah : null,
+      val: snapshot.dataComplete ? snapshot.val : null,
+      valid: snapshot.dataComplete,
+    });
+  }
+}
+
+export function finishOrderFlowProfile(
+  acc: OrderFlowProfileAccumulator,
+  options: OrderFlowProfileOptions = {},
+): OrderFlowProfileResult {
+  const resolved = resolveProfileOptions(options);
+  const snapshot = buildSnapshot(acc.byPrice, resolved.profileMetric, resolved.profileSide, resolved.valueAreaPercent);
+  return {
+    profileMetric: resolved.profileMetric,
+    profileSide: resolved.profileSide,
+    ...snapshot,
+    fromTime: acc.fromTime,
+    toTime: acc.toTime,
+    developing: acc.developing,
+  };
+}
+
 export function calculateOrderFlowProfile(
   bars: readonly FootprintBar[],
   options: OrderFlowProfileOptions = {},
 ): OrderFlowProfileResult {
-  const profileMetric = normalizeMetric(options.profileMetric);
-  const requestedSide = normalizeSide(options.profileSide);
-  const profileSide: ProfileSide = profileMetric === "delta" ? "total" : requestedSide;
-  const valueAreaPercent = clamp(options.valueAreaPercent ?? 0.7, 0.01, 0.99);
-  const byPrice = new Map<number, AccumulatedLevel>();
+  const acc = createOrderFlowProfileAccumulator();
   const orderedBars = [...bars].sort((a, b) => a.startTime - b.startTime);
-  const developing: DevelopingProfilePoint[] = [];
-  let fromTime: number | null = null;
-  let toTime: number | null = null;
-
-  for (const bar of orderedBars) {
-    fromTime = fromTime === null ? bar.startTime : Math.min(fromTime, bar.startTime);
-    toTime = toTime === null ? bar.startTime : Math.max(toTime, bar.startTime);
-    for (const cell of bar.cells.values()) {
-      accumulateCell(byPrice, cell);
-    }
-
-    if (options.developing) {
-      const snapshot = buildSnapshot(byPrice, profileMetric, profileSide, valueAreaPercent);
-      developing.push({
-        time: bar.startTime,
-        poc: snapshot.dataComplete ? snapshot.poc : null,
-        vah: snapshot.dataComplete ? snapshot.vah : null,
-        val: snapshot.dataComplete ? snapshot.val : null,
-        valid: snapshot.dataComplete,
-      });
-    }
-  }
-
-  const snapshot = buildSnapshot(byPrice, profileMetric, profileSide, valueAreaPercent);
-  return {
-    profileMetric,
-    profileSide,
-    ...snapshot,
-    fromTime,
-    toTime,
-    developing,
-  };
+  for (const bar of orderedBars) accumulateOrderFlowProfileBar(acc, bar, options);
+  return finishOrderFlowProfile(acc, options);
 }
 
 function accumulateCell(

@@ -1,5 +1,11 @@
 import {
+  accumulateOrderFlowProfileBar,
   calculateOrderFlowProfile,
+  cloneOrderFlowProfileAccumulator,
+  createOrderFlowProfileAccumulator,
+  finishOrderFlowProfile,
+  type OrderFlowProfileAccumulator,
+  type OrderFlowProfileOptions,
   type OrderFlowProfileResult,
   type ProfileMetric,
   type ProfileSide,
@@ -16,6 +22,8 @@ import {
 } from "../../../core/orderFlowProfileSettings.js";
 import { lineDash, profileHistogramParts, stepSegments } from "../../../core/render/orderFlowProfile.js";
 import type { FootprintBar } from "../../../core/types.js";
+import type { FootprintSeries } from "../../../core/model/footprint.js";
+import { incrementPerformanceCounter } from "../../../core/performanceTelemetry.js";
 import { uiColor, volumeProfileReadoutTextColor } from "../../../core/ui/seriesPalette.js";
 import type { IndicatorDefinition, IndicatorDrawContext, IndicatorPreparedData, IndicatorSettings } from "../types.js";
 import { compactNumber, drawIndicatorMessage } from "../render/indicatorPaneUi.js";
@@ -67,19 +75,40 @@ function normalizedSettings(settings: IndicatorSettings): VolumeProfileIndicator
   return normalizeOrderFlowProfileSettings(settings) as VolumeProfileIndicatorSettings;
 }
 
-function prepareVolumeProfile(ctx: IndicatorDrawContext<VolumeProfileIndicatorSettings>): VolumeProfilePreparedData {
-  if (!ctx.instance.visible) return emptyPrepared("hidden", "");
-  const settings = normalizedSettings(ctx.settings);
-  const bars = selectBars(ctx, settings);
-  const profileMetric = settings.profileMetric;
-  const developing = profileSupportsValueArea(profileMetric)
-    && [settings.pocMode, settings.vahMode, settings.valMode].some(levelModeHasDeveloping);
-  const result = calculateOrderFlowProfile(bars, {
-    profileMetric,
-    profileSide: settings.profileSide,
-    valueAreaPercent: numericSetting(settings, "valueAreaPercent", 70, 1, 99) / 100,
-    developing,
-  });
+/**
+ * Per series + instance cache of the profile window minus its last bar.
+ *
+ * A live tick only changes the series tail, and cells are accumulated in bar order, so
+ * `clone(prefix) + tail bar` performs the same float additions in the same order as a full
+ * build: the result is bit-identical while the cost no longer scales with the window's
+ * bars x cells (only with price levels). The cache is reused only while structureRevision and
+ * nonTailRevision are unchanged (so no bar other than the tail changed) and the window has
+ * the same first bar, last bar and length; anything else rebuilds the prefix from scratch.
+ */
+interface VolumeProfileCache {
+  key: string;
+  structureRevision: number;
+  nonTailRevision: number;
+  seriesRevision: number;
+  firstTime: number;
+  lastTime: number;
+  length: number;
+  prefix: OrderFlowProfileAccumulator;
+  prepared: VolumeProfilePreparedData;
+}
+const volumeProfileCaches = new WeakMap<FootprintSeries, Map<string, VolumeProfileCache>>();
+
+function windowIsAscending(bars: readonly FootprintBar[]): boolean {
+  for (let i = 1; i < bars.length; i++) if (bars[i].startTime <= bars[i - 1].startTime) return false;
+  return true;
+}
+
+function buildVolumeProfilePrepared(
+  ctx: IndicatorDrawContext<VolumeProfileIndicatorSettings>,
+  profile: OrderFlowProfileResult,
+  selectedBars: number,
+): VolumeProfilePreparedData {
+  const result = profile;
   const maxMagnitude = result.levels.reduce((max, level) => Math.max(max, level.magnitude ?? 0), 0);
   const validLevels = result.levels.filter((level) => level.value !== null);
   if (!result.levels.length || !validLevels.length) return emptyPrepared("no-data", t("indicator.volumeProfile.noData"));
@@ -89,9 +118,70 @@ function prepareVolumeProfile(ctx: IndicatorDrawContext<VolumeProfileIndicatorSe
     status: "ok",
     points: [],
     range: { min: first, max: last + ctx.series.config.priceStep },
-    meta: { result, maxMagnitude, selectedBars: bars.length },
+    meta: { result, maxMagnitude, selectedBars },
     message: result.dataComplete ? undefined : t("indicator.volumeProfile.incompleteData"),
   };
+}
+
+function prepareVolumeProfile(ctx: IndicatorDrawContext<VolumeProfileIndicatorSettings>): VolumeProfilePreparedData {
+  if (!ctx.instance.visible) return emptyPrepared("hidden", "");
+  const settings = normalizedSettings(ctx.settings);
+  const bars = selectBars(ctx, settings);
+  const profileMetric = settings.profileMetric;
+  const developing = profileSupportsValueArea(profileMetric)
+    && [settings.pocMode, settings.vahMode, settings.valMode].some(levelModeHasDeveloping);
+  const options: OrderFlowProfileOptions = {
+    profileMetric,
+    profileSide: settings.profileSide,
+    valueAreaPercent: numericSetting(settings, "valueAreaPercent", 70, 1, 99) / 100,
+    developing,
+  };
+  const { series } = ctx;
+  const key = `${profileMetric}|${options.profileSide}|${options.valueAreaPercent}|${developing}|${stringSetting(settings, "mode", "visible")}|${numericSetting(settings, "lookbackBars", 200, 1, 10_000)}`;
+  let perSeries = volumeProfileCaches.get(series);
+  if (!perSeries) { perSeries = new Map(); volumeProfileCaches.set(series, perSeries); }
+  const firstBar = bars[0];
+  const lastBar = bars[bars.length - 1];
+  const cached = perSeries.get(ctx.instance.id);
+  if (
+    cached && firstBar && lastBar
+    && cached.key === key
+    && cached.structureRevision === series.structureRevision
+    && cached.nonTailRevision === series.nonTailRevision
+    && cached.firstTime === firstBar.startTime
+    && cached.lastTime === lastBar.startTime
+    && cached.length === bars.length
+  ) {
+    if (cached.seriesRevision === series.revision) return cached.prepared;
+    const seriesBars = series.listReadonly();
+    // Window ends before the series tail: nothing inside it can have changed.
+    if (seriesBars[seriesBars.length - 1] !== lastBar) {
+      cached.seriesRevision = series.revision;
+      return cached.prepared;
+    }
+    const acc = cloneOrderFlowProfileAccumulator(cached.prefix);
+    accumulateOrderFlowProfileBar(acc, lastBar, options);
+    cached.prepared = buildVolumeProfilePrepared(ctx, finishOrderFlowProfile(acc, options), bars.length);
+    cached.seriesRevision = series.revision;
+    incrementPerformanceCounter("indicator.incremental.hit.volumeProfile");
+    return cached.prepared;
+  }
+
+  const ascending = firstBar !== undefined && windowIsAscending(bars);
+  if (!ascending) {
+    perSeries.delete(ctx.instance.id);
+    const acc = createOrderFlowProfileAccumulator();
+    for (const bar of [...bars].sort((a, b) => a.startTime - b.startTime)) accumulateOrderFlowProfileBar(acc, bar, options);
+    return buildVolumeProfilePrepared(ctx, finishOrderFlowProfile(acc, options), bars.length);
+  }
+  const prefix = createOrderFlowProfileAccumulator();
+  for (let i = 0; i < bars.length - 1; i++) accumulateOrderFlowProfileBar(prefix, bars[i], options);
+  const acc = cloneOrderFlowProfileAccumulator(prefix);
+  accumulateOrderFlowProfileBar(acc, lastBar!, options);
+  const prepared = buildVolumeProfilePrepared(ctx, finishOrderFlowProfile(acc, options), bars.length);
+  perSeries.set(ctx.instance.id, { key, structureRevision: series.structureRevision, nonTailRevision: series.nonTailRevision, seriesRevision: series.revision, firstTime: firstBar!.startTime, lastTime: lastBar!.startTime, length: bars.length, prefix, prepared });
+  incrementPerformanceCounter("indicator.incremental.full.volumeProfile");
+  return prepared;
 }
 
 function selectBars(
