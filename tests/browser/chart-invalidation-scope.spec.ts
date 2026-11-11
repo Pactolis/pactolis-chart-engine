@@ -105,8 +105,7 @@ for (const deviceScaleFactor of [1, 2]) {
         const root = page.locator(selector);
         const box = await root.boundingBox();
         if (!box || box.x !== 16 || box.y !== 16 || Math.round(box.width) !== 900) {
-          throw new Error(
-ative sampling: root drifted from its fixed viewport box: ${JSON.stringify(box)}`);
+          throw new Error(`native sampling: root drifted from its fixed viewport box: ${JSON.stringify(box)}`);
         }
         if (await page.evaluate(() => `${window.scrollX},${window.scrollY}`) !== "0,0") {
           throw new Error("native sampling: page scrolled during capture");
