@@ -1,4 +1,5 @@
 import type { FootprintBar } from "../../types.js";
+import { incrementPerformanceCounter } from "../../performanceTelemetry.js";
 
 export interface OhlcvInput {
   time: number;
@@ -160,12 +161,15 @@ export function barsToOhlcv(bars: readonly FootprintBar[]): OhlcvInput[] {
 interface OhlcvSeriesSource {
   readonly revision: number;
   readonly structureRevision: number;
+  /** When present, lets seriesOhlcv re-sync only the tail row while it stays unchanged. */
+  readonly nonTailRevision?: number;
   listReadonly(): readonly FootprintBar[];
 }
 
 interface OhlcvMemoEntry {
   revision: number;
   structureRevision: number;
+  nonTailRevision: number | undefined;
   rows: OhlcvInput[];
 }
 
@@ -198,13 +202,22 @@ export function seriesOhlcv(series: OhlcvSeriesSource): OhlcvInput[] {
     cached.structureRevision === series.structureRevision &&
     cached.rows.length === bars.length
   ) {
-    for (let i = 0; i < bars.length; i++) syncOhlcvRow(cached.rows[i], bars[i]);
+    // Same structure and non-tail revision: only the tail bar can have changed, so re-sync
+    // just that row (O(1)) instead of every row (O(n)). Without the revision, sync all.
+    if (series.nonTailRevision !== undefined && cached.nonTailRevision === series.nonTailRevision) {
+      if (bars.length > 0) syncOhlcvRow(cached.rows[bars.length - 1], bars[bars.length - 1]);
+      incrementPerformanceCounter("ohlcv.sync.tail");
+    } else {
+      for (let i = 0; i < bars.length; i++) syncOhlcvRow(cached.rows[i], bars[i]);
+      incrementPerformanceCounter("ohlcv.sync.full");
+    }
     cached.revision = series.revision;
+    cached.nonTailRevision = series.nonTailRevision;
     return cached.rows;
   }
 
   const rows = barsToOhlcv(bars);
-  ohlcvMemo.set(series, { revision: series.revision, structureRevision: series.structureRevision, rows });
+  ohlcvMemo.set(series, { revision: series.revision, structureRevision: series.structureRevision, nonTailRevision: series.nonTailRevision, rows });
   return rows;
 }
 
