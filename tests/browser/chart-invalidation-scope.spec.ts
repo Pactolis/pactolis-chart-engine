@@ -397,6 +397,8 @@ for (const deviceScaleFactor of [1, 2]) {
             const last = runtime.pipeline.series.at(seriesLen() - 1)!;
             pushTrade!({ time: opts.frozenNow, price: last.close, qty: 1, isBuy: true, market: BTC });
           }, () => isBase ? invalidations.length > 0 : invalidations.some((change) => (change & ChartChange.DataTail) !== 0), () => barAt(seriesLen() - 1));
+          runtime.setPriceAutoScaleFromControl(true);
+          await settle();
           await run("auto-scale widen", () => {
             pushTrade!({ time: opts.frozenNow, price: 61_000, qty: 1, isBuy: true, market: BTC });
           }, () => isBase ? invalidations.length > 0 : invalidations.some((change) => (change & ChartChange.DataTail) !== 0 && (change & ChartChange.Viewport) !== 0), rangeProbe);
