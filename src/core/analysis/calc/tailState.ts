@@ -85,6 +85,23 @@ export function wilderAdvance(values: readonly number[], period: number, before:
   return wilderStep({ ...before }, values[values.length - 1], period1(period));
 }
 
+/**
+ * Min/max of the `n` values ending at `last`, with rollingMin/rollingMax semantics: null while
+ * fewer than `n` values exist or when any value in the window is non-finite. Exact (no
+ * float accumulation), so it equals the deque-based full computation.
+ */
+export function windowExtreme(valueAt: (index: number) => number, last: number, period: number, pick: "min" | "max"): number | null {
+  const n = period1(period);
+  if (last + 1 < n) return null;
+  let result = pick === "min" ? Infinity : -Infinity;
+  for (let k = last + 1 - n; k <= last; k++) {
+    const v = valueAt(k);
+    if (!Number.isFinite(v)) return null;
+    if (pick === "min" ? v < result : v > result) result = v;
+  }
+  return result;
+}
+
 export interface SuperTrendState { finalUpper: number; finalLower: number; direction: 1 | -1 | 0 }
 interface BarLike { high: number; low: number; close: number }
 
