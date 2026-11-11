@@ -392,6 +392,12 @@ export class Overlay {
       }
     }
 
+    if (empty || mainSuppressed) this.onHudText?.(null);
+    else {
+      // Latest-bar HUD depends on tail data, so keep it on the annotation surface.
+      this.drawHud(ctx, view, series, crosshair, range);
+      this.drawOrderbookHover?.(ctx, view, series, crosshair);
+    }
     ctx.restore();
   }
 
@@ -403,6 +409,7 @@ export class Overlay {
     range: [number, number],
     layerOrder?: readonly string[],
   ): void {
+    void range;
     const ctx = this.interactionCtx ?? this.ctx;
     const orderedLayers = layerOrder ?? ["crosshair", "hud", "interaction-controls"];
     ctx.clearRect(0, 0, ctx.canvas.width, ctx.canvas.height);
@@ -440,11 +447,7 @@ export class Overlay {
           break;
         }
         case "hud":
-          if (mainSuppressed) this.onHudText?.(null);
-          else {
-            this.drawHud(ctx, view, series, crosshair, range);
-            this.drawOrderbookHover?.(ctx, view, series, crosshair);
-          }
+          // Tail-dependent HUD is rendered by renderAnnotations.
           break;
         case "interaction-controls":
           if (!mainSuppressed) this.drawInteractionForeground?.(ctx, view, series);
@@ -460,10 +463,7 @@ export class Overlay {
     }
   }
 
-  /**
-   * Conservative tail-dependency query for the interaction surface. This follows
-   * renderInteraction's layer order and inputs; unknown consumers remain dirty.
-   */
+  /** Whether an active crosshair selects the changing tail bar and needs a refreshed label. */
   hasTailDependentInteractionContent(
     view: View,
     series: FootprintSeries,
@@ -471,12 +471,11 @@ export class Overlay {
     range: [number, number],
     layerOrder?: readonly string[],
   ): boolean {
-    void view;
-    void crosshair;
     void range;
-    if (series.length === 0) return false;
+    if (series.length === 0 || !crosshair.visible) return false;
     const orderedLayers = layerOrder ?? ["crosshair", "hud", "interaction-controls"];
-    return orderedLayers.length > 0;
+    if (!orderedLayers.includes("crosshair")) return false;
+    return Math.floor(view.indexOfX(crosshair.x)) === series.length - 1;
   }
 
   /** Temporary bounded coupling: indicator legend/readouts still receive crosshair in their draw contract. */
