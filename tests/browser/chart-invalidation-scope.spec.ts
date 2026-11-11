@@ -282,6 +282,8 @@ for (const deviceScaleFactor of [1, 2]) {
           setCellData(mode: string): void;
           setIndicatorVisible(id: string, visible: boolean): void;
           setPriceAutoScaleFromControl(autoScale: boolean): void;
+          showSyncCrosshair(time: number): void;
+          hideSyncCrosshair(): void;
           resetPriceScale(): void;
           getState(): { clusterCellData: string };
           listIndicators(): { id: string; visible: boolean }[];
@@ -385,18 +387,46 @@ for (const deviceScaleFactor of [1, 2]) {
             const last = series.at(series.length - 1)!;
             pushTrade!({ time: opts.frozenNow, price: last.close, qty: 1, isBuy: true, market: BTC });
           }, () => isBase ? invalidations.length > 0 : invalidations.some((change) => (change & ChartChange.DataTail) !== 0), () => ({ bar: barAt(seriesLen() - 1), hud: hook()?.getAttribute("data-hud") ?? "" }));
-          await run("pointer hover", () => {
+          const dispatchHover = (xOffset = 0) => {
             const canvas = root.querySelector('canvas[data-chart-surface="interaction"]') as HTMLCanvasElement | null;
             if (!canvas) throw new Error("pointer hover: interaction canvas missing");
             const rect = canvas.getBoundingClientRect();
-            const x = runtime.view.xOfIndex(seriesLen() - 1) + runtime.view.colWidth / 2;
+            const x = runtime.view.xOfIndex(seriesLen() - 1) + runtime.view.colWidth / 2 + xOffset;
             const y = runtime.view.area.top + runtime.view.area.height / 2;
             canvas.dispatchEvent(new PointerEvent("pointermove", { bubbles: true, pointerId: 9, pointerType: "mouse", clientX: rect.left + x, clientY: rect.top + y }));
-          }, () => isBase ? invalidations.length > 0 : invalidations.some((change) => (change & ChartChange.Interaction) !== 0), () => ({ hud: hook()?.getAttribute("data-hud") ?? "" }));
+          };
+          await run("pointer hover activation", () => dispatchHover(), () =>
+            isBase ? invalidations.length > 0 : invalidations.some((change) => (change & ChartChange.Interaction) !== 0),
+          () => ({ hud: hook()?.getAttribute("data-hud") ?? "" }));
+          await run("pointer hover successive", () => dispatchHover(2), () =>
+            isBase ? invalidations.length > 0 : invalidations.some((change) => (change & ChartChange.Interaction) !== 0),
+          () => ({ hud: hook()?.getAttribute("data-hud") ?? "" }));
+          await run("pointer hover successive 2", () => dispatchHover(4), () =>
+            isBase ? invalidations.length > 0 : invalidations.some((change) => (change & ChartChange.Interaction) !== 0),
+          () => ({ hud: hook()?.getAttribute("data-hud") ?? "" }));
           await run("tail while hovered", () => {
             const last = runtime.pipeline.series.at(seriesLen() - 1)!;
             pushTrade!({ time: opts.frozenNow, price: last.close, qty: 1, isBuy: true, market: BTC });
-          }, () => isBase ? invalidations.length > 0 : invalidations.some((change) => (change & ChartChange.DataTail) !== 0), () => barAt(seriesLen() - 1));
+          }, () => isBase ? invalidations.length > 0 : invalidations.some((change) => (change & ChartChange.DataTail) !== 0),
+          () => ({ bar: barAt(seriesLen() - 1), hud: hook()?.getAttribute("data-hud") ?? "" }));
+          await run("pointer leave", () => {
+            const canvas = root.querySelector('canvas[data-chart-surface="interaction"]') as HTMLCanvasElement | null;
+            if (!canvas) throw new Error("pointer leave: interaction canvas missing");
+            canvas.dispatchEvent(new PointerEvent("pointerleave", { bubbles: false, pointerId: 9, pointerType: "mouse" }));
+          }, () => isBase ? invalidations.length > 0 : invalidations.some((change) => (change & ChartChange.Interaction) !== 0),
+          () => ({ hud: hook()?.getAttribute("data-hud") ?? "" }));
+          await run("sync time activation", () => runtime.showSyncCrosshair(TAIL_TIME), () =>
+            isBase ? invalidations.length > 0 : invalidations.some((change) => (change & ChartChange.Interaction) !== 0),
+          () => ({ hud: hook()?.getAttribute("data-hud") ?? "" }));
+          await run("sync time unchanged", () => runtime.showSyncCrosshair(TAIL_TIME), () =>
+            isBase ? invalidations.length > 0 : invalidations.some((change) => (change & ChartChange.Interaction) !== 0),
+          () => ({ hud: hook()?.getAttribute("data-hud") ?? "" }));
+          await run("sync time changed", () => runtime.showSyncCrosshair(TAIL_TIME - 60_000), () =>
+            isBase ? invalidations.length > 0 : invalidations.some((change) => (change & ChartChange.Interaction) !== 0),
+          () => ({ hud: hook()?.getAttribute("data-hud") ?? "" }));
+          await run("sync time cleared", () => runtime.hideSyncCrosshair(), () =>
+            isBase ? invalidations.length > 0 : invalidations.some((change) => (change & ChartChange.Interaction) !== 0),
+          () => ({ hud: hook()?.getAttribute("data-hud") ?? "" }));
           runtime.setPriceAutoScaleFromControl(true);
           await settle();
           await run("auto-scale widen", () => {
@@ -514,11 +544,16 @@ for (const deviceScaleFactor of [1, 2]) {
       const isBase = SOURCE === "base";
       const { names } = result;
       const byName = new Map<string, ScenarioEvidence>(result.scenarios.map((scenario) => [scenario.name, scenario]));
-      expect([...byName.keys()]).toEqual(["style", "visibility", "viewport", "layout", "tail data", "pointer hover", "tail while hovered", "auto-scale widen", "non-tail correction"]);
+      expect([...byName.keys()]).toEqual(["style", "visibility", "viewport", "layout", "tail data", "pointer hover activation", "pointer hover successive", "pointer hover successive 2", "tail while hovered", "pointer leave", "sync time activation", "sync time unchanged", "sync time changed", "sync time cleared", "auto-scale widen", "non-tail correction"]);
 
       const common = result.commonGeometry!;
       const tailTiming = byName.get("tail data")!.surfaceTiming;
       console.log("chart.surface.*.draw.ms scoped tail vs same-state full reference", JSON.stringify(tailTiming));
+      const hoverTiming = Object.fromEntries(
+        ["pointer hover activation", "pointer hover successive", "pointer hover successive 2", "pointer leave", "sync time activation", "sync time unchanged", "sync time changed", "sync time cleared"]
+          .map((name) => [name, byName.get(name)!.surfaceTiming]),
+      );
+      console.log("chart.surface.annotation.draw.ms hover edge/successive/sync scoped vs same-state full reference", JSON.stringify(hoverTiming));
       console.log("native common fixture", JSON.stringify({ source: SOURCE, sourceSHA: SOURCE_SHA, dpr: deviceScaleFactor, commonGeometry: common, scenarios: result.scenarios.map(({ name, geometry }) => ({ name, geometry })) }));
       expect(common, "common fixture: settled geometry is available").not.toBeNull();
       expect(common.root, "common fixture: fixed native root box").toEqual({ x: 16, y: 16, width: 900, height: 520 });
@@ -563,6 +598,7 @@ for (const deviceScaleFactor of [1, 2]) {
       expect(tailState.bar, "tail: raw last bar really mutated by the owned trade").toEqual({ time: TAIL_TIME, open: 60_000, high: 60_500, low: 59_800, close: TAIL_CLOSE, volume: TAIL_VOLUME, delta: TAIL_DELTA, count: TAIL_COUNT });
       expect(tailState.hud, "tail: annotation HUD refreshed from the updated latest bar").not.toBe(result.fixtureProbes.hudBefore);
       expect(tailState.hud, "tail: HUD readout contains updated tail close").toContain(String(TAIL_CLOSE));
+      expect((scenarioState("pointer leave") as { hud: string }).hud, "pointer leave: latest HUD pixel/text ownership is restored").toBe((scenarioState("tail while hovered") as { hud: string }).hud);
       expect((scenarioState("auto-scale widen") as RangeProbe).max, "auto-scale: outlying tail trade widens the price range").toBeGreaterThan(common.price.max);
       const correctedAfter = scenarioState("non-tail correction") as CorrectedProbe;
       expect(correctedAfter!.close, "non-tail: corrected closed bar really replaced").toBe(CORRECTED_CLOSE_10);
@@ -575,8 +611,15 @@ for (const deviceScaleFactor of [1, 2]) {
           visibility: names.Visibility,
           viewport: names.Viewport,
           "tail data": names.DataTail,
-          "pointer hover": names.Interaction,
+          "pointer hover activation": names.Interaction,
+          "pointer hover successive": names.Interaction,
+          "pointer hover successive 2": names.Interaction,
           "tail while hovered": names.DataTail,
+          "pointer leave": names.Interaction,
+          "sync time activation": names.Interaction,
+          "sync time unchanged": names.Interaction,
+          "sync time changed": names.Interaction,
+          "sync time cleared": names.Interaction,
           "auto-scale widen": names.DataTail | names.Viewport,
           "non-tail correction": names.DataNonTail,
         };
@@ -596,10 +639,14 @@ for (const deviceScaleFactor of [1, 2]) {
       for (const scenario of result.scenarios) {
         expect(scenario.frames.length, `${scenario.name}: drew at least one frame`).toBeGreaterThan(0);
         for (const frame of scenario.frames) {
-          // Interaction-only frames keep their narrow surface; anything else redraws every
-          // surface. In BASE mode the change mask is unknown, and this spec never issues
-          // interaction updates, so the full-surface redraw is asserted directly.
-          const expectedSurfaces = !isBase && frame.changes === names.Interaction && scenario.name === "pointer hover" ? result.annotationInteractionSurfaces : !isBase && frame.changes === names.Interaction ? result.interactionSurface : !isBase && frame.changes === names.DataTail && scenario.name !== "tail while hovered" ? (result.allSurfaces & ~result.interactionSurface) : result.allSurfaces;
+          // Local hover edge frames must restore/clear Annotation; successive moves are
+          // Interaction-only. Sync annotation is dirty only when its selected time changes.
+          const annotationEdge = ["pointer hover activation", "pointer leave", "sync time activation", "sync time changed", "sync time cleared"].includes(scenario.name);
+          const expectedSurfaces = !isBase && frame.changes === names.Interaction
+            ? annotationEdge ? result.annotationInteractionSurfaces : result.interactionSurface
+            : !isBase && frame.changes === names.DataTail && scenario.name === "tail data"
+              ? result.allSurfaces & ~result.interactionSurface
+              : result.allSurfaces;
           if (frame.changes === 0) continue;
           expect(frame.surfaces, `${scenario.name}: frame ${JSON.stringify(frame)}`).toBe(expectedSurfaces);
         }
