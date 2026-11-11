@@ -36,13 +36,13 @@ function listedTests(project) {
 test('PR CI runs one census job without the Tam/L2-L9 load profiles', () => {
   assert.doesNotMatch(workflow, /census-shards/, 'shard matrix and aggregator are removed');
   const censusBlock = jobBlock('census');
-  assert.match(censusBlock, /if:\s*github\.event_name\s*==\s*'pull_request'/);
+  assert.match(censusBlock, /if:\s*github\.event_name\s*==\s*'pull_request' && needs\.changes\.outputs\.census == 'true'/);
   assert.match(censusBlock, /--project=census\b/);
   assert.match(censusBlock, /--workers=1/);
   assert.match(censusBlock, /npm ci --no-audit --no-fund/);
   assert.match(censusBlock, /if: failure\(\)/);
-  assert.doesNotMatch(censusBlock, /needs:/, 'census starts immediately, in parallel with the other jobs');
-  assert.match(jobBlock('browser'), /if:\s*github\.event_name\s*==\s*'pull_request'/);
+  assert.match(censusBlock, /^    needs: changes$/m, 'census waits only for the change selection, not for other test jobs');
+  assert.match(jobBlock('browser'), /if:\s*github\.event_name\s*==\s*'pull_request' && needs\.changes\.outputs\.browser != 'none'/);
 
   const all = listedTests('census');
   assert.ok(all.length > 0, 'census must select tests');
@@ -57,6 +57,21 @@ test('PR CI runs one census job without the Tam/L2-L9 load profiles', () => {
     'runtime endurance remains an explicit conditional skip, not a workflow filter');
   assert.doesNotMatch(censusBlock, /CHART_ENDURANCE_(?:MINUTES|PROFILE)\s*:/,
     'regular census must not activate weekly endurance');
+});
+
+test('Tam runs in its own parallel PR job whenever the census spec is selected', () => {
+  const tamBlock = jobBlock('census-tam');
+  const censusIf = jobBlock('census').match(/^    if: (.+)$/m)?.[1];
+  assert.equal(tamBlock.match(/^    if: (.+)$/m)?.[1], censusIf, 'census-tam uses the census selection condition');
+  assert.match(tamBlock, /^    needs: changes$/m);
+  assert.match(tamBlock, /--project=census-load --grep "#308 Tam" --workers=1/);
+});
+
+test('CI result aggregates every PR job and treats skipped selections as passing', () => {
+  const block = jobBlock('ci-result');
+  assert.match(block, /needs: \[test, changes, browser, census, census-tam\]/);
+  assert.match(block, /if: always\(\)/);
+  assert.match(block, /job\.result === "failure" \|\| job\.result === "cancelled"/);
 });
 
 test('census-load project selects L2-L9 and Tam report-only load profiles', () => {
