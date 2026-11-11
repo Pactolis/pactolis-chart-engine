@@ -168,6 +168,7 @@ export class Overlay {
   private tpoMergeLeftSessionStarts: ReadonlySet<number> = new Set();
   private tpoProfileHitZones: TpoProfileHitZone[] = [];
   private interactionHudWasActive = false;
+  private interactionHudSyncTime: number | null = null;
   /** Per-chart görünüm config'i (runtime set eder); null ise global settings. */
   private chartConfig: ChartViewConfig | null = null;
   private readonly cellTextCache = new WeakMap<FootprintBar, { key: string; cellRevision: number; entries: Map<number, FormattedCellText> }>();
@@ -465,11 +466,12 @@ export class Overlay {
     }
   }
 
-  /** Whether pointer movement changes the crosshair-selected HUD painted on Annotation. */
+  /** Whether an interaction changed Annotation-owned HUD visibility or synchronized selection. */
   hasInteractionDependentHudContent(crosshair: Crosshair): boolean {
-    const active = crosshair.visible || this.getSyncCrosshairTime?.() != null;
-    const redraw = active || this.interactionHudWasActive;
-    this.interactionHudWasActive = active;
+    const syncTime = this.getSyncCrosshairTime?.() ?? null;
+    const redraw = crosshair.visible !== this.interactionHudWasActive || syncTime !== this.interactionHudSyncTime;
+    this.interactionHudWasActive = crosshair.visible;
+    this.interactionHudSyncTime = syncTime;
     return redraw;
   }
 
