@@ -488,6 +488,7 @@ class ChartRuntimeImpl implements ChartRuntime, ChartInputHost {
           }
         }
       },
+      interactionAffectsAnnotation: () => this.overlay.hasInteractionDependentHudContent(crosshair),
       getTailDependencyContext: () => ({
         annotation: true,
         interaction: this.overlay.hasTailDependentInteractionContent(

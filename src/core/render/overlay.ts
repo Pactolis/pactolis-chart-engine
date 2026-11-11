@@ -167,6 +167,7 @@ export class Overlay {
   private indicatorAxisRects: Array<{ paneId: string; plotX: number; x: number; y: number; w: number; h: number }> = [];
   private tpoMergeLeftSessionStarts: ReadonlySet<number> = new Set();
   private tpoProfileHitZones: TpoProfileHitZone[] = [];
+  private interactionHudWasActive = false;
   /** Per-chart görünüm config'i (runtime set eder); null ise global settings. */
   private chartConfig: ChartViewConfig | null = null;
   private readonly cellTextCache = new WeakMap<FootprintBar, { key: string; cellRevision: number; entries: Map<number, FormattedCellText> }>();
@@ -393,10 +394,9 @@ export class Overlay {
     }
 
     if (empty || mainSuppressed) this.onHudText?.(null);
-    else {
-      // Latest-bar HUD depends on tail data, so keep it on the annotation surface.
+    else if (!crosshair.visible) {
+      // The default latest-bar HUD depends on tail data, so keep it on Annotation.
       this.drawHud(ctx, view, series, crosshair, range);
-      this.drawOrderbookHover?.(ctx, view, series, crosshair);
     }
     ctx.restore();
   }
@@ -447,7 +447,9 @@ export class Overlay {
           break;
         }
         case "hud":
-          // Tail-dependent HUD is rendered by renderAnnotations.
+          // Hovered HUD remains above the crosshair on Interaction; default HUD lives on Annotation.
+          if (!mainSuppressed && crosshair.visible) this.drawHud(ctx, view, series, crosshair, range);
+          if (!mainSuppressed) this.drawOrderbookHover?.(ctx, view, series, crosshair);
           break;
         case "interaction-controls":
           if (!mainSuppressed) this.drawInteractionForeground?.(ctx, view, series);
@@ -461,6 +463,14 @@ export class Overlay {
           break;
       }
     }
+  }
+
+  /** Whether pointer movement changes the crosshair-selected HUD painted on Annotation. */
+  hasInteractionDependentHudContent(crosshair: Crosshair): boolean {
+    const active = crosshair.visible || this.getSyncCrosshairTime?.() != null;
+    const redraw = active || this.interactionHudWasActive;
+    this.interactionHudWasActive = active;
+    return redraw;
   }
 
   /** Whether an active crosshair selects the changing tail bar and needs a refreshed label. */
