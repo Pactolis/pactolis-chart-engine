@@ -108,6 +108,22 @@ export function makeSeriesPoints(values: readonly (number | null)[], bars: reado
   return points;
 }
 
+/**
+ * Windowed counterpart of `makeNumberPoints`: evaluates `valueAt` only for the visible
+ * `[start, end)` bars instead of materialising a full-series array first. Same null /
+ * non-finite handling, so output is identical to mapping the whole series then slicing.
+ */
+export function makeMappedPoints(bars: readonly FootprintBar[], start: number, end: number, valueAt: (bar: FootprintBar, index: number) => number | null): SeriesPoint[] {
+  const visible: SeriesPoint[] = [];
+  for (let i = start; i < end; i++) {
+    const bar = bars[i];
+    if (!bar) continue;
+    const value = valueAt(bar, i);
+    visible.push({ index: i, time: bar.startTime, value: value === null || !Number.isFinite(value) ? null : value });
+  }
+  return visible;
+}
+
 export function makeNumberPoints(points: readonly NumberPoint[], bars: readonly FootprintBar[], start: number, end: number): SeriesPoint[] {
   const visible: SeriesPoint[] = [];
   for (let i = start; i < end; i++) {
