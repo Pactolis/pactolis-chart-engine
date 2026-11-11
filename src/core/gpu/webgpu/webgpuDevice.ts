@@ -1,6 +1,8 @@
 import { incrementPerformanceCounter } from "../../performanceTelemetry.js";
 import { recordGpuContextEvent, recordGpuFallback, setGpuAdapterInfo } from "../gpuDiagnostics.js";
 import type { ChartPowerPreference } from "../../model/chartDisplayOptions.js";
+import { isWebGpuSupported } from "../gpuSettings.js";
+export { isWebGpuSupported } from "../gpuSettings.js";
 
 export interface WebGpuLimits {
   readonly maxBufferSize: number;
@@ -20,10 +22,6 @@ export interface WebGpuDeviceHandle {
 let sharedHandle: WebGpuDeviceHandle | null = null;
 let sharedDevicePromise: Promise<WebGpuDeviceHandle | null> | null = null;
 let sharedPowerPreference: ChartPowerPreference = "default";
-
-export function isWebGpuSupported(): boolean {
-  return typeof navigator !== "undefined" && Boolean((navigator as any).gpu);
-}
 
 export async function requestWebGpuDevice(options?: {
   powerPreference?: ChartPowerPreference;

@@ -30,6 +30,7 @@ jobs:
       - run: npm run check
       - run: npm test
       - run: npm run check:exports
+      - run: npm run check:default-import-graph
       - run: npm pack --dry-run
 
   browser:
@@ -78,6 +79,13 @@ jobs:
           name: census-results-${{ matrix.shard }}
           path: test-results/
           retention-days: 3
+      - if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: census-evidence-${{ matrix.shard }}
+          path: test-results/**/census-evidence.json
+          retention-days: 3
+          if-no-files-found: error
 
   census:
     name: census

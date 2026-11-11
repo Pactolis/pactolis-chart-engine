@@ -606,6 +606,7 @@ test("Full fallback cascade: WebGPU loss -> WebGL2 -> 5s context-restore timeout
       getBoundingClientRect: () => ({ width: 800, height: 600 }),
     };
 
+    const backendChanges = [];
     const session = new ChartSession({
       container,
       gpuCanvas: initialCanvas,
@@ -622,6 +623,7 @@ test("Full fallback cascade: WebGPU loss -> WebGL2 -> 5s context-restore timeout
       series: [],
       crosshair: {},
       onLostContext: () => {},
+      onBackendChanged: (backend) => backendChanges.push(backend),
       onRestoreContext: () => {},
       onResize: () => {},
     });
@@ -632,6 +634,7 @@ test("Full fallback cascade: WebGPU loss -> WebGL2 -> 5s context-restore timeout
     assert.ok(webgpuLostCb);
     webgpuLostCb("device-lost");
     assert.equal(session.getSurface().kind, "webgl2");
+    assert.deepEqual(backendChanges, ["webgl2"], "backend metadata callback follows the actual WebGPU fallback");
 
     // 2. WebGL context lost occurs on the active canvas
     const activeCanvas = session.getSurface().canvas;
@@ -644,6 +647,7 @@ test("Full fallback cascade: WebGPU loss -> WebGL2 -> 5s context-restore timeout
     // 3. Fast-forward timeout: triggers fallback to Canvas2D
     scheduledTimeoutCb();
     assert.equal(session.getSurface().kind, "canvas2d");
+    assert.deepEqual(backendChanges, ["webgl2", "canvas2d"], "backend metadata tracks every successful fallback surface");
 
     // Verify diagnostics recorded full cascade
     const diag = getGpuDiagnostics();
@@ -667,14 +671,16 @@ test("GpuDiagnostics percentile metrics, counters and copyGpuDiagnosticsJson out
   recordGpuFallback("webgpu", "webgl2", "device_lost");
 
   const diag = getGpuDiagnostics();
-  assert.equal(diag.active, "webgpu");
+  assert.equal(diag.active, "webgl2");
   assert.equal(diag.counters["gpu.backend.webgpu.frames"], 3);
   assert.ok(diag.frame.renderP50Ms > 0);
   assert.ok(diag.frame.renderP95Ms >= diag.frame.renderP50Ms);
 
   const jsonStr = copyGpuDiagnosticsJson();
   const parsed = JSON.parse(jsonStr);
-  assert.equal(parsed.active, "webgpu");
+  assert.equal(parsed.active, "webgl2");
   assert.equal(parsed.counters["gpu.backend.webgpu.frames"], 3);
+  assert.equal(parsed.fallbacks[0].from, "webgpu");
+  assert.equal(parsed.fallbacks[0].to, "webgl2");
   assert.equal(parsed.fallbacks[0].reason, "device_lost");
 });

@@ -6,6 +6,8 @@ const { FootprintSeries } = await import("../dist/core/model/footprint.js");
 const { createIndicatorScale } = await import("../dist/features/indicators/scale/indicatorScale.js");
 const { cvdIndicatorDefinition } = await import("../dist/features/indicators/builtins/cvd.js");
 const { rsiIndicatorDefinition } = await import("../dist/features/indicators/builtins/rsi.js");
+const { stochRsiIndicatorDefinition } = await import("../dist/features/indicators/builtins/stochRsi.js");
+const { mfiIndicatorDefinition } = await import("../dist/features/indicators/builtins/mfi.js");
 const { deltaIndicatorDefinition } = await import("../dist/features/indicators/builtins/delta.js");
 const { volumeIndicatorDefinition } = await import("../dist/features/indicators/builtins/volume.js");
 const { tradeCountIndicatorDefinition } = await import("../dist/features/indicators/builtins/tradeCount.js");
@@ -60,19 +62,30 @@ test("a CVD line far from zero fits the visible values and follows the scroll", 
   assert.deepEqual({ min: earlier.range.min, max: earlier.range.max }, { min: 10, max: 200 });
 });
 
-test("an RSI range does not reach down to 50 when the visible RSI stays above it", () => {
-  // Up 2, down 1: RSI settles well above 50.
+test("bounded oscillators keep a fixed 0-100 range and OB/50/OS axis ticks", () => {
+  // Up 2, down 1 keeps RSI above 50; the scale must not follow that narrow visible range.
   let close = 100;
   const series = seriesOf(160, (i) => {
     close += i % 2 === 0 ? 2 : -1;
-    return { open: close, high: close + 0.5, low: close - 0.5, close };
+    return { open: close, high: close + 0.5, low: close - 0.5, close, volume: 10 + i };
   });
 
-  const prepared = prepare(rsiIndicatorDefinition, series, [100, 160]);
-  const extent = plottedExtent(prepared);
-  assert.ok(extent.min > 50, `visible RSI minimum ${extent.min} should be above 50`);
-  assert.equal(prepared.range.min, extent.min);
-  assert.equal(prepared.range.max, extent.max);
+  for (const [definition, levels] of [
+    [rsiIndicatorDefinition, [70, 50, 30]],
+    [stochRsiIndicatorDefinition, [80, 50, 20]],
+    [mfiIndicatorDefinition, [80, 50, 20]],
+  ]) {
+    const prepared = prepare(definition, series, [100, 160]);
+    assert.deepEqual({ min: prepared.range.min, max: prepared.range.max }, { min: 0, max: 100 }, `${definition.type} range`);
+    assert.equal(prepared.range.baseline, 50, `${definition.type} baseline`);
+    assert.deepEqual(prepared.meta.axisTicks, levels, `${definition.type} axis ticks`);
+  }
+
+  const earlier = prepare(rsiIndicatorDefinition, series, [0, 100]);
+  const recent = prepare(rsiIndicatorDefinition, series, [100, 160]);
+  const earlierScale = createIndicatorScale({ mode: earlier.meta.scaleMode, ...earlier.range }, { top: 0, bottom: 100 });
+  const recentScale = createIndicatorScale({ mode: recent.meta.scaleMode, ...recent.range }, { top: 0, bottom: 100 });
+  assert.equal(earlierScale.y(50), recentScale.y(50), "zoomed/scrolling ranges preserve the 50 line's pixel position");
 });
 
 test("histogram panes keep their zero base in view", () => {

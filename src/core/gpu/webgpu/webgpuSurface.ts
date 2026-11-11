@@ -14,9 +14,11 @@ import { WebGpuQuadPipeline } from "./webgpuQuadPipeline.js";
 export class WebGpuQuadSink implements QuadSink {
   data: Float32Array;
   count = 0;
+  private colorBytes: Uint8Array;
 
   constructor(initialCapacity = 10000) {
-    this.data = new Float32Array(initialCapacity * 8);
+    this.data = new Float32Array(initialCapacity * 5);
+    this.colorBytes = new Uint8Array(this.data.buffer);
   }
 
   reset(): void {
@@ -24,21 +26,23 @@ export class WebGpuQuadSink implements QuadSink {
   }
 
   rect(x: number, y: number, w: number, h: number, c: RGBA): void {
-    const requiredLength = (this.count + 1) * 8;
+    const requiredLength = (this.count + 1) * 5;
     if (requiredLength > this.data.length) {
       const next = new Float32Array(Math.max(requiredLength, this.data.length * 2));
       next.set(this.data);
       this.data = next;
+      this.colorBytes = new Uint8Array(next.buffer);
     }
-    const offset = this.count * 8;
+    const offset = this.count * 5;
     this.data[offset] = x;
     this.data[offset + 1] = y;
     this.data[offset + 2] = w;
     this.data[offset + 3] = h;
-    this.data[offset + 4] = c.r;
-    this.data[offset + 5] = c.g;
-    this.data[offset + 6] = c.b;
-    this.data[offset + 7] = c.a;
+    const colorOffset = (offset + 4) * 4;
+    this.colorBytes[colorOffset] = Math.round(Math.min(1, Math.max(0, c.r)) * 255);
+    this.colorBytes[colorOffset + 1] = Math.round(Math.min(1, Math.max(0, c.g)) * 255);
+    this.colorBytes[colorOffset + 2] = Math.round(Math.min(1, Math.max(0, c.b)) * 255);
+    this.colorBytes[colorOffset + 3] = Math.round(Math.min(1, Math.max(0, c.a)) * 255);
     this.count++;
   }
 }

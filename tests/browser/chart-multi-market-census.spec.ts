@@ -89,6 +89,41 @@ test.use({ launchOptions: { args: [...FUNCTIONAL_WEBGL_ARGS, ...HEAP_ARGS] }, vi
  */
 const HEAP_CEILING_BYTES = 1024 * 1024 * 1024;
 
+const RENDER_TELEMETRY_METRICS = [
+  "chart.frame.render.ms",
+  "chart.surface.gpu.draw.ms",
+  "chart.surface.annotation.draw.ms",
+  "chart.surface.interaction.draw.ms",
+  "chart.gpu.footprint.ms",
+  "chart.gpu.flush.ms",
+  "chart.liveUpdate.toRenderEnd.ms",
+] as const;
+
+type TelemetrySnapshot = {
+  metrics?: Record<string, { count?: number; totalMs?: number; p50Ms?: number; p95Ms?: number; p99Ms?: number }>;
+};
+
+function phaseTelemetryDelta(before: TelemetrySnapshot | null | undefined, after: TelemetrySnapshot | null | undefined) {
+  const metrics = Object.fromEntries(RENDER_TELEMETRY_METRICS.map((name) => {
+    const start = before?.metrics?.[name];
+    const end = after?.metrics?.[name];
+    const valid = !!before && !!after && (!start || Number.isFinite(start.count) && Number.isFinite(start.totalMs))
+      && (!end || Number.isFinite(end.count) && Number.isFinite(end.totalMs));
+    return [name, {
+      count: valid ? (end?.count ?? 0) - (start?.count ?? 0) : null,
+      totalMs: valid ? Math.round(((end?.totalMs ?? 0) - (start?.totalMs ?? 0)) * 1_000) / 1_000 : null,
+      quantiles: null,
+      quantileUnavailableReason: "cumulative snapshot quantiles cannot be differenced or phase-isolated",
+      ...(valid && !start && !end ? { sampleStatus: "no samples in either boundary snapshot" } : {}),
+      ...(!valid ? { sampleStatus: "one or both phase boundary snapshots unavailable or invalid" } : {}),
+    }];
+  }));
+  return {
+    semantics: "count and totalMs are end-minus-start cumulative counter deltas; p50/p95/p99 are intentionally not derived",
+    metrics,
+  };
+}
+
 interface Scenario {
   id: string;
   issue: number;
@@ -515,6 +550,7 @@ self.onmessage = (event) => {
   const burstEnd = burstStart + cfg.burstMs;
   const end = burstEnd + cfg.recoveryMs;
   const due = cfg.markets.map(() => 0);
+  let reportedPhase = -1;
   const generated = cfg.markets.map(() => 0);
   const minutes = cfg.markets.map(() => new Map());
   let lastHeartbeat = 0;
@@ -522,6 +558,7 @@ self.onmessage = (event) => {
   const tick = () => {
     const now = Date.now();
     const phase = now < burstStart ? 0 : now < burstEnd ? 1 : 2;
+    if (phase !== reportedPhase) { self.postMessage({ kind: "phase", phase }); reportedPhase = phase; }
     if (now - lastHeartbeat >= 1000) {
       self.postMessage({ kind: "raw", raw: JSON.stringify({ type: "heartbeat", v: 1, epoch: cfg.epoch, sequence: sequence++, timestamp: now }) });
       lastHeartbeat = now;
@@ -603,6 +640,7 @@ async function runBurst(page: Page, uniqueMarkets: string[], panelIds: string[],
       worker.onerror = (event) => reject(new Error(`burst worker failed: ${event.message}`));
       worker.onmessage = (event) => {
         const data = event.data;
+        if (data.kind === "phase") { state.telemetryPhases[data.phase] = state.telemetry.snapshotPerformanceTelemetry(); return; }
         if (data.kind === "done") { resolve(data); return; }
         emit(data.raw);
         if (data.kind !== "trades") return;
@@ -707,8 +745,9 @@ async function runEndurance(page: Page, uniqueMarkets: string[], panelIds: strin
     };
     const samples: unknown[] = [];
     const takeSample = () => {
+      const at = performance.now();
       (window as any).gc?.();
-      const now = performance.now();
+      const now = at;
       // Endurance frames are folded here and dropped; load frames stay.
       const frames = state.frames.filter((frame: any) => frame.at > sampleStartedAt && frame.at <= now);
       const longTasks = state.longTasks.filter((task: any) => task.at >= sampleStartedAt && task.at < now);
@@ -752,6 +791,9 @@ async function runEndurance(page: Page, uniqueMarkets: string[], panelIds: strin
             current.delivered.push(Date.now() - data.time);
             awaitingFrame.push(data.time);
           };
+          // Record a real workload-start baseline before the worker can emit trades.
+          // The following samples remain the actual interval ticks.
+          takeSample();
           worker.postMessage({
             normalTradesPerSecond: config.normalTradesPerSecond, multiplier: 1,
             baselineMs: config.durationMs, burstMs: 0, recoveryMs: 0,
@@ -798,6 +840,7 @@ async function runEndurance(page: Page, uniqueMarkets: string[], panelIds: strin
 
 // Median heap of the first and last few one-minute samples. The first minute
 // is skipped: it still settles the load and the indicators' first refetch.
+// The baseline includes one trade-free minute, so this is not steady-state leak proof.
 function heapTrend(samples: Array<{ heapBytes: number | null }>) {
   const heaps = samples.map((sample) => sample.heapBytes).filter((value): value is number => value !== null);
   if (heaps.length < 4) return null;
@@ -834,7 +877,11 @@ function validateEnduranceSamples(samples: Array<{ minute: number; at: number; h
     if (!(intervalMs > 0)) violations.push(`non-monotonic/duplicate timestamp before minute ${sample.minute}`);
     else if (intervalMs > sampleMs * 1.5) violations.push(`gap ${Math.round(intervalMs)}ms before minute ${sample.minute} (missing sample)`);
   });
-  if (samples.length >= 2 && samples[samples.length - 1].at - samples[0].at < (samples.length - 1) * sampleMs) violations.push(`sample span under ${(samples.length - 1) * sampleMs}ms`);
+  const spanJitterBoundMs = Math.min(1_000, sampleMs * 0.02);
+  const expectedSpanMs = (samples.length - 1) * sampleMs;
+  if (samples.length >= 2 && samples[samples.length - 1].at - samples[0].at < expectedSpanMs - spanJitterBoundMs) {
+    violations.push(`sample span under ${expectedSpanMs - spanJitterBoundMs}ms (total span jitter bound ${spanJitterBoundMs}ms)`);
+  }
   return violations;
 }
 
@@ -849,6 +896,15 @@ async function attachEnduranceEvidence(testInfo: TestInfo, evidence: Record<stri
   const path = testInfo.outputPath("endurance-evidence.json");
   await writeFile(path, json, "utf8");
   await testInfo.attach("endurance-evidence", { path, contentType: "application/json" });
+}
+async function attachCensusEvidence(testInfo: TestInfo, evidence: Record<string, unknown>) {
+  const json = JSON.stringify(evidence);
+  const bytes = Buffer.byteLength(json, "utf8");
+  if (bytes > 256 * 1024) throw new Error(`census evidence exceeds 256 KiB: ${bytes} bytes`);
+  const { writeFile } = await import("node:fs/promises");
+  const path = testInfo.outputPath("census-evidence.json");
+  await writeFile(path, json, "utf8");
+  await testInfo.attach("census-evidence", { path, contentType: "application/json" });
 }
 async function runScenario(scenario: Scenario, page: Page, testInfo?: TestInfo) {
   // Concurrent mounts plus the measured phases take longer than the
@@ -988,7 +1044,10 @@ async function runScenario(scenario: Scenario, page: Page, testInfo?: TestInfo) 
 
     // Frame probe and owned state live on one window key; teardown reads it back.
     await page.evaluate(async ({ markets, panelIds, columns, cellWidth, cellHeight, bars, indicatorCount, drawingCount, burst }) => {
+      const telemetry = await import("/src/core/performanceTelemetry.ts");
+      telemetry.configurePerformanceTelemetry({ enabled: true });
       const state = {
+        telemetry, telemetryPhases: {} as Record<number, unknown>,
         pageErrors: [] as string[],
         fetchHistoryCalls: 0,
         frames: [] as Array<{ at: number; interval: number }>,
@@ -1584,6 +1643,35 @@ async function runScenario(scenario: Scenario, page: Page, testInfo?: TestInfo) 
     expect(unexpectedApiRequests).toEqual([]);
     expect(await page.evaluate(() => (window as any).__multiMarketCensus.fetchHistoryCalls)).toBe(0);
 
+    const telemetryBoundaries = await page.evaluate(() => {
+      const state = (window as any).__multiMarketCensus;
+      return { phases: state.telemetryPhases as Record<number, TelemetrySnapshot>, final: state.telemetry.snapshotPerformanceTelemetry() };
+    });
+    const phaseDeltas = live ? {
+      baseline: phaseTelemetryDelta(telemetryBoundaries.phases[0], telemetryBoundaries.phases[1]),
+      burst: phaseTelemetryDelta(telemetryBoundaries.phases[1], telemetryBoundaries.phases[2]),
+      recovery: phaseTelemetryDelta(telemetryBoundaries.phases[2], telemetryBoundaries.final),
+    } : null;
+    const rendererIdentity = await page.evaluate(() => {
+      let webgl2ContextFound = false;
+      for (const canvas of document.querySelectorAll("canvas")) {
+        let gl: WebGL2RenderingContext | null = null;
+        try { gl = canvas.getContext("webgl2") as WebGL2RenderingContext | null; } catch { /* another context type owns this canvas */ }
+        if (!gl) continue;
+        webgl2ContextFound = true;
+        const debug = gl.getExtension("WEBGL_debug_renderer_info" as any) as any;
+        if (!debug) return { available: false, webgl2ContextFound, reason: "WEBGL_debug_renderer_info extension unavailable" };
+        try {
+          return { available: true, webgl2ContextFound,
+            vendor: gl.getParameter(debug.UNMASKED_VENDOR_WEBGL),
+            renderer: gl.getParameter(debug.UNMASKED_RENDERER_WEBGL) };
+        } catch (error) {
+          return { available: false, webgl2ContextFound, reason: `renderer query failed: ${String(error)}` };
+        }
+      }
+      return { available: false, webgl2ContextFound, reason: "no existing WebGL2 chart context found" };
+    });
+
     summary = {
       test: "chart-multi-market-census",
       profile: scenario.id,
@@ -1605,6 +1693,22 @@ async function runScenario(scenario: Scenario, page: Page, testInfo?: TestInfo) 
       mountToReadyMs: load.mountToReadyMs,
       allReadyMs: Math.round(load.endedAt - load.startedAt),
       phases,
+      renderTelemetry: {
+        semantics: "cumulative boundary snapshots plus end-minus-start phase deltas; cumulative quantiles are never subtracted",
+        boundaries: telemetryBoundaries.phases,
+        final: telemetryBoundaries.final,
+        phaseDeltas,
+        phaseDeltasUnavailableReason: live ? null : "synchronized telemetry phase boundaries are currently captured by the live/burst worker only",
+      },
+      runnerFixture: { project: testInfo?.project.name ?? null, node: process.version,
+        playwright: testInfo?.config.version ?? null, chromium: page.context().browser()?.version() ?? null,
+        platform: process.platform, arch: process.arch, ci: process.env.CI ?? null,
+        githubRunner: process.env.RUNNER_NAME ?? null, os: process.env.RUNNER_OS ?? null,
+        hardwareConcurrency: await page.evaluate(() => navigator.hardwareConcurrency ?? null),
+        devicePixelRatio: await page.evaluate(() => window.devicePixelRatio),
+        gpuMode: USE_HARDWARE_GPU ? "hardware" : "swiftshader",
+        rendererIdentity,
+        fixture: { barsPerChart: BAR_COUNT, markets: MARKETS, viewport: page.viewportSize() } },
       censusReadMs: quantiles(census.readMs),
       jsHeapBytes: {
         reference: "#308 CI gate: retained heap after a forced GC <= 1 GB per tab; instantaneous and peak are information only",
@@ -1728,6 +1832,39 @@ async function runScenario(scenario: Scenario, page: Page, testInfo?: TestInfo) 
       catch (error) { provenanceError = error; }
     }
     const terminal = hasPrimary ? "FAIL" : cleanupError || provenanceError ? "PARTIAL" : "PASS";
+    let censusEvidenceError: unknown = null;
+    try {
+      await attachCensusEvidence(testInfo, {
+        schema: "pactolis.census-evidence.v1",
+        test: "chart-multi-market-census",
+        profile: scenario.id,
+        issue: scenario.issue,
+        terminal,
+        stages: {
+          measurement: summary ? "reached" : "not reached",
+          primary: hasPrimary ? "failed" : "passed",
+          cleanup: hasPrimary ? "not reached" : cleanupError ? "failed" : "passed",
+          evidence: "written",
+        },
+        workload: summary ? (summary.workload ?? null) : null,
+        layout: summary ? (summary.layout ?? null) : null,
+        totals: summary ? (summary.totals ?? null) : null,
+        phases: summary ? (summary.phases ?? null) : null,
+        renderTelemetry: summary ? (summary.renderTelemetry ?? null) : null,
+        environment: summary ? (summary.runnerFixture ?? null) : {
+          project: testInfo.project.name,
+          node: process.version,
+          platform: process.platform,
+          arch: process.arch,
+          ci: process.env.CI ?? null,
+          githubRunner: process.env.RUNNER_NAME ?? null,
+          os: process.env.RUNNER_OS ?? null,
+        },
+        failure: hasPrimary ? String(primaryError) : cleanupError ? String(cleanupError)
+          : provenanceError ? String(provenanceError) : null,
+      });
+    } catch (error) { censusEvidenceError = error; }
+    if (censusEvidenceError) evidenceError = censusEvidenceError;
     const stages = {
       measurement: summary ? "reached" : "not reached",
       financial: hasPrimary ? "not reached" : "passed",
@@ -1792,12 +1929,48 @@ async function runScenario(scenario: Scenario, page: Page, testInfo?: TestInfo) 
 test("census minute-sample validator rejects fabricated sets", () => {
   const good = Array.from({ length: 3 }, (_, index) => ({ minute: index + 1, at: 60_000 * (index + 1), heapBytes: 1_000 }));
   expect(validateEnduranceSamples(good, 180_000, 3, 60_000)).toEqual([]);
+  const workloadStartBaseline = Array.from({ length: 4 }, (_, index) => ({ minute: index + 1, at: 60_000 * index, heapBytes: 1_000 }));
+  expect(validateEnduranceSamples(workloadStartBaseline, 180_000, 3, 60_000)).toEqual([]);
+  const jitteredEndpointSamples = Array.from({ length: 30 }, (_, index) => ({
+    minute: index + 1,
+    at: Math.round(index * 60_000 + (index % 2 === 0 ? 4 : -4)),
+    heapBytes: 1_000,
+  }));
+  expect(validateEnduranceSamples(jitteredEndpointSamples, 1_800_000, 30, 60_000)).toEqual([]);
+  const spanUnderByNineMs = Array.from({ length: 30 }, (_, index) => ({
+    minute: index + 1,
+    at: Math.floor(index * 1_739_991 / 29),
+    heapBytes: 1_000,
+  }));
+  expect(validateEnduranceSamples(spanUnderByNineMs, 1_800_000, 30, 60_000)).toEqual([]); // 9 ms short is within the single 1,000 ms total-span bound.
+  const spanOverBound = Array.from({ length: 30 }, (_, index) => ({
+    minute: index + 1,
+    at: Math.floor(index * 1_738_990 / 29),
+    heapBytes: 1_000,
+  }));
+  expect(validateEnduranceSamples(spanOverBound, 1_800_000, 30, 60_000).join()).toContain("span");
   expect(validateEnduranceSamples(good.slice(0, 2), 180_000, 3, 60_000).join()).toContain("count");
   expect(validateEnduranceSamples([good[0], { minute: 2, at: 60_000, heapBytes: 1_000 }, good[2]], 180_000, 3, 60_000).join()).toContain("non-monotonic");
   expect(validateEnduranceSamples([good[0], { minute: 2, at: 90_000, heapBytes: null }, good[2]], 180_000, 3, 60_000).join()).toContain("invalid heap");
   expect(validateEnduranceSamples([{ minute: 1, at: Number.NaN, heapBytes: 1 }, good[1], good[2]], 180_000, 3, 60_000).join()).toContain("non-finite");
   expect(validateEnduranceSamples([{ minute: 1, at: 60_000, heapBytes: 1_000 }, { minute: 2, at: 70_000, heapBytes: 1_000 },
     { minute: 3, at: 80_000, heapBytes: 1_000 }], 180_000, 3, 60_000).join()).toContain("span");
+});
+
+test("render telemetry phase deltas use cumulative count and totalMs differences only", () => {
+  const before = { metrics: {
+    "chart.frame.render.ms": { count: 10, totalMs: 25, p50Ms: 2, p95Ms: 4, p99Ms: 5 },
+    "chart.gpu.flush.ms": { count: 3, totalMs: 9, p50Ms: 3, p95Ms: 4, p99Ms: 5 },
+  } };
+  const after = { metrics: {
+    "chart.frame.render.ms": { count: 16, totalMs: 41.5, p50Ms: 2, p95Ms: 4, p99Ms: 5 },
+    "chart.gpu.flush.ms": { count: 5, totalMs: 14.25, p50Ms: 3, p95Ms: 4, p99Ms: 5 },
+  } };
+  const delta = phaseTelemetryDelta(before, after);
+  expect(delta.metrics["chart.frame.render.ms"]).toMatchObject({ count: 6, totalMs: 16.5, quantiles: null });
+  expect(delta.metrics["chart.gpu.flush.ms"]).toMatchObject({ count: 2, totalMs: 5.25, quantiles: null });
+  expect(delta.metrics["chart.frame.render.ms"].quantileUnavailableReason).toContain("cannot be differenced");
+  expect(phaseTelemetryDelta(before, null).metrics["chart.frame.render.ms"]).toMatchObject({ count: null, totalMs: null });
 });
 
 test("census heap trend accurately tracks slope and detects excessive drift (#50)", () => {
@@ -1816,7 +1989,7 @@ test("census heap trend accurately tracks slope and detects excessive drift (#50
   expect(leakingTrend!.growthBytesPerMinute).toBeGreaterThan(ENDURANCE_MAX_HEAP_GROWTH_BYTES_PER_MINUTE);
 });
 
-for (const scenario of SCENARIOS) test(scenario.title, ({ page }) => runScenario(scenario, page));
+for (const scenario of SCENARIOS) test(scenario.title, ({ page }, testInfo) => runScenario(scenario, page, testInfo));
 
 // Endurance runs only on request: the "Chart endurance" workflow sets
 // CHART_ENDURANCE_MINUTES.

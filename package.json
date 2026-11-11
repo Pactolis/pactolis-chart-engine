@@ -1,6 +1,6 @@
 {
   "name": "@pactolis/chart-engine",
-  "version": "0.2.7",
+  "version": "0.3.0-rc",
   "description": "Canvas chart engine behind Pactolis: footprint and candlestick rendering, scales, indicators, order book heatmaps and drawing tools.",
   "license": "Apache-2.0",
   "author": "Pactolis",
@@ -342,6 +342,34 @@
       "types": "./dist/features/replay/replayController.d.ts",
       "default": "./dist/features/replay/replayController.js"
     },
+    "./testing/core/dataUpdateEvent": {
+      "types": "./dist/core/dataUpdateEvent.d.ts",
+      "default": "./dist/core/dataUpdateEvent.js"
+    },
+    "./testing/core/analysis/calc/ta": {
+      "types": "./dist/core/analysis/calc/ta.d.ts",
+      "default": "./dist/core/analysis/calc/ta.js"
+    },
+    "./testing/features/chart/ChartDataPipeline": {
+      "types": "./dist/features/chart/ChartDataPipeline.d.ts",
+      "default": "./dist/features/chart/ChartDataPipeline.js"
+    },
+    "./testing/features/chart/ChartSession": {
+      "types": "./dist/features/chart/ChartSession.d.ts",
+      "default": "./dist/features/chart/ChartSession.js"
+    },
+    "./testing/features/chart/ChartSyncController": {
+      "types": "./dist/features/chart/ChartSyncController.d.ts",
+      "default": "./dist/features/chart/ChartSyncController.js"
+    },
+    "./testing/features/chart/heatmap/gpu/heatmapGpuRenderer": {
+      "types": "./dist/features/chart/heatmap/gpu/heatmapGpuRenderer.d.ts",
+      "default": "./dist/features/chart/heatmap/gpu/heatmapGpuRenderer.js"
+    },
+    "./testing/features/indicators/seriesMutationSummary": {
+      "types": "./dist/features/indicators/seriesMutationSummary.d.ts",
+      "default": "./dist/features/indicators/seriesMutationSummary.js"
+    },
     "./package.json": "./package.json"
   },
   "files": [
@@ -358,6 +386,7 @@
     "build": "node -e \"require('fs').rmSync('dist',{recursive:true,force:true})\" && tsc -p tsconfig.build.json",
     "check": "tsc --noEmit",
     "check:exports": "node scripts/check-exports.mjs",
+    "check:default-import-graph": "node scripts/check-default-import-graph.mjs",
     "test": "npm run build && node scripts/run-tests.mjs \"tests/**/*.test.mjs\"",
     "prepack": "npm run build",
     "check:browser": "tsc -p tsconfig.browser.json",

@@ -203,3 +203,30 @@ test("price ticks skip the zone the touch buttons cover and keep the rest", () =
   assert.deepEqual(labelYs([]), all, "no zone, no change");
   assert.deepEqual(labelYs(undefined), all, "the argument is optional");
 });
+
+test("price-axis ticks and HUD price labels honor locale while preserving defaults and precision", () => {
+  const view = viewWithDensity("regular");
+  view.fitPriceRange(62100, 62300);
+  const localeOptions = { numberLocale: "de-DE", labels: { price: "Kurs" } };
+  const expected = new Intl.NumberFormat("de-DE", {
+    minimumFractionDigits: 1, maximumFractionDigits: 1, useGrouping: false,
+  }).format(62200.5);
+
+  const axis = makeContext();
+  drawPriceAxis(axis, view, 0.1, 1, [], localeOptions);
+  const axisText = axis.calls.filter((call) => call.op === "fillText").map((call) => call.text);
+  assert.ok(axisText.some((text) => text.includes(",")), "localized axis tick uses decimal comma");
+
+  const marker = makeContext();
+  drawPriceMarkers(marker, view, [{ price: 62200.5, color: "#00ff00", priority: 100 }], 0.1, 1, localeOptions);
+  assert.equal(marker.calls.find((call) => call.op === "fillText").text, "Kurs " + expected);
+
+  const crosshair = makeContext();
+  drawCrosshairPriceLabel(crosshair, view, { config: { priceStep: 0.1, pricePrecision: 1 } },
+    { x: 400, y: view.yOfPrice(62200.5) }, localeOptions);
+  assert.equal(crosshair.calls.find((call) => call.op === "fillText").text, expected);
+
+  const defaults = makeContext();
+  drawPriceMarkers(defaults, view, [{ price: 62200.5, color: "#00ff00", priority: 100 }], 0.1, 1);
+  assert.equal(defaults.calls.find((call) => call.op === "fillText").text, "Price 62200.5");
+});

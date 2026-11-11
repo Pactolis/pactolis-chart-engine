@@ -79,7 +79,7 @@ function rebuildRsiGeometry(
   cached.start = start;
   cached.end = end;
   cached.plotSeries = [{ key: "rsi", label: "RSI", color: cached.color, points: makeSeriesPoints(cached.values, bars, start, end) }];
-  cached.prepared = prepareMultiSeries(ctx, cached.plotSeries, { scaleMode: "percent", baseline: 50, horizontalLevels: [{ value: cached.overbought, label: "OB" }, { value: cached.oversold, label: "OS" }] });
+  cached.prepared = prepareMultiSeries(ctx, cached.plotSeries, { scaleMode: "percent", baseline: 50, horizontalLevels: [{ value: cached.overbought, label: "OB" }, { value: cached.oversold, label: "OS" }], axisTicks: [cached.overbought, 50, cached.oversold], fixedRange: { min: 0, max: 100 } });
   return cached.prepared;
 }
 
@@ -158,7 +158,7 @@ function prepareRsi(ctx: IndicatorDrawContext<RsiSettings>) {
     const { avgGains, avgLosses } = fullRsiState(closes, period);
     const values = points.map((point) => point.value);
     const plotSeries: PlotSeries[] = [{ key: "rsi", label: "RSI", color, points: makeSeriesPoints(values, bars, start, end) }];
-    const prepared = prepareMultiSeries(ctx, plotSeries, { scaleMode: "percent", baseline: 50, horizontalLevels: [{ value: overbought, label: "OB" }, { value: oversold, label: "OS" }] });
+    const prepared = prepareMultiSeries(ctx, plotSeries, { scaleMode: "percent", baseline: 50, horizontalLevels: [{ value: overbought, label: "OB" }, { value: oversold, label: "OS" }], axisTicks: [overbought, 50, oversold], fixedRange: { min: 0, max: 100 } });
     perSeries.set(ctx.instance.id, { instance: ctx.instance, seriesRevision: ctx.series.revision, structureRevision: ctx.series.structureRevision, start, end, period, color, overbought, oversold, avgGains, avgLosses, values, plotSeries, prepared });
     incrementPerformanceCounter("indicator.incremental.full.rsi");
     return prepared;

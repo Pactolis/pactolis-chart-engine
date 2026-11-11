@@ -17,6 +17,7 @@
 
 import type { View } from "../../core/engine/view.js";
 import { effectivePixelRatio } from "../../core/model/chartDisplayOptions.js";
+import type { ChartWebGlOptions } from "../../core/model/chartDisplayOptions.js";
 import type { FootprintSeries } from "../../core/model/footprint.js";
 import type { Crosshair } from "../../core/render/overlay.js";
 import {
@@ -28,7 +29,6 @@ import {
 import {
   incrementPerformanceCounter,
   isPerformanceTelemetryEnabled,
-  measurePerformance,
   recordPerformanceDuration,
 } from "../../core/performanceTelemetry.js";
 import { LifecycleController } from "../controllers/lifecycleController.js";
@@ -89,6 +89,7 @@ export interface ChartSessionOptions {
   onRestoreContext: (gl: WebGL2RenderingContext) => void;
   /** Called when the GPU context is lost, after the session already cancelled RAF, marked GPU invalid, cleared dirty state and rejected any pending capture; symmetric to onRestoreContext. */
   onLostContext?: () => void;
+  onBackendChanged?: (backend: string) => void;
   /** Called after each resize so the caller can recompute view.area. */
   onResize?: (width: number, height: number, dpr: number) => void;
   /**
@@ -100,6 +101,8 @@ export interface ChartSessionOptions {
   onInvalidate?: (changes: ChartChange) => void;
   /** Highest pixel ratio the canvases render at; null (default) follows the window's devicePixelRatio. */
   maxDevicePixelRatio?: number | null;
+  /** WebGL context attributes used for every session-owned context acquisition. */
+  webglOptions?: ChartWebGlOptions;
 }
 
 export class ChartSession {
@@ -131,11 +134,13 @@ export class ChartSession {
   private readonly crosshair: Crosshair;
   private readonly onRestoreContextCb: (gl: WebGL2RenderingContext) => void;
   private readonly onLostContextCb?: () => void;
+  private readonly onBackendChangedCb?: (backend: string) => void;
   private readonly onResizeCb?: (w: number, h: number, dpr: number) => void;
   private readonly onRenderedCb?: (surfaces: ChartSurfaceDirty, changes: ChartChange) => void;
   private readonly onInvalidateCb?: (changes: ChartChange) => void;
   private disposeDprWatcher: (() => void) | null = null;
   private maxDevicePixelRatio: number | null;
+  private readonly webglOptions?: ChartWebGlOptions;
 
   private dirtySurfaces = ChartSurfaceDirty.All;
   /** Semantic changes waiting for the next frame; travels with `dirtySurfaces`, never narrows it. */
@@ -201,10 +206,12 @@ export class ChartSession {
     this.crosshair = opts.crosshair;
     this.onRestoreContextCb = opts.onRestoreContext;
     this.onLostContextCb = opts.onLostContext;
+    this.onBackendChangedCb = opts.onBackendChanged;
     this.onResizeCb = opts.onResize;
     this.onRenderedCb = opts.onRendered;
     this.onInvalidateCb = opts.onInvalidate;
     this.maxDevicePixelRatio = opts.maxDevicePixelRatio ?? null;
+    this.webglOptions = opts.webglOptions;
 
     this.lifecycle.start();
     this.setupContextLossHandling();
@@ -257,7 +264,7 @@ export class ChartSession {
   }
 
   restoreContext(): void {
-    const freshGl = getChartWebGl2Context(this.gpuCanvas);
+    const freshGl = getChartWebGl2Context(this.gpuCanvas, this.webglOptions);
     if (!freshGl) return;
     this.gl = freshGl;
     this.onRestoreContextCb(freshGl);
@@ -435,10 +442,13 @@ export class ChartSession {
     const useAsyncCapture = this.pendingCapture !== null && Boolean(readGpuSettings(this.ownerDocument.defaultView).asyncCapture || this.gpuSurface.kind === "webgpu");
     if (dirty & ChartSurfaceDirty.GpuScene) {
       incrementPerformanceCounter("chart.surface.gpu.draw");
-      if (telemetryEnabled) {
-        measurePerformance("chart.surface.gpu.draw.ms", () => this.renderer.render(this.view, this.series));
-      } else {
+      const drawStartedAt = telemetryEnabled ? performance.now() : null;
+      try {
         this.renderer.render(this.view, this.series);
+      } finally {
+        if (drawStartedAt !== null) {
+          recordPerformanceDuration("chart.surface.gpu.draw.ms", performance.now() - drawStartedAt);
+        }
       }
       if (this.pendingCapture && !useAsyncCapture) {
         try {
@@ -470,22 +480,24 @@ export class ChartSession {
     const range = this.renderer.visibleRange(this.view, this.series.length);
     if (dirty & ChartSurfaceDirty.Annotation) {
       incrementPerformanceCounter("chart.surface.annotation.draw");
-      if (telemetryEnabled) {
-        measurePerformance("chart.surface.annotation.draw.ms", () => {
-          this.annotationRenderer.render(this.view, this.series, this.crosshair, range);
-        });
-      } else {
+      const drawStartedAt = telemetryEnabled ? performance.now() : null;
+      try {
         this.annotationRenderer.render(this.view, this.series, this.crosshair, range);
+      } finally {
+        if (drawStartedAt !== null) {
+          recordPerformanceDuration("chart.surface.annotation.draw.ms", performance.now() - drawStartedAt);
+        }
       }
     }
     if (dirty & ChartSurfaceDirty.Interaction) {
       incrementPerformanceCounter("chart.surface.interaction.draw");
-      if (telemetryEnabled) {
-        measurePerformance("chart.surface.interaction.draw.ms", () => {
-          this.interactionRenderer.render(this.view, this.series, this.crosshair, range);
-        });
-      } else {
+      const drawStartedAt = telemetryEnabled ? performance.now() : null;
+      try {
         this.interactionRenderer.render(this.view, this.series, this.crosshair, range);
+      } finally {
+        if (drawStartedAt !== null) {
+          recordPerformanceDuration("chart.surface.interaction.draw.ms", performance.now() - drawStartedAt);
+        }
       }
     }
     this.hasRenderedFrame = true;
@@ -729,12 +741,14 @@ export class ChartSession {
         recordGpuFallback("webgpu", "webgl2", reason);
         try {
           const fallbackCanvas = this.ownerDocument.createElement("canvas");
-          const fallbackGl = getChartWebGl2Context(fallbackCanvas);
+          const fallbackGl = getChartWebGl2Context(fallbackCanvas, this.webglOptions);
           if (fallbackGl) {
             this.replaceSurface(new WebGl2Surface(fallbackCanvas, fallbackGl));
+            this.onBackendChangedCb?.("webgl2");
           } else {
             recordGpuFallback("webgl2", "canvas2d", "fallback_context_unavailable");
             this.replaceSurface(new Canvas2dSurface(fallbackCanvas));
+            this.onBackendChangedCb?.("canvas2d");
           }
         } catch (err) {
           console.error("[ChartSession] WebGPU fallback failed", err);
@@ -767,6 +781,7 @@ export class ChartSession {
         const fallbackCanvas = this.ownerDocument.createElement("canvas");
         const fallbackSurface = new Canvas2dSurface(fallbackCanvas);
         this.replaceSurface(fallbackSurface);
+        this.onBackendChangedCb?.("canvas2d");
       }, CONTEXT_RESTORE_TIMEOUT_MS);
     };
 
@@ -775,7 +790,7 @@ export class ChartSession {
         clearTimeout(this.restoreTimeoutId);
         this.restoreTimeoutId = null;
       }
-      const freshGl = getChartWebGl2Context(this.gpuCanvas);
+      const freshGl = getChartWebGl2Context(this.gpuCanvas, this.webglOptions);
       if (!freshGl) {
         incrementPerformanceCounter("chart.gpu.contextCreateFailed");
         return;

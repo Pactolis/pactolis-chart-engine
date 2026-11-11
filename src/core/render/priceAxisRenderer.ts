@@ -5,6 +5,30 @@ import type { Crosshair } from "./overlay.js";
 import { clampLabelY, configDecimals, placeVerticalLabels, priceDecimals } from "../axisLabelUtils.js";
 import { uiColor, axisGridLineColor, axisMajorLabelColor, axisLabelBorderColor } from "../ui/seriesPalette.js";
 import { settings } from "../settings.js";
+import type { ResolvedChartDisplayOptions } from "../model/chartDisplayOptions.js";
+
+const priceAxisFormatterCache = new Map<string, Intl.NumberFormat | null>();
+
+function formatPriceAxisMark(price: number, label: string, decimals: number, options?: ResolvedChartDisplayOptions): string {
+  const locale = options?.numberLocale;
+  if (!locale || locale === "en-US" || !Number.isInteger(decimals) || decimals < 0 || decimals > 100) return label;
+  const key = locale + "|" + decimals;
+  let formatter = priceAxisFormatterCache.get(key);
+  if (formatter === undefined) {
+    try {
+      formatter = new Intl.NumberFormat(locale, {
+        minimumFractionDigits: decimals,
+        maximumFractionDigits: decimals,
+        useGrouping: false,
+      });
+    } catch {
+      formatter = null;
+    }
+    if (priceAxisFormatterCache.size >= 32) priceAxisFormatterCache.delete(priceAxisFormatterCache.keys().next().value!);
+    priceAxisFormatterCache.set(key, formatter);
+  }
+  return formatter?.format(price) ?? label;
+}
 
 const PRICE_AXIS_FONT = "12px ui-monospace, monospace";
 const PRICE_LABEL_FONT = "11px ui-monospace, monospace";
@@ -29,6 +53,7 @@ export function drawPriceAxis(
   priceStep: number,
   pricePrecision?: number,
   keepOut: readonly PriceAxisKeepOut[] = [],
+  displayOptions?: ResolvedChartDisplayOptions,
 ): void {
   const dec = pricePrecision ?? priceDecimals(priceStep);
   const layout = axisLayoutForChartView(view);
@@ -64,7 +89,7 @@ export function drawPriceAxis(
       ctx.lineTo(axisX, y);
       ctx.stroke();
     }
-    const label = mark.label;
+    const label = formatPriceAxisMark(mark.price, mark.label, dec, displayOptions);
     const boxH = 16;
     const labelY = clampLabelY(view, y, boxH);
     if (keepOut.some((zone) => labelY + boxH / 2 > zone.y && labelY - boxH / 2 < zone.y + zone.h)) continue;
@@ -79,7 +104,8 @@ export function drawPriceMarkers(
   view: View,
   priceMarkers: readonly PriceMarker[],
   priceStep: number,
-  pricePrecision?: number
+  pricePrecision?: number,
+  displayOptions?: ResolvedChartDisplayOptions,
 ): void {
   const dec = pricePrecision ?? priceDecimals(priceStep);
   const boxH = PRICE_LABEL_HEIGHT;
@@ -103,7 +129,8 @@ export function drawPriceMarkers(
   ctx.textBaseline = "middle";
   for (const label of labels) {
     const livePrice = label.priority >= 100 && !label.text;
-    const text = label.text ?? (livePrice && !compact ? `Price ${label.price.toFixed(dec)}` : label.price.toFixed(dec));
+    const priceText = formatPriceAxisMark(label.price, label.price.toFixed(dec), dec, displayOptions);
+    const text = label.text ?? (livePrice && !compact ? `${displayOptions?.labels.price ?? "Price"} ${priceText}` : priceText);
     const padX = 3;
     const maxBoxW = label.text || (livePrice && !compact) ? Math.max(axisW - 2, 180) : axisW - 2;
     // The compact live price spans the gutter, so a tick label at the same height is covered whole, not left peeking out.
@@ -135,12 +162,14 @@ export function drawCrosshairPriceLabel(
   ctx: CanvasRenderingContext2D,
   view: View,
   series: FootprintSeries,
-  ch: Crosshair
+  ch: Crosshair,
+  displayOptions?: ResolvedChartDisplayOptions,
 ): void {
   if (ch.y < view.area.top || ch.y > view.area.top + view.area.height) return;
   const price = view.priceOfY(ch.y);
   const axisX = view.area.left + view.area.width;
-  const text = price.toFixed(configDecimals(series.config));
+  const decimals = configDecimals(series.config);
+  const text = formatPriceAxisMark(price, price.toFixed(decimals), decimals, displayOptions);
   ctx.font = PRICE_LABEL_FONT;
   const padX = 3;
   const axisW = view.priceAxisW;
