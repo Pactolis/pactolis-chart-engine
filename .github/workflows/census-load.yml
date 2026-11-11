@@ -6,9 +6,6 @@ on:
   schedule:
     - cron: "0 2 * * *"
   workflow_dispatch:
-  # Schedules only run the default branch, which is stale until release.
-  push:
-    branches: [integration/approved-prs]
 
 permissions:
   contents: read

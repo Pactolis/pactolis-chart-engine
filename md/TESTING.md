@@ -42,7 +42,7 @@ o ölçüm "çalıştı/GREEN" sayılmaz.
 
 [.github/workflows/ci.yml](../.github/workflows/ci.yml): PR + main push, Node 22/24/26 matrisinde
 `check` + `test` + `check:exports` + `npm pack --dry-run` çalıştırır. Yalnız PR'larda (`pull_request`) çalışan ayrı `browser` job (default project,
-Playwright chromium) ve tek `census` job'u bulunur (main push'ta browser/census koşmaz). Census tek worker çalışır; `#308 L2-L9` ve `#308 Tam` report-only profilleri `census-load` projesine aittir (Census Load: nightly ve `integration/approved-prs` push'u). Başarısız census `census-results` artifact'ını yükler. Browser job yalnız failure durumunda `test-results/` klasörünü
+Playwright chromium) ve tek `census` job'u bulunur (main push'ta browser/census koşmaz). Census tek worker çalışır; `#308 L2-L9` ve `#308 Tam` report-only profilleri `census-load` projesine aittir (Census Load: nightly). Başarısız census `census-results` artifact'ını yükler. Browser job yalnız failure durumunda `test-results/` klasörünü
 `playwright-results` artifact'ı olarak yükler.
 
 [.github/workflows/chart-endurance.yml](../.github/workflows/chart-endurance.yml): weekly 60 dk 4L2

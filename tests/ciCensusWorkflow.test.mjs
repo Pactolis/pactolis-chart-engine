@@ -69,11 +69,6 @@ test('census-load project selects L2-L9 and Tam report-only load profiles', () =
   assert.ok(!names.some((name) => name.includes('endurance')), 'endurance stays out of census-load');
 });
 
-test('Census Load also runs on integration pushes (#124)', () => {
-  const y = readFileSync(new URL('../.github/workflows/census-load.yml', import.meta.url), 'utf8');
-  assert.match(y, /push:\s*\n\s*branches:\s*\[integration\/approved-prs\]/);
-});
-
 test('Chart Endurance cancels superseded PR runs only (#124)', () => {
   const y = readFileSync(new URL('../.github/workflows/chart-endurance.yml', import.meta.url), 'utf8');
   assert.match(y, /cancel-in-progress:\s*\$\{\{\s*github\.event_name == 'pull_request'\s*\}\}/);
