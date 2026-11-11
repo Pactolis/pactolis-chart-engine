@@ -132,7 +132,7 @@ for (const deviceScaleFactor of [1, 2]) {
       }, FROZEN_NOW);
       await openHarness(page);
 
-      const result = await page.evaluate(async (opts: { source: string; bindingName: string; rootSelector: string; frozenNow: number; chartId: string; correctedTime: number; commonRange: { from: number; to: number } }) => {
+      const result = await page.evaluate(async (opts: { source: string; bindingName: string; rootSelector: string; frozenNow: number; tailTime: number; chartId: string; correctedTime: number; commonRange: { from: number; to: number } }) => {
         const isBase = opts.source === "base";
         const engineModule = (path: string) => import(/* @vite-ignore */ `/src/${path}`);
         const [
@@ -385,7 +385,7 @@ for (const deviceScaleFactor of [1, 2]) {
           await run("tail data", () => {
             const series = runtime.pipeline.series;
             const last = series.at(series.length - 1)!;
-            pushTrade!({ time: opts.frozenNow, price: last.close, qty: 1, isBuy: true, market: BTC });
+            pushTrade!({ time: opts.tailTime, price: last.close, qty: 1, isBuy: true, market: BTC });
           }, () => isBase ? invalidations.length > 0 : invalidations.some((change) => (change & ChartChange.DataTail) !== 0), () => ({ bar: barAt(seriesLen() - 1), hud: hook()?.getAttribute("data-hud") ?? "" }));
           const dispatchHover = (xOffset = 0) => {
             const canvas = root.querySelector('canvas[data-chart-surface="interaction"]') as HTMLCanvasElement | null;
@@ -406,7 +406,7 @@ for (const deviceScaleFactor of [1, 2]) {
           () => ({ hud: hook()?.getAttribute("data-hud") ?? "" }));
           await run("tail while hovered", () => {
             const last = runtime.pipeline.series.at(seriesLen() - 1)!;
-            pushTrade!({ time: opts.frozenNow, price: last.close, qty: 1, isBuy: true, market: BTC });
+            pushTrade!({ time: opts.tailTime, price: last.close, qty: 1, isBuy: true, market: BTC });
           }, () => isBase ? invalidations.length > 0 : invalidations.some((change) => (change & ChartChange.DataTail) !== 0),
           () => ({ bar: barAt(seriesLen() - 1), hud: hook()?.getAttribute("data-hud") ?? "" }));
           await run("pointer leave", () => {
@@ -415,13 +415,13 @@ for (const deviceScaleFactor of [1, 2]) {
             canvas.dispatchEvent(new PointerEvent("pointerleave", { bubbles: false, pointerId: 9, pointerType: "mouse" }));
           }, () => isBase ? invalidations.length > 0 : invalidations.some((change) => (change & ChartChange.Interaction) !== 0),
           () => ({ hud: hook()?.getAttribute("data-hud") ?? "" }));
-          await run("sync time activation", () => runtime.showSyncCrosshair(opts.frozenNow), () =>
+          await run("sync time activation", () => runtime.showSyncCrosshair(opts.tailTime), () =>
             isBase ? invalidations.length > 0 : invalidations.some((change) => (change & ChartChange.Interaction) !== 0),
           () => ({ hud: hook()?.getAttribute("data-hud") ?? "" }));
-          await run("sync time unchanged", () => runtime.showSyncCrosshair(opts.frozenNow), () =>
+          await run("sync time unchanged", () => runtime.showSyncCrosshair(opts.tailTime), () =>
             isBase ? invalidations.length > 0 : invalidations.some((change) => (change & ChartChange.Interaction) !== 0),
           () => ({ hud: hook()?.getAttribute("data-hud") ?? "" }));
-          await run("sync time changed", () => runtime.showSyncCrosshair(opts.frozenNow - 60_000), () =>
+          await run("sync time changed", () => runtime.showSyncCrosshair(opts.tailTime - 60_000), () =>
             isBase ? invalidations.length > 0 : invalidations.some((change) => (change & ChartChange.Interaction) !== 0),
           () => ({ hud: hook()?.getAttribute("data-hud") ?? "" }));
           await run("sync time cleared", () => runtime.hideSyncCrosshair(), () =>
@@ -431,7 +431,7 @@ for (const deviceScaleFactor of [1, 2]) {
           await settle();
           await run("auto-scale widen", () => {
             // Historical reference bars keep OHLC immutable; widen with the next live 1m bucket.
-            pushTrade!({ time: opts.frozenNow + 60_000, price: 65_000, qty: 1, isBuy: true, market: BTC });
+            pushTrade!({ time: opts.tailTime + 60_000, price: 65_000, qty: 1, isBuy: true, market: BTC });
           }, () => isBase ? invalidations.length > 0 : invalidations.some((change) => (change & ChartChange.DataTail) !== 0 && (change & ChartChange.Viewport) !== 0), rangeProbe);
           await run("non-tail correction", async () => {
             await (window as unknown as Record<string, () => Promise<void>>).__serveCorrectedHistory();
@@ -539,7 +539,7 @@ for (const deviceScaleFactor of [1, 2]) {
           annotationInteractionSurfaces: ChartSurfaceDirty.Annotation | ChartSurfaceDirty.Interaction,
           hasPendingScope,
         };
-      }, { source: SOURCE, bindingName, rootSelector: ROOT_SELECTOR, frozenNow: FROZEN_NOW, chartId: CHART_ID, correctedTime: CORRECTED_TIME, commonRange: { from: INITIAL_BARS[0].t, to: TAIL_TIME + 2 * 60_000 } });
+      }, { source: SOURCE, bindingName, rootSelector: ROOT_SELECTOR, frozenNow: FROZEN_NOW, tailTime: TAIL_TIME, chartId: CHART_ID, correctedTime: CORRECTED_TIME, commonRange: { from: INITIAL_BARS[0].t, to: TAIL_TIME + 2 * 60_000 } });
 
       const isBase = SOURCE === "base";
       const { names } = result;
