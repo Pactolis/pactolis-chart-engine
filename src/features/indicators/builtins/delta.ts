@@ -1,16 +1,15 @@
 import type { IndicatorDefinition, IndicatorDrawContext, IndicatorSettings } from "../types.js";
-import { deltaSeries } from "../../../core/analysis/calc/ta.js";
-import { defaultPaneSettings, drawMultiSeries, makeNumberPoints, prepareMultiSeries, simpleHeader, standardAppearanceFields, stringSetting, visibleIndexRange, type PlotSeries } from "./taShared.js";
+import { deltaValue } from "../../../core/analysis/calc/ta.js";
+import { defaultPaneSettings, drawMultiSeries, makeMappedPoints, prepareMultiSeries, simpleHeader, standardAppearanceFields, stringSetting, visibleIndexRange, type PlotSeries } from "./taShared.js";
 import { deltaColorDefault, uiColor } from "../../../core/ui/seriesPalette.js";
 
 export interface DeltaSettings extends IndicatorSettings { mode: "delta" | "percent"; color: string; negativeColor: string; lineWidth: number; showLastValueLabel: boolean; showReadout: boolean; showAxisTicks: boolean; showPlotLabel: boolean; }
 function prepareDelta(ctx: IndicatorDrawContext<DeltaSettings>) {
   const { start, end } = visibleIndexRange(ctx); const bars = ctx.series.listReadonly();
   const percent = ctx.settings.mode === "percent";
-  const values = deltaSeries(bars.map((bar) => ({ time: bar.startTime, open: bar.open, high: bar.high, low: bar.low, close: bar.close, volume: bar.volume, delta: bar.delta })), percent);
   const positiveColor = stringSetting(ctx.settings, "color", deltaColorDefault);
   const negativeColor = stringSetting(ctx.settings, "negativeColor", uiColor.sell);
-  const points = makeNumberPoints(values, bars, start, end).map((point) => ({
+  const points = makeMappedPoints(bars, start, end, (bar) => deltaValue(bar, percent)).map((point) => ({
     ...point,
     color: point.value === null ? undefined : point.value > 0 ? positiveColor : point.value < 0 ? negativeColor : uiColor.textMuted,
   }));
