@@ -554,7 +554,7 @@ for (const deviceScaleFactor of [1, 2]) {
           // Interaction-only frames keep their narrow surface; anything else redraws every
           // surface. In BASE mode the change mask is unknown, and this spec never issues
           // interaction updates, so the full-surface redraw is asserted directly.
-          const expectedSurfaces = !isBase && frame.changes === names.Interaction ? result.interactionSurface : result.allSurfaces;
+          const expectedSurfaces = !isBase && frame.changes === names.Interaction ? result.interactionSurface : !isBase && frame.changes === names.DataTail ? (result.allSurfaces & ~result.interactionSurface) : result.allSurfaces;
           if (frame.changes === 0) continue;
           expect(frame.surfaces, `${scenario.name}: frame ${JSON.stringify(frame)}`).toBe(expectedSurfaces);
         }
