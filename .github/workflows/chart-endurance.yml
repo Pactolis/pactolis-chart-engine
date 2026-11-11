@@ -31,10 +31,10 @@ on:
       - ".github/workflows/chart-endurance.yml"
       - "tests/browser/chart-multi-market-census.spec.ts"
 
-# Runs of the same declared source SHA serialize; none is cancelled.
+# Runs of the same declared source SHA serialize; only superseded PR runs are cancelled.
 concurrency:
   group: chart-endurance-${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || (github.event_name == 'schedule' && github.sha || inputs.source_sha) }}
-  cancel-in-progress: false
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 permissions:
   contents: read
