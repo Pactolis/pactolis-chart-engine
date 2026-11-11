@@ -298,22 +298,71 @@ export function wilderSmooth(values: readonly number[], period: number): Array<n
   return out;
 }
 
+/**
+ * O(n) rolling population standard deviation from shifted running sums: S1 = sum(x - K) and
+ * S2 = sum((x - K)^2), both Neumaier/Kahan-compensated, variance = max(0, S2/n - (S1/n)^2).
+ * K starts as the first finite value and is re-anchored to the window mean whenever the window
+ * has moved several sigmas away from it, keeping the squared terms small so trending or
+ * flat windows do not lose precision to cancellation.
+ * `invalidInWindow` counts non-finite slots so any gap in the trailing window nulls the
+ * output (as before). Not bit-identical to the old two-pass algorithm; relative error is
+ * ~1e-15 in practice and tested against it at <= 1e-9.
+ */
 export function rollingStdDev(values: readonly number[], period: number): Array<number | null> {
   const n = positivePeriod(period, 1);
-  const out: Array<number | null> = [];
-  const window: number[] = [];
-  for (const raw of values) {
-    const value = finiteOrNull(raw);
-    if (value !== null) window.push(value);
-    else window.push(NaN);
-    if (window.length > n) window.shift();
-    if (window.length === n && window.every(Number.isFinite)) {
-      const mean = window.reduce((sum, item) => sum + item, 0) / n;
-      const variance = window.reduce((sum, item) => sum + (item - mean) ** 2, 0) / n;
-      out.push(Math.sqrt(variance));
-    } else {
-      out.push(null);
+  const len = values.length;
+  const out: Array<number | null> = new Array(len);
+  const clean = (i: number): number | null => finiteOrNull(values[i]);
+  let invalid = 0;
+  let shift = 0;
+  let s1 = createCompensatedSum();
+  let s2 = createCompensatedSum();
+  const rebuild = (end: number): void => {
+    // Recompute both sums over window (end-n, end] around a fresh shift. Only O(n) work
+    // when re-anchoring, which is rare.
+    s1 = createCompensatedSum();
+    s2 = createCompensatedSum();
+    for (let k = end - n + 1; k <= end; k++) {
+      const v = clean(k);
+      if (v === null) continue;
+      addCompensated(s1, v - shift);
+      addCompensated(s2, (v - shift) ** 2);
     }
+  };
+  for (let i = 0; i < len; i++) {
+    const v = clean(i);
+    if (v === null) invalid++;
+    else {
+      if (i === 0 || (invalid === i && shift === 0)) shift = v;
+      addCompensated(s1, v - shift);
+      addCompensated(s2, (v - shift) ** 2);
+    }
+    if (i >= n) {
+      const old = clean(i - n);
+      if (old === null) invalid--;
+      else {
+        addCompensated(s1, -(old - shift));
+        addCompensated(s2, -((old - shift) ** 2));
+      }
+    }
+    if (i + 1 < n || invalid > 0) {
+      out[i] = null;
+      continue;
+    }
+    let mean = s1.sum / n;
+    let variance = Math.max(0, s2.sum / n - mean * mean);
+    // Re-anchor when the window sits far from K relative to its own spread (mean^2 >> variance):
+    // that is where S2/n - mean^2 cancels badly (flat windows, p=1, strong trends). Each
+    // re-anchor costs O(period) but only happens after the series moved several window
+    // sigmas, so it amortises to O(1) per bar; the 1e-9*|K| guard stops flat windows from
+    // re-anchoring on rounding-level offsets every bar.
+    if (mean * mean > 4 * variance && Math.abs(mean) > 1e-9 * Math.abs(shift)) {
+      shift += mean;
+      rebuild(i);
+      mean = s1.sum / n;
+      variance = Math.max(0, s2.sum / n - mean * mean);
+    }
+    out[i] = Math.sqrt(variance);
   }
   return out;
 }
@@ -471,8 +520,11 @@ export function cci(bars: readonly OhlcvInput[], period: number): NumberPoint[] 
   return bars.map((bar, index) => {
     const middle = sma[index];
     if (middle === null || index + 1 < period) return { time: bar.time, value: null };
-    const window = typical.slice(index + 1 - period, index + 1);
-    const meanDeviation = window.reduce((sum, value) => sum + Math.abs(value - middle), 0) / period;
+    // In-place loop (no per-bar slice allocation); same left-to-right summation order as
+    // the former slice().reduce(), so results are bit-identical.
+    let deviationSum = 0;
+    for (let k = index + 1 - period; k <= index; k++) deviationSum += Math.abs(typical[k] - middle);
+    const meanDeviation = deviationSum / period;
     // meanDeviation === 0 means the window is undefined for CCI (division by zero), not a
     // genuine "exactly on the mean" reading of 0 -- return null so it renders as a gap
     // rather than an indistinguishable real zero.
@@ -538,15 +590,16 @@ export function volumeSeries(bars: readonly OhlcvInput[]): NumberPoint[] {
   return bars.map((bar) => ({ time: bar.time, value: bar.volume }));
 }
 
-export function deltaSeries(bars: readonly OhlcvInput[], percent: boolean): NumberPoint[] {
-  return bars.map((bar) => ({
-    time: bar.time,
-    // Zero volume means delta% is undefined (nothing traded), not a genuinely balanced
+export function deltaValue(bar: Pick<OhlcvInput, "volume" | "delta">, percent: boolean): number | null {
+  // Zero volume means delta% is undefined (nothing traded), not a genuinely balanced
     // 0% reading -- render it as a gap instead of a real zero. Raw (non-percent) delta is
     // unaffected: 0 there is a legitimate value (buy volume == sell volume), not a marker
     // for missing data.
-    value: percent ? (bar.volume > 0 ? (bar.delta ?? 0) / bar.volume * 100 : null) : (bar.delta ?? 0),
-  }));
+  return percent ? (bar.volume > 0 ? (bar.delta ?? 0) / bar.volume * 100 : null) : (bar.delta ?? 0);
+}
+
+export function deltaSeries(bars: readonly OhlcvInput[], percent: boolean): NumberPoint[] {
+  return bars.map((bar) => ({ time: bar.time, value: deltaValue(bar, percent) }));
 }
 
 export function ichimoku(bars: readonly OhlcvInput[], tenkanPeriod: number, kijunPeriod: number, senkouBPeriod: number, displacement: number): IchimokuPoint[] {

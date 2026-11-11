@@ -1,9 +1,8 @@
 import type { IndicatorDefinition, IndicatorDrawContext, IndicatorSettings } from "../types.js";
 import type { FootprintBar } from "../../../core/types.js";
-import type { NumberPoint } from "../../../core/analysis/calc/ta.js";
 import { cellTradeCounts } from "../../../core/model/footprintCellMetrics.js";
 import { compactNumber } from "../render/indicatorPaneUi.js";
-import { defaultPaneSettings, drawMultiSeries, makeNumberPoints, prepareMultiSeries, standardAppearanceFields, stringSetting, visibleIndexRange, type PlotSeries } from "./taShared.js";
+import { defaultPaneSettings, drawMultiSeries, makeMappedPoints, prepareMultiSeries, standardAppearanceFields, stringSetting, visibleIndexRange, type PlotSeries } from "./taShared.js";
 import { tradeCountColorDefault, uiColor } from "../../../core/ui/seriesPalette.js";
 
 export interface TradeCountSettings extends IndicatorSettings { mode: "count" | "avg-size"; directional: boolean; color: string; lineWidth: number; showLastValueLabel: boolean; showReadout: boolean; showAxisTicks: boolean; showPlotLabel: boolean; }
@@ -57,30 +56,27 @@ function prepareTradeCount(ctx: IndicatorDrawContext<TradeCountSettings>) {
 
   if (directional) {
     // Çift-taraflı histogram: buy pozitif (yukarı), sell negatif (aşağı), baseline 0.
-    const buyPoints: NumberPoint[] = [];
-    const sellPoints: NumberPoint[] = [];
-    for (const bar of bars) {
+    // Only the visible [start, end) bars are evaluated (no full-series arrays).
+    const buyValueAt = (bar: FootprintBar): number => {
       const agg = barBuySell(bar);
       // Avg size notional (USD) olarak gösterilir — uygulamanın geri kalanı (footprint
       // hücreleri, HUD) hacimleri notional gösteriyor; base bırakmak ~fiyat kadar sapardı.
-      const buyValue = averageSize ? (agg.buyCount > 0 ? (agg.buyVol / agg.buyCount) * bar.close : 0) : agg.buyCount;
+      return averageSize ? (agg.buyCount > 0 ? (agg.buyVol / agg.buyCount) * bar.close : 0) : agg.buyCount;
+    };
+    const sellValueAt = (bar: FootprintBar): number => {
+      const agg = barBuySell(bar);
       const sellValue = averageSize ? (agg.sellCount > 0 ? (agg.sellVol / agg.sellCount) * bar.close : 0) : agg.sellCount;
-      buyPoints.push({ time: bar.startTime, value: buyValue });
-      sellPoints.push({ time: bar.startTime, value: sellValue > 0 ? -sellValue : 0 });
-    }
+      return sellValue > 0 ? -sellValue : 0;
+    };
     const series: PlotSeries[] = [
-      { key: "buy", label: averageSize ? "Buy Avg" : "Buy", color: uiColor.buy, style: "histogram", points: makeNumberPoints(buyPoints, bars, start, end) },
-      { key: "sell", label: averageSize ? "Sell Avg" : "Sell", color: uiColor.sell, style: "histogram", points: makeNumberPoints(sellPoints, bars, start, end) },
+      { key: "buy", label: averageSize ? "Buy Avg" : "Buy", color: uiColor.buy, style: "histogram", points: makeMappedPoints(bars, start, end, buyValueAt) },
+      { key: "sell", label: averageSize ? "Sell Avg" : "Sell", color: uiColor.sell, style: "histogram", points: makeMappedPoints(bars, start, end, sellValueAt) },
     ];
     return prepareMultiSeries(ctx, series, { scaleMode: "signed-zero", baseline: 0, formatter });
   }
 
   // Avg size = (volume/count) × fiyat → notional (USD); count = ham işlem sayısı.
-  const values: NumberPoint[] = bars.map((bar) => ({
-    time: bar.startTime,
-    value: averageSize ? (bar.count > 0 ? (bar.volume / bar.count) * bar.close : 0) : bar.count,
-  }));
-  const series: PlotSeries[] = [{ key: "count", label: averageSize ? "Avg Size" : "Trades", color: stringSetting(ctx.settings, "color", tradeCountColorDefault), style: "histogram", points: makeNumberPoints(values, bars, start, end) }];
+  const series: PlotSeries[] = [{ key: "count", label: averageSize ? "Avg Size" : "Trades", color: stringSetting(ctx.settings, "color", tradeCountColorDefault), style: "histogram", points: makeMappedPoints(bars, start, end, (bar) => (averageSize ? (bar.count > 0 ? (bar.volume / bar.count) * bar.close : 0) : bar.count)) }];
   return prepareMultiSeries(ctx, series, { scaleMode: "volume", baseline: 0, formatter });
 }
 
