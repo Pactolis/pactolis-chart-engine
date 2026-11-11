@@ -1,5 +1,5 @@
 import type { IndicatorDefinition, IndicatorDrawContext, IndicatorSettings } from "../types.js";
-import { simpleMovingAverageAdvance, simpleMovingAverageWithState, volumeSeries, type SmaState } from "../../../core/analysis/calc/ta.js";
+import { simpleMovingAverageAdvance, simpleMovingAverageWithState, type SmaState } from "../../../core/analysis/calc/ta.js";
 import { compactNumber } from "../render/indicatorPaneUi.js";
 import { parseMarket } from "../../../core/domain/market.js";
 import { incrementPerformanceCounter } from "../../../core/performanceTelemetry.js";
@@ -8,7 +8,7 @@ import type { FootprintSeries } from "../../../core/model/footprint.js";
 import { quoteVolumeForBar } from "../../../core/model/footprintCellMetrics.js";
 // Canvas defaults mirror theme.ts semantic tokens; kept Node-safe for registry tests.
 const VOLUME_COLORS = { buy: `#${"3fe0a0"}`, sell: `#${"e06c75"}`, info: `#${"38bdf8"}`, ma: `#${"eef2fb"}` } as const;
-import { defaultPaneSettings, drawMultiSeries, makeNumberPoints, makeSeriesPoints, numericSetting, prepareMultiSeries, simpleHeader, standardAppearanceFields, stringSetting, visibleIndexRange, type PlotSeries } from "./taShared.js";
+import { defaultPaneSettings, drawMultiSeries, makeMappedPoints, makeSeriesPoints, numericSetting, prepareMultiSeries, simpleHeader, standardAppearanceFields, stringSetting, visibleIndexRange, type PlotSeries } from "./taShared.js";
 
 export interface VolumeSettings extends IndicatorSettings { maPeriod: number; showMa: boolean; deltaColored: boolean; upColor: string; downColor: string; maColor: string; lineWidth: number; showLastValueLabel: boolean; showReadout: boolean; showAxisTicks: boolean; showPlotLabel: boolean; }
 /**
@@ -44,13 +44,12 @@ function volumeMovingAverage(ctx: IndicatorDrawContext<VolumeSettings>, bars: re
 
 function prepareVolume(ctx: IndicatorDrawContext<VolumeSettings>) {
   const { start, end } = visibleIndexRange(ctx); const bars = ctx.series.listReadonly();
-  const values = volumeSeries(bars.map((bar) => ({ time: bar.startTime, open: bar.open, high: bar.high, low: bar.low, close: bar.close, volume: bar.volume })));
   const upColor = stringSetting(ctx.settings, "upColor", VOLUME_COLORS.buy);
   const downColor = stringSetting(ctx.settings, "downColor", VOLUME_COLORS.sell);
   const identity = parseMarket(ctx.chart?.market ?? "");
   const baseLabel = identity.base ?? "Base";
   const quoteLabel = identity.quote ?? "Quote";
-  const volumePoints = makeNumberPoints(values, bars, start, end).map((point) => ({ ...point, color: ctx.settings.deltaColored === false ? upColor : volumeBarColor(bars[point.index]?.delta ?? 0, upColor, downColor) }));
+  const volumePoints = makeMappedPoints(bars, start, end, (bar) => bar.volume).map((point) => ({ ...point, color: ctx.settings.deltaColored === false ? upColor : volumeBarColor(bars[point.index]?.delta ?? 0, upColor, downColor) }));
   const series: PlotSeries[] = [{ key: "volume", label: baseLabel, color: upColor, style: "histogram", points: volumePoints }];
   const readoutSeries: PlotSeries[] = [
     { key: "baseVolume", label: baseLabel, color: upColor, points: volumePoints },

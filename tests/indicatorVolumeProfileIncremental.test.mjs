@@ -66,6 +66,8 @@ test("Volume MA: tail trades, new bar, pan and history change equal full recompu
     for (let i = Math.max(0, range[0]); i < Math.min(bars.length, range[1]); i++) out.push({ index: i, time: bars[i].startTime, value: ma[i] === null ? null : ma[i] });
     return out;
   };
+  configurePerformanceTelemetry({ enabled: true });
+  const hitsBefore = snapshotPerformanceTelemetry().counters["indicator.incremental.hit.volume"] ?? 0;
   for (const period of [1, 20, 500]) {
     const series = mkSeries(300);
     const ctx = ctxFor(series, volumeIndicatorDefinition, [100, 300], { showMa: true, maPeriod: period });
@@ -87,6 +89,7 @@ test("Volume MA: tail trades, new bar, pan and history change equal full recompu
     trade(series, 9, 10_000, 52);
     assert.deepStrictEqual(maPoints(volumeIndicatorDefinition.prepareData(ctx)), fullMa(series, period, ctx.range));
   }
+  assert.ok((snapshotPerformanceTelemetry().counters["indicator.incremental.hit.volume"] ?? 0) - hitsBefore >= 3 * 6, "Volume MA tail path must run on tail trades");
 });
 
 // --- Volume Profile -----------------------------------------------------------------
