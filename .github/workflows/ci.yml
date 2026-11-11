@@ -33,8 +33,31 @@ jobs:
       - run: npm run check:default-import-graph
       - run: npm pack --dry-run
 
-  browser:
+  changes:
+    # Change-based browser test selection (scripts/select-ci-tests.mjs).
+    # Engine source, harness, config and shared test support run every browser
+    # test; a spec-only change runs that spec; docs and Node tests run none.
     if: github.event_name == 'pull_request'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    outputs:
+      browser: ${{ steps.select.outputs.browser }}
+      browser_specs: ${{ steps.select.outputs.browser_specs }}
+      census: ${{ steps.select.outputs.census }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+          fetch-depth: 2
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24
+      - id: select
+        run: node scripts/select-ci-tests.mjs
+
+  browser:
+    needs: changes
+    if: github.event_name == 'pull_request' && needs.changes.outputs.browser != 'none'
     runs-on: ubuntu-24.04
     timeout-minutes: 30
     steps:
@@ -47,7 +70,9 @@ jobs:
       - run: npm ci --no-audit --no-fund
       - run: npm run check:browser
       - run: npx --no-install playwright install --with-deps chromium
-      - run: npm run test:browser -- --project=default
+      - env:
+          SPECS: ${{ needs.changes.outputs.browser_specs }}
+        run: npm run test:browser -- --project=default $SPECS
       - if: failure()
         uses: actions/upload-artifact@v7
         with:
@@ -56,7 +81,8 @@ jobs:
           retention-days: 3
 
   census:
-    if: github.event_name == 'pull_request'
+    needs: changes
+    if: github.event_name == 'pull_request' && needs.changes.outputs.census == 'true'
     runs-on: ubuntu-24.04
     timeout-minutes: 60
     steps:
@@ -82,3 +108,22 @@ jobs:
           path: test-results/**/census-evidence.json
           retention-days: 3
           if-no-files-found: error
+
+  ci-result:
+    # One status that is red when any job failed and green when every job either
+    # passed or was skipped because the change could not reach it.
+    name: CI result
+    needs: [test, changes, browser, census]
+    if: always()
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - env:
+          NEEDS: ${{ toJSON(needs) }}
+        run: |
+          node -e '
+            const needs = JSON.parse(process.env.NEEDS);
+            const bad = Object.entries(needs).filter(([, job]) => job.result === "failure" || job.result === "cancelled");
+            for (const [name, job] of Object.entries(needs)) console.log(`${name}: ${job.result}`);
+            if (bad.length) process.exit(1);
+          '
