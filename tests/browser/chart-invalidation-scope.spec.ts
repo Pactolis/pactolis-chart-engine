@@ -400,7 +400,7 @@ for (const deviceScaleFactor of [1, 2]) {
           runtime.setPriceAutoScaleFromControl(true);
           await settle();
           await run("auto-scale widen", () => {
-            pushTrade!({ time: opts.frozenNow, price: 61_000, qty: 1, isBuy: true, market: BTC });
+            pushTrade!({ time: opts.frozenNow, price: 65_000, qty: 1, isBuy: true, market: BTC });
           }, () => isBase ? invalidations.length > 0 : invalidations.some((change) => (change & ChartChange.DataTail) !== 0 && (change & ChartChange.Viewport) !== 0), rangeProbe);
           await run("non-tail correction", async () => {
             await (window as unknown as Record<string, () => Promise<void>>).__serveCorrectedHistory();
