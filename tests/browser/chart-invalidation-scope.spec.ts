@@ -349,7 +349,7 @@ for (const deviceScaleFactor of [1, 2]) {
             invalidations = [];
             frames = [];
             await act();
-            await waitFor(done, `${name} to land`);
+            await waitFor(done, `${name} to land${name === "auto-scale widen" ? `; invalidations=${JSON.stringify(invalidations)}; tail=${JSON.stringify(barAt(seriesLen() - 1))}; range=${JSON.stringify(rangeProbe())}` : ""}`);
             await settle();
             const scenarioState = read();
             const scopedTiming = surfaceTimingSince(timingBefore, telemetry.snapshotPerformanceTelemetry());
