@@ -5,6 +5,8 @@ import {
   getGpuDiagnostics,
   resetGpuDiagnosticsForTest,
   recordGpuBackendSelection,
+  recordGpuContextEvent,
+  recordGpuDeviceLoss,
 } from "../dist/core/gpu/gpuDiagnostics.js";
 import {
   createGpuSurface,
@@ -468,4 +470,13 @@ test("createGpuSurfaceAsync auto and webgpu selection with device resolution", a
     restoreNavigator(originalDescriptor);
     resetSharedWebGpuDevice();
   }
+});
+
+
+test("shared WebGPU device loss and affected chart contexts have separate diagnostics counters", () => {
+  resetGpuDiagnosticsForTest();
+  recordGpuDeviceLoss();
+  for (let i = 0; i < 4; i++) recordGpuContextEvent("lost");
+  assert.equal(getGpuDiagnostics().counters["gpu.device.lost"], 1);
+  assert.equal(getGpuDiagnostics().counters["chart.gpu.contextLost"], 4);
 });

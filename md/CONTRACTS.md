@@ -47,3 +47,19 @@ Kaynak: [src/features/chart/historyContracts.ts](../src/features/chart/historyCo
 
 Bu belge invariantları **kaynakta ve testlerde** doğrulanmış haliyle işaret eder; burada listelenmeyen
 bir davranış için source'a bakın, bu belgeden davranış çıkarmayın.
+
+## GPU loss counters
+
+`gpu.device.lost` counts each lost shared WebGPU device once. `chart.gpu.contextLost`
+counts affected chart contexts once per loss; losing one device used by four charts
+therefore produces 1 device event and 4 chart events. Both diagnostics and performance
+telemetry use the same event writers in [gpuDiagnostics.ts](../src/core/gpu/gpuDiagnostics.ts).
+WebGL context events are chart events; they do not increment the WebGPU device counter.
+
+Live repair retains at least 90 seconds of trade references up to a hard cap of
+200,000 entries (10,000 minimum at low rates). Four immediate overflow resyncs
+are followed by the transport retry ladder, retaining the original gap start.
+While deferred, live cells resume and data stays degraded until an authoritative
+snapshot repairs the gap. `pipeline.repair.buffer_high_water` reports the aggregate
+high-water entries and `pipeline.repair.overflow_deferred` counts deferred overflows.
+The independent live flush queue keeps its existing bound; it is not a history journal.

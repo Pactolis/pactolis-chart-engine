@@ -8,6 +8,8 @@ import {
   effectiveTpoBracketMs,
   mergeTpoSessionSpans,
   tpoBracketLabel,
+  tpoSessionRange,
+  tpoSessionPartial,
 } from "../dist/core/analysis/tpoProfile.js";
 
 const STEP = 10;
@@ -151,4 +153,26 @@ test("visible TPO profile period keeps the loaded range as one profile", () => {
 test("effective TPO bracket never becomes finer than loaded chart bars", () => {
   assert.equal(effectiveTpoBracketMs("30m", 60 * 60_000), 60 * 60_000);
   assert.equal(effectiveTpoBracketMs("auto", 15 * 60_000), 15 * 60_000);
+});
+
+
+test("session profile is invariant to viewport clipping and keeps a stable cache range", () => {
+  const hour = 3600000;
+  const base = Date.UTC(2026, 10, 3);
+  const bars = Array.from({ length: 72 }, (_, i) => bar(base + i * hour, i % 24 < 12 ? 100 : 130, i % 24 < 12 ? 110 : 140));
+  const ranges = [[24, 48], [34, 40], [25, 47]].map(([from, to]) => tpoSessionRange(bars, from, to, "daily"));
+  assert.deepEqual(ranges, [[24, 48], [24, 48], [24, 48]]);
+  const profiles = ranges.map(([from, to]) => calculateTpoProfile(aggregateTpoBrackets(bars, from, to, hour).map((b) => b.bar), STEP, 0.7));
+  assert.deepEqual(profiles[0], profiles[1]);
+  assert.equal(tpoSessionPartial(bars, 24, 47, "daily", hour), false);
+  assert.equal(tpoSessionPartial(bars.slice(30), 0, 17, "daily", hour), true);
+});
+
+test("replay as-of series cannot contribute future bars to an expanded TPO session", () => {
+  const hour = 3600000;
+  const base = Date.UTC(2026, 10, 3);
+  const replay = Array.from({ length: 12 }, (_, i) => bar(base + i * hour, 100, 110));
+  assert.deepEqual(tpoSessionRange(replay, 8, 10, "daily"), [0, 12]);
+  assert.equal(tpoSessionPartial(replay, 0, 11, "daily", hour), true);
+  assert.equal(aggregateTpoBrackets(replay, 0, 12, hour).length, 12);
 });

@@ -1,5 +1,5 @@
 import type { FootprintBar } from "../types.js";
-import { bucketStart, DAY_MS, MONTH_TOKEN_MS, WEEK_MS } from "../time.js";
+import { bucketEnd, bucketStart, DAY_MS, MONTH_TOKEN_MS, WEEK_MS } from "../time.js";
 import type { TpoBracketSize, TpoProfilePeriod } from "../settings.js";
 import { neighbourBin, quantizeToStep } from "../priceStep.js";
 
@@ -112,6 +112,37 @@ export function buildTpoSessionSpans(
     }
   }
   return spans;
+}
+
+/** Expand a viewport to complete loaded sessions, including connected user merges.
+ * The input series is already the replay as-of projection: never read another series.
+ */
+export function tpoSessionRange(
+  bars: readonly FootprintBar[], from: number, to: number, period: TpoProfilePeriod,
+  mergeLeft: ReadonlySet<number> = new Set(),
+): [number, number] {
+  let first = Math.max(0, Math.min(bars.length, Math.floor(from)));
+  let end = Math.max(first, Math.min(bars.length, Math.ceil(to)));
+  const sessionMs = tpoProfilePeriodMs(period);
+  if (sessionMs === null || first === end) return [first, end];
+  const sessionAt = (index: number): number => bucketStart(bars[index].startTime, sessionMs);
+  while (first > 0 && (sessionAt(first - 1) === sessionAt(first) || mergeLeft.has(sessionAt(first)))) first--;
+  while (end < bars.length && (sessionAt(end - 1) === sessionAt(end) || mergeLeft.has(sessionAt(end)))) end++;
+  return [first, end];
+}
+
+export function tpoSessionPartial(
+  bars: readonly FootprintBar[], first: number, last: number, period: TpoProfilePeriod, intervalMs: number,
+): boolean {
+  const sessionMs = tpoProfilePeriodMs(period);
+  if (sessionMs === null || !bars[first] || !bars[last]) return false;
+  const sessionStart = bucketStart(bars[first].startTime, sessionMs);
+  const sessionEnd = bucketEnd(bucketStart(bars[last].startTime, sessionMs), sessionMs);
+  if (bars[first].startTime > sessionStart || bucketEnd(bars[last].startTime, intervalMs) < sessionEnd) return true;
+  for (let i = first + 1; i <= last; i++) {
+    if (bars[i].startTime > bucketEnd(bars[i - 1].startTime, intervalMs)) return true;
+  }
+  return false;
 }
 
 export function aggregateTpoBrackets(
