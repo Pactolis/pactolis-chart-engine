@@ -19,6 +19,11 @@ import {
 } from "../../core/syncAllowlist.js";
 import { ChartDataPipeline, PRICE_STEP_RESOLVE_TIMEOUT_MS } from "./ChartDataPipeline.js";
 import { ChartSession } from "./ChartSession.js";
+import {
+  acquireInteractionCanvasFocusStyle,
+  configureInteractionCanvasAttributes,
+  syncInteractionCanvasAriaLabel,
+} from "./chartCanvasAccessibility.js";
 import { requestChartPanelMaximize } from "./chartPanelFocus.js";
 import { ChartInputController, isDrawingMagnetEnabled, snapPriceToOhlc, WEAK_MAGNET_THRESHOLD_PX, type ChartInputHost } from "./ChartInputController.js";
 import { captureRawSource, resolveRawCursor } from "./rawViewContract.js";
@@ -187,6 +192,8 @@ class ChartRuntimeImpl implements ChartRuntime, ChartInputHost {
   displayOptions: ResolvedChartDisplayOptions;
   private disposeInput: () => void = () => undefined;
   private disposeDebugGlobals: (() => void) | null = null;
+  private focusStyleDocument: Document | null = null;
+  private releaseFocusStyle: () => void = () => undefined;
   private disposed = false;
   /** Aborted on dispose so background waits started for this chart end with it. */
   private readonly disposal = new AbortController();
@@ -266,6 +273,19 @@ class ChartRuntimeImpl implements ChartRuntime, ChartInputHost {
     this.levelContextController.npocLevels = val;
   }
 
+  private setPanelState(next: ChartPanelState): void {
+    this.state = next;
+    syncInteractionCanvasAriaLabel(this.interactionCanvas, this.state);
+  }
+
+  private syncFocusStyle(): void {
+    const nextDoc = this.panelRoot.ownerDocument;
+    if (nextDoc === this.focusStyleDocument) return;
+    this.releaseFocusStyle();
+    this.focusStyleDocument = nextDoc;
+    this.releaseFocusStyle = acquireInteractionCanvasFocusStyle(nextDoc, this.panelRoot);
+  }
+
   private setHookAttr(name: string, value: string): void {
     if (this.hookAttrCache.get(name) === value) return;
     this.hookAttrCache.set(name, value);
@@ -316,6 +336,8 @@ class ChartRuntimeImpl implements ChartRuntime, ChartInputHost {
 
     const crosshair: Crosshair = { x: 0, y: 0, visible: false };
     this.interactionCanvas = interactionCanvas;
+    this.syncFocusStyle();
+    configureInteractionCanvasAttributes(this.interactionCanvas, this.state);
     this.crosshair = crosshair;
     this.displayOptions = display;
     this.view = new View(display.timeScale, display.layout);
@@ -330,7 +352,7 @@ class ChartRuntimeImpl implements ChartRuntime, ChartInputHost {
       initial: this.state.indicators,
       onChange: (instances) => {
         if (this.disposed) return;
-        this.state = { ...this.state, indicators: instances };
+        this.setPanelState({ ...this.state, indicators: instances });
         this.emitStateChange();
         this.renderCoordinator?.applyConfig(this.chartViewConfig());
         chartHost().indicatorsChanged();
@@ -617,7 +639,7 @@ class ChartRuntimeImpl implements ChartRuntime, ChartInputHost {
         if (next.chartType !== undefined && next.chartType !== this.state.chartType) {
           this.requestedChartType = next.chartType;
         }
-        this.state = { ...next };
+        this.setPanelState({ ...next });
         this.emitStateChange();
       },
       autoFit: () => this._autoFit(),
@@ -738,7 +760,7 @@ class ChartRuntimeImpl implements ChartRuntime, ChartInputHost {
     const timeframeChanged = constrainedNext.timeframe !== prev.timeframe;
 
     this.requestedChartType = requestedType;
-    this.state = constrainedNext;
+    this.setPanelState(constrainedNext);
     if (marketChanged || timeframeChanged) {
       this.captureCoordinator.noteSelectionChange();
       this.analysisSelectionGeneration++;
@@ -987,7 +1009,7 @@ class ChartRuntimeImpl implements ChartRuntime, ChartInputHost {
 
   private applyViewState(patch: Partial<ChartPanelState>): void {
     if (this.disposed) return;
-    this.state = { ...this.state, ...patch } as ChartPanelState;
+    this.setPanelState({ ...this.state, ...patch } as ChartPanelState);
     this.renderCoordinator.applyConfig(this.chartViewConfig());
     this.emitStateChange();
     this.session.invalidate(ChartChange.Style);
@@ -1279,6 +1301,7 @@ class ChartRuntimeImpl implements ChartRuntime, ChartInputHost {
   }
 
   private bindInputController(): void {
+    configureInteractionCanvasAttributes(this.interactionCanvas, this.state);
     const inputController = new ChartInputController(this.interactionCanvas, this.crosshair, this);
     this.disposeInput = () => inputController.dispose();
   }
@@ -1288,6 +1311,7 @@ class ChartRuntimeImpl implements ChartRuntime, ChartInputHost {
     this.disposeInput();
     this.session.updateContainer(this.panelRoot);
     this.indicatorController.updateOwnerDocument(this.panelRoot.ownerDocument);
+    this.syncFocusStyle();
     this.bindInputController();
     this.session.invalidate();
   }
@@ -1339,6 +1363,9 @@ class ChartRuntimeImpl implements ChartRuntime, ChartInputHost {
     this.syncController.dispose();
     this.captureCoordinator.dispose();
     this.disposeInput();
+    this.releaseFocusStyle();
+    this.releaseFocusStyle = () => undefined;
+    this.focusStyleDocument = null;
     this.session.destroy();
     this.renderCoordinator.dispose();
     this.overlay.dispose();
@@ -1651,7 +1678,7 @@ class ChartRuntimeImpl implements ChartRuntime, ChartInputHost {
   private _togglePriceScaleModeFromControl(): ChartPanelState["scaleMode"] {
     const nextMode = this.view.isLogScale() ? "linear" : "log";
     this.view.setScaleMode(nextMode);
-    this.state = { ...this.state, scaleMode: nextMode };
+    this.setPanelState({ ...this.state, scaleMode: nextMode });
     this.emitStateChange();
     this._autoFit();
     this.session.invalidate(ChartChange.Viewport);
@@ -1861,12 +1888,7 @@ async function buildChartRuntime(
   const interactionCanvas = doc.createElement("canvas");
   gpuCanvas.dataset.chartSurface = "gpu-scene";
   annotationCanvas.dataset.chartSurface = "annotation";
-  interactionCanvas.dataset.chartSurface = "interaction";
-  interactionCanvas.className = "chart-interaction-canvas";
-  interactionCanvas.tabIndex = 0;
-  interactionCanvas.setAttribute("role", "application");
-  interactionCanvas.setAttribute("aria-label", `${initialState.market} ${initialState.timeframe}`);
-  interactionCanvas.setAttribute("aria-keyshortcuts", "? ContextMenu Shift+F10");
+  configureInteractionCanvasAttributes(interactionCanvas, initialState);
   gpuCanvas.style.cssText = "position:absolute;inset:0;z-index:1;width:100%;height:100%;pointer-events:none;";
   annotationCanvas.style.cssText = "position:absolute;inset:0;z-index:2;width:100%;height:100%;pointer-events:none;";
   // touch-action:none hands every touch to the pointer handlers (pan, pinch, long press); without it
