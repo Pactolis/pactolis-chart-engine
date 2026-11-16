@@ -90,3 +90,45 @@ test("period tolerance is relative and symmetric, including daily-source fallbac
     assert.equal(hasCompleteFootprintCoverage([shifted], start, start + DAY), false);
   }
 });
+
+test("midnight boundary shifts on edge bars conserve the day and retain VAL/VAH and nPOC", () => {
+  for (const mutateEdges of [
+    (bars) => { bars[0].cells.get(100).buyVol += 55.8; },
+    (bars) => { bars[0].cells.get(100).sellVol -= 55.8; },
+    (bars) => { bars[bars.length - 1].cells.get(100).buyVol += 55.8; },
+    (bars) => { bars[bars.length - 1].cells.get(100).sellVol -= 10; },
+    (bars) => {
+      bars[0].cells.get(100).buyVol += 30;
+      bars[2].cells.get(100).buyVol += 25.8;
+    },
+    (bars) => {
+      bars[0].cells.get(100).buyVol += 55.8;
+      bars[bars.length - 1].cells.get(100).buyVol += 20;
+    },
+  ]) {
+    const bars = realBars();
+    mutateEdges(bars);
+    assert.equal(hasCompleteFootprintCoverage(bars, start, start + DAY, MINUTE), true);
+    const result = levels(bars);
+    assert.deepEqual(result.valueArea.map((level) => level.valueAreaKind).sort(), ["vah", "val"]);
+    assert.equal(result.npoc.length, 1);
+  }
+});
+
+test("interior and oversized shifts still fail conservation and suppress footprint levels", () => {
+  for (const mutate of [
+    (bars) => { bars[600].cells.get(100).buyVol -= 1; },
+    (bars) => { bars[600].cells.get(100).buyVol += 1; },
+    (bars) => {
+      bars[0].cells.get(100).buyVol += 55.8;
+      bars[600].cells.get(100).buyVol -= 1;
+    },
+    (bars) => { bars[4].cells.get(100).buyVol += 55.8; },
+    (bars) => { bars[0].cells.get(100).buyVol += 5000; },
+  ]) {
+    const bars = realBars();
+    mutate(bars);
+    assert.equal(hasCompleteFootprintCoverage(bars, start, start + DAY, MINUTE), false);
+    assert.deepEqual(levels(bars), { valueArea: [], npoc: [] });
+  }
+});
