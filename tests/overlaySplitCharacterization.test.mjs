@@ -435,10 +435,10 @@ test("renderAnnotations and renderInteraction preserve two-pass contract, custom
   overlay.renderAnnotations(view, series, { x: view.xOfIndex(2) + 10, y: view.yOfPrice(62102), visible: true }, [0, 5], ["axis"]);
   assert.equal(hudHistory.length, 0);
 
-  const axisHoverX = view.area.left + view.area.width + 14;
-  const hoverAxisY = view.area.top + view.area.height - 10;
+  const barHoverX = view.xOfIndex(2) + 10;
+  const barHoverY = view.yOfPrice(62102);
   const interactionCallsBefore = annotationCtx.calls.length;
-  overlay.renderInteraction(view, series, { x: axisHoverX, y: hoverAxisY, visible: true }, [0, 5]);
+  overlay.renderInteraction(view, series, { x: barHoverX, y: barHoverY, visible: true }, [0, 5]);
   assert.equal(annotationCtx.calls.length, interactionCallsBefore);
   assert.ok(annotationCtx.calls.length > annotationCallsBeforeHover);
   assert.equal(interactionCtx.calls[0].op, "clearRect");
@@ -449,6 +449,10 @@ test("renderAnnotations and renderInteraction preserve two-pass contract, custom
   );
   assert.ok(events.includes("orderbookHover"));
   assert.ok(events.includes("interactionForeground"));
+
+  const axisHoverX = view.area.left + view.area.width + 14;
+  const hoverAxisY = view.area.top + view.area.height - 10;
+  overlay.renderInteraction(view, series, { x: axisHoverX, y: hoverAxisY, visible: true }, [0, 5]);
   assert.equal(overlay.getPriceScaleControlAt(axisHoverX, hoverAxisY), "autoScale");
 
   // Crosshair sync + local dashed crosshair lines drawn on interactionCtx
@@ -511,23 +515,24 @@ test("renderAnnotations draws footprint cells (full vs compact, notional toggle)
     assert.ok(vpLevels !== null && vpLevels.poc !== null);
 
     // Turning showNotional off invalidates cellTextCache even when cellRevision stays constant
+    const skipAnnotationHud = { x: 0, y: 0, visible: true };
     overlay.showNotional = false;
     ctx.calls.length = 0;
-    overlay.renderAnnotations(view, series, { x: 0, y: 0, visible: false }, [0, 3], ["footprint-text"]);
+    overlay.renderAnnotations(view, series, skipAnnotationHud, [0, 3], ["footprint-text"]);
     const baseUnitTexts = ctx.calls.filter((call) => call.op === "fillText" && (call.textAlign === "left" || call.textAlign === "right"));
     assert.ok(baseUnitTexts.some((call) => String(call.text) === "60.0" || String(call.text) === "20.0"));
 
     // Compact mode: colWidth=60 -> candleStrip=13.2 -> fpW=46.8 in [44, 72) -> centered single value
     view.colWidth = 60;
     ctx.calls.length = 0;
-    overlay.renderAnnotations(view, series, { x: 0, y: 0, visible: false }, [0, 3], ["footprint-text"]);
+    overlay.renderAnnotations(view, series, skipAnnotationHud, [0, 3], ["footprint-text"]);
     assert.ok(ctx.calls.some((call) => call.op === "fillText" && call.textAlign === "center"));
     assert.equal(ctx.calls.some((call) => call.op === "fillText" && (call.textAlign === "left" || call.textAlign === "right")), false);
 
     // Candlestick chartType draws zero cell numbers
     overlay.setChartConfig(makeChartConfig({ chartType: "candlestick" }));
     ctx.calls.length = 0;
-    overlay.renderAnnotations(view, series, { x: 0, y: 0, visible: false }, [0, 3], ["footprint-text"]);
+    overlay.renderAnnotations(view, series, skipAnnotationHud, [0, 3], ["footprint-text"]);
     assert.equal(ctx.calls.filter((call) => call.op === "fillText").length, 0);
 
     // Cross-surface queues appear on the axis pass and reset on the subsequent pass
