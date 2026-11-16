@@ -606,11 +606,17 @@ export class DrawingManager {
 
   private drawingAt(point: DrawingPoint, screen: { x: number; y: number } | undefined, touch: boolean): Drawing | undefined {
     const context = this.hitContext(touch);
-    return [...this.drawings].reverse().find((drawing) =>
-      drawing.visible &&
-      drawing.market === this.currentMarket &&
-      drawingHitTest(drawing, point, screen, context)
-    );
+    for (let i = this.drawings.length - 1; i >= 0; i--) {
+      const drawing = this.drawings[i];
+      if (
+        drawing.visible &&
+        drawing.market === this.currentMarket &&
+        drawingHitTest(drawing, point, screen, context)
+      ) {
+        return drawing;
+      }
+    }
+    return undefined;
   }
 
   private hitContext(touch: boolean): DrawingHitContext {
