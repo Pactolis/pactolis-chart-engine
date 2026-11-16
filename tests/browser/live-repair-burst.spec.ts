@@ -1,5 +1,7 @@
 import { expect, test } from "@playwright/test";
 
+test.use({ launchOptions: { args: ["--enable-precise-memory-info"] } });
+
 // Virtual exchange time compresses 90 seconds into 90 browser turns. This is
 // pipeline/journal qualification; timings are diagnostics, not a real GPU census.
 test("5k trades per second for 90 seconds recover after a delayed snapshot within the journal cap", async ({ page }, testInfo) => {
@@ -69,6 +71,7 @@ test("5k trades per second for 90 seconds recover after a delayed snapshot withi
         cellVolume: bars.reduce((n, b) => n + [...b.cells.values()].reduce((n, c) => n + c.buyVol + c.sellVol, 0), 0),
         state: states.at(-1), errors: states.filter((s) => s === "error").length, degraded,
         requests: requests.length, heapBefore, peakHeap, heapAfter: heap(),
+        heapMeasurement: peakHeap === heapBefore && heap() === heapBefore ? "unavailable_or_coarse" : "performance.memory_precise_requested",
         journalHighWater: snapshotPerformanceTelemetry().counters["pipeline.repair.buffer_high_water"],
         browserTurnP95Ms: frameMs[Math.ceil(frameMs.length * 0.95) - 1] };
     } finally { pipeline.dispose(); }
