@@ -119,6 +119,8 @@ export class ChartSession {
   private gl: WebGL2RenderingContext;
   private gpuSurface: GpuSurface;
   private ro: ResizeObserver | null = null;
+  private devicePixelBitmapWidth: number | null = null;
+  private devicePixelBitmapHeight: number | null = null;
 
   private container: HTMLElement;
   private gpuCanvas: HTMLCanvasElement;
@@ -576,15 +578,36 @@ export class ChartSession {
     const w = rect.width;
     const h = rect.height;
     if (w <= 0 || h <= 0) return null;
+    const rawDpr = this.ownerDocument.defaultView?.devicePixelRatio ?? 1;
     const dpr = this.dpr();
+    const dprCapped = Number.isFinite(rawDpr) && rawDpr > 0 && dpr < rawDpr;
+    const dpbW = this.devicePixelBitmapWidth;
+    const dpbH = this.devicePixelBitmapHeight;
+    let bitmapWidth: number;
+    let bitmapHeight: number;
+    if (
+      !dprCapped &&
+      dpbW !== null &&
+      dpbH !== null &&
+      dpbW > 0 &&
+      dpbH > 0 &&
+      Math.abs(dpbW - w * rawDpr) <= 2 &&
+      Math.abs(dpbH - h * rawDpr) <= 2
+    ) {
+      bitmapWidth = dpbW;
+      bitmapHeight = dpbH;
+    } else {
+      bitmapWidth = Math.round(w * dpr);
+      bitmapHeight = Math.round(h * dpr);
+    }
     return {
       w,
       h,
       dpr,
       cssWidth: w + "px",
       cssHeight: h + "px",
-      bitmapWidth: Math.round(w * dpr),
-      bitmapHeight: Math.round(h * dpr),
+      bitmapWidth,
+      bitmapHeight,
     };
   }
 
@@ -655,18 +678,43 @@ export class ChartSession {
     this.startRaf();
   }
 
-  private setupResizeObserver(): void {
+  private bindContainerResizeObserver(): void {
     const ResizeObserverCtor = this.ownerDocument.defaultView?.ResizeObserver ?? ResizeObserver;
-    this.ro = new ResizeObserverCtor(() => {
+    this.ro = new ResizeObserverCtor((entries: ResizeObserverEntry[]) => {
+      const entry = entries?.find((e) => e.target === this.container) ?? entries?.[0];
+      const box = entry?.devicePixelContentBoxSize?.[0];
+      if (
+        box &&
+        Number.isFinite(box.inlineSize) &&
+        box.inlineSize > 0 &&
+        Number.isFinite(box.blockSize) &&
+        box.blockSize > 0
+      ) {
+        this.devicePixelBitmapWidth = Math.round(box.inlineSize);
+        this.devicePixelBitmapHeight = Math.round(box.blockSize);
+      } else {
+        this.devicePixelBitmapWidth = null;
+        this.devicePixelBitmapHeight = null;
+      }
       if (!this.active) return;
       this.requestContainerResize();
     });
-    this.ro.observe(this.container);
+    try {
+      this.ro.observe(this.container, { box: "device-pixel-content-box" });
+    } catch {
+      this.ro.observe(this.container);
+    }
+  }
+
+  private setupResizeObserver(): void {
+    this.bindContainerResizeObserver();
     this.lifecycle.add(() => this.ro?.disconnect());
   }
 
   updateContainer(container: HTMLElement): void {
     this.ro?.disconnect();
+    this.devicePixelBitmapWidth = null;
+    this.devicePixelBitmapHeight = null;
     // Whether this owner actually owed a frame (pending paint/capture/resize intent). The
     // swap re-homes that intent on the new owner as exactly one callback; an idle or
     // inactive session must not invent paint debt on adoption.
@@ -680,12 +728,7 @@ export class ChartSession {
     this.ownerDocument = container.ownerDocument;
     this.disposeDprWatcher?.();
     this.disposeDprWatcher = null;
-    const ResizeObserverCtor = this.ownerDocument.defaultView?.ResizeObserver ?? ResizeObserver;
-    this.ro = new ResizeObserverCtor(() => {
-      if (!this.active) return;
-      this.requestContainerResize();
-    });
-    this.ro.observe(this.container);
+    this.bindContainerResizeObserver();
     this.setupDprWatcher();
     if (transferPendingWork) {
       // Re-home the interrupted frame on the new owner window: exactly one callback
@@ -704,6 +747,8 @@ export class ChartSession {
       mql?.removeEventListener("change", update);
       mql = win.matchMedia(`(resolution: ${win.devicePixelRatio}dppx)`);
       mql.addEventListener("change", update);
+      this.devicePixelBitmapWidth = null;
+      this.devicePixelBitmapHeight = null;
       if (this.active) this.requestContainerResize();
     };
     update();
