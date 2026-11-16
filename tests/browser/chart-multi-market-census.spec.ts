@@ -1045,7 +1045,7 @@ async function runScenario(scenario: Scenario, page: Page, testInfo?: TestInfo) 
     // Frame probe and owned state live on one window key; teardown reads it back.
     await page.evaluate(async ({ markets, panelIds, columns, cellWidth, cellHeight, bars, indicatorCount, drawingCount, burst }) => {
       const telemetry = await import("/src/core/performanceTelemetry.ts");
-      telemetry.configurePerformanceTelemetry({ enabled: true });
+      telemetry.configurePerformanceTelemetry({ enabled: false });
       const state = {
         telemetry, telemetryPhases: {} as Record<number, unknown>,
         pageErrors: [] as string[],
