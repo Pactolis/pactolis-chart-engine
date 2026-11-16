@@ -39,6 +39,9 @@ import {
   effectiveTpoBracketMs,
   mergeTpoSessionSpans,
   tpoBracketLabel,
+  tpoSessionRange,
+  tpoSessionPartial,
+  type TpoBracketBar,
 } from "../analysis/tpoProfile.js";
 import type { NakedPocLevel } from "../analysis/nakedPoc.js";
 import type { ReferenceLevel } from "../analysis/referenceLevels.js";
@@ -157,7 +160,7 @@ export class Overlay {
   /** When true, cell/HUD volumes are shown as USDT notional (qty * price). */
   showNotional = true;
   private profileCache: { key: string; result: VolumeProfileResult; maxVolume: number } | null = null;
-  private tpoCache: { key: string; groups: { sessionStarts: number[]; firstBracketIndex: number; lastBracketIndex: number; firstIdx: number; lastIdx: number; firstSpanIndex: number; result: ReturnType<typeof calculateTpoProfile> }[] } | null = null;
+  private tpoCache: { key: string; brackets: TpoBracketBar[]; groups: { sessionStarts: number[]; firstBracketIndex: number; lastBracketIndex: number; firstIdx: number; lastIdx: number; firstSpanIndex: number; partial: boolean; result: ReturnType<typeof calculateTpoProfile> }[] } | null = null;
   private priceMarkers: PriceMarker[] = [];
   private timeMarkers: TimeMarker[] = [];
   private lineLabels: { price: number; text: string; color: string; priority: number }[] = [];
@@ -654,18 +657,16 @@ export class Overlay {
     const step = series.config.priceStep;
 
     const bracketMs = effectiveTpoBracketMs(chartCfg.tpoBracketSize, series.config.intervalMs);
-    const brackets = aggregateTpoBrackets(all, from, to, bracketMs);
-    const spans = buildTpoBracketSpans(brackets, chartCfg.tpoProfilePeriod);
-    const groupsMeta = mergeTpoSessionSpans(spans, this.tpoMergeLeftSessionStarts);
-    if (!groupsMeta.length) return;
-
-    const key = [
-      vaPercent, step, series.revision, chartCfg.tpoProfilePeriod, chartCfg.tpoBracketSize, bracketMs,
-      ...groupsMeta.map((g) => `${g.sessionStarts.join("+")}:${g.firstIdx}:${g.lastIdx}`),
-    ].join("|");
+    const [sessionFrom, sessionTo] = tpoSessionRange(all, from, to, chartCfg.tpoProfilePeriod, this.tpoMergeLeftSessionStarts);
+    const key = [vaPercent, step, series.revision, chartCfg.tpoProfilePeriod, chartCfg.tpoBracketSize,
+      bracketMs, sessionFrom, sessionTo, ...[...this.tpoMergeLeftSessionStarts].sort((a, b) => a - b)].join("|");
     if (this.tpoCache?.key !== key) {
+      const brackets = aggregateTpoBrackets(all, sessionFrom, sessionTo, bracketMs);
+      const spans = buildTpoBracketSpans(brackets, chartCfg.tpoProfilePeriod);
+      const groupsMeta = mergeTpoSessionSpans(spans, this.tpoMergeLeftSessionStarts);
       this.tpoCache = {
         key,
+        brackets,
         groups: groupsMeta.map((g) => ({
           sessionStarts: [...g.sessionStarts],
           firstBracketIndex: g.firstBracketIndex,
@@ -673,6 +674,7 @@ export class Overlay {
           firstIdx: g.firstIdx,
           lastIdx: g.lastIdx,
           firstSpanIndex: g.firstSpanIndex,
+          partial: tpoSessionPartial(all, g.firstIdx, g.lastIdx, chartCfg.tpoProfilePeriod, series.config.intervalMs),
           result: calculateTpoProfile(
             brackets.slice(g.firstBracketIndex, g.lastBracketIndex + 1).map((bracket) => bracket.bar),
             step,
@@ -682,6 +684,7 @@ export class Overlay {
       };
     }
 
+    const brackets = this.tpoCache.brackets;
     const ctx = this.ctx;
     // Letters mode needs vertical room per price row and horizontal room per
     // bracket column; otherwise fall back to the collapsed histogram.
@@ -701,6 +704,7 @@ export class Overlay {
       ctx.textAlign = "center";
     }
     for (const g of this.tpoCache.groups) {
+      if (g.lastIdx < from || g.firstIdx >= to) continue;
       const result = g.result;
       if (!result.levels.length) continue;
 
@@ -799,6 +803,14 @@ export class Overlay {
         }
       }
 
+      if (g.partial) {
+        ctx.save();
+        ctx.fillStyle = tpoPalette.leaderVa;
+        ctx.font = "9px ui-monospace, Menlo, monospace";
+        ctx.textAlign = "left";
+        ctx.fillText("partial", Math.max(left + 3, view.area.left + 3), view.area.top + 12);
+        ctx.restore();
+      }
       // Level leaders + labels (both modes): solid white POC, dashed VA.
       if (settings.profilePoc && result.poc !== null) this.drawTpoLeader(view, result.poc + step / 2, "POC", tpoPalette.leaderPoc, left, labelX, false);
       if (settings.profileVah && result.vah !== null) this.drawTpoLeader(view, result.vah + step / 2, "VAH", tpoPalette.leaderVa, left, labelX, true);

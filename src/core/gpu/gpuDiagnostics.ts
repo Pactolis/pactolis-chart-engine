@@ -108,6 +108,13 @@ export function recordGpuFeatureFallback(feature: string, reason: string): void 
   incrementPerformanceCounter(counterKey);
 }
 
+/** One WebGPU device loss, shared by any number of chart surfaces. */
+export function recordGpuDeviceLoss(): void {
+  counters["gpu.device.lost"] = (counters["gpu.device.lost"] ?? 0) + 1;
+  incrementPerformanceCounter("gpu.device.lost");
+}
+
+/** Per-chart context event, including each chart affected by a shared device loss. */
 export function recordGpuContextEvent(kind: "lost" | "restored" | "createFailed"): void {
   let counterKey: string;
   if (kind === "lost") {

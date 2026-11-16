@@ -9,13 +9,17 @@ import type { TradeStreamSession } from "./historyContracts.js";
 import type { ChartDataPipelineServices, PipelineIntegrityReporter, TradeMarketReadiness } from "./ChartDataPipelinePorts.js";
 import {
   LIVE_REPAIR_EVIDENCE_WAIT_MS,
+  liveRepairRetryDelayMs,
   LIVE_REPAIR_UNRESOLVED_AFTER_MS,
   type LiveRepairRetryReason,
 } from "./recentCoverageRetryPolicy.js";
 import { LIVE_REPAIR_UNRESOLVED_DETAIL } from "./chartDataState.js";
+import { incrementPerformanceCounter } from "../../core/performanceTelemetry.js";
 import { chartDataSource } from "./chartDataSource.js";
 
 const RECONCILE_BUFFER_CAP = 10_000;
+const RECONCILE_BUFFER_MAX_TRADES = 200_000;
+const RECONCILE_BUFFER_WINDOW_MS = 90_000;
 const REPAIR_OVERFLOW_RESYNC_LIMIT = 4;
 const REPAIR_SOURCE = "binance-usdm-aggTrade";
 const DECIMAL_ID = /^(0|[1-9][0-9]*)$/;
@@ -340,6 +344,8 @@ export class LiveTradeRepairController {
   private explicitHistoryToken = 0;
   private reconcileBuffer: AggTrade[] = [];
   private reconcileOverflow = false;
+  private overflowRetryTimer: ReturnType<typeof setTimeout> | null = null;
+  private bufferHighWater = 0;
   private overflowResyncCount = 0;
   private lastTransportSession: TradeStreamSession | null = null;
   /** Last applied trade time when a new transport session began: the start of what the outage may have missed. */
@@ -431,18 +437,22 @@ export class LiveTradeRepairController {
     }
     if (!this.repairActive) return false;
     if (trade.market !== undefined && trade.market !== this.host.getMarket()) return false;
-    if (this.reconcileBuffer.length >= RECONCILE_BUFFER_CAP) {
+    const firstTime = this.reconcileBuffer[0]?.time;
+    const elapsed = Number.isFinite(firstTime) && Number.isFinite(trade.time) ? trade.time - firstTime : 0;
+    if (this.reconcileBuffer.length >= RECONCILE_BUFFER_MAX_TRADES
+      || (this.reconcileBuffer.length >= RECONCILE_BUFFER_CAP && elapsed >= RECONCILE_BUFFER_WINDOW_MS)) {
       const detail = "Trade stream repair buffer overflow";
       if (!this.restartAfterOverflow(trade, detail)) {
-        this.reconcileOverflow = true;
-        this.pendingSession = null;
-        this.pendingRepairFrom = null;
-        this.host.integrityReporter?.report("error", detail);
-        this.host.setDataDegraded(true, detail);
+        // The original gap stays pending; live candles/cells resume while the
+        // bounded transport ladder waits for a usable replacement snapshot.
         return false;
       }
     }
     this.reconcileBuffer.push(trade);
+    if (this.reconcileBuffer.length > this.bufferHighWater) {
+      incrementPerformanceCounter("pipeline.repair.buffer_high_water", this.reconcileBuffer.length - this.bufferHighWater);
+      this.bufferHighWater = this.reconcileBuffer.length;
+    }
     if (trade.liquidation !== true && Number.isFinite(trade.time)) {
       this.host.series.beginRepairBarrier([bucketStart(trade.time, this.host.getIntervalMs())]);
     }
@@ -490,6 +500,7 @@ export class LiveTradeRepairController {
   }
 
   cancel(): void {
+    this.clearOverflowRetryTimer();
     this.preempt(false);
     this.localDataLossPending = false;
     this.pendingSession = null;
@@ -513,7 +524,13 @@ export class LiveTradeRepairController {
     return `${this.host.getMarket()}|${this.host.getIntervalMs()}|${this.host.series.config.priceStep}`;
   }
 
+  private clearOverflowRetryTimer(): void {
+    if (this.overflowRetryTimer !== null) clearTimeout(this.overflowRetryTimer);
+    this.overflowRetryTimer = null;
+  }
+
   private queueRepair(session: TradeStreamSession, from: number | null, detail: string): void {
+    this.clearOverflowRetryTimer();
     this.pendingSession = session;
     this.pendingRepairFrom = from;
     this.repairRetryCount = 0;
@@ -530,10 +547,7 @@ export class LiveTradeRepairController {
 
   private restartAfterOverflow(trade: AggTrade, detail: string): boolean {
     const session = this.activeRepairSession ?? this.pendingSession ?? this.lastTransportSession;
-    if (!session || this.overflowResyncCount >= REPAIR_OVERFLOW_RESYNC_LIMIT) {
-      this.preempt(false);
-      return false;
-    }
+    if (!session) { this.preempt(false); return false; }
 
     const intervalMs = this.host.getIntervalMs();
     const boundaryAt = Number.isFinite(trade.time) ? trade.time : Date.now();
@@ -543,6 +557,32 @@ export class LiveTradeRepairController {
     const from = this.activeRepairFrom ?? this.pendingRepairFrom ??
       bucketStart(Math.min(cursor, session.boundaryAt) - 1, intervalMs);
 
+    if (this.overflowResyncCount >= REPAIR_OVERFLOW_RESYNC_LIMIT) {
+      this.preempt(false);
+      this.pendingSession = { ...session, boundaryAt };
+      this.pendingRepairFrom = from;
+      this.repairDeferred = true;
+      this.repairFailingSince ??= Date.now();
+      this.host.setDataDegraded(true, detail);
+      this.host.integrityReporter?.report("pending", `${detail}; retry deferred`);
+      incrementPerformanceCounter("pipeline.repair.overflow_deferred");
+      const pending = this.pendingSession;
+      const generation = this.host.getGeneration();
+      const retry = (): boolean => {
+        if (this.host.isDisposed() || generation !== this.host.getGeneration() || this.pendingSession !== pending) return false;
+        this.overflowRetryTimer = null;
+        const applied = this.host.getLastAppliedTradeTime();
+        this.pendingSession = { ...pending, boundaryAt: Number.isFinite(applied) ? Math.max(applied, pending.boundaryAt) : pending.boundaryAt };
+        this.repairDeferred = false;
+        this.startPendingRepair();
+        return true;
+      };
+      const attempt = this.repairRetryCount++;
+      if (!this.host.scheduleRecentCoverageRetry?.(attempt, retry, "transport")) {
+        this.overflowRetryTimer = setTimeout(retry, liveRepairRetryDelayMs(attempt, "transport"));
+      }
+      return false;
+    }
     this.preempt(false);
     this.overflowResyncCount++;
     this.reconcileOverflow = false;

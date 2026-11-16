@@ -2235,7 +2235,7 @@ async function o1Scenario(mode, ledger) {
     assert.equal(firstQ.reference, 'M'); assert.equal(firstQ.interval, INTERVAL); assert.equal(firstQ.priceStep, 1);
     const oldSignal = firstQ.signal; assert.equal(oldSignal.aborted, false);
     const sendA = id => {
-      const time = T02D_TARGET + 70000 + id;
+      const time = T02D_TARGET + 10000 + id * 9;
       lastA = id % 2 ? buy(id, time, 10000, 1) : sell(id, time, 10001, 1);
       ledger.event(); a.emit('M', lastA); assertB(); assert.equal(o1Healthy(a), baseHealthy);
       a.flush(); assertB(); assert.equal(o1Healthy(a), baseHealthy);

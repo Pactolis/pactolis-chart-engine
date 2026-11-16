@@ -1,5 +1,5 @@
 import { incrementPerformanceCounter } from "../../performanceTelemetry.js";
-import { recordGpuContextEvent, recordGpuFallback, setGpuAdapterInfo } from "../gpuDiagnostics.js";
+import { recordGpuDeviceLoss, recordGpuFallback, setGpuAdapterInfo } from "../gpuDiagnostics.js";
 import type { ChartPowerPreference } from "../../model/chartDisplayOptions.js";
 import { isWebGpuSupported } from "../gpuSettings.js";
 export { isWebGpuSupported } from "../gpuSettings.js";
@@ -97,7 +97,7 @@ export async function requestWebGpuDevice(options?: {
       const handleLoss = (reason: string): void => {
         if (lost) return;
         lost = true;
-        recordGpuContextEvent("lost");
+        recordGpuDeviceLoss();
         if (sharedHandle === handle) {
           sharedHandle = null;
           sharedPowerPreference = "default";

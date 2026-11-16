@@ -44,7 +44,7 @@ import {
 import type { GpuSurface } from "../../core/gpu/gpuBackend.js";
 import { Canvas2dSurface } from "../../core/gpu/canvas2d/canvas2dSurface.js";
 import { WebGl2Surface } from "../../core/gpu/webgl2/webgl2Surface.js";
-import { recordGpuFallback, recordGpuFrame } from "../../core/gpu/gpuDiagnostics.js";
+import { recordGpuContextEvent, recordGpuFallback, recordGpuFrame } from "../../core/gpu/gpuDiagnostics.js";
 import { readGpuSettings } from "../../core/gpu/gpuSettings.js";
 
 const CONTEXT_RESTORE_TIMEOUT_MS = 5000;
@@ -733,7 +733,7 @@ export class ChartSession {
 
     if (this.gpuSurface.kind === "webgpu") {
       const unbind = this.gpuSurface.onLost((reason) => {
-        incrementPerformanceCounter("chart.gpu.contextLost");
+        recordGpuContextEvent("lost");
         this.cancelRaf();
         this.pendingLiveUpdateStartedAt = null;
         this.gpuValid = false;
@@ -769,7 +769,7 @@ export class ChartSession {
 
     const onLost = (e: Event): void => {
       e.preventDefault();
-      incrementPerformanceCounter("chart.gpu.contextLost");
+      recordGpuContextEvent("lost");
       this.cancelRaf();
       this.pendingLiveUpdateStartedAt = null;
       this.gpuValid = false;

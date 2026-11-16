@@ -78,7 +78,7 @@ function repairMeta(q, overrides = {}) {
   return meta;
 }
 
-function harness(fetchHistory) {
+function harness(fetchHistory, options = {}) {
   let session;
   const subs = new Set();
   const reporterEvents = [];
@@ -95,7 +95,7 @@ function harness(fetchHistory) {
     },
   };
   const pipeline = new ChartDataPipeline({
-    market: "M", intervalMs: 60_000, priceStep: 1, services,
+    market: "M", intervalMs: 60_000, priceStep: 1, services, ...options,
     onDataDegraded: (value, detail) => degraded.push({ value, detail }),
   });
   return {
@@ -245,7 +245,7 @@ test("repair buffer overflow starts a bounded resync and fences the late snapsho
     return index === 0 ? first.promise : second.promise;
   });
   h.reconnect(1);
-  for (let i = 0; i < 10_001; i++) h.emit(trade(101 + i, BASE + 60_001 + i));
+  for (let i = 0; i < 10_001; i++) h.emit(trade(101 + i, BASE + 60_001 + (i === 10_000 ? 90_000 : i)));
 
   assert.equal(calls, 2, "overflow immediately starts a fresh repair");
   assert.equal(signals[0].aborted, true, "the superseded snapshot is fenced");
@@ -271,4 +271,68 @@ test("dispose aborts repair and fences all late callbacks", async (t) => {
   assert.equal(h.reporterEvents.at(-1)?.state, "disposed");
   pending.resolve([bar(BASE, 999)]); await tick(3);
   assert.equal(h.pipeline.series.listReadonly().some((b) => b.volume === 999), false);
+});
+
+test("CPI burst buffers 60000 trades over 30 seconds and reconciles cells exactly once", async (t) => {
+  useFakeChartDataSource(t);
+  const pending = deferred();
+  let calls = 0;
+  const h = harness((q) => { calls++; q.onMeta?.(repairMeta(q)); return pending.promise; }, {
+    scheduler: { request: (cb) => { cb(); return 0; }, cancel() {} },
+  });
+  h.reconnect(1);
+  for (let i = 0; i < 60000; i++) h.emit(trade(101 + i, BASE + 60001 + Math.floor(i / 2)));
+  assert.equal(calls, 1);
+  assert.equal(h.reporterEvents.some((e) => e.state === "error"), false);
+  pending.resolve([bar(BASE, 10)]);
+  await tick(6);
+  const bars = h.pipeline.series.listReadonly();
+  assert.equal(totalVolume(h.pipeline.series), 60010);
+  assert.equal(bars.reduce((sum, b) => sum + [...b.cells.values()].reduce((n, c) => n + c.buyVol + c.sellVol, 0), 0), 60010);
+  assert.equal(h.reporterEvents.at(-1)?.state, "healthy");
+  assert.equal(h.degraded.at(-1)?.value, false);
+  h.pipeline.dispose();
+});
+
+test("overflow exhaustion defers on the transport ladder then repairs the original gap without a new session", async (t) => {
+  useFakeChartDataSource(t);
+  const trades = [];
+  const signals = [];
+  let retry;
+  let calls = 0;
+  const h = harness((q) => {
+    signals.push(q.signal);
+    calls++;
+    if (calls <= 5) return new Promise(() => {});
+    const volumes = new Map([[BASE, 10]]);
+    for (const trade of trades) {
+      const bucket = Math.floor(trade.time / 60000) * 60000;
+      volumes.set(bucket, (volumes.get(bucket) ?? 0) + trade.qty);
+    }
+    q.onMeta?.(repairMeta(q, { watermark: trades.at(-1).id }));
+    return Promise.resolve([...volumes].map(([time, volume]) => bar(time, volume)));
+  }, { scheduler: { request: (cb) => { cb(); return 0; }, cancel() {} } });
+  h.pipeline.setRecentCoverageRetryScheduler((attempt, callback, reason) => {
+    assert.equal(reason, "transport");
+    retry = callback;
+  });
+  h.reconnect(1);
+  for (let round = 0; round < 5; round++) {
+    for (let i = 0; i <= 10000; i++) {
+      const value = trade(101 + trades.length, BASE + 60001 + round * 100000 + (i === 10000 ? 90000 : i));
+      trades.push(value);
+      h.emit(value);
+    }
+  }
+  assert.equal(calls, 5, "overflow exhaustion must not spin a sixth immediate request");
+  assert.equal(typeof retry, "function");
+  assert.equal(signals.every((signal) => signal.aborted), true);
+  assert.equal(h.degraded.at(-1)?.value, true);
+  assert.equal(retry(), true);
+  await tick(6);
+  assert.equal(h.reporterEvents.at(-1)?.state, "healthy");
+  assert.equal(h.degraded.at(-1)?.value, false);
+  assert.equal(totalVolume(h.pipeline.series), 10 + trades.length);
+  assert.equal(h.pipeline.series.listReadonly().reduce((sum, b) => sum + [...b.cells.values()].reduce((n, c) => n + c.buyVol + c.sellVol, 0), 0), 10 + trades.length);
+  h.pipeline.dispose();
 });
