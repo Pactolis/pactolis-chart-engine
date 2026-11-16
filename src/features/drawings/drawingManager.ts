@@ -3,7 +3,7 @@ import type { View } from "../../core/engine/view.js";
 import type { FootprintSeries } from "../../core/model/footprint.js";
 import { drawAnalysisDrawings } from "../../core/render/analysisDrawings.js";
 import { t } from "../../core/chartLocale.js";
-import type { DrawingContext } from "../../core/drawingTypes.js";
+import type { Drawing, DrawingContext, DrawingType } from "../../core/drawingTypes.js";
 import { applyLineStyle, clamp01, drawLine, drawObjectName, drawingDisplayName, isAnnotationTool, isFibonacciTool, isMeasurementTool, isZoneTool, queuePriceAxisLabel, queueTimeAxisLabel, queueTrendPriceLabels, queueZonePriceLabels, queueZoneTimeLabels, renderAnnotationTool, renderBrush, renderEllipse, renderFibonacciTool, renderGannFan, renderGannGrid, renderMeasurementTool, renderParallelChannel, renderPitchfork, renderRegressionChannel, renderTriangle, screenPoint, trendRenderLine, zoneRenderBox } from "./drawingPrimitives.js";
 import { DrawingGestures } from "./drawingGestures.js";
 
@@ -34,6 +34,14 @@ export {
 } from "./drawingPrimitives.js";
 
 export class DrawingManager extends DrawingGestures {
+  constructor(
+    onChange: (drawings: Drawing[], transient: boolean) => void,
+    onToolChange?: (tool: DrawingType | null) => void,
+    onRequestText?: (id: string, deleteOnCancel?: boolean) => void,
+    onRequestSettings?: (id: string) => void,
+  ) {
+    super(onChange, onToolChange, onRequestText, onRequestSettings);
+  }
 
   /** Read-only render seam: avoids cloning the full drawing graph on every frame. */
   renderAnalysis(
