@@ -2740,7 +2740,7 @@ test("real Runtime native DPR lifecycle: device-scale sweep, hidden zero-geometr
     let tornDown = false;
     try {
       wrap(FootprintRenderer.prototype, "renderLayers", (original) => function (view, series, activeLayers) {
-        const owner = ownerOfCanvas(this?.gl?.canvas);
+        const owner = ownerOfCanvas(this?.surface?.canvas ?? this?.gl?.canvas);
         try {
           return Reflect.apply(original, this, [view, series, activeLayers]);
         } finally {
