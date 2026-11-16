@@ -66,6 +66,7 @@ export class AxisLayerCache {
   private hasLastTimeViewport = false;
   private lastTimeOffsetX = Number.NaN;
   private lastTimeColWidth = Number.NaN;
+  private timeViewportMovedLastFrame = false;
 
   renderPriceAxis(
     ctx: CanvasRenderingContext2D,
@@ -160,12 +161,17 @@ export class AxisLayerCache {
   ): void {
     const offsetX = view.offsetX;
     const colWidth = view.colWidth;
-    // Active pan/zoom changes offsetX/colWidth every frame: bypass the offscreen
-    // bitmap and draw straight onto ctx to avoid clearRect + offscreen blit overhead.
-    if (this.hasLastTimeViewport && (this.lastTimeOffsetX !== offsetX || this.lastTimeColWidth !== colWidth)) {
+    const viewportMoved =
+      this.hasLastTimeViewport &&
+      (this.lastTimeOffsetX !== offsetX || this.lastTimeColWidth !== colWidth);
+    // Active pan/zoom changes offsetX/colWidth across consecutive frames: bypass the
+    // offscreen bitmap and draw straight onto ctx to avoid clearRect + offscreen blit overhead,
+    // while leaving one-shot programmatic viewport jumps on the cached path.
+    if (viewportMoved && this.timeViewportMovedLastFrame) {
       this.timeEntry = null;
       this.lastTimeOffsetX = offsetX;
       this.lastTimeColWidth = colWidth;
+      this.timeViewportMovedLastFrame = true;
       incrementPerformanceCounter("chart.annotation.axis.time.cache.bypass");
       drawTimeAxis(ctx, view, series, undefined, timeMarkers);
       return;
@@ -175,6 +181,7 @@ export class AxisLayerCache {
     if (!env) {
       this.timeEntry = null;
       this.hasLastTimeViewport = false;
+      this.timeViewportMovedLastFrame = false;
       drawTimeAxis(ctx, view, series, undefined, timeMarkers);
       return;
     }
@@ -188,6 +195,7 @@ export class AxisLayerCache {
     if (bounds.devW <= 0 || bounds.devH <= 0) {
       this.timeEntry = null;
       this.hasLastTimeViewport = false;
+      this.timeViewportMovedLastFrame = false;
       drawTimeAxis(ctx, view, series, undefined, timeMarkers);
       return;
     }
@@ -195,6 +203,10 @@ export class AxisLayerCache {
     const key = buildTimeAxisKey(view, series, timeMarkers, env.canvasW, env.canvasH, env.tx);
     if (this.timeEntry && this.timeEntry.key === key && this.timeEntry.series === series) {
       incrementPerformanceCounter("chart.annotation.axis.time.cache.hit");
+      this.lastTimeOffsetX = offsetX;
+      this.lastTimeColWidth = colWidth;
+      this.hasLastTimeViewport = true;
+      this.timeViewportMovedLastFrame = false;
       if (this.timeEntry.hasBitmap && this.timeCanvas) {
         blitOffscreenCanvas(ctx, this.timeCanvas, this.timeEntry.devX, this.timeEntry.devY);
       }
@@ -206,6 +218,7 @@ export class AxisLayerCache {
     if (!offCtx || typeof offCtx.setTransform !== "function") {
       this.timeEntry = null;
       this.hasLastTimeViewport = false;
+      this.timeViewportMovedLastFrame = false;
       drawTimeAxis(ctx, view, series, undefined, timeMarkers);
       return;
     }
@@ -229,6 +242,7 @@ export class AxisLayerCache {
     this.lastTimeOffsetX = offsetX;
     this.lastTimeColWidth = colWidth;
     this.hasLastTimeViewport = true;
+    this.timeViewportMovedLastFrame = viewportMoved;
     blitOffscreenCanvas(ctx, offscreen, entry.devX, entry.devY);
   }
 
@@ -238,6 +252,7 @@ export class AxisLayerCache {
     this.hasLastTimeViewport = false;
     this.lastTimeOffsetX = Number.NaN;
     this.lastTimeColWidth = Number.NaN;
+    this.timeViewportMovedLastFrame = false;
   }
 
   dispose(): void {

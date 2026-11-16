@@ -381,7 +381,13 @@ test("axis cache invalidates independently on scale, viewport, DPR, locale, sett
         assert.equal(d["chart.annotation.axis.time.cache.hit"], 1);
         assert.ok(ctx.calls.filter((c) => c.op === "stroke" && c.strokeStyle === axisGridLineColor).length > 0);
 
-        // 7. Horizontal pan/zoom -> bypasses offscreen time cache (draws directly on ctx), price hits
+        // 7. Horizontal pan/zoom -> one-shot move caches, consecutive active pan bypasses offscreen time cache, price hits
+        view.panX(-40);
+        d = renderDelta();
+        assert.equal(d["chart.annotation.axis.price.cache.hit"], 1);
+        assert.equal(d["chart.annotation.axis.time.cache.miss"], 1);
+        assert.equal(d["chart.annotation.axis.time.cache.bypass"], undefined);
+
         view.panX(-40);
         d = renderDelta();
         assert.equal(d["chart.annotation.axis.price.cache.hit"], 1);
@@ -606,8 +612,25 @@ test("time axis bypasses offscreen cache during active pan/zoom and resumes cach
 
         let offTimeCalls = doc.offscreenCanvases[1].recordedCtx.calls.length;
 
-        // 2. Active horizontal pan across multiple frames bypasses time offscreen cache.
-        for (const dx of [-15, -20, -18]) {
+        // 2a. A single one-shot jump stays cached (and immediately hits if stationary on the next frame).
+        view.panX(-15);
+        const singleJump = renderStep();
+        assert.equal(singleJump.delta["chart.annotation.axis.price.cache.hit"], 1);
+        assert.equal(singleJump.delta["chart.annotation.axis.time.cache.miss"], 1);
+        assert.equal(singleJump.delta["chart.annotation.axis.time.cache.bypass"], undefined);
+        assert.equal(singleJump.drawImages, 2);
+
+        const stationaryAfterJump = renderStep();
+        assert.equal(stationaryAfterJump.delta["chart.annotation.axis.time.cache.hit"], 1);
+        assert.equal(stationaryAfterJump.delta["chart.annotation.axis.time.cache.bypass"], undefined);
+
+        // 2b. Active horizontal pan across consecutive frames warms frame 1 then bypasses offscreen time cache.
+        view.panX(-12);
+        const panStart = renderStep();
+        assert.equal(panStart.delta["chart.annotation.axis.time.cache.miss"], 1);
+        offTimeCalls = doc.offscreenCanvases[1].recordedCtx.calls.length;
+
+        for (const dx of [-20, -18]) {
           view.panX(dx);
           const p = renderStep();
           assert.equal(p.delta["chart.annotation.axis.price.cache.hit"], 1);
@@ -622,7 +645,7 @@ test("time axis bypasses offscreen cache during active pan/zoom and resumes cach
           assert.deepEqual(timeLabelsInCalls(ctx.calls, view), timeLabelsInCalls(direct.calls, view));
         }
 
-        // 3. Changing only colWidth (zoom) also triggers bypass without offscreen draw/blit.
+        // 3. Changing only colWidth (zoom) during consecutive motion also triggers bypass without offscreen draw/blit.
         view.colWidth = 26;
         const zoomed = renderStep();
         assert.equal(zoomed.delta["chart.annotation.axis.time.cache.bypass"], 1);
@@ -646,9 +669,11 @@ test("time axis bypasses offscreen cache during active pan/zoom and resumes cach
           assert.equal(doc.offscreenCanvases[1].recordedCtx.calls.length, offTimeCalls);
         }
 
-        // 5. Panning back to exact initial (offsetX, colWidth) bypasses and must not reuse invalidated pre-pan entry.
-        view.offsetX = initialOffsetX;
+        // 5. Panning back to exact initial (offsetX, colWidth) across consecutive moves bypasses without reusing stale entry.
+        view.offsetX = initialOffsetX + 8;
         view.colWidth = initialColWidth;
+        assert.equal(renderStep().delta["chart.annotation.axis.time.cache.miss"], 1);
+        view.offsetX = initialOffsetX;
         const returned = renderStep();
         assert.equal(returned.delta["chart.annotation.axis.time.cache.bypass"], 1);
         assert.equal(returned.delta["chart.annotation.axis.time.cache.hit"], undefined);
@@ -671,6 +696,8 @@ test("time axis bypasses offscreen cache during active pan/zoom and resumes cach
         // Active marker while panning draws directly on main ctx matching drawTimeAxis output, then caches when stopped.
         activeTimeMarker = { time: BASE_TIME + 12 * 60_000, text: "M1", color: "#00ff00" };
         view.panX(-10);
+        assert.equal(renderStep().delta["chart.annotation.axis.time.cache.miss"], 1);
+        view.panX(-10);
         const markerPan = renderStep();
         assert.equal(markerPan.delta["chart.annotation.axis.time.cache.bypass"], 1);
         const directWithMarker = makeRecordedContext(1500, 900, null, 1.5);
@@ -689,11 +716,17 @@ test("time axis bypasses offscreen cache during active pan/zoom and resumes cach
         drawTimeAxis(directTz, view, series, undefined, [activeTimeMarker]);
         assert.deepEqual(timeLabelsInCalls(doc.offscreenCanvases[1].recordedCtx.calls, view), timeLabelsInCalls(directTz.calls, view));
 
-        // Explicit invalidateAxisCache resets pan tracking so the next render warms the cache instead of bypassing.
+        // Explicit invalidateAxisCache resets pan tracking so two consecutive pans after reset must re-arm before bypassing.
+        view.panX(-5);
+        assert.equal(renderStep().delta["chart.annotation.axis.time.cache.miss"], 1);
         overlay.invalidateAxisCache();
         const afterReset = renderStep();
         assert.equal(afterReset.delta["chart.annotation.axis.time.cache.miss"], 1);
         assert.equal(afterReset.delta["chart.annotation.axis.time.cache.bypass"], undefined);
+        view.panX(-5);
+        assert.equal(renderStep().delta["chart.annotation.axis.time.cache.miss"], 1);
+        view.panX(-5);
+        assert.equal(renderStep().delta["chart.annotation.axis.time.cache.bypass"], 1);
       } finally {
         overlay.dispose();
       }
