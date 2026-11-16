@@ -3,7 +3,8 @@ import { expect, test } from "@playwright/test";
 // Virtual exchange time compresses 90 seconds into 90 browser turns. This is
 // pipeline/journal qualification; timings are diagnostics, not a real GPU census.
 test("5k trades per second for 90 seconds recover after a delayed snapshot within the journal cap", async ({ page }, testInfo) => {
-  await page.goto("/");
+  await page.route("**/__repair-burst", (route) => route.fulfill({ contentType: "text/html", body: "<!doctype html><html><body></body></html>" }));
+  await page.goto("/__repair-burst");
   const result = await page.evaluate(async () => {
     const { ChartDataPipeline } = await import("/src/features/chart/ChartDataPipeline.ts");
     const { configureChartDataSource } = await import("/src/features/chart/chartDataSource.ts");
