@@ -2,10 +2,14 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 
-const source = readFileSync(new URL("../src/features/chart/ChartDataPipeline.ts", import.meta.url), "utf8");
+const source = [
+  readFileSync(new URL("../src/features/chart/ChartDataPipeline.ts", import.meta.url), "utf8"),
+  readFileSync(new URL("../src/features/chart/pipeline/historyLoad.ts", import.meta.url), "utf8"),
+  readFileSync(new URL("../src/features/chart/pipeline/liveTradeQueue.ts", import.meta.url), "utf8"),
+].join("\n");
 
 test("explicit history records live trades without freezing normal delivery", () => {
-  assert.match(source, /private explicitHistoryReconcile: ExplicitHistoryReconcileState \| null = null/);
+  assert.match(source, /explicitHistoryReconcile: ExplicitHistoryReconcileState \| null = null/);
   assert.match(source, /explicit\.trades\.push\(trade\)/);
   assert.match(source, /this\._enqueuePendingTrade\(trade\)/);
   assert.match(source, /this\.historyController\?\.abort\(\)/);
