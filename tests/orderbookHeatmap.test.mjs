@@ -1,5 +1,8 @@
 import { OrderbookHeatmapOverlay } from "../dist/features/orderbook/heatmapOverlay.js";
-import { configureOrderbookHeatmapSettingsSource } from "../dist/features/orderbook/heatmapSettingsSource.js";
+import {
+  configureOrderbookHeatmapSettingsSource,
+  orderbookHeatmapSettingsSource,
+} from "../dist/features/orderbook/heatmapSettingsSource.js";
 import { View } from "../dist/core/engine/view.js";
 import { FootprintSeries } from "../dist/core/model/footprint.js";
 // Orderbook heatmap model: tiers, chunking, sub-bar selection, units and colors.
@@ -111,149 +114,168 @@ const mockCtx = {
   textBaseline: "",
 };
 
-test("preserves historical chunks while live-tail invalidation updates only the live tail", async () => {
+async function withHeatmapSettingsSource(settingsFor, work) {
+  let prevSource = null;
+  try { prevSource = orderbookHeatmapSettingsSource(); } catch {}
   configureOrderbookHeatmapSettingsSource({
-    settingsFor: () => ({
-      mode: "single", unit: "usd", bucketStep: 50,
-      single: { usd: 1, btc: 1 }, aggregated: { usd: 1, btc: 1 },
-    }),
+    settingsFor,
     onChange: () => () => {},
   });
+  try {
+    return await work();
+  } finally {
+    if (prevSource) configureOrderbookHeatmapSettingsSource(prevSource);
+  }
+}
 
-  const series = new FootprintSeries({ intervalMs: 60_000, priceStep: 1 });
-  series.loadBars(Array.from({ length: 1050 }, (_, i) => ({
-    startTime: i * 60_000,
-    open: 100, high: 105, low: 95, close: 102, volume: 10, delta: 0, count: 0, cells: new Map(), hasRef: true,
-  })));
+test("preserves historical chunks while live-tail invalidation updates only the live tail", async () => {
+  await withHeatmapSettingsSource(() => ({
+    mode: "single", unit: "usd", bucketStep: 50,
+    single: { usd: 1, btc: 1 }, aggregated: { usd: 1, btc: 1 },
+  }), async () => {
+    const series = new FootprintSeries({ intervalMs: 60_000, priceStep: 1 });
+    series.loadBars(Array.from({ length: 1050 }, (_, i) => ({
+      startTime: i * 60_000,
+      open: 100, high: 105, low: 95, close: 102, volume: 10, delta: 0, count: 0, cells: new Map(), hasRef: true,
+    })));
 
-  const fetchedRequests = [];
-  let currentTime = 1050 * 60_000;
+    const fetchedRequests = [];
+    let currentTime = 1050 * 60_000;
 
-  const overlay = new OrderbookHeatmapOverlay({
-    fetch: async (req) => {
-      fetchedRequests.push(req);
-      return {
-        schemaVersion: 1,
-        generatedAt: currentTime,
-        base: "BTC",
-        source: req.source,
-        resolution: req.resolution,
-        bucketStep: req.bucketStep,
-        from: req.from,
-        to: req.to,
-        bars: [{ t: req.from, cells: [[50000, 1000, 1000]] }],
-      };
-    },
-    invalidate: () => {},
-    getMarket: () => "BINANCE_FUTURES:btcusdt",
-    now: () => currentTime,
-    liveDebounceMs: 10,
+    const overlay = new OrderbookHeatmapOverlay({
+      fetch: async (req) => {
+        fetchedRequests.push(req);
+        return {
+          schemaVersion: 1,
+          generatedAt: currentTime,
+          base: "BTC",
+          source: req.source,
+          resolution: req.resolution,
+          bucketStep: req.bucketStep,
+          from: req.from,
+          to: req.to,
+          bars: [{ t: req.from, cells: [[50000, 1000, 1000]] }],
+        };
+      },
+      invalidate: () => {},
+      getMarket: () => "BINANCE_FUTURES:btcusdt",
+      now: () => currentTime,
+      liveDebounceMs: 10,
+    });
+
+    try {
+      const view = makeTestView();
+      overlay.draw(mockCtx, view, series, [0, 1049]);
+
+      // Wait for initial REST chunks
+      await new Promise((resolve) => setTimeout(resolve, 50));
+      assert.equal(fetchedRequests.length, 2);
+      assert.equal(fetchedRequests[0].from, 0); // historical chunk
+      assert.equal(fetchedRequests[1].from, 1000 * 60_000); // live chunk
+      assert.equal(overlay.chunkStatus(0), "ready");
+      assert.equal(overlay.chunkStatus(1000 * 60_000), "ready");
+
+      // Clear request log to track live-tail invalidation
+      fetchedRequests.length = 0;
+
+      // Trigger live tail invalidation signal
+      overlay.invalidateLiveTail();
+
+      // Wait for bounded debounce
+      await new Promise((resolve) => setTimeout(resolve, 50));
+
+      // Historical chunk (from: 0) is NEVER requested again!
+      assert.ok(fetchedRequests.every((req) => req.from >= 1000 * 60_000), "historical chunks are never re-fetched");
+      assert.equal(overlay.chunkStatus(0), "ready", "historical chunk remains ready");
+
+      // Direct live-tail push merges bars without REST fetch
+      const beforePushCount = fetchedRequests.length;
+      overlay.applyLiveTailBars([{ t: 1050 * 60_000, cells: [[50050, 5000, 5000]] }]);
+      assert.equal(fetchedRequests.length, beforePushCount, "direct push does not issue REST requests");
+    } finally {
+      overlay.dispose();
+    }
   });
-
-  const view = makeTestView();
-  overlay.draw(mockCtx, view, series, [0, 1049]);
-
-  // Wait for initial REST chunks
-  await new Promise((resolve) => setTimeout(resolve, 50));
-  assert.equal(fetchedRequests.length, 2);
-  assert.equal(fetchedRequests[0].from, 0); // historical chunk
-  assert.equal(fetchedRequests[1].from, 1000 * 60_000); // live chunk
-  assert.equal(overlay.chunkStatus(0), "ready");
-  assert.equal(overlay.chunkStatus(1000 * 60_000), "ready");
-
-  // Clear request log to track live-tail invalidation
-  fetchedRequests.length = 0;
-
-  // Trigger live tail invalidation signal
-  overlay.invalidateLiveTail();
-
-  // Wait for bounded debounce
-  await new Promise((resolve) => setTimeout(resolve, 50));
-
-  // Historical chunk (from: 0) is NEVER requested again!
-  assert.ok(fetchedRequests.every((req) => req.from >= 1000 * 60_000), "historical chunks are never re-fetched");
-  assert.equal(overlay.chunkStatus(0), "ready", "historical chunk remains ready");
-
-  // Direct live-tail push merges bars without REST fetch
-  const beforePushCount = fetchedRequests.length;
-  overlay.applyLiveTailBars([{ t: 1050 * 60_000, cells: [[50050, 5000, 5000]] }]);
-  assert.equal(fetchedRequests.length, beforePushCount, "direct push does not issue REST requests");
-
-  overlay.dispose();
 });
 
 test("raising the threshold reuses cached data without a blank frame or refetch", async () => {
   let threshold = 20_000_000;
-  configureOrderbookHeatmapSettingsSource({
-    settingsFor: () => ({ mode: "single", unit: "usd", bucketStep: 50,
-      single: { usd: threshold, btc: 1 }, aggregated: { usd: threshold, btc: 1 } }),
-    onChange: () => () => {},
-  });
-  const series = new FootprintSeries({ intervalMs: 60_000, priceStep: 1 });
-  series.loadBars([{ startTime: 0, open: 100, high: 105, low: 95, close: 102, volume: 10, delta: 0, count: 0, cells: new Map(), hasRef: true }]);
-  const requests = [];
-  const now = 60_000;
-  const overlay = new OrderbookHeatmapOverlay({
-    fetch: async (req) => {
-      requests.push(req);
-      return { schemaVersion: 1, generatedAt: now, base: "BTC", source: req.source,
-        resolution: req.resolution, bucketStep: req.bucketStep, from: req.from, to: req.to,
-        bars: [{ t: 0, cells: [[100, 30_000_000, 30_000_000]] }] };
-    }, invalidate: () => {}, getMarket: () => "BINANCE_FUTURES:btcusdt", now: () => now,
-  });
-  const view = makeTestView();
-  overlay.draw(mockCtx, view, series, [0, 0]);
-  await new Promise((resolve) => setTimeout(resolve, 20));
-  const initialRequests = requests.length;
-  assert.ok(initialRequests > 0);
-  assert.ok(overlay.cachedBarsCount() > 0);
+  await withHeatmapSettingsSource(() => ({
+    mode: "single", unit: "usd", bucketStep: 50,
+    single: { usd: threshold, btc: 1 }, aggregated: { usd: threshold, btc: 1 },
+  }), async () => {
+    const series = new FootprintSeries({ intervalMs: 60_000, priceStep: 1 });
+    series.loadBars([{ startTime: 0, open: 100, high: 105, low: 95, close: 102, volume: 10, delta: 0, count: 0, cells: new Map(), hasRef: true }]);
+    const requests = [];
+    const now = 60_000;
+    const overlay = new OrderbookHeatmapOverlay({
+      fetch: async (req) => {
+        requests.push(req);
+        return { schemaVersion: 1, generatedAt: now, base: "BTC", source: req.source,
+          resolution: req.resolution, bucketStep: req.bucketStep, from: req.from, to: req.to,
+          bars: [{ t: 0, cells: [[100, 30_000_000, 30_000_000]] }] };
+      }, invalidate: () => {}, getMarket: () => "BINANCE_FUTURES:btcusdt", now: () => now,
+    });
+    try {
+      const view = makeTestView();
+      overlay.draw(mockCtx, view, series, [0, 0]);
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      const initialRequests = requests.length;
+      assert.ok(initialRequests > 0);
+      assert.ok(overlay.cachedBarsCount() > 0);
 
-  for (threshold = 21_000_000; threshold <= 50_000_000; threshold += 1_000_000) {
-    overlay.draw(mockCtx, view, series, [0, 0]);
-    assert.ok(overlay.cachedBarsCount() > 0, `cache remains populated at ${threshold}`);
-    await new Promise((resolve) => setTimeout(resolve, 5));
-    assert.equal(requests.length, initialRequests, `no request at ${threshold}`);
-  }
-  overlay.dispose();
+      for (threshold = 21_000_000; threshold <= 50_000_000; threshold += 1_000_000) {
+        overlay.draw(mockCtx, view, series, [0, 0]);
+        assert.ok(overlay.cachedBarsCount() > 0, `cache remains populated at ${threshold}`);
+        await new Promise((resolve) => setTimeout(resolve, 5));
+        assert.equal(requests.length, initialRequests, `no request at ${threshold}`);
+      }
+    } finally {
+      overlay.dispose();
+    }
+  });
 });
 
 test("lowering the threshold keeps compatible cached bars visible during revalidation", async () => {
   let threshold = 20_000_000;
-  configureOrderbookHeatmapSettingsSource({
-    settingsFor: () => ({ mode: "single", unit: "usd", bucketStep: 50,
-      single: { usd: threshold, btc: 1 }, aggregated: { usd: threshold, btc: 1 } }),
-    onChange: () => () => {},
+  await withHeatmapSettingsSource(() => ({
+    mode: "single", unit: "usd", bucketStep: 50,
+    single: { usd: threshold, btc: 1 }, aggregated: { usd: threshold, btc: 1 },
+  }), async () => {
+    const series = new FootprintSeries({ intervalMs: 60_000, priceStep: 1 });
+    series.loadBars([{ startTime: 0, open: 100, high: 105, low: 95, close: 102, volume: 10, delta: 0, count: 0, cells: new Map(), hasRef: true }]);
+    let finishRefresh;
+    const requests = [];
+    const now = 60_000;
+    const overlay = new OrderbookHeatmapOverlay({
+      fetch: (req) => {
+        requests.push(req);
+        if (requests.length === 1) return Promise.resolve({ schemaVersion: 1, generatedAt: now, base: "BTC", source: req.source,
+          resolution: req.resolution, bucketStep: req.bucketStep, from: req.from, to: req.to,
+          bars: [{ t: 0, cells: [[100, 25_000_000, 25_000_000]] }] });
+        return new Promise((resolve) => { finishRefresh = () => resolve({ schemaVersion: 1, generatedAt: now, base: "BTC", source: req.source,
+          resolution: req.resolution, bucketStep: req.bucketStep, from: req.from, to: req.to,
+          bars: [{ t: 0, cells: [[100, 15_000_000, 15_000_000]] }] }); });
+      }, invalidate: () => {}, getMarket: () => "BINANCE_FUTURES:btcusdt", now: () => now,
+    });
+    try {
+      const view = makeTestView();
+      overlay.draw(mockCtx, view, series, [0, 0]);
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      assert.equal(overlay.cachedBarsCount(), 1);
+      threshold = 10_000_000;
+      overlay.draw(mockCtx, view, series, [0, 0]);
+      assert.equal(requests.length, 2);
+      assert.equal(requests[1].minUsd, threshold);
+      assert.equal(overlay.cachedBarsCount(), 1, "old compatible data remains while refresh is pending");
+      assert.equal(overlay.chunkStatus(0), "loading");
+      finishRefresh();
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      assert.equal(overlay.cachedBarsCount(), 1);
+    } finally {
+      overlay.dispose();
+    }
   });
-  const series = new FootprintSeries({ intervalMs: 60_000, priceStep: 1 });
-  series.loadBars([{ startTime: 0, open: 100, high: 105, low: 95, close: 102, volume: 10, delta: 0, count: 0, cells: new Map(), hasRef: true }]);
-  let finishRefresh;
-  const requests = [];
-  const now = 60_000;
-  const overlay = new OrderbookHeatmapOverlay({
-    fetch: (req) => {
-      requests.push(req);
-      if (requests.length === 1) return Promise.resolve({ schemaVersion: 1, generatedAt: now, base: "BTC", source: req.source,
-        resolution: req.resolution, bucketStep: req.bucketStep, from: req.from, to: req.to,
-        bars: [{ t: 0, cells: [[100, 25_000_000, 25_000_000]] }] });
-      return new Promise((resolve) => { finishRefresh = () => resolve({ schemaVersion: 1, generatedAt: now, base: "BTC", source: req.source,
-        resolution: req.resolution, bucketStep: req.bucketStep, from: req.from, to: req.to,
-        bars: [{ t: 0, cells: [[100, 15_000_000, 15_000_000]] }] }); });
-    }, invalidate: () => {}, getMarket: () => "BINANCE_FUTURES:btcusdt", now: () => now,
-  });
-  const view = makeTestView();
-  overlay.draw(mockCtx, view, series, [0, 0]);
-  await new Promise((resolve) => setTimeout(resolve, 20));
-  assert.equal(overlay.cachedBarsCount(), 1);
-  threshold = 10_000_000;
-  overlay.draw(mockCtx, view, series, [0, 0]);
-  assert.equal(requests.length, 2);
-  assert.equal(requests[1].minUsd, threshold);
-  assert.equal(overlay.cachedBarsCount(), 1, "old compatible data remains while refresh is pending");
-  assert.equal(overlay.chunkStatus(0), "loading");
-  finishRefresh();
-  await new Promise((resolve) => setTimeout(resolve, 20));
-  assert.equal(overlay.cachedBarsCount(), 1);
-  overlay.dispose();
 });
 test("falls back to timer refresh when no live-tail source is provided or when idle", () => {
   let currentTime = 1_000_000;
@@ -322,13 +344,10 @@ test("subscribes to live-tail and performs proper cleanup on dispose", () => {
 });
 
 test("CPU raster cache skips cell fillRect loop when data and viewport stay unchanged and refreshes on change", async () => {
-  configureOrderbookHeatmapSettingsSource({
-    settingsFor: () => ({
-      mode: "single", unit: "usd", bucketStep: 50,
-      single: { usd: 1, btc: 1 }, aggregated: { usd: 1, btc: 1 },
-    }),
-    onChange: () => () => {},
-  });
+  await withHeatmapSettingsSource(() => ({
+    mode: "single", unit: "usd", bucketStep: 50,
+    single: { usd: 1, btc: 1 }, aggregated: { usd: 1, btc: 1 },
+  }), async () => {
 
   const series = new FootprintSeries({ intervalMs: 60_000, priceStep: 1 });
   series.loadBars([
@@ -446,9 +465,10 @@ test("CPU raster cache skips cell fillRect loop when data and viewport stay unch
     assert.equal(offClearRectCalls, 4);
     assert.equal(offFillRectCalls, 16);
     assert.equal(drawImageCalls.length, 5);
-  } finally {
-    overlay.dispose();
-    assert.equal(overlay.rasterCacheCanvas, null);
-    assert.equal(overlay.lastRasterKey, "");
-  }
+    } finally {
+      overlay.dispose();
+      assert.equal(overlay.rasterCacheCanvas, null);
+      assert.equal(overlay.lastRasterKey, "");
+    }
+  });
 });

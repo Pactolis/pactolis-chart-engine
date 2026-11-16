@@ -23,6 +23,7 @@ const {
 } = await import("../dist/features/orderbook/heatmapOverlay.js");
 const {
   configureOrderbookHeatmapSettingsSource,
+  orderbookHeatmapSettingsSource,
 } = await import("../dist/features/orderbook/heatmapSettingsSource.js");
 const {
   configurePerformanceTelemetry,
@@ -328,6 +329,8 @@ test("ChartHeatmapGpuCoordinator: publishes successful WebGL2 render and clears 
 
 test("ChartHeatmapGpuCoordinator: caches prepared GPU frames across unchanged renders and preserves lease accounting", async () => {
   resetGpuDiagnosticsForTest();
+  let prevHeatmapSettingsSource = null;
+  try { prevHeatmapSettingsSource = orderbookHeatmapSettingsSource(); } catch {}
   configureOrderbookHeatmapSettingsSource({
     settingsFor: () => ({
       mode: "single", unit: "usd", bucketStep: 25,
@@ -506,6 +509,7 @@ test("ChartHeatmapGpuCoordinator: caches prepared GPU frames across unchanged re
     assert.equal(coordinator.getLease(), null);
   } finally {
     configurePerformanceTelemetry({ enabled: wasTelemetryEnabled });
+    if (prevHeatmapSettingsSource) configureOrderbookHeatmapSettingsSource(prevHeatmapSettingsSource);
     overlay.dispose();
     coordinator.dispose();
     resetGpuDiagnosticsForTest();
