@@ -124,7 +124,7 @@ async function install15kFixture(page: Page): Promise<string> {
     });
   });
 
-  await openHarness(page);
+  await openHarness(page, "?chart=BINANCE_FUTURES:btcusdt&timeframe=15m&priceStep=50&priceStepResolved=0");
   const hook = page.locator(HOOK_SELECTOR);
   await expect(hook).toHaveAttribute("data-history-loading", "false");
   await expect(hook).toHaveAttribute("data-series-len", String(BARS_COUNT));

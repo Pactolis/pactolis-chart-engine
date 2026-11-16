@@ -206,7 +206,7 @@ test("per-chart budget fallback paints directly without caching and releases pri
       assert.equal(s1.createCanvasCalls, 0, "over-chart-budget frame must not create offscreen canvas");
       assert.equal(s1.drawImageCount, 0);
       assert.equal(s1.offFillRectCalls, 0);
-      assert.equal(s1.mainFillRectCalls, 2, "over-budget fallback still draws all cells directly");
+      assert.equal(s1.mainFillRectCalls, 4, "over-budget fallback still draws all cells directly (bar + live tail)");
       assert.equal(overlay.reservedRasterBytes(), 0);
       assert.equal(getHeatmapCpuRasterModuleReservedBytes(), 0);
       assert.equal(
@@ -239,7 +239,7 @@ test("per-chart budget fallback paints directly without caching and releases pri
       assert.equal(createdCanvas.height, 0, "over-budget transition zeroes previous canvas height");
       assert.equal(overlay.reservedRasterBytes(), 0);
       assert.equal(getHeatmapCpuRasterModuleReservedBytes(), 0);
-      assert.equal(harness.stats().mainFillRectCalls, 2);
+      assert.equal(harness.stats().mainFillRectCalls, 4);
     });
   } finally {
     for (const overlay of overlays) overlay.dispose();
@@ -313,7 +313,7 @@ test("module budget caps N concurrent charts (8+ realms) and frees slots on hide
         assert.equal(heavyOverlays[i].reservedRasterBytes(), 0, `chart ${i} falls back cleanly past 128 MiB`);
         assert.equal(heavyHarnesses[i].stats().createCanvasCalls, 0);
         assert.equal(heavyHarnesses[i].stats().drawImageCount, 0);
-        assert.equal(heavyHarnesses[i].stats().mainFillRectCalls, 2);
+        assert.equal(heavyHarnesses[i].stats().mainFillRectCalls, 4);
       }
       assert.equal(getHeatmapCpuRasterModuleReservedBytes(), 4 * chartBytes);
 
@@ -412,7 +412,7 @@ test("resize updates net reserved bytes accurately and drops old buffer if resiz
       assert.equal(canvasA.height, 0);
       assert.equal(overlayA.reservedRasterBytes(), 0);
       assert.equal(getHeatmapCpuRasterModuleReservedBytes(), 128_000_000);
-      assert.equal(hA.stats().mainFillRectCalls, 2);
+      assert.equal(hA.stats().mainFillRectCalls, 4);
     });
   } finally {
     for (const overlay of overlays) overlay.dispose();
@@ -423,15 +423,14 @@ test("resize updates net reserved bytes accurately and drops old buffer if resiz
 test("empty visible cells, pull-mode off, failed 2d context, and repeated release/dispose never double-release", async () => {
   const overlays = [];
   let mode = "single";
-  let threshold = 1;
 
   try {
     await withSettingsSource(() => ({
       mode,
       unit: "usd",
       bucketStep: 50,
-      single: { usd: threshold, btc: 1 },
-      aggregated: { usd: threshold, btc: 1 },
+      single: { usd: 1, btc: 1 },
+      aggregated: { usd: 1, btc: 1 },
     }), async () => {
       const series = makeTestSeries();
       const view = makeTestView();
@@ -452,8 +451,8 @@ test("empty visible cells, pull-mode off, failed 2d context, and repeated releas
       assert.equal(getHeatmapCpuRasterModuleReservedBytes(), anchorBytes + expectedBytes);
       const canvas = h.stats().offscreenCanvases[0];
 
-      // 1. cells === 0 via high threshold releases offscreen canvas & keeps repeated empty draws at 0 bytes
-      threshold = 1_000_000_000;
+      // 1. cells === 0 via vertical pan outside loaded buckets releases offscreen canvas & keeps 0 bytes
+      view.priceTop = 10_000;
       h.resetPaintCounters();
       overlay.draw(h.ctx, view, series, [0, 0]);
       assert.equal(canvas.width, 0);
@@ -466,7 +465,7 @@ test("empty visible cells, pull-mode off, failed 2d context, and repeated releas
       assert.equal(getHeatmapCpuRasterModuleReservedBytes(), anchorBytes);
 
       // 2. Restore visible cells -> caches again, then repeated release/mode-off/dispose must NOT double-release anchor!
-      threshold = 1;
+      view.priceTop = 250;
       overlay.draw(h.ctx, view, series, [0, 0]);
       assert.equal(overlay.reservedRasterBytes(), expectedBytes);
       assert.equal(getHeatmapCpuRasterModuleReservedBytes(), anchorBytes + expectedBytes);
@@ -498,7 +497,7 @@ test("empty visible cells, pull-mode off, failed 2d context, and repeated releas
       assert.equal(getHeatmapCpuRasterModuleReservedBytes(), anchorBytes);
       assert.equal(hBroken.stats().offscreenCanvases[0].width, 0);
       assert.equal(hBroken.stats().offscreenCanvases[0].height, 0);
-      assert.equal(hBroken.stats().mainFillRectCalls, 2);
+      assert.equal(hBroken.stats().mainFillRectCalls, 4);
 
       // Clean up remaining anchor + broken
       brokenOverlay.dispose();
