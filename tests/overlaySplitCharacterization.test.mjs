@@ -432,7 +432,7 @@ test("renderAnnotations and renderInteraction preserve two-pass contract, custom
   // When crosshair is visible, annotation pass skips HUD while interaction pass renders hovered HUD onto interactionCtx.
   const annotationCallsBeforeHover = annotationCtx.calls.length;
   hudHistory.length = 0;
-  overlay.renderAnnotations(view, series, { x: view.xOfIndex(2) + 10, y: view.yOfPrice(62102), visible: true }, [0, 5], ["axis"]);
+  overlay.renderAnnotations(view, series, { x: view.xOfIndex(2) + 10, y: view.yOfPrice(62102), visible: true }, [0, 5], ["indicators", "axis"]);
   assert.equal(hudHistory.length, 0);
 
   const barHoverX = view.xOfIndex(2) + 10;
@@ -498,9 +498,15 @@ test("renderAnnotations draws footprint cells (full vs compact, notional toggle)
     const series = makeSeries({ count: 3, priceStep: 1 });
     const view = makeView({ width: 838, height: 300, colWidth: 100, barIndex: 2, low: 62099, high: 62105 });
 
+    let queueCustomMarkers = false;
     const overlay = new Overlay(
       ctx,
-      undefined,
+      () => {
+        if (!queueCustomMarkers) return;
+        overlay.queueLineObject(62102, "CUSTOM-POC", "#38bdf8");
+        overlay.queuePriceAxisLabel(62101, "MARK-A", "#fbbf24");
+        overlay.queueTimeObject(series.at(1).startTime, "T1", "#a855f7");
+      },
       () => ({ enabled: true, mode: "visible", valueAreaPercent: 0.7, showPoc: true, showVah: true, showVal: true }),
     );
     overlay.setChartConfig(makeChartConfig({ chartType: "footprint", clusterCellData: "bidask", cellNumbers: true }));
@@ -535,19 +541,18 @@ test("renderAnnotations draws footprint cells (full vs compact, notional toggle)
     overlay.renderAnnotations(view, series, skipAnnotationHud, [0, 3], ["footprint-text"]);
     assert.equal(ctx.calls.filter((call) => call.op === "fillText").length, 0);
 
-    // Cross-surface queues appear on the axis pass and reset on the subsequent pass
-    overlay.queueLineObject(62102, "CUSTOM-POC", "#38bdf8");
-    overlay.queuePriceAxisLabel(62101, "MARK-A", "#fbbf24");
-    overlay.queueTimeObject(series.at(1).startTime, "T1", "#a855f7");
+    // Cross-surface queues populated in drawings layer appear on the axis pass and reset on the subsequent pass
+    queueCustomMarkers = true;
     ctx.calls.length = 0;
-    overlay.renderAnnotations(view, series, { x: 0, y: 0, visible: false }, [0, 3], ["axis"]);
+    overlay.renderAnnotations(view, series, { x: 0, y: 0, visible: false }, [0, 3], ["drawings", "axis"]);
     const axisTexts = ctx.calls.filter((call) => call.op === "fillText").map((call) => call.text);
     assert.ok(axisTexts.includes("CUSTOM-POC"));
     assert.ok(axisTexts.includes("MARK-A"));
     assert.ok(ctx.calls.some((call) => call.op === "stroke" && call.strokeStyle === "#a855f7"));
 
+    queueCustomMarkers = false;
     ctx.calls.length = 0;
-    overlay.renderAnnotations(view, series, { x: 0, y: 0, visible: false }, [0, 3], ["axis"]);
+    overlay.renderAnnotations(view, series, { x: 0, y: 0, visible: false }, [0, 3], ["drawings", "axis"]);
     const nextAxisTexts = ctx.calls.filter((call) => call.op === "fillText").map((call) => call.text);
     assert.equal(nextAxisTexts.includes("CUSTOM-POC"), false);
     assert.equal(nextAxisTexts.includes("MARK-A"), false);
