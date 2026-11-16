@@ -73,6 +73,7 @@ test("5k trades per second for 90 seconds recover after a delayed snapshot withi
         browserTurnP95Ms: frameMs[Math.ceil(frameMs.length * 0.95) - 1] };
     } finally { pipeline.dispose(); }
   });
+  console.log("REPAIR_BURST_EVIDENCE", JSON.stringify(result));
   await testInfo.attach("live-repair-burst-memory-and-turns.json", { body: JSON.stringify(result, null, 2), contentType: "application/json" });
   expect(result.volume).toBe(450000);
   expect(result.cellVolume).toBe(450000);
