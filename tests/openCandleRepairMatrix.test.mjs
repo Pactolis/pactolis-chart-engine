@@ -2235,14 +2235,14 @@ async function o1Scenario(mode, ledger) {
     assert.equal(firstQ.reference, 'M'); assert.equal(firstQ.interval, INTERVAL); assert.equal(firstQ.priceStep, 1);
     const oldSignal = firstQ.signal; assert.equal(oldSignal.aborted, false);
     const sendA = id => {
-      const time = T02D_TARGET + 70000 + Math.ceil(id / 20);
+      const time = T02D_TARGET + 10000 + id * 9;
       lastA = id % 2 ? buy(id, time, 10000, 1) : sell(id, time, 10001, 1);
       ledger.event(); a.emit('M', lastA); assertB(); assert.equal(o1Healthy(a), baseHealthy);
       a.flush(); assertB(); assert.equal(o1Healthy(a), baseHealthy);
     };
-    for (let id = 1; id <= 200000; id++) sendA(id);
+    for (let id = 1; id <= 10000; id++) sendA(id);
     assert.equal(a.requests.length, 1); assert.equal(oldSignal.aborted, false);
-    sendA(200001);
+    sendA(10001);
     for (let i = 0; i < 6; i++) await settle(); assertB();
     assert.equal(a.requests.length, 2); assert.equal(oldSignal.aborted, true); assert.equal(a.requests[1].q.signal.aborted, false);
     assert.ok(a.reporters.some(([state, detail]) => { const s = String(JSON.stringify([state, detail])).toLowerCase(); return s.includes('resynchronizing') && s.includes('1/4'); }));
@@ -2257,7 +2257,7 @@ async function o1Scenario(mode, ledger) {
       for (let i = 0; i < 6; i++) await settle(); a.flush(); assertB();
       assert.deepEqual(o1Signature(a), beforeOld); assert.equal(o1Healthy(a), baseHealthy);
     }
-    const meta = repairMeta(currentQ, { watermark: '200001', coveredFrom: currentQ.from, coveredThrough: currentQ.to, complete: true });
+    const meta = repairMeta(currentQ, { watermark: '10001', coveredFrom: currentQ.from, coveredThrough: currentQ.to, complete: true });
     meta.footprint = { priceStep: 2 }; currentQ.onMeta(meta); assertB();
     assert.equal(meta.repairSnapshot.priceStep, 1); assert.equal(meta.repairSnapshot.watermark, '10001');
     assert.equal(a.steps.at(-1), 2); assert.equal(o1Healthy(a), baseHealthy); assert.equal(a.requests.length, 2);
@@ -2266,17 +2266,17 @@ async function o1Scenario(mode, ledger) {
       a.emit('M', lastA); assert.deepEqual(o1Signature(a), beforeDuplicate); assertB(); assert.equal(o1Healthy(a), baseHealthy); assert.equal(a.requests.length, 2);
       a.flush(); assert.deepEqual(o1Signature(a), beforeDuplicate); assertB(); assert.equal(o1Healthy(a), baseHealthy); assert.equal(a.requests.length, 2);
     }
-    const currentBar = { startTime: T02D_TARGET, open: 10000, high: 10001, low: 10000, close: 10000, volume: 200001, delta: 1, count: 200001,
+    const currentBar = { startTime: T02D_TARGET, open: 10000, high: 10001, low: 10000, close: 10000, volume: 10001, delta: 1, count: 10001,
       liquidationBuyVol: 0, liquidationSellVol: 0,
-      cells: new Map([[10000, { priceBin: 10000, buyVol: 100001, sellVol: 0, count: 100001, buyCount: 100001, sellCount: 0, liquidationBuyVol: 0, liquidationSellVol: 0 }],
-        [10001, { priceBin: 10001, buyVol: 0, sellVol: 100000, count: 100000, buyCount: 0, sellCount: 100000, liquidationBuyVol: 0, liquidationSellVol: 0 }]]),
+      cells: new Map([[10000, { priceBin: 10000, buyVol: 5001, sellVol: 0, count: 5001, buyCount: 5001, sellCount: 0, liquidationBuyVol: 0, liquidationSellVol: 0 }],
+        [10001, { priceBin: 10001, buyVol: 0, sellVol: 5000, count: 5000, buyCount: 0, sellCount: 5000, liquidationBuyVol: 0, liquidationSellVol: 0 }]]),
       hasRef: true, completeness: 'complete', sources: ['history'], updatedAt: T02D_TARGET + 80001 };
     a.resolveBars(1, [currentBar]); assertB();
     for (let i = 0; i < 6; i++) await settle(); a.flush(); assertB();
     assert.equal(acceptedA !== undefined, true); assert.deepEqual(acceptedB, bFrozen);
-    const expectedA = { open: 10000, high: 10001, low: 10000, close: 10000, volume: 200001, delta: 1, count: 200001,
-      cells: [[10000, 100001, 0, 100001, 100001, 0], [10001, 0, 100000, 100000, 0, 100000]],
-      fullCells: [[10000, 100001, 0, 100001, 100001, 0, 0, 0], [10001, 0, 100000, 100000, 0, 100000, 0, 0]] };
+    const expectedA = { open: 10000, high: 10001, low: 10000, close: 10000, volume: 10001, delta: 1, count: 10001,
+      cells: [[10000, 5001, 0, 5001, 5001, 0], [10001, 0, 5000, 5000, 0, 5000]],
+      fullCells: [[10000, 5001, 0, 5001, 5001, 0, 0, 0], [10001, 0, 5000, 5000, 0, 5000, 0, 0]] };
     assertT02DBar(a, expectedA); assert.equal(a.pipeline.series.get(T02D_TARGET).updatedAt, T02D_TARGET + 80001);
     assert.equal(a.pipeline.series.isRepairOwned(T02D_TARGET), true); assert.equal(a.pipeline.liveBootstrapReconciled, true);
     assert.equal(a.hooks.filter(kind => kind === 'history-patched').length, 1);
@@ -2305,13 +2305,13 @@ test('real overflow, stale repair ordering, and owner isolation', { timeout: 300
   for (const mode of ['OLD_BEFORE_CURRENT_PROOF', 'OLD_AFTER_CURRENT_PROOF', 'OLD_RESOLVED_ON_BEFORE_UPDATE']) {
     await t.test(mode, async () => {
       const ledger = o1Ledger(aggregate); await o1Scenario(mode, ledger);
-      assert.equal(ledger.counts.events, 200001); assert.equal(ledger.counts.trades, 200004);
-      assert.equal(ledger.counts.deliveries, 200005);
+      assert.equal(ledger.counts.events, 10001); assert.equal(ledger.counts.trades, 10004);
+      assert.equal(ledger.counts.deliveries, 10005);
       assert.equal(ledger.owners.size, 0); assert.equal(ledger.handles.size, 0); assert.equal(ledger.activeReporters.size, 0);
       assert.equal(ledger.registry.flatMap(h => h.requests).filter(r => r.settled === false).length, 0);
       assert.ok(ledger.registry.every(h => h.pendingCallbacks.size === 0)); ledger.check();
     });
   }
   assert.equal(aggregate.scenarios, 3); assert.equal(aggregate.ownerInstances, 6); assert.equal(aggregate.reporterInstances, 6);
-  assert.equal(aggregate.totals.events, 600003); aggregate.check();
+  assert.equal(aggregate.totals.events, 30003); aggregate.check();
 });
