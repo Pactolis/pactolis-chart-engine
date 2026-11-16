@@ -47,3 +47,12 @@ export interface LiveHeatmapTailEvent {
   timestamp?: number;
   bars?: OrderbookHeatmapBar[];
 }
+
+/** Subscription parameters describing which market and server-side tail filter to stream. */
+export interface LiveHeatmapTailRequest {
+  market: string;
+  base?: string;
+  minQuantityUsd?: number;
+  priceStepPct?: number;
+  bucketStep?: OrderbookHeatmapBucketStep;
+}
