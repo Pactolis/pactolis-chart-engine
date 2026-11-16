@@ -9,13 +9,13 @@ export abstract class DrawingNotifications {
 
 
   constructor(
-    private readonly onChange: (drawings: Drawing[], transient: boolean) => void,
-    private readonly onToolChange?: (tool: DrawingType | null) => void,
-    private readonly onRequestText?: (id: string, deleteOnCancel?: boolean) => void,
-    private readonly onRequestSettings?: (id: string) => void,
+    protected readonly onChange: (drawings: Drawing[], transient: boolean) => void,
+    protected readonly onToolChange?: (tool: DrawingType | null) => void,
+    protected readonly onRequestText?: (id: string, deleteOnCancel?: boolean) => void,
+    protected readonly onRequestSettings?: (id: string) => void,
   ) {}
 
-  private changed(transient = false): void {
+  protected changed(transient = false): void {
     this.displayNameCache = null;
     this.summaryRevision++;
     this.onChange(structuredClone(this.drawings.filter((drawing) => drawing.id !== this.draft?.id)), transient);

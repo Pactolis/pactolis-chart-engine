@@ -11,35 +11,35 @@ export abstract class DrawingState extends DrawingNotifications {
   protected abstract pruneSelection(): void;
   protected abstract selectedInDrawOrder(): Drawing[];
 
-  private drawings: Drawing[] = [];
-  private undoStack: Drawing[][] = [];
-  private redoStack: Drawing[][] = [];
-  private tool: DrawingType | null = null;
-  private draft: Drawing | null = null;
-  private draftStage: 1 | 2 | null = null;
-  private placementPointerDown = false;
-  private placementMoved = false;
-  private placementCommitted = false;
-  private selectedId: string | null = null;
-  private selectedIds = new Set<string>();
-  private editingPoint: number | null = null;
-  private draggingSelection: { start: DrawingPoint; before: Array<{ id: string; points: DrawingPoint[] }> } | null = null;
-  private gestureBefore: Drawing[] | null = null; // drawings before a pointer drag/point edit, see commitGesture
-  private clipboard: Drawing[] = [];
-  private positionRiskSettings: PositionRiskSettings = structuredClone(DEFAULT_POSITION_RISK_SETTINGS);
-  private drawingTemplates: DrawingTemplateState = structuredClone(DEFAULT_DRAWING_TEMPLATE_STATE);
-  private styleClipboard: DrawingStylePreset | null = null;
-  private currentMarket = "";
-  private lastView: View | null = null;
-  private lastTime: DrawingContext | null = null;
+  protected drawings: Drawing[] = [];
+  protected undoStack: Drawing[][] = [];
+  protected redoStack: Drawing[][] = [];
+  protected tool: DrawingType | null = null;
+  protected draft: Drawing | null = null;
+  protected draftStage: 1 | 2 | null = null;
+  protected placementPointerDown = false;
+  protected placementMoved = false;
+  protected placementCommitted = false;
+  protected selectedId: string | null = null;
+  protected selectedIds = new Set<string>();
+  protected editingPoint: number | null = null;
+  protected draggingSelection: { start: DrawingPoint; before: Array<{ id: string; points: DrawingPoint[] }> } | null = null;
+  protected gestureBefore: Drawing[] | null = null; // drawings before a pointer drag/point edit, see commitGesture
+  protected clipboard: Drawing[] = [];
+  protected positionRiskSettings: PositionRiskSettings = structuredClone(DEFAULT_POSITION_RISK_SETTINGS);
+  protected drawingTemplates: DrawingTemplateState = structuredClone(DEFAULT_DRAWING_TEMPLATE_STATE);
+  protected styleClipboard: DrawingStylePreset | null = null;
+  protected currentMarket = "";
+  protected lastView: View | null = null;
+  protected lastTime: DrawingContext | null = null;
   /** The last press came from a finger: hit tests pick wider and selected drawings draw bigger handles. */
-  private touchTargets = false;
-  private summaryRevision = 0;
-  private readonly summaryCache = new Map<string, { revision: number; summary: DrawingMarketSummary }>();
-  private readonly readonlyListCache = new Map<string, { revision: number; draftId: string | null; list: readonly Drawing[] }>();
-  private displayNameCache: Map<string, string> | null = null;
+  protected touchTargets = false;
+  protected summaryRevision = 0;
+  protected readonly summaryCache = new Map<string, { revision: number; summary: DrawingMarketSummary }>();
+  protected readonly readonlyListCache = new Map<string, { revision: number; draftId: string | null; list: readonly Drawing[] }>();
+  protected displayNameCache: Map<string, string> | null = null;
 
-  private getDisplayNames(): Map<string, string> {
+  protected getDisplayNames(): Map<string, string> {
     if (this.displayNameCache) return this.displayNameCache;
     const cache = new Map<string, string>();
     const typeCounters = new Map<DrawingType, number>();
@@ -311,7 +311,7 @@ export abstract class DrawingState extends DrawingNotifications {
     this.moveSelectedZ(-1);
   }
 
-  private moveSelectedZ(delta: 1 | -1): void {
+  protected moveSelectedZ(delta: 1 | -1): void {
     if (!this.selectedIds.size) return;
     let moved = false;
     const next = [...this.drawings];
@@ -375,7 +375,7 @@ export abstract class DrawingState extends DrawingNotifications {
 
   setAllVisibleForMarket(market: string, visible: boolean): void { this.setVisibleWhere((drawing) => drawing.market === market, visible); }
 
-  private setVisibleWhere(match: (drawing: Drawing) => boolean, visible: boolean): void {
+  protected setVisibleWhere(match: (drawing: Drawing) => boolean, visible: boolean): void {
     const scoped = this.drawings.filter(match);
     if (!scoped.some((drawing) => drawing.visible !== visible)) return;
     this.snapshot();
@@ -416,7 +416,7 @@ export abstract class DrawingState extends DrawingNotifications {
     this.changed();
   }
 
-  private updateSelectedBatch(mutator: (drawing: Drawing) => void): void {
+  protected updateSelectedBatch(mutator: (drawing: Drawing) => void): void {
     const selected = this.selectedInDrawOrder();
     if (!selected.length) return;
     this.snapshot();
@@ -428,9 +428,9 @@ export abstract class DrawingState extends DrawingNotifications {
     this.changed();
   }
 
-  private snapshot(): void { this.pushHistory(structuredClone(this.drawings)); }
+  protected snapshot(): void { this.pushHistory(structuredClone(this.drawings)); }
 
-  private pushHistory(previous: Drawing[]): void {
+  protected pushHistory(previous: Drawing[]): void {
     this.undoStack.push(previous);
     if (this.undoStack.length > 50) this.undoStack.shift();
     this.redoStack = [];

@@ -247,7 +247,7 @@ export class DrawingGestures extends DrawingSelection {
     return true;
   }
 
-  private commitDraft(): void {
+  protected commitDraft(): void {
     if (!this.draft) return;
     const requiredAnchors = getDrawingTool(this.draft.type).pointsRequired;
     if (this.draft.points.length < requiredAnchors) return;
@@ -272,7 +272,7 @@ export class DrawingGestures extends DrawingSelection {
   }
 
   /** A drag is one undo step; a click that only selects adds none and keeps the redo stack. */
-  private commitGesture(): void {
+  protected commitGesture(): void {
     if (this.gestureBefore && JSON.stringify(this.gestureBefore) !== JSON.stringify(this.drawings)) this.pushHistory(this.gestureBefore);
     this.gestureBefore = null;
   }

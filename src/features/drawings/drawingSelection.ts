@@ -77,7 +77,7 @@ export class DrawingSelection extends DrawingState {
     return found ? { id: found.id, selected: this.selectedIds.has(found.id) } : null;
   }
 
-  private drawingAt(point: DrawingPoint, screen: { x: number; y: number } | undefined, touch: boolean): Drawing | undefined {
+  protected drawingAt(point: DrawingPoint, screen: { x: number; y: number } | undefined, touch: boolean): Drawing | undefined {
     const context = this.hitContext(touch);
     for (let i = this.drawings.length - 1; i >= 0; i--) {
       const drawing = this.drawings[i];
@@ -92,7 +92,7 @@ export class DrawingSelection extends DrawingState {
     return undefined;
   }
 
-  private hitContext(touch: boolean): DrawingHitContext {
+  protected hitContext(touch: boolean): DrawingHitContext {
     return { view: this.lastView, time: this.lastTime, positionRisk: this.positionRiskSettings, touch };
   }
 
@@ -115,7 +115,7 @@ export class DrawingSelection extends DrawingState {
     ctx.restore();
   }
 
-  private setSelection(ids: string[], primary: string | null | undefined = undefined, emit = false): void {
+  protected setSelection(ids: string[], primary: string | null | undefined = undefined, emit = false): void {
     const valid = ids.filter((id) => this.drawings.some((drawing) => drawing.id === id));
     this.selectedIds = new Set(valid);
     this.selectedId = primary && this.selectedIds.has(primary) ? primary : (lastOf(valid) ?? null);
@@ -123,7 +123,7 @@ export class DrawingSelection extends DrawingState {
     if (emit) this.changed();
   }
 
-  private toggleSelection(id: string): void {
+  protected toggleSelection(id: string): void {
     if (!this.drawings.some((drawing) => drawing.id === id)) return;
     if (this.selectedIds.has(id)) {
       this.selectedIds.delete(id);
@@ -135,19 +135,19 @@ export class DrawingSelection extends DrawingState {
     this.summaryRevision++;
   }
 
-  private pruneSelection(): void {
+  protected pruneSelection(): void {
     const validIds = new Set(this.drawings.map((drawing) => drawing.id));
     this.selectedIds = new Set([...this.selectedIds].filter((id) => validIds.has(id)));
     this.selectedId = this.selectedId && this.selectedIds.has(this.selectedId) ? this.selectedId : (lastOf([...this.selectedIds]) ?? null);
   }
 
-  private selectedInDrawOrder(): Drawing[] {
+  protected selectedInDrawOrder(): Drawing[] {
     return this.drawings.filter((drawing) => this.selectedIds.has(drawing.id));
   }
 
-  private selectionKey(): string { return `${this.selectedId ?? ""}|${[...this.selectedIds].join(",")}`; }
+  protected selectionKey(): string { return `${this.selectedId ?? ""}|${[...this.selectedIds].join(",")}`; }
 
-  private drawSelection(
+  protected drawSelection(
     ctx: CanvasRenderingContext2D,
     drawing: Drawing,
     a: { x: number; y: number },
