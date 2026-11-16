@@ -72,7 +72,7 @@ function fixture(t, { dpr = 1.25, width = 800.2, height = 500.1, maxDevicePixelR
     kind: "webgl2",
     resize(w, h, ratio) { surfaceResizes.push({ w, h, ratio }); },
     render() {},
-    destroy() {},
+    dispose() {},
     getGlContext: () => gl,
   };
   const context = (name) => ({ setTransform: (...values) => transforms.push({ name, values }) });
@@ -232,4 +232,26 @@ test("DPR change and updateContainer reset cached devicePixelContentBoxSize", (t
   assert.deepEqual(h.ro().observeCalls[0].options, { box: "device-pixel-content-box" });
   h.frame();
   assert.deepEqual(allSurfaceDims(h), [[1200, 750], [1200, 750], [1200, 750]]);
+});
+
+test("ignores devicePixelContentBoxSize that diverges from active window DPR (e.g. headless CDP emulation)", (t) => {
+  const h = fixture(t, { dpr: 2, width: 800.2, height: 500.1 });
+  assert.deepEqual(allSurfaceDims(h), [[1600, 1000], [1600, 1000], [1600, 1000]]);
+
+  // Emulated 2x viewport where ResizeObserver still emits 1x CSS pixels (800x500)
+  h.ro().trigger([{
+    target: h.container,
+    devicePixelContentBoxSize: [{ inlineSize: 800, blockSize: 500 }],
+  }]);
+  assert.equal(h.queued(), 0, "mismatched 1x box should keep Math.round(w * dpr) without queuing resize");
+  assert.deepEqual(allSurfaceDims(h), [[1600, 1000], [1600, 1000], [1600, 1000]]);
+
+  // Valid subpixel-snapped 2x box within <= 2px of w * dpr still applies
+  h.ro().trigger([{
+    target: h.container,
+    devicePixelContentBoxSize: [{ inlineSize: 1601, blockSize: 1001 }],
+  }]);
+  assert.equal(h.queued(), 1);
+  h.frame();
+  assert.deepEqual(allSurfaceDims(h), [[1601, 1001], [1601, 1001], [1601, 1001]]);
 });

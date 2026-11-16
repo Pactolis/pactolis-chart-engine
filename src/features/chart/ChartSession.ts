@@ -585,7 +585,15 @@ export class ChartSession {
     const dpbH = this.devicePixelBitmapHeight;
     let bitmapWidth: number;
     let bitmapHeight: number;
-    if (!dprCapped && dpbW !== null && dpbH !== null && dpbW > 0 && dpbH > 0) {
+    if (
+      !dprCapped &&
+      dpbW !== null &&
+      dpbH !== null &&
+      dpbW > 0 &&
+      dpbH > 0 &&
+      Math.abs(dpbW - w * rawDpr) <= 2 &&
+      Math.abs(dpbH - h * rawDpr) <= 2
+    ) {
       bitmapWidth = dpbW;
       bitmapHeight = dpbH;
     } else {

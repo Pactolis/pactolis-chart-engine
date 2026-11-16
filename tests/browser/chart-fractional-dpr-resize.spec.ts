@@ -8,9 +8,10 @@ interface DeviceBoxSnapshot {
   serial: number;
   inlineSize: number;
   blockSize: number;
+  rectW: number;
+  rectH: number;
   dpr: number;
   dims: number[][];
-  css: string[][];
   needsRender: boolean;
   ink: number;
 }
@@ -30,7 +31,7 @@ for (const dpr of [1.25, 1.5]) {
   test.describe(`fractional DPR ${dpr}`, () => {
     test.use({ deviceScaleFactor: dpr });
 
-    test("matches ResizeObserver devicePixelContentBoxSize across all three chart surfaces", async ({ page }) => {
+    test("sizes all three chart surfaces consistently and honors devicePixelContentBoxSize at fractional DPR", async ({ page }) => {
       await page.setViewportSize({ width: 1280, height: 800 });
       await installHistory(page, { bars: buildBars(120) });
       await openHarness(page, "?chart=BINANCE_FUTURES:btcusdt");
@@ -89,13 +90,15 @@ for (const dpr of [1.25, 1.5]) {
 
         window.__fractionalDprProbe = {
           snapshot(): DeviceBoxSnapshot {
+            const rect = root.getBoundingClientRect();
             return {
               serial,
               inlineSize,
               blockSize,
+              rectW: rect.width,
+              rectH: rect.height,
               dpr: window.devicePixelRatio,
               dims: canvases.map((c) => [c.width, c.height]),
-              css: canvases.map((c) => [c.style.width, c.style.height]),
               needsRender: session.needsRender,
               ink: countInk(),
             };
@@ -108,6 +111,16 @@ for (const dpr of [1.25, 1.5]) {
           throw new Error(`Expected DPR ${expectedDpr}, got ${window.devicePixelRatio}`);
         }
       }, { id: panelId, expectedDpr: dpr });
+
+      const expectedDimsFor = (snap: DeviceBoxSnapshot): [number, number] => {
+        const scaledBoxMatchesDpr = snap.inlineSize > 0
+          && snap.blockSize > 0
+          && Math.abs(snap.inlineSize - snap.rectW * snap.dpr) <= 2
+          && Math.abs(snap.blockSize - snap.rectH * snap.dpr) <= 2;
+        return scaledBoxMatchesDpr
+          ? [Math.round(snap.inlineSize), Math.round(snap.blockSize)]
+          : [Math.round(snap.rectW * snap.dpr), Math.round(snap.rectH * snap.dpr)];
+      };
 
       try {
         await expect.poll(async () => {
@@ -135,18 +148,123 @@ for (const dpr of [1.25, 1.5]) {
           await expect.poll(async () => {
             const snap = await page.evaluate(() => window.__fractionalDprProbe!.snapshot());
             if (snap.serial <= prevSerial || snap.needsRender || snap.ink <= 20) return false;
-            const targetW = Math.round(snap.inlineSize);
-            const targetH = Math.round(snap.blockSize);
+            const [targetW, targetH] = expectedDimsFor(snap);
             return targetW > 0
               && targetH > 0
               && snap.dims.every(([w, h]) => w === targetW && h === targetH);
           }, { timeout: 15_000 }).toBe(true);
 
           const finalSnap = await page.evaluate(() => window.__fractionalDprProbe!.snapshot());
-          const expected = [Math.round(finalSnap.inlineSize), Math.round(finalSnap.blockSize)];
+          const expected = expectedDimsFor(finalSnap);
           expect(finalSnap.dpr).toBe(dpr);
           expect(finalSnap.dims).toEqual([expected, expected, expected]);
         }
+
+        // Also verify ChartSession on real Chromium HTMLCanvasElements directly adopts subpixel-snapped
+        // devicePixelContentBoxSize when it differs by +1px from Math.round(w * dpr).
+        const directBoxResult = await page.evaluate(async (expectedDpr) => {
+          const { ChartSession } = await import("/src/features/chart/ChartSession.ts");
+          const cssW = expectedDpr === 1.25 ? 800.2 : 640.3;
+          const cssH = expectedDpr === 1.25 ? 500.1 : 360.3;
+          const exactW = Math.round(cssW * expectedDpr) + 1;
+          const exactH = Math.round(cssH * expectedDpr) + 1;
+
+          let roCallback: ((entries: ResizeObserverEntry[], observer: ResizeObserver) => void) | null = null;
+          let roInstance: ResizeObserver | null = null;
+          class TestResizeObserver {
+            constructor(cb: (entries: ResizeObserverEntry[], observer: ResizeObserver) => void) {
+              roCallback = cb;
+              roInstance = this as unknown as ResizeObserver;
+            }
+            observe() {}
+            unobserve() {}
+            disconnect() {}
+          }
+
+          const container = document.createElement("div");
+          const gpuCanvas = document.createElement("canvas");
+          const annotationCanvas = document.createElement("canvas");
+          const interactionCanvas = document.createElement("canvas");
+          const gl = gpuCanvas.getContext("webgl2");
+          const annotationCtx2d = annotationCanvas.getContext("2d");
+          const interactionCtx2d = interactionCanvas.getContext("2d");
+          if (!gl || !annotationCtx2d || !interactionCtx2d) {
+            throw new Error("Missing real canvas contexts for fractional DPR probe");
+          }
+
+          const fakeWin = {
+            devicePixelRatio: expectedDpr,
+            ResizeObserver: TestResizeObserver,
+            requestAnimationFrame: window.requestAnimationFrame.bind(window),
+            cancelAnimationFrame: window.cancelAnimationFrame.bind(window),
+            matchMedia: window.matchMedia.bind(window),
+          };
+          const fakeDoc = {
+            defaultView: fakeWin,
+            createElement: document.createElement.bind(document),
+          } as unknown as Document;
+
+          Object.defineProperty(container, "ownerDocument", { value: fakeDoc });
+          container.getBoundingClientRect = () => ({
+            x: 0, y: 0, left: 0, top: 0, right: cssW, bottom: cssH, width: cssW, height: cssH,
+            toJSON: () => ({}),
+          });
+
+          const session = new ChartSession({
+            container,
+            ownerDocument: fakeDoc,
+            gl,
+            gpuCanvas,
+            annotationCanvas,
+            interactionCanvas,
+            annotationCtx2d,
+            interactionCtx2d,
+            renderer: { render() {}, visibleRange: () => [0, 0] },
+            annotation: { render() {} },
+            interaction: { render() {} },
+            view: { colWidth: 11, offsetX: 0, priceTop: 0, pricePerPx: 1, area: { left: 0, top: 0, width: 0, height: 0 } } as never,
+            series: { length: 1 } as never,
+            crosshair: { visible: false, x: 0, y: 0 },
+            onRestoreContext() {},
+          });
+
+          try {
+            session.activate();
+            await new Promise<void>((r) => requestAnimationFrame(() => requestAnimationFrame(() => r())));
+            const fallbackDims = [
+              [gpuCanvas.width, gpuCanvas.height],
+              [annotationCanvas.width, annotationCanvas.height],
+              [interactionCanvas.width, interactionCanvas.height],
+            ];
+            roCallback!(
+              [{
+                target: container,
+                devicePixelContentBoxSize: [{ inlineSize: exactW, blockSize: exactH }],
+              } as unknown as ResizeObserverEntry],
+              roInstance!,
+            );
+            await new Promise<void>((r) => requestAnimationFrame(() => requestAnimationFrame(() => r())));
+            const boxDims = [
+              [gpuCanvas.width, gpuCanvas.height],
+              [annotationCanvas.width, annotationCanvas.height],
+              [interactionCanvas.width, interactionCanvas.height],
+            ];
+            return { fallbackDims, boxDims, expectedFallback: [Math.round(cssW * expectedDpr), Math.round(cssH * expectedDpr)], expectedBox: [exactW, exactH] };
+          } finally {
+            session.destroy();
+          }
+        }, dpr);
+
+        expect(directBoxResult.fallbackDims).toEqual([
+          directBoxResult.expectedFallback,
+          directBoxResult.expectedFallback,
+          directBoxResult.expectedFallback,
+        ]);
+        expect(directBoxResult.boxDims).toEqual([
+          directBoxResult.expectedBox,
+          directBoxResult.expectedBox,
+          directBoxResult.expectedBox,
+        ]);
       } finally {
         await page.evaluate(() => {
           window.__fractionalDprProbe?.stop();
