@@ -587,7 +587,12 @@ function attachChartInput(canvas: HTMLCanvasElement, crosshair: Crosshair, host:
     }
     if (e.button !== 0) return;
     if (ownedByOtherPointer(e.pointerId)) return;
-    canvas.focus({ preventScroll: true });
+    if (touch) {
+      // Touch gestures claim the pointer stream via touch-action:none and may suppress native mousedown focus;
+      // mouse clicks keep native mousedown focus so Chromium preserves :focus-visible=false.
+      (canvas as HTMLElement & { focus(options?: FocusOptions & { focusVisible?: boolean }): void })
+        .focus({ preventScroll: true, focusVisible: false });
+    }
     const rect = canvas.getBoundingClientRect();
     const cx = e.clientX - rect.left;
     const cy = e.clientY - rect.top;
