@@ -219,7 +219,7 @@ function attachChartInput(canvas: HTMLCanvasElement, crosshair: Crosshair, host:
     return "default";
   };
 
-  const updateAxisCursor = (e: PointerEvent): void => {
+  const updateAxisCursor = (cx: number, cy: number): void => {
     if (gestures.pan) {
       canvas.style.cursor = cursorForTarget(gestures.pan.target);
       return;
@@ -228,9 +228,6 @@ function attachChartInput(canvas: HTMLCanvasElement, crosshair: Crosshair, host:
       canvas.style.cursor = "ns-resize";
       return;
     }
-    const rect = canvas.getBoundingClientRect();
-    const cx = e.clientX - rect.left;
-    const cy = e.clientY - rect.top;
     canvas.style.cursor = cursorForTarget(hitTestChartAxis(view, cx, cy));
   };
 
@@ -308,10 +305,7 @@ function attachChartInput(canvas: HTMLCanvasElement, crosshair: Crosshair, host:
     session.invalidateSurface(ChartSurfaceDirty.Annotation | ChartSurfaceDirty.Interaction);
   };
 
-  const onPointerMove = (e: PointerEvent) => {
-    const rect = canvas.getBoundingClientRect();
-    const cx = e.clientX - rect.left;
-    const cy = e.clientY - rect.top;
+  const onPointerMove = (e: PointerEvent, cx: number, cy: number) => {
     const drawings = host.svc.getAnalysisContext().drawings;
     if (gestures.drawingActive || drawings.hasDraft()) {
       moveDrawing(e, cx, cy);
@@ -644,7 +638,7 @@ function attachChartInput(canvas: HTMLCanvasElement, crosshair: Crosshair, host:
     if (touch && target === "plot") armLongPress(e.pointerId);
   };
 
-  const onPointerDrag = (e: PointerEvent) => {
+  const onPointerDrag = (e: PointerEvent, cx: number, cy: number) => {
     if (gestures.indicatorScale) {
       if (gestures.indicatorScale.pointerId !== e.pointerId) return;
       const dy = e.clientY - gestures.indicatorScale.lastY;
@@ -664,17 +658,13 @@ function attachChartInput(canvas: HTMLCanvasElement, crosshair: Crosshair, host:
     const dy = e.clientY - gestures.pan.y;
 
     if (gestures.pan.target === "price-axis") {
-      const rect = canvas.getBoundingClientRect();
-      const currentLocalY = e.clientY - rect.top;
-      view.scalePriceAxisTo(currentLocalY);
+      view.scalePriceAxisTo(cy);
       session.invalidate(ChartChange.Viewport);
       return;
     }
 
     if (gestures.pan.target === "time-axis") {
-      const rect = canvas.getBoundingClientRect();
-      const currentLocalX = e.clientX - rect.left;
-      host.timeViewport.dragTimeAxisScaleTo(currentLocalX, host.pipeline.series.length);
+      host.timeViewport.dragTimeAxisScaleTo(cx, host.pipeline.series.length);
       applyHorizontalViewportChange();
       return;
     }
@@ -1029,10 +1019,7 @@ function attachChartInput(canvas: HTMLCanvasElement, crosshair: Crosshair, host:
   };
 
   /** A finger moves one gesture at a time (pinch, inspect, drawing drag, pan) and never shows a hover crosshair. */
-  const onTouchMove = (e: PointerEvent): void => {
-    const rect = canvas.getBoundingClientRect();
-    const cx = e.clientX - rect.left;
-    const cy = e.clientY - rect.top;
+  const onTouchMove = (e: PointerEvent, cx: number, cy: number): void => {
     touches.move(e.pointerId, cx, cy);
     if (gestures.pinch) {
       if (e.pointerId === gestures.pinch.firstId || e.pointerId === gestures.pinch.secondId) stepPinch();
@@ -1047,28 +1034,28 @@ function attachChartInput(canvas: HTMLCanvasElement, crosshair: Crosshair, host:
       if (gestures.acceptedDrawingPointerId === e.pointerId) moveDrawing(e, cx, cy);
       return;
     }
-    if (gestures.pan || gestures.indicatorScale) onPointerDrag(e);
+    if (gestures.pan || gestures.indicatorScale) onPointerDrag(e, cx, cy);
   };
 
   const onPointerMoveMain = (e: PointerEvent) => {
+    const rect = canvas.getBoundingClientRect();
+    const cx = e.clientX - rect.left;
+    const cy = e.clientY - rect.top;
     if (isTouchPointer(e)) {
-      onTouchMove(e);
+      onTouchMove(e, cx, cy);
       return;
     }
     if (crosshair.touch) setTouchMode(false);
-    onPointerMove(e);
+    onPointerMove(e, cx, cy);
     if (host.isReplaySelecting()) {
-      const rect = canvas.getBoundingClientRect();
-      const cx = e.clientX - rect.left;
-      const cy = e.clientY - rect.top;
       const target = hitTestChartAxis(view, cx, cy);
       host.previewReplayStart(target === "plot" ? host.screenToDrawingPoint(cx, cy).time : null);
       canvas.style.cursor = target === "plot" ? "crosshair" : cursorForTarget(target);
       return;
     }
     if (gestures.drawingActive) return;
-    updateAxisCursor(e);
-    if (gestures.pan || gestures.indicatorScale) onPointerDrag(e);
+    updateAxisCursor(cx, cy);
+    if (gestures.pan || gestures.indicatorScale) onPointerDrag(e, cx, cy);
   };
 
   canvas.addEventListener("wheel", onWheel, { passive: false });
