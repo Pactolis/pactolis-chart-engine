@@ -47,14 +47,20 @@ export interface PriceAxisKeepOut {
   h: number;
 }
 
-export function drawPriceAxis(
+interface PaintPriceAxisOptions {
+  readonly drawGrid: boolean;
+  readonly includeCornerAndFullSeparator: boolean;
+}
+
+function paintPriceAxis(
   ctx: CanvasRenderingContext2D,
   view: View,
   priceStep: number,
-  pricePrecision?: number,
-  keepOut: readonly PriceAxisKeepOut[] = [],
-  displayOptions?: ResolvedChartDisplayOptions,
-): void {
+  pricePrecision: number | undefined,
+  keepOut: readonly PriceAxisKeepOut[],
+  displayOptions: ResolvedChartDisplayOptions | undefined,
+  options: PaintPriceAxisOptions,
+): number[] {
   const dec = pricePrecision ?? priceDecimals(priceStep);
   const layout = axisLayoutForChartView(view);
   const axisX = layout.priceAxisRect.left;
@@ -64,11 +70,16 @@ export function drawPriceAxis(
   // filled by drawSubPanes before indicator axis ticks are drawn into it.
   const gutterFillH = Math.min(layout.priceAxisRect.height, view.area.top + view.area.height);
   ctx.fillRect(layout.priceAxisRect.left, layout.priceAxisRect.top, layout.priceAxisRect.width, gutterFillH);
-  ctx.fillRect(layout.cornerRect.left, layout.cornerRect.top, layout.cornerRect.width, layout.cornerRect.height);
+  if (options.includeCornerAndFullSeparator) {
+    ctx.fillRect(layout.cornerRect.left, layout.cornerRect.top, layout.cornerRect.width, layout.cornerRect.height);
+  }
+  const separatorBottom = options.includeCornerAndFullSeparator
+    ? layout.cornerRect.top + layout.cornerRect.height
+    : layout.priceAxisRect.top + gutterFillH;
   ctx.strokeStyle = uiColor.separator;
   ctx.beginPath();
   ctx.moveTo(axisX + 0.5, layout.priceAxisRect.top);
-  ctx.lineTo(axisX + 0.5, layout.cornerRect.top + layout.cornerRect.height);
+  ctx.lineTo(axisX + 0.5, separatorBottom);
   ctx.stroke();
 
   ctx.font = PRICE_AXIS_FONT;
@@ -77,12 +88,14 @@ export function drawPriceAxis(
   ctx.textBaseline = "middle";
 
   const marks = view.priceMarks(dec, 11);
+  const gridYs: number[] = [];
   for (const mark of marks) {
     const y = view.area.top + mark.coord;
     if (y < view.area.top - 1 || y > view.area.top + view.area.height + 1) continue;
+    gridYs.push(y);
     // Global grid toggle: skip only the plot grid stroke. Labels, background,
     // separator, price markers and crosshair stay untouched.
-    if (settings.grid) {
+    if (options.drawGrid && settings.grid) {
       ctx.strokeStyle = axisGridLineColor;
       ctx.beginPath();
       ctx.moveTo(view.area.left, y);
@@ -96,6 +109,53 @@ export function drawPriceAxis(
     ctx.fillStyle = axisMajorLabelColor;
     ctx.textAlign = "right";
     ctx.fillText(label, axisX + axisW - 6, labelY);
+  }
+  return gridYs;
+}
+
+export function drawPriceAxis(
+  ctx: CanvasRenderingContext2D,
+  view: View,
+  priceStep: number,
+  pricePrecision?: number,
+  keepOut: readonly PriceAxisKeepOut[] = [],
+  displayOptions?: ResolvedChartDisplayOptions,
+): void {
+  paintPriceAxis(ctx, view, priceStep, pricePrecision, keepOut, displayOptions, {
+    drawGrid: true,
+    includeCornerAndFullSeparator: true,
+  });
+}
+
+/** Draw only the static price-axis gutter strip (excluding plot grid and corner stub) and return grid y positions. */
+export function drawPriceAxisStrip(
+  ctx: CanvasRenderingContext2D,
+  view: View,
+  priceStep: number,
+  pricePrecision?: number,
+  keepOut: readonly PriceAxisKeepOut[] = [],
+  displayOptions?: ResolvedChartDisplayOptions,
+): number[] {
+  return paintPriceAxis(ctx, view, priceStep, pricePrecision, keepOut, displayOptions, {
+    drawGrid: false,
+    includeCornerAndFullSeparator: false,
+  });
+}
+
+/** Draw cached horizontal plot grid lines directly onto the main annotation context. */
+export function drawPriceAxisGridLines(
+  ctx: CanvasRenderingContext2D,
+  view: View,
+  gridYs: readonly number[],
+): void {
+  if (!settings.grid || gridYs.length === 0) return;
+  const axisX = view.area.left + view.area.width;
+  for (const y of gridYs) {
+    ctx.strokeStyle = axisGridLineColor;
+    ctx.beginPath();
+    ctx.moveTo(view.area.left, y);
+    ctx.lineTo(axisX, y);
+    ctx.stroke();
   }
 }
 

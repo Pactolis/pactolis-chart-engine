@@ -24,8 +24,9 @@ import {
 } from "./touchControlsRenderer.js";
 import { HUD_ROW_HEIGHT, hudMaxRows, layoutHud, type HudPart } from "./hudLayout.js";
 import { configDecimals, placeVerticalLabels } from "../axisLabelUtils.js";
-import { drawCrosshairPriceLabel, drawPriceAxis, drawPriceMarkers, type PriceAxisKeepOut, type PriceMarker } from "./priceAxisRenderer.js";
-import { drawCrosshairTimeLabel, drawTimeAxis, type TimeMarker } from "./timeAxisRenderer.js";
+import { AxisLayerCache } from "./axisLayerCache.js";
+import { drawCrosshairPriceLabel, drawPriceMarkers, type PriceAxisKeepOut, type PriceMarker } from "./priceAxisRenderer.js";
+import { drawCrosshairTimeLabel, type TimeMarker } from "./timeAxisRenderer.js";
 import {
   calculateVolumeProfile,
   sessionBars,
@@ -174,6 +175,7 @@ export class Overlay {
   private interactionHudSyncTime: number | null = null;
   /** Per-chart görünüm config'i (runtime set eder); null ise global settings. */
   private chartConfig: ChartViewConfig | null = null;
+  private readonly axisCache = new AxisLayerCache();
   private readonly cellTextCache = new WeakMap<FootprintBar, { key: string; cellRevision: number; entries: Map<number, FormattedCellText> }>();
 
   getPriceScaleControlAt(x: number, y: number): PriceScaleControlId | null {
@@ -299,6 +301,26 @@ export class Overlay {
     return this.getDisplayOptions?.() ?? this.defaultDisplayOptions;
   }
 
+  /** Clear cached axis offscreen bitmaps so the next render rebuilds them from fresh state. */
+  invalidateAxisCache(): void {
+    this.axisCache.invalidate();
+  }
+
+  /** Release offscreen axis canvases and transient overlay buffers. */
+  dispose(): void {
+    this.axisCache.dispose();
+    this.profileCache = null;
+    this.tpoCache = null;
+    this.priceMarkers = [];
+    this.timeMarkers = [];
+    this.lineLabels = [];
+    this.priceScaleControlRects = [];
+    this.indicatorScaleControlRects = [];
+    this.touchMenuButton = null;
+    this.indicatorAxisRects = [];
+    this.tpoProfileHitZones = [];
+  }
+
   /** Static/semi-static Canvas2D surface. Scene layer order is the render authority. */
   renderAnnotations(
     view: View,
@@ -352,10 +374,16 @@ export class Overlay {
         if (layerId === "axis") {
           if (!mainSuppressed && !empty) {
             this.drawLineLabels(view);
-            drawPriceAxis(ctx, view, series.config.priceStep, series.config.pricePrecision, this.priceAxisKeepOut(view, crosshair), this.displayOptions);
+            this.axisCache.renderPriceAxis(
+              ctx,
+              view,
+              series,
+              this.priceAxisKeepOut(view, crosshair),
+              this.displayOptions,
+            );
             drawPriceMarkers(ctx, view, this.priceMarkers, series.config.priceStep, series.config.pricePrecision, this.displayOptions);
           }
-          drawTimeAxis(ctx, view, series, undefined, this.timeMarkers);
+          this.axisCache.renderTimeAxis(ctx, view, series, this.timeMarkers);
           continue;
         }
 
