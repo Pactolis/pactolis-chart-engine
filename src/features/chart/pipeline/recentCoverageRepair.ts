@@ -64,7 +64,7 @@ export interface RecentCoverageRepairHost {
   readonly series: FootprintSeries;
   readonly services: Pick<ChartDataPipelineServices, "fetchHistory">;
   readonly integrityReporter?: PipelineIntegrityReporter;
-  readonly onDataDegraded?: (degraded: boolean, detail: string) => void;
+  notifyDataDegraded(degraded: boolean, detail: string): void;
   isDisposed(): boolean;
   isPaused(): boolean;
   getGeneration(): number;
@@ -292,7 +292,7 @@ export class RecentCoverageRepairCoordinator {
     if (complete) {
       this.host.markRecentCoverageCompleted(from);
       this.host.integrityReporter?.report("healthy");
-      this.host.onDataDegraded?.(false, "");
+      this.host.notifyDataDegraded(false, "");
     }
     return complete ? "complete" : "retry";
   }

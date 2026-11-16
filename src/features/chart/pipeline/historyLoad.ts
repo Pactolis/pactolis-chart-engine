@@ -119,7 +119,7 @@ export function lowerBoundByStartTime(bars: readonly FootprintBar[], target: num
 
 export interface HistoryLoadHost {
   readonly integrityReporter?: PipelineIntegrityReporter;
-  readonly onDataDegraded?: (degraded: boolean, detail: string) => void;
+  notifyDataDegraded(degraded: boolean, detail: string): void;
   readonly onHistoryCandlesReady: () => void;
   isDisposed(): boolean;
   getGeneration(): number;
@@ -200,15 +200,13 @@ export class HistoryLoadCoordinator {
       if (droppedBars > 0) footprintParts.push(`Footprint dropped ${droppedBars} bars`);
       if (reasonCode && !footprintParts.some((part) => part.includes(reasonCode))) footprintParts.push(`Reason: ${reasonCode}`);
       this.activeHistoryFootprintDetail = footprintParts.join(" · ");
-      if (this.host.onDataDegraded) {
-        const provenanceDetail = errorEntries.length > 1
-          ? errorEntries.map((p) => (p.source && !p.error.includes(p.source) ? `${p.source}: ${p.error}` : p.error)).join(" · ")
-          : errorEntries[0]?.error;
-        const detail = provenanceDetail ?? (droppedBars > 0 ? `Footprint dropped ${droppedBars} bars` : (reasonCode ?? ""));
-        this.host.onDataDegraded(true, detail);
-      }
+      const provenanceDetail = errorEntries.length > 1
+        ? errorEntries.map((p) => (p.source && !p.error.includes(p.source) ? `${p.source}: ${p.error}` : p.error)).join(" · ")
+        : errorEntries[0]?.error;
+      const detail = provenanceDetail ?? (droppedBars > 0 ? `Footprint dropped ${droppedBars} bars` : (reasonCode ?? ""));
+      this.host.notifyDataDegraded(true, detail);
     } else {
-      this.host.onDataDegraded?.(false, "");
+      this.host.notifyDataDegraded(false, "");
     }
   };
 
@@ -943,7 +941,7 @@ export class HistoryLoadCoordinator {
     if (blockedBuckets.size > 0) {
       incrementPerformanceCounter("pipeline.history.candle_coverage_unknown", blockedBuckets.size);
       this.host.integrityReporter?.report("pending", "CANDLE_COVERAGE_UNKNOWN");
-      this.host.onDataDegraded?.(true, "CANDLE_COVERAGE_UNKNOWN: overlapping live candle kept until source ownership is verified");
+      this.host.notifyDataDegraded(true, "CANDLE_COVERAGE_UNKNOWN: overlapping live candle kept until source ownership is verified");
       // Both reach code outside the pipeline, which may reset it or start another load.
       if (this.explicitHistoryReconcile !== state || generation !== this.host.getGeneration() || this.host.isDisposed()) return false;
     }

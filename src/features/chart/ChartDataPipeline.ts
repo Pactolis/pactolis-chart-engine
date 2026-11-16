@@ -1,6 +1,7 @@
 /** Per-panel historical/live chart data facade. */
 import { FootprintSeries } from "../../core/model/footprint.js";
 import type { AggTrade, FootprintBar } from "../../core/types.js";
+import type { EnvelopeMeta } from "../../core/envelope.js";
 import type { ChartDataStateInputs } from "./chartDataState.js";
 import { incrementPerformanceCounter, measurePerformance } from "../../core/performanceTelemetry.js";
 import {
@@ -66,7 +67,7 @@ export class ChartDataPipeline {
   private generation = 0;
   /** Aborted on dispose so a pending step-lookup retry leaves no timer behind. */
   private readonly disposal = new AbortController();
-  private readonly onDataDegraded?: (degraded: boolean, detail: string) => void;
+  private onDataDegraded?: (degraded: boolean, detail: string) => void;
   private readonly repair: LiveTradeRepairController;
   private readonly priceStepCoordinator: PriceStepResolutionCoordinator;
   private readonly tradeQueueCoordinator: LiveTradeQueueCoordinator;
@@ -120,7 +121,7 @@ export class ChartDataPipeline {
 
     this.historyCoordinator = new HistoryLoadCoordinator({
       integrityReporter: this.integrityReporter,
-      onDataDegraded: this.onDataDegraded,
+      notifyDataDegraded: (degraded, detail) => this.onDataDegraded?.(degraded, detail),
       onHistoryCandlesReady: () => this.onHistoryCandlesReady?.(),
       isDisposed: () => this.disposed,
       getGeneration: () => this.generation,
@@ -137,8 +138,8 @@ export class ChartDataPipeline {
         this.tradeQueueCoordinator.pendingTrades = this.tradeQueueCoordinator.pendingTrades.filter(predicate);
       },
       enqueuePendingTrades: (trades) => this.tradeQueueCoordinator._enqueuePendingTrades(trades),
-      scheduleFlush: () => this.tradeQueueCoordinator._scheduleFlush(),
-      cancelFlush: () => this.tradeQueueCoordinator._cancelFlush(),
+      scheduleFlush: () => this._scheduleFlush(),
+      cancelFlush: () => this._cancelFlush(),
       beforeUpdateKeepsPlan: (kind, generation, owned) => this._beforeUpdateKeepsPlan(kind, generation, owned),
       emitUpdate: (kind, source, previous, metadata) => this._emitUpdate(kind, source, previous, metadata),
       recordLastAppliedTradeTime: (time) => this.recordLastAppliedTradeTime(time),
@@ -149,7 +150,7 @@ export class ChartDataPipeline {
       series: this.series,
       services: this.services,
       integrityReporter: this.integrityReporter,
-      onDataDegraded: this.onDataDegraded,
+      notifyDataDegraded: (degraded, detail) => this.onDataDegraded?.(degraded, detail),
       isDisposed: () => this.disposed,
       isPaused: () => this.tradeQueueCoordinator.paused,
       getGeneration: () => this.generation,
@@ -162,8 +163,8 @@ export class ChartDataPipeline {
       filterPendingTrades: (predicate) => {
         this.tradeQueueCoordinator.pendingTrades = this.tradeQueueCoordinator.pendingTrades.filter(predicate);
       },
-      scheduleFlush: () => this.tradeQueueCoordinator._scheduleFlush(),
-      cancelFlush: () => this.tradeQueueCoordinator._cancelFlush(),
+      scheduleFlush: () => this._scheduleFlush(),
+      cancelFlush: () => this._cancelFlush(),
       handleMeta: (meta, reportDegraded) => this.historyCoordinator.handleMeta(meta, reportDegraded),
       beforeUpdateKeepsPlan: (kind, generation, owned) => this._beforeUpdateKeepsPlan(kind, generation, owned),
       emitHistoryPatched: (previous) => this._emitUpdate("history-patched", "history", previous),
@@ -176,7 +177,7 @@ export class ChartDataPipeline {
     this.tradeQueueCoordinator = new LiveTradeQueueCoordinator({
       services: this.services,
       integrityReporter: this.integrityReporter,
-      onDataDegraded: this.onDataDegraded,
+      notifyDataDegraded: (degraded, detail) => this.onDataDegraded?.(degraded, detail),
       isDisposed: () => this.disposed,
       getMarket: () => this._market,
       getIntervalMs: () => this._intervalMs,
@@ -196,6 +197,9 @@ export class ChartDataPipeline {
       recordLastAppliedTradeTime: (time) => this.recordLastAppliedTradeTime(time),
       emitBarClose: (closed) => this.onBarClose?.(closed),
       emitUpdateEvent: (event) => this._dispatchUpdateEvent(event),
+      _scheduleFlush: () => this._scheduleFlush(),
+      _cancelFlush: () => this._cancelFlush(),
+      _flushTrades: (limit, budgetMs) => this._flushTrades(limit, budgetMs),
     }, this.series, opts.scheduler ?? defaultTradeFlushScheduler());
 
     this.repair = new LiveTradeRepairController({
@@ -259,6 +263,12 @@ export class ChartDataPipeline {
   get pendingTrades(): AggTrade[] { return this.tradeQueueCoordinator.pendingTrades; }
   set pendingTrades(trades: AggTrade[]) { this.tradeQueueCoordinator.pendingTrades = trades; }
   /** @internal White-box test compatibility bridge. */
+  get pendingTradeDataLoss(): boolean { return this.tradeQueueCoordinator.pendingTradeDataLoss; }
+  set pendingTradeDataLoss(value: boolean) { this.tradeQueueCoordinator.pendingTradeDataLoss = value; }
+  /** @internal White-box test compatibility bridge. */
+  get pendingTradeOverloaded(): boolean { return this.tradeQueueCoordinator.pendingTradeOverloaded; }
+  set pendingTradeOverloaded(value: boolean) { this.tradeQueueCoordinator.pendingTradeOverloaded = value; }
+  /** @internal White-box test compatibility bridge. */
   get explicitHistoryReconcile(): ExplicitHistoryReconcileState | null { return this.historyCoordinator.explicitHistoryReconcile; }
   set explicitHistoryReconcile(state: ExplicitHistoryReconcileState | null) { this.historyCoordinator.explicitHistoryReconcile = state; }
   /** @internal White-box test compatibility bridge. */
@@ -269,6 +279,10 @@ export class ChartDataPipeline {
   set historyController(controller: AbortController | null) { this.historyCoordinator.historyController = controller; }
   /** @internal White-box test compatibility bridge. */
   get fillCellsAttempted(): Map<number, number> { return this.historyCoordinator.fillCellsAttempted; }
+  /** @internal White-box test compatibility arrow callback. */
+  readonly handleMeta = (meta: EnvelopeMeta | undefined, reportDegraded = true): void => {
+    this.historyCoordinator.handleMeta(meta, reportDegraded);
+  };
 
   setRecentCoverageRetryScheduler(scheduler: ((attempt: number, retry: () => boolean, reason: LiveRepairRetryReason) => void) | null): void {
     this.recentRepairCoordinator.setRetryScheduler(scheduler);
@@ -434,8 +448,9 @@ export class ChartDataPipeline {
   _enqueuePendingTrade(trade: AggTrade): boolean { return this.tradeQueueCoordinator._enqueuePendingTrade(trade); }
   /** @internal White-box test compatibility delegate. */
   _enqueuePendingTrades(trades: readonly AggTrade[]): boolean { return this.tradeQueueCoordinator._enqueuePendingTrades(trades); }
-  /** @internal White-box test compatibility delegate. */
-  _flushTrades(limit?: number, budgetMs?: number): void { this.tradeQueueCoordinator._flushTrades(limit, budgetMs); }
+  private _scheduleFlush(): void { this.tradeQueueCoordinator._scheduleFlush(); }
+  private _cancelFlush(): void { this.tradeQueueCoordinator._cancelFlush(); }
+  private _flushTrades(limit?: number, budgetMs?: number): void { this.tradeQueueCoordinator._flushTrades(limit, budgetMs); }
 
   private recordLastAppliedTradeTime(time: number): void {
     if (Number.isFinite(time)) this.lastAppliedTradeTime = Math.max(this.lastAppliedTradeTime, time);

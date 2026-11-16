@@ -94,7 +94,7 @@ export function defaultTradeFlushScheduler(): TradeFlushScheduler {
 export interface LiveTradeQueueHost {
   readonly services: Pick<ChartDataPipelineServices, "subscribeToTrades">;
   readonly integrityReporter?: PipelineIntegrityReporter;
-  readonly onDataDegraded?: (degraded: boolean, detail: string) => void;
+  notifyDataDegraded(degraded: boolean, detail: string): void;
   isDisposed(): boolean;
   getMarket(): string;
   getIntervalMs(): number;
@@ -111,6 +111,9 @@ export interface LiveTradeQueueHost {
   recordLastAppliedTradeTime(time: number): void;
   emitBarClose(closed: FootprintBar): void;
   emitUpdateEvent(event: ChartDataUpdateEvent): void;
+  _scheduleFlush(): void;
+  _cancelFlush(): void;
+  _flushTrades(limit?: number, budgetMs?: number): void;
 }
 
 export class LiveTradeQueueCoordinator {
@@ -141,18 +144,18 @@ export class LiveTradeQueueCoordinator {
     if (this.paused === paused) return;
     this.paused = paused;
     if (paused) {
-      this._cancelFlush();
+      this.host._cancelFlush();
       this.unsubscribe?.();
       this.unsubscribe = null;
       this.subscribedMarket = null;
       return;
     }
     this.ensureDesiredSubscription();
-    if (this.pendingTrades.length > 0) this._scheduleFlush();
+    if (this.pendingTrades.length > 0) this.host._scheduleFlush();
   }
 
   resetOnConfigOrStepChange(): void {
-    this._cancelFlush();
+    this.host._cancelFlush();
     this.pendingTrades = [];
     this.pendingTradeOverloaded = false;
     this.pendingTradeDataLoss = false;
@@ -166,7 +169,7 @@ export class LiveTradeQueueCoordinator {
   }
 
   dispose(): void {
-    this._cancelFlush();
+    this.host._cancelFlush();
     this.pendingTrades = [];
     this.pendingTradeOverloaded = false;
     this.unsubscribe?.();
@@ -193,7 +196,7 @@ export class LiveTradeQueueCoordinator {
       if (this.host.isDisposed() || this.paused) return;
       if (trade.market !== undefined && trade.market !== market) return;
       if (this.host.recordRecentRepairTrade(trade)) {
-        if (!this._enqueuePendingTrade(trade)) this._scheduleFlush();
+        if (!this._enqueuePendingTrade(trade)) this.host._scheduleFlush();
         return;
       }
       this.host.handleRepairTrade(trade);
@@ -212,10 +215,10 @@ export class LiveTradeQueueCoordinator {
             return;
           }
         }
-        if (!this._enqueuePendingTrade(trade)) this._scheduleFlush();
+        if (!this._enqueuePendingTrade(trade)) this.host._scheduleFlush();
         return;
       }
-      if (!this._enqueuePendingTrade(trade)) this._scheduleFlush();
+      if (!this._enqueuePendingTrade(trade)) this.host._scheduleFlush();
     });
     this.subscribedMarket = market;
   }
@@ -242,11 +245,11 @@ export class LiveTradeQueueCoordinator {
     if (dropped > 0) {
       this.pendingTradeDataLoss = true;
       incrementPerformanceCounter("pipeline.flush.overflow_dropped");
-      this.host.onDataDegraded?.(true, "PENDING_TRADE_BUFFER_OVERFLOW: " + dropped + " live trade(s) require resync");
+      this.host.notifyDataDegraded(true, "PENDING_TRADE_BUFFER_OVERFLOW: " + dropped + " live trade(s) require resync");
       this.host.cancelRecentFootprintCoverageRepair();
       this.host.recoverDataLoss(trades.slice(accepted));
     }
-    this._scheduleFlush();
+    this.host._scheduleFlush();
     return true;
   }
 
@@ -254,7 +257,7 @@ export class LiveTradeQueueCoordinator {
   private _drainThrottledQueue(incoming: number): void {
     while (this.pendingTrades.length > 0 && this.pendingTrades.length + incoming > THROTTLED_QUEUE_LIMIT) {
       const before = this.pendingTrades.length;
-      this._flushTrades(before, THROTTLED_DRAIN_BUDGET_MS);
+      this.host._flushTrades(before, THROTTLED_DRAIN_BUDGET_MS);
       if (this.pendingTrades.length >= before) return;
       incrementPerformanceCounter("pipeline.flush.throttled_drain");
     }
@@ -268,8 +271,8 @@ export class LiveTradeQueueCoordinator {
       firedSynchronously = true;
       this.flushScheduled = false;
       this.flushHandle = null;
-      this._flushTrades(nextLiveTradeFlushBatchSize(this.pendingTrades.length));
-      if (this.pendingTrades.length > 0) this._scheduleFlush();
+      this.host._flushTrades(nextLiveTradeFlushBatchSize(this.pendingTrades.length));
+      if (this.pendingTrades.length > 0) this.host._scheduleFlush();
     });
     this.flushHandle = firedSynchronously ? null : handle;
   }
@@ -364,6 +367,6 @@ export class LiveTradeQueueCoordinator {
     const detail = "TRADE_IDENTITY_CONFLICT: " + count + " live trade(s) reused an applied ID with a different payload";
     this.identityConflict = { detail, seriesEpoch: this.series.resetEpoch };
     this.host.integrityReporter?.report("error", detail);
-    this.host.onDataDegraded?.(true, detail);
+    this.host.notifyDataDegraded(true, detail);
   }
 }
