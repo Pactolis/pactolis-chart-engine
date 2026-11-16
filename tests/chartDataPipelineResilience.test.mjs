@@ -278,7 +278,7 @@ test("CPI burst buffers 60000 trades over 30 seconds and reconciles cells exactl
   const pending = deferred();
   let calls = 0;
   const h = harness((q) => { calls++; q.onMeta?.(repairMeta(q)); return pending.promise; }, {
-    scheduler: { schedule: (cb) => { cb(); return 0; }, cancel() {} },
+    scheduler: { request: (cb) => { cb(); return 0; }, cancel() {} },
   });
   h.reconnect(1);
   for (let i = 0; i < 60000; i++) h.emit(trade(101 + i, BASE + 60001 + Math.floor(i / 2)));
@@ -311,7 +311,7 @@ test("overflow exhaustion defers on the transport ladder then repairs the origin
     }
     q.onMeta?.(repairMeta(q, { watermark: trades.at(-1).id }));
     return Promise.resolve([...volumes].map(([time, volume]) => bar(time, volume)));
-  }, { scheduler: { schedule: (cb) => { cb(); return 0; }, cancel() {} } });
+  }, { scheduler: { request: (cb) => { cb(); return 0; }, cancel() {} } });
   h.pipeline.setRecentCoverageRetryScheduler((attempt, callback, reason) => {
     assert.equal(reason, "transport");
     retry = callback;

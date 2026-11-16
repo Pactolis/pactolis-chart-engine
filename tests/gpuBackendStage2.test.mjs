@@ -780,7 +780,8 @@ test("Device loss and uncapturederror triggers onLost and updates GpuDiagnostics
     assert.equal(handle.isLost(), true);
 
     const diag = getGpuDiagnostics();
-    assert.ok(diag.counters["chart.gpu.contextLost"] >= 1);
+    assert.equal(diag.counters["gpu.device.lost"], 1);
+    assert.equal(diag.counters["chart.gpu.contextLost"], undefined, "a device without charts has no affected chart contexts");
   } finally {
     restoreNavigator(originalDescriptor);
     resetSharedWebGpuDevice();

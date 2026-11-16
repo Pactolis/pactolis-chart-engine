@@ -440,7 +440,7 @@ test("second owner: another pipeline on the same market is unaffected by the fir
   });
 });
 
-test("repeated overflow: resyncs stop at the limit with an error, never a false healthy, and a new session recovers", async (t) => {
+test("repeated overflow: resyncs defer at the limit, never report false healthy, and newer sessions remain supported", async (t) => {
   useFakeChartDataSource(t);
   await withClock(async () => {
     const helds = [];
@@ -463,7 +463,7 @@ test("repeated overflow: resyncs stop at the limit with an error, never a false 
       const LIMIT = 4;
       const trades = [];
       for (let n = 0; n < (LIMIT + 1) * CAP + 1; n++) {
-        const t = trade(1_000 + n, START + 60_000 + Math.floor(n / 2), 10_000 + (n % 2), 1, n % 2 === 0);
+        const t = trade(1_000 + n, START + 60_000 + n * 10, 10_000 + (n % 2), 1, n % 2 === 0);
         trades.push(t);
         fixture.emit(t);
         if (n % 1_000 === 999) fixture.scheduler.flushAll();
@@ -474,7 +474,7 @@ test("repeated overflow: resyncs stop at the limit with an error, never a false 
       assert.ok(fixture.queries.slice(0, LIMIT).every((q) => q.signal.aborted), "every superseded request is aborted");
       const resyncs = fixture.reports.filter(([, detail]) => /resynchronizing \(\d\/4\)/.test(detail)).map(([, detail]) => detail.match(/\((\d)\/4\)/)[1]);
       assert.deepEqual(resyncs, ["1", "2", "3", "4"]);
-      assert.deepEqual(fixture.reports.at(-1), ["error", "Trade stream repair buffer overflow"]);
+      assert.deepEqual(fixture.reports.at(-1), ["pending", "Trade stream repair buffer overflow; retry deferred"]);
       assert.deepEqual(fixture.degraded.at(-1), [true, "Trade stream repair buffer overflow"]);
       // The first entry is the reporter's construction baseline, before any repair existed.
       const firstPending = fixture.reports.findIndex(([state]) => state === "pending");
@@ -486,7 +486,7 @@ test("repeated overflow: resyncs stop at the limit with an error, never a false 
         held.resolve([cloneBar(aggregate(PROJECTION))]);
       }
       await fixture.settle();
-      assert.deepEqual(fixture.reports.at(-1), ["error", "Trade stream repair buffer overflow"]);
+      assert.deepEqual(fixture.reports.at(-1), ["pending", "Trade stream repair buffer overflow; retry deferred"]);
 
       // A new transport session repairs from a proof covering everything so far.
       const all = [...PROJECTION, ...trades];
