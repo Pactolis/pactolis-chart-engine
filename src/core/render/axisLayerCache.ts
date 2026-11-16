@@ -63,6 +63,9 @@ export class AxisLayerCache {
   private timeCanvas: HTMLCanvasElement | null = null;
   private priceEntry: PriceAxisCacheEntry | null = null;
   private timeEntry: TimeAxisCacheEntry | null = null;
+  private hasLastTimeViewport = false;
+  private lastTimeOffsetX = Number.NaN;
+  private lastTimeColWidth = Number.NaN;
 
   renderPriceAxis(
     ctx: CanvasRenderingContext2D,
@@ -155,8 +158,23 @@ export class AxisLayerCache {
     series: FootprintSeries,
     timeMarkers: readonly TimeMarker[],
   ): void {
+    const offsetX = view.offsetX;
+    const colWidth = view.colWidth;
+    // Active pan/zoom changes offsetX/colWidth every frame: bypass the offscreen
+    // bitmap and draw straight onto ctx to avoid clearRect + offscreen blit overhead.
+    if (this.hasLastTimeViewport && (this.lastTimeOffsetX !== offsetX || this.lastTimeColWidth !== colWidth)) {
+      this.timeEntry = null;
+      this.lastTimeOffsetX = offsetX;
+      this.lastTimeColWidth = colWidth;
+      incrementPerformanceCounter("chart.annotation.axis.time.cache.bypass");
+      drawTimeAxis(ctx, view, series, undefined, timeMarkers);
+      return;
+    }
+
     const env = resolveOffscreenEnvironment(ctx, view);
     if (!env) {
+      this.timeEntry = null;
+      this.hasLastTimeViewport = false;
       drawTimeAxis(ctx, view, series, undefined, timeMarkers);
       return;
     }
@@ -168,6 +186,8 @@ export class AxisLayerCache {
     const bottom = Math.max(axis.top + axis.height, corner.top + corner.height);
     const bounds = computeDeviceBounds(axis.left, axis.top, right, bottom, env.canvasW, env.canvasH, env.tx, 0, 0);
     if (bounds.devW <= 0 || bounds.devH <= 0) {
+      this.timeEntry = null;
+      this.hasLastTimeViewport = false;
       drawTimeAxis(ctx, view, series, undefined, timeMarkers);
       return;
     }
@@ -184,6 +204,8 @@ export class AxisLayerCache {
     const offscreen = this.ensureTimeCanvas(env.doc, bounds.devW, bounds.devH);
     const offCtx = offscreen.getContext("2d");
     if (!offCtx || typeof offCtx.setTransform !== "function") {
+      this.timeEntry = null;
+      this.hasLastTimeViewport = false;
       drawTimeAxis(ctx, view, series, undefined, timeMarkers);
       return;
     }
@@ -204,12 +226,18 @@ export class AxisLayerCache {
       hasBitmap: true,
     };
     this.timeEntry = entry;
+    this.lastTimeOffsetX = offsetX;
+    this.lastTimeColWidth = colWidth;
+    this.hasLastTimeViewport = true;
     blitOffscreenCanvas(ctx, offscreen, entry.devX, entry.devY);
   }
 
   invalidate(): void {
     this.priceEntry = null;
     this.timeEntry = null;
+    this.hasLastTimeViewport = false;
+    this.lastTimeOffsetX = Number.NaN;
+    this.lastTimeColWidth = Number.NaN;
   }
 
   dispose(): void {

@@ -381,11 +381,13 @@ test("axis cache invalidates independently on scale, viewport, DPR, locale, sett
         assert.equal(d["chart.annotation.axis.time.cache.hit"], 1);
         assert.ok(ctx.calls.filter((c) => c.op === "stroke" && c.strokeStyle === axisGridLineColor).length > 0);
 
-        // 7. Horizontal pan/zoom -> time misses, price hits
+        // 7. Horizontal pan/zoom -> bypasses offscreen time cache (draws directly on ctx), price hits
         view.panX(-40);
         d = renderDelta();
         assert.equal(d["chart.annotation.axis.price.cache.hit"], 1);
-        assert.equal(d["chart.annotation.axis.time.cache.miss"], 1);
+        assert.equal(d["chart.annotation.axis.time.cache.bypass"], 1);
+        assert.equal(d["chart.annotation.axis.time.cache.miss"], undefined);
+        assert.equal(d["chart.annotation.axis.time.cache.hit"], undefined);
 
         // 8. New bar append (structureRevision / length change) -> time misses, price hits
         series.addTrade({ price: 62180, qty: 1, isBuy: true, time: BASE_TIME + 20 * 60_000 });
@@ -537,6 +539,168 @@ test("falls back directly to main ctx when offscreen canvas creation is unavaila
       overlay.dispose();
     }
   }));
+});
+
+test("time axis bypasses offscreen cache during active pan/zoom and resumes caching once stationary", () => {
+  const prevLocale = chartLocale();
+  let activeTz = "UTC";
+  configureChartLocale({
+    locale: () => "en-US",
+    timeZone: () => activeTz,
+    translate: prevLocale.translate,
+    onLocaleChange: prevLocale.onLocaleChange,
+  });
+
+  try {
+    withSettingsSnapshot(() => withTelemetryEnabled(() => {
+      settings.grid = true;
+      settings.lastPrice = true;
+
+      const doc = makeMockDocument();
+      const ctx = makeRecordedContext(900, 522, doc, 1);
+      const series = makeSeries();
+      const view = makeView(838, 500, 1);
+      const initialOffsetX = view.offsetX;
+      const initialColWidth = view.colWidth;
+      let activeTimeMarker = null;
+
+      const overlay = makeOverlay(ctx, {
+        drawForeground: () => {
+          if (activeTimeMarker) {
+            overlay.queueTimeObject(activeTimeMarker.time, activeTimeMarker.text, activeTimeMarker.color);
+          }
+        },
+      });
+      const layerOrder = ["drawings", "last-price", "axis"];
+      const crosshair = { x: 0, y: 0, visible: false };
+
+      const renderStep = () => {
+        ctx.calls.length = 0;
+        const before = snapshotPerformanceTelemetry().counters;
+        overlay.renderAnnotations(view, series, crosshair, [0, series.length], layerOrder);
+        const delta = counterDelta(before, snapshotPerformanceTelemetry().counters);
+        return {
+          delta,
+          drawImages: ctx.calls.filter((c) => c.op === "drawImage").length,
+        };
+      };
+
+      const timeLabelsInCalls = (calls, activeView) => {
+        const axisTop = activeView.area.top + activeView.area.height + activeView.subPanesH;
+        return calls
+          .filter((c) => c.op === "fillText" && c.font === "11px ui-monospace, monospace" && c.y >= axisTop)
+          .map((c) => ({ text: c.text, x: c.x, y: c.y, fillStyle: c.fillStyle }));
+      };
+
+      try {
+        // 1. Cold start fills both offscreen caches; next stationary frame hits both.
+        const cold = renderStep();
+        assert.equal(cold.delta["chart.annotation.axis.price.cache.miss"], 1);
+        assert.equal(cold.delta["chart.annotation.axis.time.cache.miss"], 1);
+        assert.equal(cold.drawImages, 2);
+
+        const warm = renderStep();
+        assert.equal(warm.delta["chart.annotation.axis.price.cache.hit"], 1);
+        assert.equal(warm.delta["chart.annotation.axis.time.cache.hit"], 1);
+        assert.equal(warm.drawImages, 2);
+
+        let offTimeCalls = doc.offscreenCanvases[1].recordedCtx.calls.length;
+
+        // 2. Active horizontal pan across multiple frames bypasses time offscreen cache.
+        for (const dx of [-15, -20, -18]) {
+          view.panX(dx);
+          const p = renderStep();
+          assert.equal(p.delta["chart.annotation.axis.price.cache.hit"], 1);
+          assert.equal(p.delta["chart.annotation.axis.time.cache.bypass"], 1);
+          assert.equal(p.delta["chart.annotation.axis.time.cache.miss"], undefined);
+          assert.equal(p.delta["chart.annotation.axis.time.cache.hit"], undefined);
+          assert.equal(p.drawImages, 1, "only price axis is blitted during time-axis pan bypass");
+          assert.equal(doc.offscreenCanvases[1].recordedCtx.calls.length, offTimeCalls, "time offscreen canvas untouched while panning");
+
+          const direct = makeRecordedContext(ctx.canvas.width, ctx.canvas.height, null, view.pixelRatio ?? 1);
+          drawTimeAxis(direct, view, series, undefined, []);
+          assert.deepEqual(timeLabelsInCalls(ctx.calls, view), timeLabelsInCalls(direct.calls, view));
+        }
+
+        // 3. Changing only colWidth (zoom) also triggers bypass without offscreen draw/blit.
+        view.colWidth = 26;
+        const zoomed = renderStep();
+        assert.equal(zoomed.delta["chart.annotation.axis.time.cache.bypass"], 1);
+        assert.equal(zoomed.drawImages, 1);
+        assert.equal(doc.offscreenCanvases[1].recordedCtx.calls.length, offTimeCalls);
+
+        // 4. Stopping pan/zoom rebuilds offscreen time cache on first stationary frame, then hits on live tail ticks.
+        const stopped = renderStep();
+        assert.equal(stopped.delta["chart.annotation.axis.time.cache.miss"], 1);
+        assert.equal(stopped.delta["chart.annotation.axis.time.cache.bypass"], undefined);
+        assert.equal(stopped.drawImages, 2);
+        offTimeCalls = doc.offscreenCanvases[1].recordedCtx.calls.length;
+
+        for (const [idx, price] of [62151, 62159].entries()) {
+          series.addTrade({ price, qty: 1, isBuy: true, time: BASE_TIME + 19 * 60_000 + (idx + 1) * 1_000 });
+          const burst = renderStep();
+          assert.equal(burst.delta["chart.annotation.axis.price.cache.hit"], 1);
+          assert.equal(burst.delta["chart.annotation.axis.time.cache.hit"], 1);
+          assert.equal(burst.delta["chart.annotation.axis.time.cache.bypass"], undefined);
+          assert.equal(burst.drawImages, 2);
+          assert.equal(doc.offscreenCanvases[1].recordedCtx.calls.length, offTimeCalls);
+        }
+
+        // 5. Panning back to exact initial (offsetX, colWidth) bypasses and must not reuse invalidated pre-pan entry.
+        view.offsetX = initialOffsetX;
+        view.colWidth = initialColWidth;
+        const returned = renderStep();
+        assert.equal(returned.delta["chart.annotation.axis.time.cache.bypass"], 1);
+        assert.equal(returned.delta["chart.annotation.axis.time.cache.hit"], undefined);
+        assert.equal(returned.drawImages, 1);
+
+        // Settle once, verify stationary hit, then verify resize/DPR/marker/timezone invalidations stay accurate.
+        assert.equal(renderStep().delta["chart.annotation.axis.time.cache.miss"], 1);
+        assert.equal(renderStep().delta["chart.annotation.axis.time.cache.hit"], 1);
+
+        ctx.canvas.width = 1500;
+        ctx.canvas.height = 900;
+        ctx.setTransform(1.5, 0, 0, 1.5, 0, 0);
+        view.pixelRatio = 1.5;
+        view.area = { left: 0, top: 0, width: 938, height: 578 };
+        const dprMiss = renderStep();
+        assert.equal(dprMiss.delta["chart.annotation.axis.price.cache.miss"], 1);
+        assert.equal(dprMiss.delta["chart.annotation.axis.time.cache.miss"], 1);
+        assert.equal(renderStep().delta["chart.annotation.axis.time.cache.hit"], 1);
+
+        // Active marker while panning draws directly on main ctx matching drawTimeAxis output, then caches when stopped.
+        activeTimeMarker = { time: BASE_TIME + 12 * 60_000, text: "M1", color: "#00ff00" };
+        view.panX(-10);
+        const markerPan = renderStep();
+        assert.equal(markerPan.delta["chart.annotation.axis.time.cache.bypass"], 1);
+        const directWithMarker = makeRecordedContext(1500, 900, null, 1.5);
+        drawTimeAxis(directWithMarker, view, series, undefined, [activeTimeMarker]);
+        assert.deepEqual(timeLabelsInCalls(ctx.calls, view), timeLabelsInCalls(directWithMarker.calls, view));
+
+        assert.equal(renderStep().delta["chart.annotation.axis.time.cache.miss"], 1);
+        assert.equal(renderStep().delta["chart.annotation.axis.time.cache.hit"], 1);
+
+        // Timezone change when stationary invalidates offscreen cache cleanly.
+        activeTz = "Asia/Tokyo";
+        doc.offscreenCanvases[1].recordedCtx.calls.length = 0;
+        const tzMiss = renderStep();
+        assert.equal(tzMiss.delta["chart.annotation.axis.time.cache.miss"], 1);
+        const directTz = makeRecordedContext(1500, 900, null, 1.5);
+        drawTimeAxis(directTz, view, series, undefined, [activeTimeMarker]);
+        assert.deepEqual(timeLabelsInCalls(doc.offscreenCanvases[1].recordedCtx.calls, view), timeLabelsInCalls(directTz.calls, view));
+
+        // Explicit invalidateAxisCache resets pan tracking so the next render warms the cache instead of bypassing.
+        overlay.invalidateAxisCache();
+        const afterReset = renderStep();
+        assert.equal(afterReset.delta["chart.annotation.axis.time.cache.miss"], 1);
+        assert.equal(afterReset.delta["chart.annotation.axis.time.cache.bypass"], undefined);
+      } finally {
+        overlay.dispose();
+      }
+    }));
+  } finally {
+    configureChartLocale(prevLocale);
+  }
 });
 
 test("ChartRuntime wires overlay axis cache invalidation on context loss/restore and overlay disposal on teardown", () => {
