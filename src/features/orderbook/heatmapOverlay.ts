@@ -3,6 +3,7 @@
 import type { View } from "../../core/engine/view.js";
 import type { FootprintSeries } from "../../core/model/footprint.js";
 import type { Crosshair } from "../../core/render/overlay.js";
+import { parseMarket } from "../../core/domain/market.js";
 import {
   activeOrderbookHeatmapThreshold,
   isOrderbookHeatmapMarket,
@@ -13,6 +14,7 @@ import { isPerformanceTelemetryEnabled, recordPerformanceDuration } from "../../
 import { orderbookHeatmapSettingsSource } from "./heatmapSettingsSource.js";
 import type {
   LiveHeatmapTailEvent,
+  LiveHeatmapTailRequest,
   OrderbookHeatmapBar,
   OrderbookHeatmapRequest,
   OrderbookHeatmapResponse,
@@ -36,7 +38,7 @@ import {
 } from "./heatmapModel.js";
 import type { HeatmapGpuCellFrame } from "../chart/heatmap/gpu/heatmapGpuRenderer.js";
 
-export type { LiveHeatmapTailEvent } from "./heatmapContracts.js";
+export type { LiveHeatmapTailEvent, LiveHeatmapTailRequest } from "./heatmapContracts.js";
 
 export type OrderbookHeatmapFetch = (
   request: OrderbookHeatmapRequest,
@@ -125,7 +127,10 @@ export interface OrderbookHeatmapOverlayOptions {
    * Transport-agnostic: frontend WS service or data pipeline delivers events.
    * Returns an unsubscribe function.
    */
-  subscribeLiveTail?: (listener: (event?: LiveHeatmapTailEvent) => void) => () => void;
+  subscribeLiveTail?: (
+    listener: (event?: LiveHeatmapTailEvent) => void,
+    request?: LiveHeatmapTailRequest,
+  ) => () => void;
   /** Bounded coalescing / debounce for live tail invalidations (default 200ms). */
   liveDebounceMs?: number;
 }
@@ -136,9 +141,16 @@ export class OrderbookHeatmapOverlay {
   private readonly invalidate: () => void;
   private readonly now: () => number;
   private readonly getMarket: () => string;
-  private readonly subscribeLiveTail?: (listener: (event?: LiveHeatmapTailEvent) => void) => () => void;
+  private readonly subscribeLiveTail?: (
+    listener: (event?: LiveHeatmapTailEvent) => void,
+    request?: LiveHeatmapTailRequest,
+  ) => () => void;
   private readonly liveDebounceMs: number;
   private unsubscribeLiveTail: (() => void) | null = null;
+  private liveTailRequestKey = "";
+  private liveTailGeneration = 0;
+  private disposed = false;
+  private lastMarket = "";
   private liveDebounceTimer: ReturnType<typeof setTimeout> | null = null;
   private lastLiveEventAt = 0;
   private currentTier: HeatmapTier | null = null;
@@ -165,13 +177,13 @@ export class OrderbookHeatmapOverlay {
     this.now = options.now ?? Date.now;
     this.subscribeLiveTail = options.subscribeLiveTail;
     this.liveDebounceMs = Math.max(50, options.liveDebounceMs ?? DEFAULT_LIVE_DEBOUNCE_MS);
-    this.unsubscribe = orderbookHeatmapSettingsSource().onChange(() => this.invalidate());
+    this.lastMarket = this.getMarket();
+    this.unsubscribe = orderbookHeatmapSettingsSource().onChange(() => {
+      this.syncLiveTailSubscription();
+      this.invalidate();
+    });
 
-    if (this.subscribeLiveTail) {
-      this.unsubscribeLiveTail = this.subscribeLiveTail((event) => {
-        this.handleLiveTailEvent(event);
-      });
-    }
+    this.syncLiveTailSubscription();
 
     // Redraws pull the live tail; this keeps it moving on a quiet chart when live tail subscription is inactive/idle.
     this.liveTimer = setInterval(() => {
@@ -188,6 +200,67 @@ export class OrderbookHeatmapOverlay {
     return orderbookHeatmapSettingsSource().settingsFor(this.getMarket());
   }
 
+  private trySettings(): OrderbookHeatmapSettings | null {
+    try {
+      return orderbookHeatmapSettingsSource().settingsFor(this.getMarket());
+    } catch {
+      return null;
+    }
+  }
+
+  private liveTailKeyFor(market: string, settings: OrderbookHeatmapSettings | null): string {
+    if (!settings) return `${market}|unconfigured`;
+    return `${market}|${settings.mode}|${settings.unit}|${settings.bucketStep}|${activeOrderbookHeatmapThreshold(settings)}`;
+  }
+
+  /** Synchronizes the active live-tail subscription with current market and heatmap settings. */
+  private syncLiveTailSubscription(): void {
+    if (this.disposed || !this.subscribeLiveTail) return;
+    const market = this.getMarket();
+    const settings = this.trySettings();
+    const key = this.liveTailKeyFor(market, settings);
+    if (key === this.liveTailRequestKey && this.unsubscribeLiveTail !== null) return;
+
+    this.liveTailGeneration++;
+    const generation = this.liveTailGeneration;
+    this.unsubscribeLiveTail?.();
+    this.unsubscribeLiveTail = null;
+    if (this.liveDebounceTimer) {
+      clearTimeout(this.liveDebounceTimer);
+      this.liveDebounceTimer = null;
+    }
+    this.lastLiveEventAt = 0;
+    this.liveTailRequestKey = key;
+
+    const parsed = parseMarket(market);
+    const request: LiveHeatmapTailRequest = {
+      market,
+      ...(parsed.base ? { base: parsed.base } : {}),
+    };
+    if (settings) {
+      request.bucketStep = settings.bucketStep;
+      if (settings.mode !== "off" && settings.unit === "usd") {
+        request.minQuantityUsd = activeOrderbookHeatmapThreshold(settings);
+      }
+    }
+
+    const listener = (event?: LiveHeatmapTailEvent): void => {
+      if (generation !== this.liveTailGeneration || this.disposed) return;
+      if (event?.market && event.market !== market) return;
+      this.handleLiveTailEvent(event);
+    };
+    this.unsubscribeLiveTail = this.subscribeLiveTail(listener, request);
+  }
+
+  /** Resets cached data and immediately re-subscribes when the chart switches markets. */
+  handleMarketChange(): void {
+    if (this.disposed) return;
+    this.lastMarket = this.getMarket();
+    this.currentTier = null;
+    this.reset("");
+    this.syncLiveTailSubscription();
+  }
+
   /** Whether the live-tail subscription is actively receiving events. */
   private isLiveTailHealthy(now: number): boolean {
     return Boolean(this.subscribeLiveTail && this.lastLiveEventAt > 0 && now - this.lastLiveEventAt < LIVE_TAIL_IDLE_FALLBACK_MS);
@@ -195,29 +268,35 @@ export class OrderbookHeatmapOverlay {
 
   /** Handles incoming transport-agnostic live-tail invalidation or bars push. */
   handleLiveTailEvent(event?: LiveHeatmapTailEvent): void {
-    if (!this.active()) return;
+    if (this.disposed || !this.active()) return;
     const currentMarket = this.getMarket();
     if (event?.market && event.market !== currentMarket) return;
-    this.lastLiveEventAt = this.now();
 
-    // Direct push: merge provided bars immediately without hitting REST
-    if (event?.bars && event.bars.length > 0) {
-      mergeHeatmapBars(this.bars, event.bars);
-      this.barsRevision++;
-      // Mark current live chunk as refreshed if loaded
-      if (this.currentTier) {
-        const now = this.now();
+    // Direct push: only the 1m tier accepts 1m live-tail bars so coarse tiers (>= 5m) stay uncontaminated.
+    if (event?.bars !== undefined) {
+      if (this.currentTier?.name !== "1m") return;
+      const now = this.now();
+      this.lastLiveEventAt = now;
+      if (this.liveDebounceTimer) {
+        clearTimeout(this.liveDebounceTimer);
+        this.liveDebounceTimer = null;
+      }
+      if (event.bars.length > 0) {
+        mergeHeatmapBars(this.bars, event.bars);
+        this.barsRevision++;
+        // Mark current live chunk as refreshed if loaded
         const liveChunkStart = heatmapChunkStart(now, this.currentTier);
         const existing = this.chunks.get(liveChunkStart);
         if (existing && existing.status === "ready") {
           existing.fetchedAt = now;
         }
+        this.invalidate();
       }
-      this.invalidate();
       return;
     }
 
-    // Invalidation signal without bars: coalesce and refresh only the live tail
+    // Invalidation signal without bars (Stage 1 health ping): coalesce and refresh only the live tail
+    this.lastLiveEventAt = this.now();
     this.scheduleLiveTailRefresh();
   }
 
@@ -307,12 +386,15 @@ export class OrderbookHeatmapOverlay {
   }
 
   dispose(): void {
+    this.disposed = true;
+    this.liveTailGeneration++;
     clearInterval(this.liveTimer);
     if (this.hoverTimer) clearTimeout(this.hoverTimer);
     if (this.liveDebounceTimer) clearTimeout(this.liveDebounceTimer);
     this.unsubscribe();
     this.unsubscribeLiveTail?.();
     this.unsubscribeLiveTail = null;
+    this.liveTailRequestKey = "";
     this.reset("");
   }
 
@@ -325,6 +407,7 @@ export class OrderbookHeatmapOverlay {
       clearTimeout(this.liveDebounceTimer);
       this.liveDebounceTimer = null;
     }
+    this.lastLiveEventAt = 0;
     for (const controller of this.inFlight) controller.abort();
     this.inFlight.clear();
     this.dataKey = key;
@@ -486,6 +569,13 @@ export class OrderbookHeatmapOverlay {
     series: FootprintSeries,
     range: [number, number],
   ): HeatmapFramePreamble | null {
+    const market = this.getMarket();
+    if (this.lastMarket !== "" && market !== this.lastMarket) {
+      this.currentTier = null;
+      this.reset("");
+    }
+    this.lastMarket = market;
+    this.syncLiveTailSubscription();
     if (!this.active() || series.length === 0) return null;
     const tier = heatmapTierFor(series.config.intervalMs);
     this.currentTier = tier;

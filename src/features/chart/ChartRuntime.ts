@@ -746,6 +746,7 @@ class ChartRuntimeImpl implements ChartRuntime, ChartInputHost {
       if (!this.hostActive) this.pipeline.setPaused(true);
       this.analysisBridge.resetMarket(constrainedNext.market);
       this._beginNpocRequest(constrainedNext.market);
+      this.orderbookHeatmap?.handleMarketChange();
     }
 
     if (constrainedNext.indicators !== prev.indicators) this.indicatorController.restore(constrainedNext.indicators);
