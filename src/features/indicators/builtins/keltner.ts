@@ -47,10 +47,14 @@ function prepareKeltner(ctx: IndicatorDrawContext<KeltnerSettings>) {
     for (let i = 0; i < closes.length - 1; i++) {
       if (Number.isFinite(closes[i]) && emaSeedCount < emaPeriod) { emaSeedSum += closes[i]; emaSeedCount++; }
     }
+    let emaBefore: number | null = null;
+    for (let i = ema.length - 2; i >= 0; i--) {
+      if (ema[i] !== null) { emaBefore = ema[i]; break; }
+    }
     const middle = ema.map((value, i) => i < warmup || atr[i] === null ? null : value);
     const upper = middle.map((value, i) => value === null ? null : value + multiplier * atr[i]!);
     const lower = middle.map((value, i) => value === null ? null : value - multiplier * atr[i]!);
-    return { middle, upper, lower, ranges, emaBefore: ema.slice(0, -1).findLast((value) => value !== null) ?? null,
+    return { middle, upper, lower, ranges, emaBefore,
       emaSeedSum, emaSeedCount, atrBefore: wilderFull(ranges, atrPeriod).before };
   }, (cached) => {
     const tail = bars.length - 1;
