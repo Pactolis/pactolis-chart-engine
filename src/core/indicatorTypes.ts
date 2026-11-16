@@ -87,6 +87,8 @@ export interface IndicatorPaneRect {
 }
 
 export interface IndicatorChartContext {
+  /** Replay clock: bars ending after this time cannot participate in analysis. */
+  asOfTime?: number;
   market: string;
   timeframe: string;
   intervalMs: number;

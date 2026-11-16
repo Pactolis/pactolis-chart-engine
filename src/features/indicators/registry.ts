@@ -14,6 +14,7 @@ import { mfiIndicatorDefinition } from "./builtins/mfi.js";
 import { movingAverageIndicatorDefinition } from "./builtins/movingAverage.js";
 import { rsiIndicatorDefinition } from "./builtins/rsi.js";
 import { stochRsiIndicatorDefinition } from "./builtins/stochRsi.js";
+import { swingMapIndicatorDefinition } from "./builtins/swingMap.js";
 import { superTrendIndicatorDefinition } from "./builtins/superTrend.js";
 import { tradeCountIndicatorDefinition } from "./builtins/tradeCount.js";
 import { volumeIndicatorDefinition } from "./builtins/volume.js";
@@ -25,6 +26,7 @@ const staticDefinitions = [
   bollingerIndicatorDefinition,
   keltnerIndicatorDefinition,
   superTrendIndicatorDefinition,
+  swingMapIndicatorDefinition,
   vwapIndicatorDefinition,
   rsiIndicatorDefinition,
   stochRsiIndicatorDefinition,
