@@ -159,7 +159,7 @@ test("ChartSyncController updateState, persistState restore and replacement canv
 });
 
 test("focus-visible style uses host theme token fallback chain, stays idempotent across charts, and cleans up on dispose", () => {
-  assert.match(CHART_INTERACTION_FOCUS_STYLE, /\.chart-interaction-canvas:focus:not\(:focus-visible\)\s*\{\s*outline:\s*none;\s*\}/);
+  assert.match(CHART_INTERACTION_FOCUS_STYLE, /\.chart-interaction-canvas:focus:not\(:focus-visible\)\s*\{\s*outline:\s*none;\s*outline-width:\s*0;\s*\}/);
   assert.match(
     CHART_INTERACTION_FOCUS_STYLE,
     new RegExp(`\\.chart-interaction-canvas:focus-visible\\s*\\{[^}]*outline:\\s*2px solid var\\(--ui-focus-ring-color,\\s*var\\(--ui-color-info,\\s*${uiColor.info}\\)\\);\\s*outline-offset:\\s*-2px;`),
@@ -215,4 +215,7 @@ test("ChartRuntime wires every state update, lifecycle refresh, canvas setup, an
   // Ensure no direct post-constructor this.state mutations bypass setPanelState
   const rawStateWrites = [...source.matchAll(/this\.state\s*=/g)].map((m) => source.slice(Math.max(0, m.index - 80), m.index + 30));
   assert.equal(rawStateWrites.length, 2, "only setPanelState and initial constructor assignment may write this.state directly");
+
+  const inputSource = readFileSync(new URL("../src/features/chart/ChartInputController.ts", import.meta.url), "utf8");
+  assert.match(inputSource, /if \(touch\)\s*\{[\s\S]*?\.focus\(\{\s*preventScroll:\s*true,\s*focusVisible:\s*false\s*\}\)/);
 });

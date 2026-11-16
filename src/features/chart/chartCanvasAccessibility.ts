@@ -13,7 +13,7 @@ export const CHART_INTERACTION_CANVAS_STYLE_ID = "pactolis-chart-interaction-can
  * pointer clicks free of focus outlines.
  */
 export const CHART_INTERACTION_FOCUS_STYLE = [
-  `.${CHART_INTERACTION_CANVAS_CLASS}:focus:not(:focus-visible) { outline: none; }`,
+  `.${CHART_INTERACTION_CANVAS_CLASS}:focus:not(:focus-visible) { outline: none; outline-width: 0; }`,
   `.${CHART_INTERACTION_CANVAS_CLASS}:focus-visible { outline: 2px solid var(--ui-focus-ring-color, var(--ui-color-info, ${uiColor.info})); outline-offset: -2px; }`,
 ].join("\n");
 
