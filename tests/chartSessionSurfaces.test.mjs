@@ -745,6 +745,7 @@ test("owner adoption cancels the pending RAF on its actual old window and re-sch
 const { ChartRenderCoordinator } = await import("../dist/features/chart/ChartRenderCoordinator.js");
 const { FootprintSeries } = await import("../dist/core/model/footprint.js");
 const { FootprintRenderer } = await import("../dist/core/render/footprintRenderer.js");
+const { WebGl2Surface } = await import("../dist/core/gpu/webgl2/webgl2Surface.js");
 const { View } = await import("../dist/core/engine/view.js");
 
 function viewConfig(overrides = {}) {
@@ -802,14 +803,14 @@ test("the GPU flush uses the canvas window's DPR, not the main window's", () => 
         return () => ({});
       },
     });
-    const renderer = new FootprintRenderer(gl);
     const flushes = [];
-    renderer.batch = {
+    const batch = {
       begin() {},
       rect() {},
       flush: (w, h) => flushes.push([w, h]),
       dispose() {},
     };
+    const renderer = new FootprintRenderer(new WebGl2Surface(canvas, gl, batch));
     renderer.setChartConfig(viewConfig());
     const series = new FootprintSeries({ intervalMs: 60_000, priceStep: 1 });
     const view = new View();

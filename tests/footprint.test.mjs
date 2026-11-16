@@ -204,6 +204,7 @@ test("live inserts cap an open chart's bar map and keep the newest bars", () => 
 });
 
 const { FootprintRenderer } = await import("../dist/core/render/footprintRenderer.js");
+const { WebGl2Surface } = await import("../dist/core/gpu/webgl2/webgl2Surface.js");
 const { View } = await import("../dist/core/engine/view.js");
 
 const FOOTPRINT_MINUTE = 60_000;
@@ -229,7 +230,7 @@ function footprintHistoryBar(startTime, cells, ohlc = {}) {
 }
 
 function fakeGl(dpr) {
-  const canvas = { ownerDocument: { defaultView: { devicePixelRatio: dpr } } };
+  const canvas = { width: 800 * dpr, height: 600 * dpr, ownerDocument: { defaultView: { devicePixelRatio: dpr } } };
   return new Proxy({ canvas, drawingBufferWidth: 800 * dpr, drawingBufferHeight: 600 * dpr }, {
     get(target, prop) {
       if (prop in target) return target[prop];
@@ -240,15 +241,18 @@ function fakeGl(dpr) {
 }
 
 function recordingRenderer(dpr = 1) {
-  const renderer = new FootprintRenderer(fakeGl(dpr));
+  const gl = fakeGl(dpr);
   const rects = [];
   const flushes = [];
-  renderer.batch = {
+  const batch = {
     begin() {},
     rect: (x, y, w, h) => rects.push({ x, y, w, h }),
     flush: (w, h) => flushes.push([w, h]),
     dispose() {},
   };
+  const surface = new WebGl2Surface(gl.canvas, gl, batch);
+  const renderer = new FootprintRenderer(surface);
+  renderer.batch = surface.getBatch();
   return { renderer, rects, flushes };
 }
 

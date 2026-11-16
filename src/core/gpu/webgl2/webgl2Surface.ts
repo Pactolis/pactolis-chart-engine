@@ -1,6 +1,5 @@
-import { WebGl2HeatmapLayer } from "./webgl2Heatmap.js";
 import { QuadBatch } from "../../engine/quadBatch.js";
-import type { GpuFrame, GpuLossReason, GpuSurface, HeatmapLayer, QuadSink, RGBA, RgbaFrame } from "../gpuBackend.js";
+import type { GpuFrame, GpuLossReason, GpuSurface, QuadSink, RGBA, RgbaFrame } from "../gpuBackend.js";
 import { flipRgbaRows } from "../../../features/chart/nativeCapture.js";
 
 function hasWebGl2ShaderCapabilities(gl: WebGL2RenderingContext): boolean {
@@ -25,11 +24,6 @@ function makeNoopBatch(): QuadSink & { begin(): void; flush(): void; dispose(): 
 
 export class WebGl2Surface implements GpuSurface {
   readonly kind = "webgl2" as const;
-  private _heatmap: HeatmapLayer | null = null;
-
-  get heatmap(): HeatmapLayer | null {
-    return this._heatmap;
-  }
 
   private batch: QuadSink & { begin(): void; flush(w: number, h: number): void; dispose(): void };
   private dpr = 1;
@@ -55,7 +49,6 @@ export class WebGl2Surface implements GpuSurface {
   ) {
     const hasShaders = hasWebGl2ShaderCapabilities(gl);
     this.batch = batch ?? (hasShaders ? new QuadBatch(gl) : makeNoopBatch());
-    this._heatmap = hasShaders ? new WebGl2HeatmapLayer(gl) : null;
   }
 
   getGlContext(): WebGL2RenderingContext {
@@ -70,9 +63,7 @@ export class WebGl2Surface implements GpuSurface {
     if (this.disposed) return;
     this.gl = nextGl;
     this.batch.dispose();
-    this._heatmap?.dispose();
     const hasShaders = hasWebGl2ShaderCapabilities(nextGl);
-    this._heatmap = hasShaders ? new WebGl2HeatmapLayer(nextGl) : null;
     this.batch = hasShaders ? new QuadBatch(nextGl) : makeNoopBatch();
   }
 
@@ -160,7 +151,5 @@ export class WebGl2Surface implements GpuSurface {
     }
     this.lostListeners.clear();
     this.batch.dispose();
-    this._heatmap?.dispose();
-    this._heatmap = null;
   }
 }

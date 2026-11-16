@@ -642,7 +642,7 @@ test("WebGpuSurface renders frame lifecycle and writes instance data via WebGpuQ
   const surface = new WebGpuSurface(canvas, handle);
   assert.equal(surface.kind, "webgpu");
   assert.equal(surface.canvas, canvas);
-  assert.equal(surface.heatmap, null);
+  assert.equal("heatmap" in surface, false);
 
   surface.resize(1000, 500, 2);
   assert.equal(canvas.width, 1000);

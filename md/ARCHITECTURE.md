@@ -60,8 +60,8 @@ sonrası yeniden kurulur; bağlam geri yükleme zaman aşımına uğrarsa (5 san
 ## GPU Arka Uç Mimarisi ve Fallback Zinciri (Issue #20)
 
 Motorun fiziksel GPU sahnesi tek bir arayüzün (`GpuSurface`) arkasında soyutlanmıştır:
-- `webgpu` — `WebGpuSurface`: WGSL shader'ları, instanced quad boru hattı (`WebGpuQuadPipeline`), paylaşımlı tekil cihaz (`WebGpuDeviceHandle`) ve dokulu ısı haritası (`WebGpuHeatmapLayer`).
-- `webgl2` — `WebGl2Surface`: GLSL ES 3.0 tabanlı instanced `QuadBatch` ve `WebGl2HeatmapLayer`.
+- `webgpu` — `WebGpuSurface`: WGSL shader'ları, instanced quad boru hattı (`WebGpuQuadPipeline`) ve paylaşımlı tekil cihaz (`WebGpuDeviceHandle`).
+- `webgl2` — `WebGl2Surface`: GLSL ES 3.0 tabanlı instanced `QuadBatch`.
 - `canvas2d` — `Canvas2dSurface`: Başsız veya WebGL/WebGPU desteklemeyen ortamlarda tam işlevsel CPU yedek arka ucu.
 
 ### Seçim ve Otomatik Düşüş (Fallback) Zinciri:
@@ -73,7 +73,7 @@ Arka uç tercihi yapılandırma veya `?gpu=auto|webgpu|webgl2|canvas2d` URL para
 ### WebGPU İmplementasyonunun Mevcut Teknik Sınırları:
 - `WebGpuQuadPipeline` ([src/core/gpu/webgpu/webgpuQuadPipeline.ts](../src/core/gpu/webgpu/webgpuQuadPipeline.ts)) `GPUBufferUsage.VERTEX | COPY_DST` instanced vertex buffer kullanır; `RenderPipeline` ve `BindGroup` nesneleri pipeline oluşturulurken bir kez üretilir ve cache'lenir.
 - Her flush çağrısında `uploadInstances(...)`, CPU'da biriken `Float32Array` quad verisini 0. offsetten itibaren tam `byteLength` olarak `device.queue.writeBuffer` ile GPU'ya gönderir.
-- Mevcut mimaride storage buffer (`GPUBufferUsage.STORAGE`), compute shader veya partial buffer upload bulunmaz; `WebGpuHeatmapLayer` fragment shader texture sampling (`textureSample`) kullanır.
+- Mevcut mimaride storage buffer (`GPUBufferUsage.STORAGE`), compute shader veya partial buffer upload bulunmaz.
 
 ### Performans Telemetrisi ve Sınırları:
 - `src/core/performanceTelemetry.ts` ve `src/features/chart/ChartSession.ts` üzerinden 3 yüzey (`gpu-scene`, `annotation`, `interaction`) ve frame render süreleri (`chart.surface.gpu.draw.ms`, `chart.surface.annotation.draw.ms`, `chart.surface.interaction.draw.ms`, `chart.frame.render.ms`) yalnızca CPU tarafında `performance.now()` ile ölçülür.

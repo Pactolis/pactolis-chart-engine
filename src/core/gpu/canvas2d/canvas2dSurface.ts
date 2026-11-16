@@ -1,4 +1,4 @@
-import type { GpuFrame, GpuLossReason, GpuSurface, HeatmapLayer, QuadSink, RGBA, RgbaFrame } from "../gpuBackend.js";
+import type { GpuFrame, GpuLossReason, GpuSurface, QuadSink, RGBA, RgbaFrame } from "../gpuBackend.js";
 
 function clamp01(v: number): number {
   return v < 0 ? 0 : v > 1 ? 1 : v;
@@ -42,7 +42,6 @@ export class Canvas2dQuadSink implements QuadSink {
 
 export class Canvas2dSurface implements GpuSurface {
   readonly kind = "canvas2d" as const;
-  readonly heatmap: HeatmapLayer | null = null;
 
   private readonly quadSink: Canvas2dQuadSink;
   private dpr = 1;
