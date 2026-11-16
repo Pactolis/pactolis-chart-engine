@@ -479,7 +479,10 @@ class ChartRuntimeImpl implements ChartRuntime, ChartInputHost {
         // The GPU prototype skips canvas density ONLY for the same completed
         // successful GPU frame with identical inputs/geometry/layer key; any
         // mismatch (or legacy mode) keeps the annotation path authoritative.
-        if (this.heatmapGpuSuppressedAnnotation(activeView, activeSeries, range)) return;
+        if (this.heatmapGpuSuppressedAnnotation(activeView, activeSeries, range)) {
+          this.orderbookHeatmap?.releaseRasterCache();
+          return;
+        }
         this.orderbookHeatmap?.draw(ctx, activeView, activeSeries, range);
       },
       (ctx, activeView, activeSeries, activeCrosshair) =>
