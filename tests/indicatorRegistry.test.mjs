@@ -26,10 +26,10 @@ test("indicator catalog exposes heavyweight entries without requiring definition
   for (const type of heavyTypes) assert.ok(catalog.some((entry) => entry.type === type));
 });
 
-test("indicator catalog keeps all 24 addable types with settings and serializable defaults", async () => {
+test("indicator catalog keeps all 25 addable types with settings and serializable defaults", async () => {
   const module = await registry();
   const catalog = module.listIndicatorDefinitions();
-  assert.equal(catalog.length, 24);
+  assert.equal(catalog.length, 25);
   assert.equal(new Set(catalog.map((entry) => entry.type)).size, 24);
 
   for (const [order, entry] of catalog.entries()) {
