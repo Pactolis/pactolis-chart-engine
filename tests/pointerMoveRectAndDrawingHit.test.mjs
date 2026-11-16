@@ -120,6 +120,8 @@ function createMockHost() {
       getIndicatorAxisPaneAt: () => null,
       getIndicatorScaleControlAt: () => null,
       getPriceScaleControlAt: () => null,
+      getMenuButtonAt: () => null,
+      getMenuButtonRect: () => null,
       getTpoProfileAt: () => null,
     },
     timeViewport: {
@@ -303,7 +305,7 @@ test("DrawingManager hitTestAt and peekAt select topmost visible market drawing 
     const hit = manager.hitTestAt(FAR, HIT_SCREEN);
     assert.equal(hit?.id, "top", "hitTestAt picks the topmost visible drawing for current market");
     assert.equal(reverseCalls, 0, "hitTestAt avoids copying and reversing the drawing list");
-    assert.equal(cloneCalls, 0, "hitTestAt avoids cloning");
+    assert.equal(cloneCalls, 1, "hitTestAt only clones the single matched drawing on return");
 
     // Once "top" is hidden, fallback selects "bottom" while preserving list order
     manager.replace([
