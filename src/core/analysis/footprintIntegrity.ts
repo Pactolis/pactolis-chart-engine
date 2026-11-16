@@ -3,9 +3,9 @@ import type { FootprintBar } from "../types.js";
 
 /**
  * Returns true only when `bars` provide gap-free footprint coverage for the
- * requested closed range. This intentionally mirrors the historical naked-POC
- * completeness gate so callers share one narrow definition of footprint
- * integrity.
+ * requested closed range. Kline and trade cells can assign volume to different
+ * neighboring minutes, so conservation is checked over the whole period.
+ * Backend completeness remains authoritative for individual missing bars.
  */
 export function hasCompleteFootprintCoverage(
   bars: readonly FootprintBar[],
@@ -13,11 +13,15 @@ export function hasCompleteFootprintCoverage(
   end: number,
   sourceIntervalMs?: number,
 ): boolean {
-  if (!bars.length) return false;
+  if (!bars.length || !bars.every(hasCompleteFootprint)) return false;
+  const expected = bars.reduce((sum, bar) => sum + bar.volume, 0);
+  const actual = bars.reduce((sum, bar) => sum + cellVolume(bar), 0);
+  const conserved = Number.isFinite(expected) && Number.isFinite(actual)
+    && Math.abs(actual - expected) <= Math.max(1e-12, expected * 1e-6);
+  if (!conserved) return false;
   if (sourceIntervalMs && sourceIntervalMs > 0) {
     let cursor = start;
     for (const bar of [...bars].sort((a, b) => a.startTime - b.startTime)) {
-      if (!hasCompleteFootprint(bar)) return false;
       const barStart = bucketStart(bar.startTime, sourceIntervalMs);
       const barEnd = bucketEnd(barStart, sourceIntervalMs);
       if (barEnd <= cursor) continue;
@@ -35,10 +39,16 @@ export function hasCompleteFootprintCoverage(
   return bars.every(hasCompleteFootprint);
 }
 
+/** Structural per-bar gate; cross-source volume equality belongs to the period. */
 export function hasCompleteFootprint(bar: FootprintBar): boolean {
   return bar.completeness === "complete"
     && bar.cells.size > 0
-    && cellVolume(bar) >= bar.volume * 0.98;
+    && Number.isFinite(bar.volume)
+    && bar.volume >= 0
+    && [...bar.cells.values()].every((cell) => Number.isFinite(cell.priceBin)
+      && Number.isFinite(cell.buyVol) && cell.buyVol >= 0
+      && Number.isFinite(cell.sellVol) && cell.sellVol >= 0)
+    && Number.isFinite(cellVolume(bar));
 }
 
 /** Value-area profiles additionally require finite, positive volume input. */
