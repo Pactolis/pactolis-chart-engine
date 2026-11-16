@@ -10,7 +10,11 @@ import {
   type OrderbookHeatmapSettings,
   type OrderbookHeatmapUnit,
 } from "../../core/orderbookHeatmap/settings.js";
-import { isPerformanceTelemetryEnabled, recordPerformanceDuration } from "../../core/performanceTelemetry.js";
+import {
+  incrementPerformanceCounter,
+  isPerformanceTelemetryEnabled,
+  recordPerformanceDuration,
+} from "../../core/performanceTelemetry.js";
 import { orderbookHeatmapSettingsSource } from "./heatmapSettingsSource.js";
 import type {
   LiveHeatmapTailEvent,
@@ -44,6 +48,28 @@ export type OrderbookHeatmapFetch = (
   request: OrderbookHeatmapRequest,
   signal?: AbortSignal,
 ) => Promise<OrderbookHeatmapResponse>;
+
+/** Maximum RGBA byte footprint for a single chart's CPU heatmap offscreen raster cache (32 MiB). */
+export const HEATMAP_CPU_RASTER_CHART_BUDGET_BYTES = 32 * 1024 * 1024;
+/** Maximum combined RGBA byte footprint across all concurrent CPU heatmap raster caches (128 MiB). */
+export const HEATMAP_CPU_RASTER_MODULE_BUDGET_BYTES = 128 * 1024 * 1024;
+
+let moduleCpuRasterReservedBytes = 0;
+
+/** Computes RGBA8 backing-store byte size (`width * height * 4`) for valid positive dimensions. */
+export function heatmapRasterByteSize(width: number, height: number): number | null {
+  if (!Number.isSafeInteger(width) || !Number.isSafeInteger(height) || width <= 0 || height <= 0) {
+    return null;
+  }
+  const bytes = width * height * 4;
+  if (!Number.isSafeInteger(bytes) || bytes <= 0) return null;
+  return bytes;
+}
+
+/** Returns total RGBA bytes currently reserved across all active CPU heatmap offscreen raster caches. */
+export function getHeatmapCpuRasterModuleReservedBytes(): number {
+  return moduleCpuRasterReservedBytes;
+}
 
 /** How often the chunk holding "now" is refreshed; the backend fills the bar in progress from the current books. */
 const LIVE_REFRESH_MS = 20_000;
@@ -215,9 +241,13 @@ export class OrderbookHeatmapOverlay {
 
   /** Synchronizes the active live-tail subscription with current market and heatmap settings. */
   private syncLiveTailSubscription(): void {
-    if (this.disposed || !this.subscribeLiveTail) return;
+    if (this.disposed) return;
     const market = this.getMarket();
     const settings = this.trySettings();
+    if (!settings || settings.mode === "off" || !isOrderbookHeatmapMarket(market)) {
+      this.releaseRasterCache();
+    }
+    if (!this.subscribeLiveTail) return;
     const key = this.liveTailKeyFor(market, settings);
     if (key === this.liveTailRequestKey && this.unsubscribeLiveTail !== null) return;
 
@@ -417,11 +447,7 @@ export class OrderbookHeatmapOverlay {
     // Dropping the data identity also releases the owned same-frame visible list.
     this.lastCollectedKey = "";
     this.lastCollected = null;
-    this.lastRasterKey = "";
-    this.rasterCacheCanvas = null;
-    this.rasterCacheHasCells = false;
-    this.rasterCacheCeiling = 0;
-    this.rasterCacheThreshold = 0;
+    this.releaseRasterCache();
     this.barsRevision++;
   }
 
@@ -438,92 +464,190 @@ export class OrderbookHeatmapOverlay {
     return this.settings.unit === "btc" ? { minBtc: threshold } : { minUsd: threshold };
   }
 
+  /** Releases this overlay's offscreen CPU raster canvas and returns reserved bytes once. */
+  releaseRasterCache(): void {
+    this.lastRasterKey = "";
+    this.rasterCacheHasCells = false;
+    this.rasterCacheCeiling = 0;
+    this.rasterCacheThreshold = 0;
+    if (this.rasterCacheCanvas) {
+      try {
+        this.rasterCacheCanvas.width = 0;
+        this.rasterCacheCanvas.height = 0;
+      } catch {
+        // Ignore mock canvases with readonly dimensions on teardown.
+      }
+      this.rasterCacheCanvas = null;
+    }
+    if (this.rasterReservedBytes > 0) {
+      moduleCpuRasterReservedBytes = Math.max(0, moduleCpuRasterReservedBytes - this.rasterReservedBytes);
+      this.rasterReservedBytes = 0;
+    }
+  }
+
   /** Draws cells for the visible bars and requests any chunk they still need. */
   draw(ctx: CanvasRenderingContext2D, view: View, series: FootprintSeries, range: [number, number]): void {
     const frame = this.beginFrame(series, range);
     if (!frame) return;
-    const canvasWidth = ctx.canvas?.width ?? 0;
-    const canvasHeight = ctx.canvas?.height ?? 0;
-    const rasterKey = `${this.frameCacheKey(view, series, frame)}|${canvasWidth}|${canvasHeight}`;
-    const canUseRasterCache =
-      canvasWidth > 0 &&
-      canvasHeight > 0 &&
-      typeof ctx.canvas?.ownerDocument?.createElement === "function" &&
-      typeof ctx.drawImage === "function";
+    const startedAt = isPerformanceTelemetryEnabled() ? performance.now() : null;
+    try {
+      const canvasWidth = ctx.canvas?.width ?? 0;
+      const canvasHeight = ctx.canvas?.height ?? 0;
+      const rasterKey = `${this.frameCacheKey(view, series, frame)}|${canvasWidth}|${canvasHeight}`;
+      const canUseRasterCache =
+        canvasWidth > 0 &&
+        canvasHeight > 0 &&
+        typeof ctx.canvas?.ownerDocument?.createElement === "function" &&
+        typeof ctx.drawImage === "function";
 
-    if (canUseRasterCache && this.lastRasterKey === rasterKey) {
-      this.visibleCeiling = this.rasterCacheCeiling;
-      this.visibleThreshold = this.rasterCacheThreshold;
-      if (this.rasterCacheHasCells && this.rasterCacheCanvas) {
-        this.blitRasterCache(ctx);
+      if (!canUseRasterCache && (this.rasterCacheCanvas || this.rasterReservedBytes > 0)) {
+        this.releaseRasterCache();
       }
-      return;
-    }
 
-    // Streaming CPU path: two passes (ceiling, then paint) with an O(1)-held
-    // payload. It never builds or reuses the whole-visible collection list.
-    let cells = 0;
-    const ceiling = this.forEachVisibleCell(view, series, frame, null, () => { cells++; });
-    this.visibleCeiling = ceiling;
-    this.visibleThreshold = frame.threshold;
-    if (cells === 0) {
-      if (canUseRasterCache) {
-        this.lastRasterKey = rasterKey;
-        this.rasterCacheHasCells = false;
-        this.rasterCacheCeiling = ceiling;
-        this.rasterCacheThreshold = frame.threshold;
-      }
-      return;
-    }
-
-    if (canUseRasterCache) {
-      const offscreen = this.ensureRasterCacheCanvas(ctx.canvas.ownerDocument, canvasWidth, canvasHeight);
-      const offCtx = offscreen?.getContext("2d");
-      if (offscreen && offCtx) {
-        offCtx.save();
-        offCtx.setTransform?.(1, 0, 0, 1, 0, 0);
-        offCtx.clearRect(0, 0, canvasWidth, canvasHeight);
-        const transform = typeof ctx.getTransform === "function" ? ctx.getTransform() : null;
-        if (transform && Number.isFinite(transform.a) && Number.isFinite(transform.d)) {
-          offCtx.setTransform?.(
-            transform.a,
-            transform.b,
-            transform.c,
-            transform.d,
-            transform.e,
-            transform.f,
-          );
-        } else {
-          const dpr = view.pixelRatio !== null && view.pixelRatio !== undefined && view.pixelRatio > 0
-            ? view.pixelRatio
-            : 1;
-          offCtx.setTransform?.(dpr, 0, 0, dpr, 0, 0);
+      if (
+        canUseRasterCache &&
+        this.lastRasterKey === rasterKey &&
+        (!this.rasterCacheHasCells || this.rasterCacheCanvas)
+      ) {
+        this.visibleCeiling = this.rasterCacheCeiling;
+        this.visibleThreshold = this.rasterCacheThreshold;
+        if (this.rasterCacheHasCells) {
+          this.blitRasterCache(ctx);
         }
-        this.paintCellsToContext(offCtx, view, series, frame);
-        offCtx.restore();
-        this.lastRasterKey = rasterKey;
-        this.rasterCacheHasCells = true;
-        this.rasterCacheCeiling = ceiling;
-        this.rasterCacheThreshold = frame.threshold;
-        this.blitRasterCache(ctx);
+        incrementPerformanceCounter("chart.cpu.heatmap.raster.hit");
         return;
       }
-    }
 
-    this.paintCellsToContext(ctx, view, series, frame);
+      // Streaming CPU path: two passes (ceiling, then paint) with an O(1)-held
+      // payload. It never builds or reuses the whole-visible collection list.
+      let cells = 0;
+      const ceiling = this.forEachVisibleCell(view, series, frame, null, () => { cells++; });
+      this.visibleCeiling = ceiling;
+      this.visibleThreshold = frame.threshold;
+      if (cells === 0) {
+        this.releaseRasterCache();
+        if (canUseRasterCache) {
+          this.lastRasterKey = rasterKey;
+          this.rasterCacheHasCells = false;
+          this.rasterCacheCeiling = ceiling;
+          this.rasterCacheThreshold = frame.threshold;
+        }
+        return;
+      }
+
+      if (canUseRasterCache) {
+        const offCtx = this.ensureRasterCacheCanvas(ctx.canvas.ownerDocument, canvasWidth, canvasHeight);
+        if (offCtx) {
+          offCtx.save();
+          offCtx.setTransform?.(1, 0, 0, 1, 0, 0);
+          offCtx.clearRect(0, 0, canvasWidth, canvasHeight);
+          const transform = typeof ctx.getTransform === "function" ? ctx.getTransform() : null;
+          if (transform && Number.isFinite(transform.a) && Number.isFinite(transform.d)) {
+            offCtx.setTransform?.(
+              transform.a,
+              transform.b,
+              transform.c,
+              transform.d,
+              transform.e,
+              transform.f,
+            );
+          } else {
+            const dpr = view.pixelRatio !== null && view.pixelRatio !== undefined && view.pixelRatio > 0
+              ? view.pixelRatio
+              : 1;
+            offCtx.setTransform?.(dpr, 0, 0, dpr, 0, 0);
+          }
+          this.paintCellsToContext(offCtx, view, series, frame);
+          offCtx.restore();
+          this.lastRasterKey = rasterKey;
+          this.rasterCacheHasCells = true;
+          this.rasterCacheCeiling = ceiling;
+          this.rasterCacheThreshold = frame.threshold;
+          this.blitRasterCache(ctx);
+          incrementPerformanceCounter("chart.cpu.heatmap.raster.miss");
+          return;
+        }
+      }
+
+      incrementPerformanceCounter("chart.cpu.heatmap.raster.direct");
+      this.paintCellsToContext(ctx, view, series, frame);
+    } finally {
+      if (startedAt !== null) recordPerformanceDuration("chart.cpu.heatmap.draw.ms", performance.now() - startedAt);
+    }
   }
 
   private ensureRasterCacheCanvas(
     doc: Document,
     width: number,
     height: number,
-  ): HTMLCanvasElement | null {
-    if (!this.rasterCacheCanvas) {
-      this.rasterCacheCanvas = doc.createElement("canvas");
+  ): CanvasRenderingContext2D | null {
+    const requiredBytes = heatmapRasterByteSize(width, height);
+    if (requiredBytes === null) {
+      this.releaseRasterCache();
+      return null;
     }
-    if (this.rasterCacheCanvas.width !== width) this.rasterCacheCanvas.width = width;
-    if (this.rasterCacheCanvas.height !== height) this.rasterCacheCanvas.height = height;
-    return this.rasterCacheCanvas;
+    if (requiredBytes > HEATMAP_CPU_RASTER_CHART_BUDGET_BYTES) {
+      this.releaseRasterCache();
+      incrementPerformanceCounter("chart.cpu.heatmap.raster.budgetFallback");
+      return null;
+    }
+
+    const otherModuleBytes = Math.max(0, moduleCpuRasterReservedBytes - this.rasterReservedBytes);
+    if (otherModuleBytes + requiredBytes > HEATMAP_CPU_RASTER_MODULE_BUDGET_BYTES) {
+      this.releaseRasterCache();
+      incrementPerformanceCounter("chart.cpu.heatmap.raster.budgetFallback");
+      return null;
+    }
+
+    const existing = this.rasterCacheCanvas;
+    if (
+      existing &&
+      existing.width === width &&
+      existing.height === height &&
+      this.rasterReservedBytes === requiredBytes
+    ) {
+      const existingCtx = existing.getContext?.("2d") ?? null;
+      if (existingCtx) return existingCtx;
+      this.releaseRasterCache();
+      return null;
+    }
+
+    // Release prior reservation before resizing/creating so module byte accounting
+    // stays exact and a failed resize/context acquisition never leaks bytes.
+    if (this.rasterReservedBytes > 0) {
+      moduleCpuRasterReservedBytes = Math.max(0, moduleCpuRasterReservedBytes - this.rasterReservedBytes);
+      this.rasterReservedBytes = 0;
+    }
+    this.lastRasterKey = "";
+    this.rasterCacheHasCells = false;
+
+    let canvas = this.rasterCacheCanvas;
+    if (!canvas) {
+      try {
+        canvas = doc.createElement("canvas");
+      } catch {
+        return null;
+      }
+      if (!canvas) return null;
+      this.rasterCacheCanvas = canvas;
+    }
+
+    let offCtx: CanvasRenderingContext2D | null = null;
+    try {
+      if (canvas.width !== width) canvas.width = width;
+      if (canvas.height !== height) canvas.height = height;
+      offCtx = canvas.getContext?.("2d") ?? null;
+    } catch {
+      offCtx = null;
+    }
+    if (!offCtx) {
+      this.releaseRasterCache();
+      return null;
+    }
+
+    this.rasterReservedBytes = requiredBytes;
+    moduleCpuRasterReservedBytes += requiredBytes;
+    return offCtx;
   }
 
   private blitRasterCache(ctx: CanvasRenderingContext2D): void {
@@ -576,7 +700,10 @@ export class OrderbookHeatmapOverlay {
     }
     this.lastMarket = market;
     this.syncLiveTailSubscription();
-    if (!this.active() || series.length === 0) return null;
+    if (!this.active() || series.length === 0) {
+      this.releaseRasterCache();
+      return null;
+    }
     const tier = heatmapTierFor(series.config.intervalMs);
     this.currentTier = tier;
     const settings = this.settings;
@@ -587,7 +714,10 @@ export class OrderbookHeatmapOverlay {
     if (key !== this.dataKey) this.reset(key);
     const first = Math.max(0, Math.floor(range[0]));
     const last = Math.min(series.length - 1, Math.ceil(range[1]));
-    if (last < first) return null;
+    if (last < first) {
+      this.releaseRasterCache();
+      return null;
+    }
     this.lastVisibleFromMs = series.timeOfIndex(first);
     this.lastVisibleToMs = series.timeOfIndex(last + 1) - 1;
     // Chunk scheduling runs every frame so a quiet chart still honors the
@@ -779,6 +909,7 @@ export class OrderbookHeatmapOverlay {
   private lastCollected: Array<{ x: number; yTop: number; cellHeight: number; value: number; live: boolean }> | null = null;
   private lastRasterKey = "";
   private rasterCacheCanvas: HTMLCanvasElement | null = null;
+  private rasterReservedBytes = 0;
   private rasterCacheHasCells = false;
   private rasterCacheCeiling = 0;
   private rasterCacheThreshold = 0;
@@ -1021,6 +1152,11 @@ export class OrderbookHeatmapOverlay {
   /** Read-only test seam: returns chunk status for a chunk start time. */
   chunkStatus(chunkStart: number): "loading" | "ready" | "error" | undefined {
     return this.chunks.get(chunkStart)?.status;
+  }
+
+  /** Read-only seam / diagnostics: returns RGBA bytes held by this overlay's CPU raster cache. */
+  reservedRasterBytes(): number {
+    return this.rasterReservedBytes;
   }
 
   /** Read-only test seam: returns whether live tail is considered healthy. */
