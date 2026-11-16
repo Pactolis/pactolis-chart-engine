@@ -68,7 +68,7 @@ test("Swing Map labels use earlier same-kind pivots, retain offscreen history an
   assert.deepEqual(definition.prepareData(ctx).points.map((point) => point.label), ["H", "L", "HH", "HL", "LH", "LL", "LH", "LL"]);
   ctx.range = [5, bars.length];
   assert.equal(definition.prepareData(ctx).points[0].label, "LH", "classification retains offscreen previous high");
-  const equal = context(bars.map((bar, i) => i === 3 ? { ...bar, high: 11.5 } : bar), { equalityToleranceSteps: 1 });
+  const equal = context(bars.map((bar, i) => i === 3 ? { ...bar, high: 11.5, open: 11.25, close: 11.25 } : bar), { equalityToleranceSteps: 1 });
   assert.ok(!definition.prepareData(equal).points.some((point) => point.index === 3), "same-price marker within one priceStep is not repeated");
 });
 
