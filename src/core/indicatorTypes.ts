@@ -185,6 +185,8 @@ export interface IndicatorDefinition<S extends IndicatorSettings = IndicatorSett
   type: string;
   name: string;
   category: IndicatorCategory;
+  /** Optional finer picker grouping within a backward-compatible category. */
+  group?: string;
   defaultPane: IndicatorPaneMode;
   canOverlay: boolean;
   paneHeight: number;

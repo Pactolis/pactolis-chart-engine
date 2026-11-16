@@ -7,6 +7,7 @@ import { cvdIndicatorDefinition } from "./builtins/cvd.js";
 import { deltaIndicatorDefinition } from "./builtins/delta.js";
 import { dmiIndicatorDefinition } from "./builtins/dmi.js";
 import { ichimokuIndicatorDefinition } from "./builtins/ichimoku.js";
+import { keltnerIndicatorDefinition } from "./builtins/keltner.js";
 import { kdjIndicatorDefinition } from "./builtins/kdj.js";
 import { macdIndicatorDefinition } from "./builtins/macd.js";
 import { mfiIndicatorDefinition } from "./builtins/mfi.js";
@@ -23,6 +24,7 @@ import { vwapIndicatorDefinition } from "./builtins/vwapIndicator.js";
 const staticDefinitions = [
   movingAverageIndicatorDefinition,
   bollingerIndicatorDefinition,
+  keltnerIndicatorDefinition,
   superTrendIndicatorDefinition,
   swingMapIndicatorDefinition,
   vwapIndicatorDefinition,
@@ -47,6 +49,7 @@ export interface IndicatorCatalogEntry {
   type: string;
   name: string;
   category: IndicatorDefinition["category"];
+  group?: string;
   defaultPane: IndicatorDefinition["defaultPane"];
 }
 
@@ -88,6 +91,7 @@ export function listIndicatorDefinitions(): IndicatorCatalogEntry[] {
       type: definition.type,
       name: definition.name,
       category: definition.category,
+      ...(definition.group ? { group: definition.group } : {}),
       defaultPane: definition.defaultPane,
     })),
     ...Object.values(heavyCatalog),
