@@ -362,7 +362,11 @@
       "types": "./dist/features/indicators/seriesMutationSummary.d.ts",
       "default": "./dist/features/indicators/seriesMutationSummary.js"
     },
-    "./package.json": "./package.json"
+    "./package.json": "./package.json",
+    "./core/analysis/swings": {
+      "types": "./dist/core/analysis/swings.d.ts",
+      "default": "./dist/core/analysis/swings.js"
+    }
   },
   "files": [
     "dist/**/*.js",

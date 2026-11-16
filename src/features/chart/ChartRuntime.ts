@@ -360,6 +360,7 @@ class ChartRuntimeImpl implements ChartRuntime, ChartInputHost {
       onLayoutChange: () => this._layoutFromCurrentSize(),
       onInvalidate: (changes) => this.session.invalidate(changes),
       getChartContext: () => ({
+        asOfTime: this.replayCoordinator?.getSnapshot()?.virtualTime,
         market: this.state.market,
         timeframe: this.state.timeframe,
         intervalMs: this.pipeline.intervalMs,
