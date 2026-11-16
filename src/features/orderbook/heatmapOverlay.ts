@@ -334,6 +334,12 @@ export class OrderbookHeatmapOverlay {
     // Dropping the data identity also releases the owned same-frame visible list.
     this.lastCollectedKey = "";
     this.lastCollected = null;
+    this.lastRasterKey = "";
+    this.rasterCacheCanvas = null;
+    this.rasterCacheHasCells = false;
+    this.rasterCacheCeiling = 0;
+    this.rasterCacheThreshold = 0;
+    this.barsRevision++;
   }
 
   private baseRequest(tier: HeatmapTier): Pick<OrderbookHeatmapRequest, "source" | "resolution" | "bucketStep"> {
@@ -353,30 +359,121 @@ export class OrderbookHeatmapOverlay {
   draw(ctx: CanvasRenderingContext2D, view: View, series: FootprintSeries, range: [number, number]): void {
     const frame = this.beginFrame(series, range);
     if (!frame) return;
+    const canvasWidth = ctx.canvas?.width ?? 0;
+    const canvasHeight = ctx.canvas?.height ?? 0;
+    const rasterKey = `${this.frameCacheKey(view, series, frame)}|${canvasWidth}|${canvasHeight}`;
+    const canUseRasterCache =
+      canvasWidth > 0 &&
+      canvasHeight > 0 &&
+      typeof ctx.canvas?.ownerDocument?.createElement === "function" &&
+      typeof ctx.drawImage === "function";
+
+    if (canUseRasterCache && this.lastRasterKey === rasterKey) {
+      this.visibleCeiling = this.rasterCacheCeiling;
+      this.visibleThreshold = this.rasterCacheThreshold;
+      if (this.rasterCacheHasCells && this.rasterCacheCanvas) {
+        this.blitRasterCache(ctx);
+      }
+      return;
+    }
+
     // Streaming CPU path: two passes (ceiling, then paint) with an O(1)-held
     // payload. It never builds or reuses the whole-visible collection list.
     let cells = 0;
     const ceiling = this.forEachVisibleCell(view, series, frame, null, () => { cells++; });
     this.visibleCeiling = ceiling;
     this.visibleThreshold = frame.threshold;
-    if (cells === 0) return;
+    if (cells === 0) {
+      if (canUseRasterCache) {
+        this.lastRasterKey = rasterKey;
+        this.rasterCacheHasCells = false;
+        this.rasterCacheCeiling = ceiling;
+        this.rasterCacheThreshold = frame.threshold;
+      }
+      return;
+    }
+
+    if (canUseRasterCache) {
+      const offscreen = this.ensureRasterCacheCanvas(ctx.canvas.ownerDocument, canvasWidth, canvasHeight);
+      const offCtx = offscreen?.getContext("2d");
+      if (offscreen && offCtx) {
+        offCtx.save();
+        offCtx.setTransform?.(1, 0, 0, 1, 0, 0);
+        offCtx.clearRect(0, 0, canvasWidth, canvasHeight);
+        const transform = typeof ctx.getTransform === "function" ? ctx.getTransform() : null;
+        if (transform && Number.isFinite(transform.a) && Number.isFinite(transform.d)) {
+          offCtx.setTransform?.(
+            transform.a,
+            transform.b,
+            transform.c,
+            transform.d,
+            transform.e,
+            transform.f,
+          );
+        } else {
+          const dpr = view.pixelRatio !== null && view.pixelRatio !== undefined && view.pixelRatio > 0
+            ? view.pixelRatio
+            : 1;
+          offCtx.setTransform?.(dpr, 0, 0, dpr, 0, 0);
+        }
+        this.paintCellsToContext(offCtx, view, series, frame);
+        offCtx.restore();
+        this.lastRasterKey = rasterKey;
+        this.rasterCacheHasCells = true;
+        this.rasterCacheCeiling = ceiling;
+        this.rasterCacheThreshold = frame.threshold;
+        this.blitRasterCache(ctx);
+        return;
+      }
+    }
+
+    this.paintCellsToContext(ctx, view, series, frame);
+  }
+
+  private ensureRasterCacheCanvas(
+    doc: Document,
+    width: number,
+    height: number,
+  ): HTMLCanvasElement | null {
+    if (!this.rasterCacheCanvas) {
+      this.rasterCacheCanvas = doc.createElement("canvas");
+    }
+    if (this.rasterCacheCanvas.width !== width) this.rasterCacheCanvas.width = width;
+    if (this.rasterCacheCanvas.height !== height) this.rasterCacheCanvas.height = height;
+    return this.rasterCacheCanvas;
+  }
+
+  private blitRasterCache(ctx: CanvasRenderingContext2D): void {
+    if (!this.rasterCacheCanvas) return;
+    ctx.save();
+    ctx.setTransform?.(1, 0, 0, 1, 0, 0);
+    ctx.drawImage(this.rasterCacheCanvas, 0, 0);
+    ctx.restore();
+  }
+
+  private paintCellsToContext(
+    targetCtx: CanvasRenderingContext2D,
+    view: View,
+    series: FootprintSeries,
+    frame: HeatmapFramePreamble,
+  ): void {
     const { left, top, width, height } = view.area;
     const right = left + width;
-    ctx.save();
-    ctx.beginPath();
-    ctx.rect(left, top, width, height);
-    ctx.clip();
+    targetCtx.save();
+    targetCtx.beginPath();
+    targetCtx.rect(left, top, width, height);
+    targetCtx.clip();
     this.forEachVisibleCell(view, series, frame, null, ({ x, yTop, cellHeight, value, live }) => {
       const intensity = heatmapIntensity(value, this.visibleThreshold, this.visibleCeiling);
-      ctx.fillStyle = heatmapCellColor(intensity);
-      ctx.fillRect(x, yTop, Math.max(1, view.colWidth), cellHeight);
+      targetCtx.fillStyle = heatmapCellColor(intensity);
+      targetCtx.fillRect(x, yTop, Math.max(1, view.colWidth), cellHeight);
       // The live bar's walls continue across the empty space right of the last candle.
       if (live && x + view.colWidth < right) {
-        ctx.fillStyle = heatmapCellColor(intensity, 0.45);
-        ctx.fillRect(x + view.colWidth, yTop, right - x - view.colWidth, cellHeight);
+        targetCtx.fillStyle = heatmapCellColor(intensity, 0.45);
+        targetCtx.fillRect(x + view.colWidth, yTop, right - x - view.colWidth, cellHeight);
       }
     });
-    ctx.restore();
+    targetCtx.restore();
   }
 
   /**
@@ -573,6 +670,16 @@ export class OrderbookHeatmapOverlay {
     return this.dataKey;
   }
 
+  /**
+   * Returns a deterministic cache key for GPU prepare inputs (while running
+   * `beginFrame` chunk TTL and error retry scheduling), or `null` when nothing can be drawn.
+   */
+  getPrepareCacheKey(view: View, series: FootprintSeries, range: [number, number]): string | null {
+    const frame = this.beginFrame(series, range);
+    if (!frame) return null;
+    return this.frameCacheKey(view, series, frame);
+  }
+
   /** Threshold of the last collected frame; 0 before the first draw/prepare. */
   private visibleThreshold = 0;
   /** Bumped whenever acknowledged book data merges; part of the collection memo key. */
@@ -580,6 +687,15 @@ export class OrderbookHeatmapOverlay {
   /** Same-frame collection memo: one visible list per frame shared by the GPU prepare and the legacy draw. */
   private lastCollectedKey = "";
   private lastCollected: Array<{ x: number; yTop: number; cellHeight: number; value: number; live: boolean }> | null = null;
+  private lastRasterKey = "";
+  private rasterCacheCanvas: HTMLCanvasElement | null = null;
+  private rasterCacheHasCells = false;
+  private rasterCacheCeiling = 0;
+  private rasterCacheThreshold = 0;
+
+  private frameCacheKey(view: View, series: FootprintSeries, frame: HeatmapFramePreamble): string {
+    return `${this.dataKey}|${frame.settings.unit}|${frame.threshold}|${this.barsRevision}|${series.length}|${frame.first}|${frame.last}|${view.colWidth}|${view.offsetX}|${view.area.left}|${view.area.top}|${view.area.width}|${view.area.height}|${view.priceTop}|${view.pricePerPx}|${view.priceScaleMode}`;
+  }
 
   /** Collects the visible density cells and refreshes chunk requests/ceiling. */
   private collectVisibleCells(
@@ -590,7 +706,7 @@ export class OrderbookHeatmapOverlay {
   ): Array<{ x: number; yTop: number; cellHeight: number; value: number; live: boolean }> | null {
     const frame = this.beginFrame(series, range);
     if (!frame) return null;
-    const collectKey = `${this.dataKey}|${frame.settings.unit}|${frame.threshold}|${this.barsRevision}|${series.length}|${frame.first}|${frame.last}|${view.colWidth}|${view.offsetX}|${view.area.left}|${view.area.top}|${view.area.width}|${view.area.height}|${view.priceTop}|${view.pricePerPx}|${view.priceScaleMode}`;
+    const collectKey = this.frameCacheKey(view, series, frame);
     if (cellLimit === null && this.lastCollectedKey === collectKey && this.lastCollected) return this.lastCollected;
     const visible: Array<{ x: number; yTop: number; cellHeight: number; value: number; live: boolean }> = [];
     const ceiling = this.forEachVisibleCell(view, series, frame, cellLimit, (cell) => visible.push(cell));

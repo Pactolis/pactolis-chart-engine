@@ -320,3 +320,135 @@ test("subscribes to live-tail and performs proper cleanup on dispose", () => {
   overlay.dispose();
   assert.equal(unsubscribed, true, "unsubscribe was called on dispose");
 });
+
+test("CPU raster cache skips cell fillRect loop when data and viewport stay unchanged and refreshes on change", async () => {
+  configureOrderbookHeatmapSettingsSource({
+    settingsFor: () => ({
+      mode: "single", unit: "usd", bucketStep: 50,
+      single: { usd: 1, btc: 1 }, aggregated: { usd: 1, btc: 1 },
+    }),
+    onChange: () => () => {},
+  });
+
+  const series = new FootprintSeries({ intervalMs: 60_000, priceStep: 1 });
+  series.loadBars([
+    { startTime: 0, open: 100, high: 150, low: 50, close: 120, volume: 10, delta: 0, count: 0, cells: new Map(), hasRef: true },
+  ]);
+
+  const overlay = new OrderbookHeatmapOverlay({
+    fetch: async (req) => ({
+      schemaVersion: 1, generatedAt: 60_000, base: "BTC", source: req.source,
+      resolution: req.resolution, bucketStep: req.bucketStep, from: req.from, to: req.to,
+      bars: [{ t: 0, cells: [[100, 1000, 1000], [150, 2000, 2000]] }],
+    }),
+    invalidate: () => {},
+    getMarket: () => "BINANCE_FUTURES:btcusdt",
+    now: () => 60_000,
+  });
+
+  const view = makeTestView();
+  view.priceTop = 250;
+  view.pricePerPx = 1;
+  view.pixelRatio = 2;
+
+  let createCanvasCalls = 0;
+  let offFillRectCalls = 0;
+  let offClearRectCalls = 0;
+  const offSetTransforms = [];
+  const offCtx = {
+    fillStyle: "",
+    save() {},
+    restore() {},
+    beginPath() {},
+    rect() {},
+    clip() {},
+    setTransform(...args) { offSetTransforms.push(args); },
+    clearRect() { offClearRectCalls++; },
+    fillRect() { offFillRectCalls++; },
+  };
+  const offscreenCanvas = {
+    width: 0,
+    height: 0,
+    getContext(kind) { return kind === "2d" ? offCtx : null; },
+  };
+
+  let mainFillRectCalls = 0;
+  const mainSetTransforms = [];
+  const drawImageCalls = [];
+  const ctx = {
+    canvas: {
+      width: 1600,
+      height: 800,
+      ownerDocument: {
+        createElement(tag) {
+          assert.equal(tag, "canvas");
+          createCanvasCalls++;
+          return offscreenCanvas;
+        },
+      },
+    },
+    fillStyle: "",
+    save() {},
+    restore() {},
+    beginPath() {},
+    rect() {},
+    clip() {},
+    getTransform() { return { a: 2, b: 0, c: 0, d: 2, e: 0, f: 0 }; },
+    setTransform(...args) { mainSetTransforms.push(args); },
+    drawImage(img, x, y) { drawImageCalls.push({ img, x, y }); },
+    fillRect() { mainFillRectCalls++; },
+  };
+
+  try {
+    // Warm chunk fetch
+    overlay.draw(ctx, view, series, [0, 0]);
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    assert.equal(offFillRectCalls, 0);
+
+    // 1. First draw with ready data: cache MISS -> rasterizes cells into offscreen canvas and blits
+    overlay.draw(ctx, view, series, [0, 0]);
+    assert.equal(createCanvasCalls, 1);
+    assert.equal(offscreenCanvas.width, 1600);
+    assert.equal(offscreenCanvas.height, 800);
+    assert.equal(offClearRectCalls, 1);
+    assert.equal(offFillRectCalls, 4, "two cells across live bar + extension");
+    assert.equal(mainFillRectCalls, 0, "main ctx uses blitted raster cache");
+    assert.equal(drawImageCalls.length, 1);
+    assert.equal(drawImageCalls[0].img, offscreenCanvas);
+    assert.deepEqual(offSetTransforms.at(-1), [2, 0, 0, 2, 0, 0]);
+    assert.deepEqual(mainSetTransforms.at(-1), [1, 0, 0, 1, 0, 0]);
+
+    // 2. Second draw with identical data & viewport: cache HIT -> skips fillRect loop
+    overlay.draw(ctx, view, series, [0, 0]);
+    assert.equal(createCanvasCalls, 1);
+    assert.equal(offClearRectCalls, 1);
+    assert.equal(offFillRectCalls, 4, "fillRect loop is skipped on raster cache hit");
+    assert.equal(drawImageCalls.length, 2);
+
+    // 3. barsRevision bump via live-tail push invalidates raster cache
+    overlay.applyLiveTailBars([{ t: 0, cells: [[100, 1500, 1500], [150, 2500, 2500]] }]);
+    overlay.draw(ctx, view, series, [0, 0]);
+    assert.equal(offClearRectCalls, 2);
+    assert.equal(offFillRectCalls, 8, "barsRevision change refreshes raster cache");
+    assert.equal(drawImageCalls.length, 3);
+
+    // 4. Viewport change invalidates raster cache
+    view.offsetX += 16;
+    overlay.draw(ctx, view, series, [0, 0]);
+    assert.equal(offClearRectCalls, 3);
+    assert.equal(offFillRectCalls, 12, "viewport change refreshes raster cache");
+    assert.equal(drawImageCalls.length, 4);
+
+    // 5. Canvas dimension change invalidates raster cache
+    ctx.canvas.width = 1200;
+    overlay.draw(ctx, view, series, [0, 0]);
+    assert.equal(offscreenCanvas.width, 1200);
+    assert.equal(offClearRectCalls, 4);
+    assert.equal(offFillRectCalls, 16);
+    assert.equal(drawImageCalls.length, 5);
+  } finally {
+    overlay.dispose();
+    assert.equal(overlay.rasterCacheCanvas, null);
+    assert.equal(overlay.lastRasterKey, "");
+  }
+});

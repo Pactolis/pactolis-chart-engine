@@ -19,6 +19,7 @@ test.use({
 type RuntimeProbe = {
   heatmapTexturePrototypeEnabled: boolean;
   heatmapGpuFrame: unknown;
+  view: { offsetX: number };
   invalidate(): void;
   orderbookHeatmap: {
     bars: Map<number, { t: number; cells: number[][] }>;
@@ -100,8 +101,9 @@ test("GPU heatmap stage times reach performance telemetry only while it is on", 
       metrics.map((metric) => [metric, telemetry.snapshotPerformanceTelemetry().metrics[metric]?.count ?? 0]),
     );
     // Each capture renders one frame of all three surfaces.
-    const frames = async (n: number) => {
+    const frames = async (n: number, pan = false) => {
       for (let i = 0; i < n; i++) {
+        if (pan) r.view.offsetX -= 1;
         r.invalidate();
         await r.session.captureCompositePng();
       }
@@ -114,10 +116,17 @@ test("GPU heatmap stage times reach performance telemetry only while it is on", 
       const whileOff = counts();
       telemetry.configurePerformanceTelemetry({ enabled: true });
       await frames(3);
-      const whileOn = counts();
+      const whileOnCached = counts();
+      await frames(3, true);
+      const whileOnPanned = counts();
       const snapshot = telemetry.snapshotPerformanceTelemetry().metrics;
-      return { whileOff, whileOn, gpuOwned: r.heatmapGpuFrame !== null,
-        snapshot: Object.fromEntries(metrics.map((metric) => [metric, snapshot[metric]])) };
+      return {
+        whileOff,
+        whileOnCached,
+        whileOnPanned,
+        gpuOwned: r.heatmapGpuFrame !== null,
+        snapshot: Object.fromEntries(metrics.map((metric) => [metric, snapshot[metric]])),
+      };
     } finally {
       r.heatmapTexturePrototypeEnabled = false;
       telemetry.configurePerformanceTelemetry({ enabled: wasEnabled });
@@ -128,7 +137,20 @@ test("GPU heatmap stage times reach performance telemetry only while it is on", 
   expect(result.gpuOwned, "the density must really be GPU-owned").toBe(true);
   for (const metric of METRICS) {
     expect(result.whileOff[metric], `${metric}: no sample while telemetry is off`).toBe(0);
-    expect(result.whileOn[metric], `${metric}: a sample for every frame rendered with telemetry on`).toBeGreaterThanOrEqual(3);
+  }
+  expect(
+    result.whileOnCached["chart.gpu.heatmap.prepare.ms"],
+    "chart.gpu.heatmap.prepare.ms: cached unchanged frames skip CPU prepare",
+  ).toBe(0);
+  expect(
+    result.whileOnCached["chart.gpu.heatmap.render.ms"],
+    "chart.gpu.heatmap.render.ms: a sample for every unchanged frame rendered with telemetry on",
+  ).toBeGreaterThanOrEqual(3);
+  for (const metric of METRICS) {
+    expect(
+      result.whileOnPanned[metric] - result.whileOnCached[metric],
+      `${metric}: a sample for every viewport-changed frame rendered with telemetry on`,
+    ).toBeGreaterThanOrEqual(3);
     expect(result.snapshot[metric].p95Ms, `${metric}: p95`).toBeGreaterThanOrEqual(0);
   }
 });
