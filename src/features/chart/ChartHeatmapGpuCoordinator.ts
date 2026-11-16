@@ -46,6 +46,11 @@ export class ChartHeatmapGpuCoordinator {
   private heatmapGpuUnsupportedEpisode = false;
   private heatmapGpuFrame: HeatmapGpuRenderFrame | null = null;
   private heatmapGpuLease: { release(): void } | null = null;
+  private cachedPrepareKey: string | null = null;
+  private cachedPrepareFrame: HeatmapGpuCellFrame | null = null;
+  private cachedPrepareLease: { release(): void } | null = null;
+  private cachedPrepareHandle: { release(): void } | undefined = undefined;
+  private cachedPrepareEpoch = 0;
 
   constructor(private readonly host: ChartHeatmapGpuCoordinatorHost) {}
 
@@ -55,7 +60,14 @@ export class ChartHeatmapGpuCoordinator {
 
   set heatmapTexturePrototypeEnabled(enabled: boolean) {
     this._heatmapTexturePrototypeEnabled = enabled;
-    if (enabled) void this.loadHeatmapGpuRenderer();
+    if (enabled) {
+      void this.loadHeatmapGpuRenderer();
+    } else {
+      this.heatmapGpuFrame = null;
+      this.releaseHeatmapGpuLease();
+      this.clearPreparedCache();
+      setGpuFeaturePath(HEATMAP_GPU_FEATURE, undefined);
+    }
     this.host.invalidateSession();
   }
 
@@ -65,11 +77,6 @@ export class ChartHeatmapGpuCoordinator {
 
   setHeatmapTexturePrototypeEnabled(enabled: boolean): void {
     this.heatmapTexturePrototypeEnabled = enabled;
-    if (!enabled) {
-      this.heatmapGpuFrame = null;
-      this.releaseHeatmapGpuLease();
-      setGpuFeaturePath(HEATMAP_GPU_FEATURE, undefined);
-    }
   }
 
   private supportsHeatmapGpu(): boolean {
@@ -98,6 +105,7 @@ export class ChartHeatmapGpuCoordinator {
     if (this.heatmapGpuRendererGl !== gl) {
       this.heatmapGpuFrame = null;
       this.releaseHeatmapGpuLease();
+      this.clearPreparedCache();
       setGpuFeaturePath(HEATMAP_GPU_FEATURE, undefined);
     }
     this.heatmapGpuRendererGl = gl;
@@ -112,7 +120,7 @@ export class ChartHeatmapGpuCoordinator {
   }
 
   getLease(): { release(): void } | null {
-    return this.heatmapGpuLease;
+    return this.heatmapGpuLease ?? this.cachedPrepareLease;
   }
 
   whenHeatmapGpuRendererReady(): Promise<void> {
@@ -148,18 +156,69 @@ export class ChartHeatmapGpuCoordinator {
   }
 
   prepareHeatmapGpuCells(v: View, s: FootprintSeries): HeatmapGpuCellFrame | null {
-    if (!this.supportsHeatmapGpu() || this.heatmapGpuFailureLatched || !this.heatmapGpuRenderer) return null;
-    if (!this.host.orderbookHeatmap) return null;
-    if (!(this.host.renderCoordinator?.getAnnotationLayerOrder() ?? []).includes("orderbook-heatmap")) return null;
-    if (v.area.width <= 1 || v.area.height <= 1 || s.length === 0) return null;
+    if (!this.supportsHeatmapGpu() || this.heatmapGpuFailureLatched || !this.heatmapGpuRenderer) {
+      this.clearPreparedCache();
+      return null;
+    }
+    if (!this.host.orderbookHeatmap) {
+      this.clearPreparedCache();
+      return null;
+    }
+    if (!(this.host.renderCoordinator?.getAnnotationLayerOrder() ?? []).includes("orderbook-heatmap")) {
+      this.clearPreparedCache();
+      return null;
+    }
+    if (v.area.width <= 1 || v.area.height <= 1 || s.length === 0) {
+      this.clearPreparedCache();
+      return null;
+    }
 
+    const overlay = this.host.orderbookHeatmap;
+    const range = this.host.renderer.visibleRange(v, s.length);
+    const hasCacheKeyFn = typeof overlay.getPrepareCacheKey === "function";
+    const cacheKey = hasCacheKeyFn ? overlay.getPrepareCacheKey(v, s, range) : null;
+    if (hasCacheKeyFn && cacheKey === null) {
+      this.clearPreparedCache();
+      return null;
+    }
+
+    if (cacheKey !== null && cacheKey === this.cachedPrepareKey && this.cachedPrepareFrame) {
+      return {
+        ...this.cachedPrepareFrame,
+        preparedLease: this.cachedPrepareHandle,
+      };
+    }
+
+    this.clearPreparedCache();
     const gpuRenderer = this.heatmapGpuRenderer;
-    return this.host.orderbookHeatmap.prepareGpuCells(
+    const prepared = overlay.prepareGpuCells(
       v,
       s,
-      this.host.renderer.visibleRange(v, s.length),
+      range,
       (logicalBytes: number) => gpuRenderer.reservePreparedPayload(logicalBytes),
     );
+    if (!prepared || cacheKey === null) return prepared;
+
+    const realLease = prepared.preparedLease ?? null;
+    let handle: { release(): void } | undefined;
+    if (realLease) {
+      const epoch = ++this.cachedPrepareEpoch;
+      handle = {
+        release: () => {
+          if (this.cachedPrepareEpoch === epoch) {
+            this.clearPreparedCache();
+          }
+        },
+      };
+    }
+    this.cachedPrepareKey = cacheKey;
+    this.cachedPrepareFrame = prepared;
+    this.cachedPrepareLease = realLease;
+    this.cachedPrepareHandle = handle;
+    return {
+      ...prepared,
+      preparedLease: handle,
+    };
   }
 
   renderHeatmapGpuCells(frame: HeatmapGpuCellFrame | null, v: View, s: FootprintSeries): void {
@@ -222,7 +281,9 @@ export class ChartHeatmapGpuCoordinator {
       rangeFrom: range[0],
       rangeTo: range[1],
     };
-    this.heatmapGpuLease = frame.preparedLease ?? null;
+    this.heatmapGpuLease = frame.preparedLease && frame.preparedLease === this.cachedPrepareHandle
+      ? null
+      : (frame.preparedLease ?? null);
     setGpuFeaturePath(HEATMAP_GPU_FEATURE, "webgl2");
   }
 
@@ -244,6 +305,16 @@ export class ChartHeatmapGpuCoordinator {
       && claim.rangeTo === range[1];
   }
 
+  private clearPreparedCache(): void {
+    const lease = this.cachedPrepareLease;
+    this.cachedPrepareKey = null;
+    this.cachedPrepareFrame = null;
+    this.cachedPrepareLease = null;
+    this.cachedPrepareHandle = undefined;
+    this.cachedPrepareEpoch++;
+    lease?.release();
+  }
+
   releaseHeatmapGpuLease(): void {
     const lease = this.heatmapGpuLease;
     this.heatmapGpuLease = null;
@@ -254,6 +325,7 @@ export class ChartHeatmapGpuCoordinator {
     this.heatmapGpuFrame = null;
     setGpuFeaturePath(HEATMAP_GPU_FEATURE, undefined);
     this.releaseHeatmapGpuLease();
+    this.clearPreparedCache();
     this.heatmapGpuRenderer?.dispose();
     this.heatmapGpuRenderer = null;
     this.heatmapGpuRendererGl = null;

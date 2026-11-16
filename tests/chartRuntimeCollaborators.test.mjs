@@ -18,6 +18,18 @@ const {
 const {
   ChartLevelContextController,
 } = await import("../dist/features/chart/ChartLevelContextController.js");
+const {
+  OrderbookHeatmapOverlay,
+} = await import("../dist/features/orderbook/heatmapOverlay.js");
+const {
+  configureOrderbookHeatmapSettingsSource,
+  orderbookHeatmapSettingsSource,
+} = await import("../dist/features/orderbook/heatmapSettingsSource.js");
+const {
+  configurePerformanceTelemetry,
+  isPerformanceTelemetryEnabled,
+  snapshotPerformanceTelemetry,
+} = await import("../dist/core/performanceTelemetry.js");
 
 // ---------------------------------------------------------------------------
 // 1. ChartMagnetController Tests
@@ -310,6 +322,195 @@ test("ChartHeatmapGpuCoordinator: publishes successful WebGL2 render and clears 
     assert.equal(coordinator.isHeatmapTexturePrototypeEnabled(), true);
     assert.equal(coordinator.getFrame(), null);
   } finally {
+    coordinator.dispose();
+    resetGpuDiagnosticsForTest();
+  }
+});
+
+test("ChartHeatmapGpuCoordinator: caches prepared GPU frames across unchanged renders and preserves lease accounting", async () => {
+  resetGpuDiagnosticsForTest();
+  let prevHeatmapSettingsSource = null;
+  try { prevHeatmapSettingsSource = orderbookHeatmapSettingsSource(); } catch {}
+  configureOrderbookHeatmapSettingsSource({
+    settingsFor: () => ({
+      mode: "single", unit: "usd", bucketStep: 25,
+      single: { usd: 1, btc: 1 }, aggregated: { usd: 1, btc: 1 },
+    }),
+    onChange: () => () => {},
+  });
+
+  const INTERVAL = 60_000;
+  const BASE = Date.UTC(2026, 9, 1);
+  const NOW = BASE + 5 * INTERVAL;
+  const series = new FootprintSeries({ intervalMs: INTERVAL, priceStep: 1 });
+  series.loadBars(Array.from({ length: 5 }, (_, i) => ({
+    startTime: BASE + i * INTERVAL,
+    open: 100, high: 150, low: 90, close: 120,
+    volume: 10, delta: 0, count: 1, cells: new Map(), hasRef: true,
+  })));
+
+  const view = new View();
+  view.area = { left: 0, top: 0, width: 800, height: 600 };
+  view.colWidth = 20;
+  view.offsetX = 0;
+  view.priceTop = 200;
+  view.pricePerPx = 1;
+
+  const overlay = new OrderbookHeatmapOverlay({
+    fetch: async (req) => ({
+      schemaVersion: 1, generatedAt: NOW, base: "BTC", source: req.source,
+      resolution: req.resolution, bucketStep: req.bucketStep, from: req.from, to: req.to,
+      bars: Array.from({ length: 5 }, (_, i) => ({
+        t: BASE + i * INTERVAL,
+        cells: [[100, 600, 400], [125, 900, 100]],
+      })),
+    }),
+    invalidate: () => {},
+    getMarket: () => "BINANCE_FUTURES:btcusdt",
+    now: () => NOW,
+  });
+
+  const coordinator = new ChartHeatmapGpuCoordinator({
+    backendKind: "webgl2",
+    orderbookHeatmap: overlay,
+    renderCoordinator: {
+      getAnnotationLayerOrder: () => ["orderbook-heatmap", "candles"],
+    },
+    renderer: {
+      visibleRange: () => [0, 4],
+    },
+    invalidateSession: () => {},
+  });
+
+  const wasTelemetryEnabled = isPerformanceTelemetryEnabled();
+  const sampleCount = (metric) => snapshotPerformanceTelemetry().metrics[metric]?.count ?? 0;
+
+  try {
+    coordinator.setHeatmapTexturePrototypeEnabled(true);
+    await coordinator.whenHeatmapGpuRendererReady();
+    const gpuRenderer = coordinator.heatmapGpuRenderer;
+    let throwBudget = false;
+    gpuRenderer.renderFrame = () => {
+      if (throwBudget) throw new Error("Heatmap GPU prototype budget exceeded");
+      return true;
+    };
+
+    let reservedCount = 0;
+    let releasedCount = 0;
+    const origReserve = gpuRenderer.reservePreparedPayload.bind(gpuRenderer);
+    gpuRenderer.reservePreparedPayload = (logicalBytes) => {
+      const realLease = origReserve(logicalBytes);
+      if (!realLease) return null;
+      reservedCount++;
+      let released = false;
+      return {
+        release: () => {
+          if (!released) {
+            released = true;
+            releasedCount++;
+          }
+          realLease.release();
+        },
+      };
+    };
+
+    coordinator.setGl({});
+
+    // Warm chunk fetch before spying on cached prepare calls
+    coordinator.beginFrameAttempt();
+    coordinator.prepareHeatmapGpuCells(view, series);
+    await new Promise((resolve) => setTimeout(resolve, 20));
+
+    let prepareCalls = 0;
+    const origPrepare = overlay.prepareGpuCells.bind(overlay);
+    overlay.prepareGpuCells = (...args) => {
+      prepareCalls++;
+      return origPrepare(...args);
+    };
+
+    configurePerformanceTelemetry({ enabled: true });
+    const basePrepareSamples = sampleCount("chart.gpu.heatmap.prepare.ms");
+
+    // 1. Frame 1 (MISS): runs prepareGpuCells and acquires lease
+    coordinator.beginFrameAttempt();
+    const frame1 = coordinator.prepareHeatmapGpuCells(view, series);
+    assert.ok(frame1);
+    assert.equal(frame1.main.length, 10);
+    assert.equal(prepareCalls, 1);
+    assert.equal(sampleCount("chart.gpu.heatmap.prepare.ms") - basePrepareSamples, 1);
+    assert.equal(reservedCount, 1);
+    assert.equal(releasedCount, 0);
+    const initialLeaseBytes = gpuRenderer.preparedLeaseBytes;
+    assert.ok(initialLeaseBytes > 0);
+    coordinator.renderHeatmapGpuCells(frame1, view, series);
+    assert.equal(gpuRenderer.preparedLeaseBytes, initialLeaseBytes);
+
+    // 2. Frame 2 (HIT): unchanged data & viewport skips prepareGpuCells and keeps lease alive across beginFrameAttempt
+    coordinator.beginFrameAttempt();
+    assert.equal(gpuRenderer.preparedLeaseBytes, initialLeaseBytes, "beginFrameAttempt must not release cached lease");
+    const frame2 = coordinator.prepareHeatmapGpuCells(view, series);
+    assert.ok(frame2);
+    assert.equal(frame2.main.length, 10);
+    assert.equal(prepareCalls, 1, "unchanged key skips overlay.prepareGpuCells");
+    assert.equal(sampleCount("chart.gpu.heatmap.prepare.ms") - basePrepareSamples, 1, "cached frame emits no prepare telemetry");
+    assert.equal(reservedCount, 1);
+    assert.equal(releasedCount, 0);
+    assert.equal(gpuRenderer.preparedLeaseBytes, initialLeaseBytes);
+    coordinator.renderHeatmapGpuCells(frame2, view, series);
+    assert.equal(gpuRenderer.preparedLeaseBytes, initialLeaseBytes);
+
+    // 3. Key change (viewport pan): old lease released once and new frame prepared
+    view.offsetX = 12;
+    coordinator.beginFrameAttempt();
+    const frame3 = coordinator.prepareHeatmapGpuCells(view, series);
+    assert.ok(frame3);
+    assert.equal(prepareCalls, 2);
+    assert.equal(sampleCount("chart.gpu.heatmap.prepare.ms") - basePrepareSamples, 2);
+    assert.equal(reservedCount, 2);
+    assert.equal(releasedCount, 1, "previous cached lease released on key change");
+    assert.equal(gpuRenderer.preparedLeaseBytes, initialLeaseBytes);
+    coordinator.renderHeatmapGpuCells(frame3, view, series);
+
+    // 4. Key change (barsRevision bump): old lease released and new bar cell count prepared
+    overlay.applyLiveTailBars([{
+      t: BASE + 4 * INTERVAL,
+      cells: [[100, 600, 400], [125, 900, 100], [150, 500, 500]],
+    }]);
+    coordinator.beginFrameAttempt();
+    const frame4 = coordinator.prepareHeatmapGpuCells(view, series);
+    assert.ok(frame4);
+    assert.equal(frame4.main.length, 11);
+    assert.equal(prepareCalls, 3);
+    assert.equal(reservedCount, 3);
+    assert.equal(releasedCount, 2);
+    assert.ok(gpuRenderer.preparedLeaseBytes > initialLeaseBytes);
+    coordinator.renderHeatmapGpuCells(frame4, view, series);
+
+    // 5. Render budget failure releases cached lease once
+    throwBudget = true;
+    coordinator.beginFrameAttempt();
+    const frame5 = coordinator.prepareHeatmapGpuCells(view, series);
+    assert.equal(prepareCalls, 3);
+    coordinator.renderHeatmapGpuCells(frame5, view, series);
+    assert.equal(releasedCount, 3, "budget error releases cached lease");
+    assert.equal(gpuRenderer.preparedLeaseBytes, 0);
+
+    // 6. Re-prepare and verify disabling prototype releases cached lease once
+    throwBudget = false;
+    coordinator.beginFrameAttempt();
+    const frame6 = coordinator.prepareHeatmapGpuCells(view, series);
+    assert.equal(prepareCalls, 4);
+    assert.equal(reservedCount, 4);
+    coordinator.renderHeatmapGpuCells(frame6, view, series);
+    assert.ok(gpuRenderer.preparedLeaseBytes > 0);
+    coordinator.setHeatmapTexturePrototypeEnabled(false);
+    assert.equal(releasedCount, 4);
+    assert.equal(gpuRenderer.preparedLeaseBytes, 0);
+    assert.equal(coordinator.getLease(), null);
+  } finally {
+    configurePerformanceTelemetry({ enabled: wasTelemetryEnabled });
+    if (prevHeatmapSettingsSource) configureOrderbookHeatmapSettingsSource(prevHeatmapSettingsSource);
+    overlay.dispose();
     coordinator.dispose();
     resetGpuDiagnosticsForTest();
   }
