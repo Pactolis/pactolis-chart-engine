@@ -549,10 +549,12 @@ class ChartRuntimeImpl implements ChartRuntime, ChartInputHost {
         this.renderer.dispose();
         this.renderer = new FootprintRenderer(this.session.getSurface());
         this.heatmapGpuCoordinator.onRestoreContext(restoredGl);
+        this.overlay.invalidateAxisCache();
         this.renderCoordinator.applyConfig(this.chartViewConfig());
         this.session.invalidate();
       },
       onLostContext: () => {
+        this.overlay.invalidateAxisCache();
         this.heatmapGpuCoordinator.onLostContext();
       },
       onBackendChanged: (backend) => this._hook.setAttribute("data-gpu-backend", backend),
@@ -1338,6 +1340,7 @@ class ChartRuntimeImpl implements ChartRuntime, ChartInputHost {
     this.disposeInput();
     this.session.destroy();
     this.renderCoordinator.dispose();
+    this.overlay.dispose();
     this.renderer.dispose();
     this.pipeline.dispose();
     this.indicatorController.dispose();
