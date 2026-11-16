@@ -10,6 +10,7 @@ const {
   snapshotPerformanceTelemetry,
 } = await import("../dist/core/performanceTelemetry.js");
 const { FootprintRenderer } = await import("../dist/core/render/footprintRenderer.js");
+const { WebGl2Surface } = await import("../dist/core/gpu/webgl2/webgl2Surface.js");
 const { FootprintSeries } = await import("../dist/core/model/footprint.js");
 const { View } = await import("../dist/core/engine/view.js");
 const { ChartSurfaceDirty } = await import("../dist/core/render/scene/chartScene.js");
@@ -28,14 +29,14 @@ function fakeGl(dpr = 1) {
 }
 
 function makeFootprintRenderer(dpr = 1) {
-  const renderer = new FootprintRenderer(fakeGl(dpr));
-  renderer.batch = {
+  const gl = fakeGl(dpr);
+  const batch = {
     begin() {},
     rect() {},
     flush() {},
     dispose() {},
   };
-  return renderer;
+  return new FootprintRenderer(new WebGl2Surface(gl.canvas, gl, batch));
 }
 
 function makeSeries() {

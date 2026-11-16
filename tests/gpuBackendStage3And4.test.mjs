@@ -11,9 +11,7 @@ import {
 } from "../dist/core/gpu/gpuDiagnostics.js";
 import { Canvas2dSurface } from "../dist/core/gpu/canvas2d/canvas2dSurface.js";
 import { WebGl2Surface } from "../dist/core/gpu/webgl2/webgl2Surface.js";
-import { WebGl2HeatmapLayer } from "../dist/core/gpu/webgl2/webgl2Heatmap.js";
 import { WebGpuSurface } from "../dist/core/gpu/webgpu/webgpuSurface.js";
-import { WebGpuHeatmapLayer } from "../dist/core/gpu/webgpu/webgpuHeatmap.js";
 import { ChartSession } from "../dist/features/chart/ChartSession.js";
 
 function setMockNavigator(navObj) {
@@ -181,6 +179,8 @@ function makeFakeWebGpuDevice(format = "rgba8unorm") {
   const passes = [];
   const writtenBuffers = [];
   const writtenTextures = [];
+  let shaderModuleCalls = 0;
+  let renderPipelineCalls = 0;
   let lostResolve;
   const lostPromise = new Promise((resolve) => {
     lostResolve = resolve;
@@ -196,6 +196,7 @@ function makeFakeWebGpuDevice(format = "rgba8unorm") {
     addEventListener() {},
     removeEventListener() {},
     createShaderModule(desc) {
+      shaderModuleCalls++;
       return { label: desc.label, code: desc.code };
     },
     createSampler(desc) {
@@ -227,6 +228,7 @@ function makeFakeWebGpuDevice(format = "rgba8unorm") {
       return { label: desc.label, bindGroupLayouts: desc.bindGroupLayouts };
     },
     createRenderPipeline(desc) {
+      renderPipelineCalls++;
       return { label: desc.label, layout: desc.layout };
     },
     createTexture(desc) {
@@ -282,7 +284,15 @@ function makeFakeWebGpuDevice(format = "rgba8unorm") {
     },
   };
 
-  return { device, buffers, textures, passes, writtenBuffers, writtenTextures };
+  return {
+    device,
+    buffers,
+    textures,
+    passes,
+    writtenBuffers,
+    writtenTextures,
+    getPipelineCreationCounts: () => ({ shaderModuleCalls, renderPipelineCalls }),
+  };
 }
 
 function makeFakeWebGpuContext(device, format = "rgba8unorm") {
@@ -353,83 +363,17 @@ function makeFake2dContext() {
   };
 }
 
-test("WebGl2HeatmapLayer uploads density, draws quad and cleans up on dispose", () => {
-  const fakeGl = makeFakeGl();
-  const heatmap = new WebGl2HeatmapLayer(fakeGl);
-  assert.equal(heatmap.kind, "webgl2");
-
-  // Upload Float32Array
-  const dataF32 = new Float32Array(64 * 32);
-  dataF32.fill(0.5);
-  heatmap.upload(64, 32, dataF32);
-  assert.deepEqual(heatmap.getDimensions(), { width: 64, height: 32 });
-  const texUpload1 = fakeGl.operations.find((op) => op.op === "texImage2D");
-  assert.ok(texUpload1);
-  assert.equal(texUpload1.internalFormat, fakeGl.R32F);
-
-  // Draw quad
-  heatmap.draw({ x: 10, y: 20, w: 200, h: 100 }, 0.8);
-  const drawOp = fakeGl.operations.find((op) => op.op === "drawArrays");
-  assert.ok(drawOp);
-  assert.equal(drawOp.count, 6);
-
-  // Upload Uint8Array RGBA and verify dimension change
-  const dataU8 = new Uint8Array(128 * 64 * 4);
-  heatmap.upload(128, 64, dataU8);
-  assert.deepEqual(heatmap.getDimensions(), { width: 128, height: 64 });
-  const texUpload2 = fakeGl.operations.filter((op) => op.op === "texImage2D")[1];
-  assert.equal(texUpload2.internalFormat, fakeGl.RGBA);
-
-  heatmap.dispose();
-});
-
-test("WebGpuHeatmapLayer uploads texture, stores draw params, records pass and disposes", () => {
-  const { device, textures, writtenTextures } = makeFakeWebGpuDevice("rgba8unorm");
-  const heatmap = new WebGpuHeatmapLayer(device, "rgba8unorm");
-  assert.equal(heatmap.kind, "webgpu");
-
-  // Upload Float32Array
-  const f32Data = new Float32Array(32 * 16);
-  f32Data.fill(0.75);
-  heatmap.upload(32, 16, f32Data);
-  assert.deepEqual(heatmap.getDimensions(), { width: 32, height: 16 });
-  assert.equal(textures.length, 1);
-  assert.equal(writtenTextures.length, 1);
-
-  // Draw and record pass
-  heatmap.draw({ x: 5, y: 10, w: 150, h: 80 }, 0.9);
-  const lastParams = heatmap.getLastDrawParams();
-  assert.deepEqual(lastParams.rect, { x: 5, y: 10, w: 150, h: 80 });
-  assert.equal(lastParams.opacity, 0.9);
-
-  let passDrawn = false;
-  const mockPass = {
-    setPipeline() {},
-    setBindGroup() {},
-    draw(count) {
-      if (count === 6) passDrawn = true;
-    },
-  };
-  heatmap.recordPass(mockPass, 800, 600);
-  assert.equal(passDrawn, true);
-
-  // Resize dimension change recreates texture
-  heatmap.upload(64, 64, new Uint8Array(64 * 64 * 4));
-  assert.deepEqual(heatmap.getDimensions(), { width: 64, height: 64 });
-  assert.ok(textures.length >= 2);
-  assert.equal(textures[0].destroyed, true);
-
-  heatmap.dispose();
-});
-
-test("Surface and Heatmap integration: WebGl2Surface and WebGpuSurface expose active HeatmapLayer", () => {
+test("WebGpuSurface compiles only quad pipeline in constructor and creates zero pipelines or shader modules on flushQuads", () => {
   const fakeGl = makeFakeGl();
   const glCanvas = makeFakeCanvas({ webgl2: fakeGl });
   const webglSurface = new WebGl2Surface(glCanvas, fakeGl);
-  assert.ok(webglSurface.heatmap instanceof WebGl2HeatmapLayer);
-  assert.equal(webglSurface.heatmap.kind, "webgl2");
+  assert.equal("heatmap" in webglSurface, false);
 
-  const { device } = makeFakeWebGpuDevice("rgba8unorm");
+  const c2dCanvas = makeFakeCanvas({ "2d": makeFake2dContext() });
+  const c2dSurface = new Canvas2dSurface(c2dCanvas);
+  assert.equal("heatmap" in c2dSurface, false);
+
+  const { device, passes, getPipelineCreationCounts } = makeFakeWebGpuDevice("rgba8unorm");
   const ctx = makeFakeWebGpuContext(device, "rgba8unorm");
   const gpuCanvas = makeFakeCanvas({ webgpu: ctx });
   const handle = {
@@ -441,13 +385,32 @@ test("Surface and Heatmap integration: WebGl2Surface and WebGpuSurface expose ac
     onLost: () => () => {},
     dispose: () => {},
   };
-  const webgpuSurface = new WebGpuSurface(gpuCanvas, handle);
-  assert.ok(webgpuSurface.heatmap instanceof WebGpuHeatmapLayer);
-  assert.equal(webgpuSurface.heatmap.kind, "webgpu");
 
-  const c2dCanvas = makeFakeCanvas({ "2d": makeFake2dContext() });
-  const c2dSurface = new Canvas2dSurface(c2dCanvas);
-  assert.equal(c2dSurface.heatmap, null);
+  const webgpuSurface = new WebGpuSurface(gpuCanvas, handle);
+  assert.equal("heatmap" in webgpuSurface, false);
+
+  const afterCtor = getPipelineCreationCounts();
+  assert.equal(afterCtor.shaderModuleCalls, 1, "only WebGpuQuadPipeline compiles a shader module in constructor");
+  assert.equal(afterCtor.renderPipelineCalls, 1, "only WebGpuQuadPipeline compiles a render pipeline in constructor");
+
+  webgpuSurface.resize(320, 240, 1);
+  const emptyFrame = webgpuSurface.beginFrame({ r: 0, g: 0, b: 0, a: 1 });
+  emptyFrame.flushQuads(320, 240);
+  emptyFrame.end();
+
+  const quadFrame = webgpuSurface.beginFrame({ r: 0, g: 0, b: 0, a: 1 });
+  quadFrame.quads.rect(0, 0, 16, 16, { r: 1, g: 0, b: 0, a: 1 });
+  quadFrame.flushQuads(320, 240);
+  quadFrame.end();
+
+  assert.deepEqual(
+    getPipelineCreationCounts(),
+    afterCtor,
+    "flushQuads must not create any render pipeline or shader module after constructor",
+  );
+  assert.equal(passes.length, 2);
+  assert.equal(passes[0].draws.length, 0);
+  assert.equal(passes[1].draws[0].instanceCount, 1);
 
   webglSurface.dispose();
   webgpuSurface.dispose();

@@ -1,16 +1,5 @@
 // WebGL layer: draws footprint cell heat (buy/sell halves) and POC highlight.
-import { QuadBatch } from "../engine/quadBatch.js";
 import type { GpuFrame, GpuSurface, QuadSink } from "../gpu/gpuBackend.js";
-
-function isGpuSurface(value: unknown): value is GpuSurface {
-  return Boolean(
-    value
-    && typeof value === "object"
-    && "kind" in (value as object)
-    && ((value as any).kind === "webgl2" || (value as any).kind === "canvas2d" || (value as any).kind === "webgpu")
-    && typeof (value as GpuSurface).beginFrame === "function"
-  );
-}
 import type { RGBA } from "../engine/gl.js";
 import type { View } from "../engine/view.js";
 import type { FootprintSeries } from "../model/footprint.js";
@@ -102,11 +91,9 @@ interface CachedPixelBuckets {
 }
 
 export class FootprintRenderer {
-  private batch: QuadSink;
-  private rawBatch: QuadBatch | null = null;
-  private surface: GpuSurface | null = null;
+  private batch: QuadSink = { rect: () => {} };
+  private surface: GpuSurface;
   private currentFrame: GpuFrame | null = null;
-  private gl?: WebGL2RenderingContext;
   private readonly heatCache = new WeakMap<FootprintBar, BarHeatCache>();
   private readonly imbalanceCache = new WeakMap<FootprintBar, BarImbalanceCache>();
   private readonly pixelBucketCache = new WeakMap<FootprintBar, CachedPixelBuckets>();
@@ -126,25 +113,12 @@ export class FootprintRenderer {
   /** Per-chart görünüm config'i (runtime set eder); null ise global settings. */
   private chartConfig: ChartViewConfig | null = null;
 
-  constructor(glOrSurface: WebGL2RenderingContext | GpuSurface) {
-    if (isGpuSurface(glOrSurface)) {
-      this.surface = glOrSurface;
-      if (glOrSurface.kind === "webgl2" && typeof glOrSurface.getGlContext === "function") {
-        this.gl = glOrSurface.getGlContext() ?? undefined;
-      }
-      this.batch = { rect: () => {} };
-    } else {
-      this.gl = glOrSurface;
-      this.rawBatch = new QuadBatch(glOrSurface);
-      this.batch = this.rawBatch;
-    }
+  constructor(surface: GpuSurface) {
+    this.surface = surface;
   }
 
   setSurface(surface: GpuSurface): void {
     this.surface = surface;
-    if (surface.kind === "webgl2" && typeof surface.getGlContext === "function") {
-      this.gl = surface.getGlContext() ?? undefined;
-    }
   }
 
   /** ChartRuntime her state değişiminde effective config'i buraya iter. */
@@ -158,8 +132,8 @@ export class FootprintRenderer {
   }
 
   dispose(): void {
-    (this.batch as any).dispose?.();
     this.currentFrame = null;
+    this.batch = { rect: () => {} };
   }
 
   /**
@@ -169,30 +143,25 @@ export class FootprintRenderer {
    */
   private devicePixelRatio(view: View): number {
     if (view.pixelRatio !== null && view.pixelRatio > 0) return view.pixelRatio;
-    const canvas = (this.surface?.canvas ?? this.gl?.canvas) as Partial<HTMLCanvasElement> | undefined;
+    const canvas = this.surface.canvas as Partial<HTMLCanvasElement> | undefined;
     const owner = canvas?.ownerDocument?.defaultView ?? (typeof window !== "undefined" ? window : null);
     return owner?.devicePixelRatio || 1;
   }
 
   clear(): void {
-    if (this.surface) return;
-    const gl = this.gl;
-    if (!gl) return;
-    gl.viewport(0, 0, gl.drawingBufferWidth, gl.drawingBufferHeight);
-    gl.clearColor(0.07, 0.08, 0.1, 1);
-    gl.clear(gl.COLOR_BUFFER_BIT);
+    const frame = this.surface.beginFrame({ r: 0.07, g: 0.08, b: 0.1, a: 1 });
+    frame.flushQuads();
+    frame.end();
   }
 
   private flushCurrent(dpr: number): void {
-    const gl = this.gl;
-    const w = gl ? gl.drawingBufferWidth / dpr : (this.surface?.canvas.width ?? 0) / dpr;
-    const h = gl ? gl.drawingBufferHeight / dpr : (this.surface?.canvas.height ?? 0) / dpr;
+    const gl = this.surface.kind === "webgl2" ? this.surface.getGlContext?.() : null;
+    const w = (gl?.drawingBufferWidth ?? this.surface.canvas.width ?? 0) / dpr;
+    const h = (gl?.drawingBufferHeight ?? this.surface.canvas.height ?? 0) / dpr;
     if (this.currentFrame) {
       this.currentFrame.flushQuads(w, h);
       this.currentFrame.end();
       this.currentFrame = null;
-    } else if (gl) {
-      (this.batch as any).flush?.(w, h);
     }
   }
 
@@ -233,21 +202,17 @@ export class FootprintRenderer {
     if (view.area.width <= 0 || view.area.height <= 0) return;
     const telemetryEnabled = isPerformanceTelemetryEnabled();
 
-    if (this.surface) {
-      const frame = this.surface.beginFrame({ r: 0.07, g: 0.08, b: 0.1, a: 1 });
-      this.currentFrame = frame;
-      this.batch = frame.quads;
-    } else {
-      const clearStartedAt = telemetryEnabled ? performance.now() : null;
-      try {
-        this.clear();
-      } finally {
-        if (clearStartedAt !== null) {
-          recordPerformanceDuration("chart.gpu.clear.ms", performance.now() - clearStartedAt);
-        }
+    const clearStartedAt = telemetryEnabled ? performance.now() : null;
+    let frame: GpuFrame;
+    try {
+      frame = this.surface.beginFrame({ r: 0.07, g: 0.08, b: 0.1, a: 1 });
+    } finally {
+      if (clearStartedAt !== null) {
+        recordPerformanceDuration("chart.gpu.clear.ms", performance.now() - clearStartedAt);
       }
-      (this.batch as any).begin?.();
     }
+    this.currentFrame = frame;
+    this.batch = frame.quads;
 
     const step = series.config.priceStep;
     const [from, to] = this.visibleRange(view, series.length);

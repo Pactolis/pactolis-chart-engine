@@ -178,7 +178,7 @@ class ChartRuntimeImpl implements ChartRuntime, ChartInputHost {
   private readonly panelRoot: HTMLElement;
   private _lastKnownSize: { width: number; height: number } | null = null;
   private readonly surface: ChartSurfaceModel;
-  private currentGpuSurface: GpuSurface | null = null;
+  private currentGpuSurface: GpuSurface;
   private readonly ownedElements: readonly HTMLElement[];
   private readonly _hook: HTMLElement;
   private readonly interactionCanvas: HTMLCanvasElement;
@@ -289,7 +289,7 @@ class ChartRuntimeImpl implements ChartRuntime, ChartInputHost {
     panelId: string,
     hook: HTMLElement,
     display: ResolvedChartDisplayOptions,
-    gpuSurface?: GpuSurface,
+    gpuSurface: GpuSurface,
   ) {
     this.requestedChartType = initialState.chartType ?? settings.chartType;
     this.state = {
@@ -300,7 +300,7 @@ class ChartRuntimeImpl implements ChartRuntime, ChartInputHost {
     this.pipeline = pipeline;
     this.panelRoot = panelRoot;
     this.surface = surface;
-    this.currentGpuSurface = gpuSurface ?? null;
+    this.currentGpuSurface = gpuSurface;
     this.panelId = panelId;
     this._hook = hook;
     this.ownedElements = [hook, gpuCanvas, annotationCanvas, interactionCanvas];
@@ -321,7 +321,7 @@ class ChartRuntimeImpl implements ChartRuntime, ChartInputHost {
     this.view = new View(display.timeScale, display.layout);
     this.view.setScaleMode(initialState.scaleMode);
     this.timeViewport = new TimeScaleViewportController(this.view);
-    this.renderer = new FootprintRenderer(gpuSurface ?? (gl as WebGL2RenderingContext));
+    this.renderer = new FootprintRenderer(gpuSurface);
 
     const series = this.pipeline.series;
     this.indicatorController = new ChartIndicatorController({

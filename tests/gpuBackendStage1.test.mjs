@@ -94,7 +94,7 @@ test("selectBackend creates WebGl2Surface when WebGL2 context is available", () 
   const surface = createGpuSurface(canvas, "webgl2", fakeGl);
   assert.equal(surface.kind, "webgl2");
   assert.equal(surface.canvas, canvas);
-  assert.equal(surface.heatmap, null);
+  assert.equal("heatmap" in surface, false);
 
   const diag = getGpuDiagnostics();
   assert.equal(diag.active, "webgl2");
