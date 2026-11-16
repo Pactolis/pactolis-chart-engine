@@ -30,7 +30,7 @@ test("indicator catalog keeps all 25 addable types with settings and serializabl
   const module = await registry();
   const catalog = module.listIndicatorDefinitions();
   assert.equal(catalog.length, 25);
-  assert.equal(new Set(catalog.map((entry) => entry.type)).size, 24);
+  assert.equal(new Set(catalog.map((entry) => entry.type)).size, 25);
 
   for (const [order, entry] of catalog.entries()) {
     const definition = module.getIndicatorDefinition(entry.type);
