@@ -193,6 +193,18 @@ export class OrderbookHeatmapOverlay {
   private pendingHoverKey = "";
   /** Largest value drawn on the last frame; the hover table shades against it like the chart does. */
   private visibleCeiling = 0;
+  private explicitVisible = true;
+  private rasterCacheDisabledForTest = false;
+  private visibilityObservedDoc: Document | null = null;
+  private visibilityObservedCanvas: HTMLCanvasElement | null = null;
+  private visibilityObserver: IntersectionObserver | null = null;
+  private visibilityObservedIntersecting: boolean | null = null;
+  private readonly handleDocumentVisibilityChange = (): void => {
+    if (this.disposed) return;
+    if (this.visibilityObservedDoc?.visibilityState === "hidden") {
+      this.releaseRasterCache();
+    }
+  };
   private readonly liveTimer: ReturnType<typeof setInterval>;
   private readonly unsubscribe: () => void;
 
@@ -425,6 +437,7 @@ export class OrderbookHeatmapOverlay {
     this.unsubscribeLiveTail?.();
     this.unsubscribeLiveTail = null;
     this.liveTailRequestKey = "";
+    this.releaseVisibilityTracking();
     this.reset("");
   }
 
@@ -464,6 +477,22 @@ export class OrderbookHeatmapOverlay {
     return this.settings.unit === "btc" ? { minBtc: threshold } : { minUsd: threshold };
   }
 
+  /** Updates explicit panel visibility; hiding immediately releases the CPU raster cache. */
+  setVisible(visible: boolean): void {
+    this.explicitVisible = visible;
+    if (!visible) {
+      this.releaseRasterCache();
+    }
+  }
+
+  /** Test-only seam: bypasses CPU raster caching so direct painting can be measured on identical viewports. */
+  setRasterCacheDisabledForTest(disabled: boolean): void {
+    this.rasterCacheDisabledForTest = disabled;
+    if (disabled) {
+      this.releaseRasterCache();
+    }
+  }
+
   /** Releases this overlay's offscreen CPU raster canvas and returns reserved bytes once. */
   releaseRasterCache(): void {
     this.lastRasterKey = "";
@@ -485,16 +514,103 @@ export class OrderbookHeatmapOverlay {
     }
   }
 
+  private syncVisibilityTracking(canvas: HTMLCanvasElement | undefined): void {
+    if (this.disposed) return;
+    const nextDoc = canvas?.ownerDocument ?? null;
+    if (nextDoc !== this.visibilityObservedDoc) {
+      if (this.visibilityObservedDoc && typeof this.visibilityObservedDoc.removeEventListener === "function") {
+        this.visibilityObservedDoc.removeEventListener("visibilitychange", this.handleDocumentVisibilityChange);
+      }
+      this.visibilityObservedDoc = nextDoc;
+      if (nextDoc && typeof nextDoc.addEventListener === "function") {
+        nextDoc.addEventListener("visibilitychange", this.handleDocumentVisibilityChange);
+      }
+    }
+
+    const nextCanvas = canvas ?? null;
+    if (nextCanvas !== this.visibilityObservedCanvas) {
+      if (this.visibilityObserver) {
+        try {
+          this.visibilityObserver.disconnect();
+        } catch {
+          // Ignore mock observer teardown failures.
+        }
+        this.visibilityObserver = null;
+      }
+      this.visibilityObservedCanvas = nextCanvas;
+      this.visibilityObservedIntersecting = null;
+      if (nextCanvas) {
+        const ObserverCtor =
+          (nextDoc as { defaultView?: { IntersectionObserver?: typeof IntersectionObserver } | null } | null)
+            ?.defaultView?.IntersectionObserver
+          ?? (typeof IntersectionObserver === "function" ? IntersectionObserver : undefined);
+        if (typeof ObserverCtor === "function") {
+          try {
+            const observer = new ObserverCtor((entries) => {
+              if (this.disposed || this.visibilityObserver !== observer) return;
+              const entry = entries[entries.length - 1];
+              if (!entry) return;
+              this.visibilityObservedIntersecting = entry.isIntersecting;
+              if (!entry.isIntersecting) {
+                this.releaseRasterCache();
+              }
+            });
+            observer.observe(nextCanvas);
+            this.visibilityObserver = observer;
+          } catch {
+            // Non-Element mock targets are ignored when native IntersectionObserver exists.
+            this.visibilityObserver = null;
+          }
+        }
+      }
+    }
+  }
+
+  private isVisibilityHidden(canvas: HTMLCanvasElement | undefined): boolean {
+    if (!this.explicitVisible) return true;
+    const doc = canvas?.ownerDocument ?? this.visibilityObservedDoc;
+    if (doc?.visibilityState === "hidden") return true;
+    if ((canvas as { isConnected?: boolean } | undefined)?.isConnected === false) return true;
+    if (canvas && canvas === this.visibilityObservedCanvas && this.visibilityObservedIntersecting === false) {
+      return true;
+    }
+    return false;
+  }
+
+  private releaseVisibilityTracking(): void {
+    if (this.visibilityObserver) {
+      try {
+        this.visibilityObserver.disconnect();
+      } catch {
+        // Ignore mock observer teardown failures.
+      }
+      this.visibilityObserver = null;
+    }
+    this.visibilityObservedCanvas = null;
+    this.visibilityObservedIntersecting = null;
+    if (this.visibilityObservedDoc && typeof this.visibilityObservedDoc.removeEventListener === "function") {
+      this.visibilityObservedDoc.removeEventListener("visibilitychange", this.handleDocumentVisibilityChange);
+    }
+    this.visibilityObservedDoc = null;
+  }
+
   /** Draws cells for the visible bars and requests any chunk they still need. */
   draw(ctx: CanvasRenderingContext2D, view: View, series: FootprintSeries, range: [number, number]): void {
     const frame = this.beginFrame(series, range);
     if (!frame) return;
+    this.syncVisibilityTracking(ctx.canvas);
+    const hidden = this.isVisibilityHidden(ctx.canvas);
+    if (hidden) {
+      this.releaseRasterCache();
+    }
     const startedAt = isPerformanceTelemetryEnabled() ? performance.now() : null;
     try {
       const canvasWidth = ctx.canvas?.width ?? 0;
       const canvasHeight = ctx.canvas?.height ?? 0;
       const rasterKey = `${this.frameCacheKey(view, series, frame)}|${canvasWidth}|${canvasHeight}`;
       const canUseRasterCache =
+        !this.rasterCacheDisabledForTest &&
+        !hidden &&
         canvasWidth > 0 &&
         canvasHeight > 0 &&
         typeof ctx.canvas?.ownerDocument?.createElement === "function" &&
