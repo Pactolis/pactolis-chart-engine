@@ -10,6 +10,7 @@ import {
   drawingLabelPillBg,
   drawingLabelPillBorder,
 } from "../../core/ui/seriesPalette.js";
+import { isSeriesDependentDrawingType } from "../../core/drawingTypes.js";
 import type {
   Drawing,
   DrawingContext,
@@ -179,6 +180,8 @@ export interface DrawingMarketSummary {
   selectedCount: number;
   /** Types of the market's committed drawings (the in-progress draft is left out). */
   types: DrawingType[];
+  /** True when the market has a visible drawing whose values recompute with series tail data. */
+  hasLiveSeriesDrawings: boolean;
 }
 
 /** Counts one market's drawings in a single pass without cloning them (chart test hook). */
@@ -189,12 +192,15 @@ export function summarizeMarketDrawings(
   selectedIds: ReadonlySet<string>,
   draftId: string | null,
 ): DrawingMarketSummary {
-  const summary: DrawingMarketSummary = { selectedId: null, selectedCount: 0, types: [] };
+  const summary: DrawingMarketSummary = { selectedId: null, selectedCount: 0, types: [], hasLiveSeriesDrawings: false };
   for (const drawing of drawings) {
     if (drawing.market !== market) continue;
     if (drawing.id === selectedId) summary.selectedId = drawing.id;
     if (selectedIds.has(drawing.id)) summary.selectedCount++;
     if (drawing.id !== draftId) summary.types.push(drawing.type);
+    if (drawing.visible && isSeriesDependentDrawingType(drawing.type)) {
+      summary.hasLiveSeriesDrawings = true;
+    }
   }
   return summary;
 }

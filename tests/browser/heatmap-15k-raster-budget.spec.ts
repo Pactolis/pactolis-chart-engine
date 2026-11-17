@@ -352,6 +352,51 @@ test("15,000-cell SwiftShader benchmark and CPU raster cache budget / GPU takeov
       cpuWarmMisses += counterDelta(b, a, "chart.cpu.heatmap.raster.miss");
     }
 
+    // Same viewport-changing workload for direct and adaptive paths. The injected
+    // clock makes every sampled frame active motion independently of CI wall time.
+    // Waiting on requestAnimationFrame after draining two trailing frames avoids
+    // captureCompositePng()'s async PNG encoding gap so background timers cannot
+    // squeeze an extra render between telemetry snapshots.
+    const waitNextFrame = () => new Promise<void>((resolve) => requestAnimationFrame(() => resolve()));
+    const motionOverlay = r.orderbookHeatmap as typeof r.orderbookHeatmap & { now: () => number };
+    const originalNow = motionOverlay.now;
+    let motionClock = originalNow();
+    motionOverlay.now = () => motionClock;
+    const panSamples: Record<string, { heatmapMs: ReturnType<typeof summarize>; directs: number; misses: number; hits: number; skips: number }> = {};
+    for (const [name, direct] of [["direct", true], ["adaptive", false]] as const) {
+      v.offsetX = calibratedOffsetX;
+      r.orderbookHeatmap.setRasterCacheDisabledForTest(direct);
+      r.orderbookHeatmap.releaseRasterCache();
+      r.invalidate();
+      await r.session.captureCompositePng();
+      await waitNextFrame();
+      await waitNextFrame();
+      const samples: number[] = [];
+      let directs = 0;
+      let misses = 0;
+      let hits = 0;
+      let skips = 0;
+      for (let i = 0; i < 30; i++) {
+        motionClock += 16;
+        v.offsetX += 0.25;
+        const b = telemetry.snapshotPerformanceTelemetry();
+        r.invalidate();
+        await waitNextFrame();
+        const a = telemetry.snapshotPerformanceTelemetry();
+        const hm = metricDelta(b, a, "chart.cpu.heatmap.draw.ms");
+        if (hm.count > 0) samples.push(hm.totalMs / hm.count);
+        directs += counterDelta(b, a, "chart.cpu.heatmap.raster.direct");
+        misses += counterDelta(b, a, "chart.cpu.heatmap.raster.miss");
+        hits += counterDelta(b, a, "chart.cpu.heatmap.raster.hit");
+        skips += counterDelta(b, a, "chart.cpu.heatmap.raster.skip");
+      }
+      panSamples[name] = { heatmapMs: summarize(samples), directs, misses, hits, skips };
+    }
+    v.offsetX = calibratedOffsetX;
+    r.orderbookHeatmap.setRasterCacheDisabledForTest(false);
+    r.orderbookHeatmap.releaseRasterCache();
+    motionOverlay.now = originalNow;
+
     // Phase 3: GPU Prototype Cold + Steady (takeover releases CPU rasterCache immediately)
     r.heatmapTexturePrototypeEnabled = true;
     await r.whenHeatmapGpuRendererReady();
@@ -466,6 +511,7 @@ test("15,000-cell SwiftShader benchmark and CPU raster cache budget / GPU takeov
     const moduleReservedAfterModeOffPaint = getHeatmapCpuRasterModuleReservedBytes();
 
     return {
+      continuousPan: panSamples,
       viewport: { width: window.innerWidth, height: window.innerHeight, dpr: window.devicePixelRatio },
       annotationCanvas: { width: annotation.width, height: annotation.height, expectedRasterBytes },
       budgets: {
@@ -537,6 +583,10 @@ test("15,000-cell SwiftShader benchmark and CPU raster cache budget / GPU takeov
   });
 
   console.log("HEATMAP_15K_SWIFTSHADER_EVIDENCE", JSON.stringify(report));
+  console.log("HEATMAP_15K_PAN_SUMMARY", JSON.stringify({
+    cpuWarm: { hits: report.cpuWarm.hits, misses: report.cpuWarm.misses, heatmapMs: report.cpuWarm.heatmapMs },
+    continuousPan: report.continuousPan,
+  }));
   await testInfo.attach("heatmap-15k-swiftshader-evidence.json", {
     body: JSON.stringify(report, null, 2),
     contentType: "application/json",
@@ -552,6 +602,18 @@ test("15,000-cell SwiftShader benchmark and CPU raster cache budget / GPU takeov
   expect(report.cpuCold.budgetFallbacks).toBe(0);
   expect(report.cpuWarm.hits).toBe(20);
   expect(report.cpuWarm.misses).toBe(0);
+  expect(report.cpuWarm.heatmapMs.meanMs).toBeLessThan(0.1);
+  expect(report.continuousPan.direct.heatmapMs.samples).toBe(30);
+  expect(report.continuousPan.direct.directs).toBe(30);
+  expect(report.continuousPan.direct.misses).toBe(0);
+  expect(report.continuousPan.direct.hits).toBe(0);
+  expect(report.continuousPan.direct.skips).toBe(0);
+  expect(report.continuousPan.adaptive.heatmapMs.samples).toBe(30);
+  expect(report.continuousPan.adaptive.skips).toBe(30);
+  expect(report.continuousPan.adaptive.directs).toBe(30);
+  expect(report.continuousPan.adaptive.misses).toBe(0);
+  expect(report.continuousPan.adaptive.hits).toBe(0);
+  expect(report.continuousPan.adaptive.heatmapMs.meanMs).toBeLessThanOrEqual(report.continuousPan.direct.heatmapMs.meanMs * 1.1);
   expect(report.gpuCold.prepareMs.samples).toBe(6);
   expect(report.gpuCold.renderMs.samples).toBe(6);
   expect(report.gpuWarm.renderMs.samples).toBe(20);

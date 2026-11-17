@@ -1,0 +1,54 @@
+name: Tail pass measurements
+on:
+  pull_request:
+    paths:
+      - 'src/core/render/overlay.ts'
+      - 'src/core/render/overlay/annotationPassCache.ts'
+      - '.github/workflows/tail-pass-measurements.yml'
+permissions:
+  contents: read
+jobs:
+  compare:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        charts: [4, 8]
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          path: head
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ github.event.pull_request.base.sha }}
+          path: base
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24
+      - run: npm ci --no-audit --no-fund
+        working-directory: head
+      - run: npm ci --no-audit --no-fund
+        working-directory: base
+      - run: npx --no-install playwright install --with-deps chromium
+        working-directory: head
+      - name: Use the identical telemetry fixture for both revisions
+        run: cp head/tests/browser/chart-multi-market-census.spec.ts base/tests/browser/chart-multi-market-census.spec.ts
+      - name: Main baseline
+        working-directory: base
+        env:
+          CHART_TAIL_BURST_CHARTS: ${{ matrix.charts }}
+        run: npm run test:browser -- --project=census --grep '#308 burst' --workers=1
+      - name: Tail pass branch
+        working-directory: head
+        env:
+          CHART_TAIL_BURST_CHARTS: ${{ matrix.charts }}
+        run: npm run test:browser -- --project=census --grep '#308 burst' --workers=1
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: tail-pass-${{ matrix.charts }}-charts
+          path: |
+            base/test-results/
+            head/test-results/
+          retention-days: 7

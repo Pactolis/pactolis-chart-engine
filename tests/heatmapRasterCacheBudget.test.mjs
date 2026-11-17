@@ -12,6 +12,7 @@ import {
   orderbookHeatmapSettingsSource,
 } from "../dist/features/orderbook/heatmapSettingsSource.js";
 import {
+  HEATMAP_CPU_RASTER_QUIET_MS,
   HEATMAP_CPU_RASTER_CHART_BUDGET_BYTES,
   HEATMAP_CPU_RASTER_MODULE_BUDGET_BYTES,
   OrderbookHeatmapOverlay,
@@ -754,5 +755,50 @@ test("hidden panel/tab visibility transitions release rasterCache without double
     for (const overlay of overlays) overlay.dispose();
     configurePerformanceTelemetry({ enabled: wasTelemetryEnabled });
     assert.equal(getHeatmapCpuRasterModuleReservedBytes(), 0);
+  }
+});
+
+
+test("viewport motion skips raster misses until an injected quiet interval, then rebuilds once and hits", async () => {
+  const overlays = [];
+  const wasEnabled = isPerformanceTelemetryEnabled();
+  configurePerformanceTelemetry({ enabled: true });
+  try {
+    await withSettingsSource(() => ({ mode: "single", unit: "usd", bucketStep: 50,
+      single: { usd: 1, btc: 1 }, aggregated: { usd: 1, btc: 1 } }), async () => {
+      const overlay = await createWarmOverlay(overlays);
+      let now = 60_000;
+      overlay.now = () => now;
+      const view = makeTestView();
+      const series = makeTestSeries();
+      const h = makeCanvasHarness(1600, 800);
+      await warmChunk(overlay, h.ctx, view, series);
+      const before = snapshotPerformanceTelemetry().counters;
+      overlay.draw(h.ctx, view, series, [0, 0]);
+      overlay.draw(h.ctx, view, series, [0, 0]);
+      for (let index = 0; index < 5; index++) {
+        now += 16;
+        view.offsetX += 0.25;
+        overlay.draw(h.ctx, view, series, [0, 0]);
+      }
+      now += HEATMAP_CPU_RASTER_QUIET_MS - 1;
+      overlay.draw(h.ctx, view, series, [0, 0]);
+      const moving = snapshotPerformanceTelemetry().counters;
+      assert.equal((moving["chart.cpu.heatmap.raster.skip"] ?? 0) - (before["chart.cpu.heatmap.raster.skip"] ?? 0), 6);
+      assert.equal((moving["chart.cpu.heatmap.raster.miss"] ?? 0) - (before["chart.cpu.heatmap.raster.miss"] ?? 0), 1);
+      assert.equal((moving["chart.cpu.heatmap.raster.hit"] ?? 0) - (before["chart.cpu.heatmap.raster.hit"] ?? 0), 1);
+      now++;
+      overlay.draw(h.ctx, view, series, [0, 0]);
+      overlay.draw(h.ctx, view, series, [0, 0]);
+      const quiet = snapshotPerformanceTelemetry().counters;
+      assert.equal((quiet["chart.cpu.heatmap.raster.miss"] ?? 0) - (moving["chart.cpu.heatmap.raster.miss"] ?? 0), 1);
+      assert.equal((quiet["chart.cpu.heatmap.raster.hit"] ?? 0) - (moving["chart.cpu.heatmap.raster.hit"] ?? 0), 1);
+      assert.equal(overlay.reservedRasterBytes(), 1600 * 800 * 4);
+      overlay.setVisible(false);
+      assert.equal(overlay.reservedRasterBytes(), 0);
+    });
+  } finally {
+    for (const overlay of overlays) overlay.dispose();
+    configurePerformanceTelemetry({ enabled: wasEnabled });
   }
 });

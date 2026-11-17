@@ -1,3 +1,5 @@
+import { ChartChange } from "./scene/chartScene.js";
+import { annotationPass, AnnotationPassCache } from "./overlay/annotationPassCache.js";
 // Canvas2D layer: cell volume numbers, price/time axes, crosshair, HUD.
 import type { View } from "../engine/view.js";
 import type { FootprintBar } from "../types.js";
@@ -21,7 +23,7 @@ import type { NakedPocLevel } from "../analysis/nakedPoc.js";
 import type { ReferenceLevel } from "../analysis/referenceLevels.js";
 import type { PreviousWeekStrategyLevel, PreviousWeekStrategySettings } from "../analysis/previousWeekStrategy.js";
 import type { MondayRangeLevel, MondayRangeSettings } from "../analysis/mondayRange.js";
-import { isPerformanceTelemetryEnabled, recordPerformanceDuration } from "../performanceTelemetry.js";
+import { incrementPerformanceCounter, isPerformanceTelemetryEnabled, recordPerformanceDuration } from "../performanceTelemetry.js";
 import { resolveChartDisplayOptions, type ResolvedChartDisplayOptions } from "../model/chartDisplayOptions.js";
 import { drawHud, type HudRendererDeps } from "./overlay/hudRenderer.js";
 import {
@@ -78,6 +80,7 @@ export class Overlay {
   /** Per-chart görünüm config'i (runtime set eder); null ise global settings. */
   private chartConfig: ChartViewConfig | null = null;
   private readonly axisCache = new AxisLayerCache();
+  private readonly annotationPassCache = new AnnotationPassCache<{ price: PriceMarker[]; time: TimeMarker[]; labels: LineLabelEntry[] }>();
   private readonly cellTextCache = new WeakMap<FootprintBar, { key: string; cellRevision: number; entries: Map<number, FormattedCellText> }>();
   private readonly hudDeps: HudRendererDeps;
   private readonly tpoHost: TpoRenderHost;
@@ -152,7 +155,7 @@ export class Overlay {
   }
 
   constructor(
-    private readonly ctx: CanvasRenderingContext2D,
+    private ctx: CanvasRenderingContext2D,
     private readonly drawForeground?: (
       ctx: CanvasRenderingContext2D,
       view: View,
@@ -199,6 +202,7 @@ export class Overlay {
       crosshair: Crosshair,
     ) => void,
     private readonly getDisplayOptions?: () => ResolvedChartDisplayOptions,
+    private readonly hasLiveSeriesDrawings?: () => boolean,
   ) {
     const self = this;
     this.hudDeps = {
@@ -275,6 +279,7 @@ export class Overlay {
   /** Release offscreen axis canvases and transient overlay buffers. */
   dispose(): void {
     this.axisCache.dispose();
+    this.annotationPassCache.clear();
     this.profileCache = null;
     this.tpoCache = null;
     this.priceMarkers = [];
@@ -294,8 +299,9 @@ export class Overlay {
     crosshair: Crosshair,
     range: [number, number],
     layerOrder?: readonly string[],
+    changes: ChartChange = ChartChange.None,
   ): void {
-    const ctx = this.ctx;
+    let ctx = this.ctx;
     const orderedLayers = layerOrder ?? [
       "orderbook-heatmap",
       "footprint-text",
@@ -309,6 +315,8 @@ export class Overlay {
       "last-price",
       "axis",
     ];
+    const transform = ctx.getTransform?.();
+    this.annotationPassCache.begin(changes, JSON.stringify([ctx.canvas.width, ctx.canvas.height, transform?.a, transform?.d, view.area, view.offsetX, view.colWidth, view.priceTop, view.pricePerPx, range, series.length, series.at(series.length - 1)?.startTime, orderedLayers]));
     const telemetryEnabled = isPerformanceTelemetryEnabled();
     const setupStartedAt = telemetryEnabled ? performance.now() : null;
     ctx.clearRect(0, 0, ctx.canvas.width, ctx.canvas.height);
@@ -329,65 +337,81 @@ export class Overlay {
       if (isIndicatorLayer && (indicatorBatchDrawn || empty)) continue;
       const metricLayer = isIndicatorLayer ? "indicators" : layerId;
       const layerStartedAt = telemetryEnabled ? performance.now() : null;
-      try {
-        if (isIndicatorLayer) {
-          indicatorBatchDrawn = true;
-          drawSubPanes(this.annotationHost, view, series, range, crosshair, false);
-          if (!mainSuppressed) drawIndicatorPriceOverlays(this.annotationHost, view, series, range, crosshair);
-          continue;
-        }
-
-        if (layerId === "axis") {
-          if (!mainSuppressed && !empty) {
-            drawLineLabels(this.annotationHost, view);
-            this.axisCache.renderPriceAxis(
-              ctx,
-              view,
-              series,
-              priceAxisKeepOut(view, crosshair),
-              this.displayOptions,
-            );
-            drawPriceMarkers(ctx, view, this.priceMarkers, series.config.priceStep, series.config.pricePrecision, this.displayOptions);
+      const paint = () => {
+        try {
+          if (isIndicatorLayer) {
+            indicatorBatchDrawn = true;
+            drawSubPanes(this.annotationHost, view, series, range, crosshair, false);
+            if (!mainSuppressed) drawIndicatorPriceOverlays(this.annotationHost, view, series, range, crosshair);
+            return;
           }
-          this.axisCache.renderTimeAxis(ctx, view, series, this.timeMarkers);
-          continue;
-        }
 
-        if (empty || mainSuppressed) continue;
-        switch (layerId) {
-          case "orderbook-heatmap":
-            this.drawOrderbookHeatmap?.(ctx, view, series, range);
-            break;
-          case "footprint-text":
-            drawCells(this.annotationHost, view, series, range);
-            break;
-          case "volume-profile":
-            drawVolumeProfile(this.annotationHost, view, series, range);
-            break;
-          case "tpo":
-            drawTpo(this.tpoHost, view, series, range);
-            break;
-          case "strategy-levels":
-            drawPreviousWeekStrategy(this.annotationHost, view, series);
-            drawMondayRange(this.annotationHost, view, series);
-            break;
-          case "naked-poc":
-            drawNakedPocs(this.annotationHost, view, series);
-            break;
-          case "reference-levels":
-            drawReferenceLevels(this.annotationHost, view, series);
-            break;
-          case "drawings":
-            this.drawForeground?.(ctx, view, series);
-            break;
-          case "last-price":
-            if (settings.lastPrice) drawLastPrice(this.annotationHost, view, series);
-            break;
+          if (layerId === "axis") {
+            if (!mainSuppressed && !empty) {
+              drawLineLabels(this.annotationHost, view);
+              this.axisCache.renderPriceAxis(
+                ctx,
+                view,
+                series,
+                priceAxisKeepOut(view, crosshair),
+                this.displayOptions,
+              );
+
+            }
+            this.axisCache.renderTimeAxis(ctx, view, series, this.timeMarkers);
+            return;
+          }
+
+          if (empty || mainSuppressed) return;
+          switch (layerId) {
+            case "orderbook-heatmap":
+              this.drawOrderbookHeatmap?.(ctx, view, series, range);
+              break;
+            case "footprint-text":
+              this.paintRetainedAnnotationPass("closed-footprint-text", "", changes, () => {
+                drawCells(this.annotationHost, view, series, [range[0], Math.min(range[1], series.length - 1)]);
+              });
+              if (range[1] > series.length - 1) drawCells(this.annotationHost, view, series, [Math.max(range[0], series.length - 1), range[1]]);
+              break;
+            case "volume-profile":
+              drawVolumeProfile(this.annotationHost, view, series, range);
+              break;
+            case "tpo":
+              drawTpo(this.tpoHost, view, series, range);
+              break;
+            case "strategy-levels":
+              drawPreviousWeekStrategy(this.annotationHost, view, series);
+              drawMondayRange(this.annotationHost, view, series);
+              break;
+            case "naked-poc":
+              drawNakedPocs(this.annotationHost, view, series);
+              break;
+            case "reference-levels":
+              drawReferenceLevels(this.annotationHost, view, series);
+              break;
+            case "drawings":
+              this.drawForeground?.(ctx, view, series);
+              break;
+            case "last-price":
+              if (settings.lastPrice) drawLastPrice(this.annotationHost, view, series);
+              break;
+          }
+        } finally {
+          if (layerStartedAt !== null) {
+            recordPerformanceDuration(`chart.annotation.layer.${metricLayer}.ms`, performance.now() - layerStartedAt);
+          }
         }
-      } finally {
-        if (layerStartedAt !== null) {
-          recordPerformanceDuration(`chart.annotation.layer.${metricLayer}.ms`, performance.now() - layerStartedAt);
-        }
+      };
+      const key = this.layerCacheKey(layerId, crosshair);
+      const livePass = layerId === "drawings" && (this.hasLiveSeriesDrawings?.() ?? false);
+      const retained = this.paintRetainedAnnotationPass(layerId, key, changes, () => {
+        const main = ctx;
+        ctx = this.ctx;
+        try { paint(); } finally { ctx = main; }
+      }, livePass);
+      if (retained) incrementPerformanceCounter(`chart.annotation.pass.${metricLayer}.reuse`);
+      if (layerId === "axis" && !mainSuppressed && !empty) {
+        drawPriceMarkers(ctx, view, this.priceMarkers, series.config.priceStep, series.config.pricePrecision, this.displayOptions);
       }
     }
 
@@ -397,6 +421,50 @@ export class Overlay {
       drawHud(ctx, view, series, crosshair, range, this.hudDeps);
     }
     ctx.restore();
+  }
+
+  private layerCacheKey(layerId: string, crosshair: Crosshair): string {
+    switch (layerId) {
+      case "axis":
+        return JSON.stringify([this.lineLabels, this.timeMarkers, crosshair.touch]);
+      case "naked-poc":
+        return JSON.stringify(this.getNakedPocs?.() ?? null);
+      case "strategy-levels":
+        return JSON.stringify([
+          this.getPreviousWeekStrategySettings?.() ?? null,
+          this.getPreviousWeekStrategyLevels?.() ?? null,
+          this.getMondayRangeSettings?.() ?? null,
+          this.getMondayRangeLevels?.() ?? null,
+        ]);
+      case "reference-levels":
+        return JSON.stringify(this.getReferenceLevels?.() ?? null);
+      default:
+        return "";
+    }
+  }
+
+  private paintRetainedAnnotationPass(
+    id: string,
+    key: string,
+    changes: ChartChange,
+    draw: () => void,
+    live = false,
+  ): boolean {
+    const main = this.ctx;
+    const handled = this.annotationPassCache.render(main, annotationPass(id, live), key, changes, (target) => {
+      const priceStart = this.priceMarkers.length;
+      const timeStart = this.timeMarkers.length;
+      const labelStart = this.lineLabels.length;
+      this.ctx = target;
+      try { draw(); } finally { this.ctx = main; }
+      return { price: this.priceMarkers.slice(priceStart), time: this.timeMarkers.slice(timeStart), labels: this.lineLabels.slice(labelStart) };
+    }, (effects) => {
+      this.priceMarkers.push(...effects.price);
+      this.timeMarkers.push(...effects.time);
+      this.lineLabels.push(...effects.labels);
+    });
+    if (!handled) draw();
+    return handled === "hit";
   }
 
   /** High-frequency pointer/selection surface. Scene layer order is the render authority. */

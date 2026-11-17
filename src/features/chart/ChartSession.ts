@@ -59,7 +59,7 @@ export interface ChartSessionRenderer {
 }
 
 export interface ChartSessionAnnotation {
-  render(view: View, series: FootprintSeries, crosshair: Crosshair, range: [number, number]): void;
+  render(view: View, series: FootprintSeries, crosshair: Crosshair, range: [number, number], changes?: ChartChange): void;
   /** Some legacy indicator readouts still depend on crosshair until their own interaction pass lands. */
   requiresInteractionRedraw?(): boolean;
 }
@@ -475,7 +475,7 @@ export class ChartSession {
       incrementPerformanceCounter("chart.surface.annotation.draw");
       const drawStartedAt = telemetryEnabled ? performance.now() : null;
       try {
-        this.annotationRenderer.render(this.view, this.series, this.crosshair, range);
+        this.annotationRenderer.render(this.view, this.series, this.crosshair, range, changes);
       } finally {
         if (drawStartedAt !== null) {
           recordPerformanceDuration("chart.surface.annotation.draw.ms", performance.now() - drawStartedAt);
