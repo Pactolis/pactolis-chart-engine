@@ -390,12 +390,9 @@ test("fail-closed on unsupported metrics/sides in all-OHLCV estimated windows", 
 
 test("an exact footprint bar makes OHLCV estimates in the entire window inert", () => {
   const bars = [
-    ohlcvBar(T0, 100, 102, 100, 101, 20),
-    exactBar(T0 + MIN, [
-      { priceBin: 100, buyVol: 15, sellVol: 5, buyCount: 3, sellCount: 2, count: 5 },
-      { priceBin: 102, buyVol: 8, sellVol: 12, buyCount: 2, sellCount: 4, count: 6 },
-    ]),
-    ohlcvBar(T0 + 2 * MIN, 101, 103, 101, 102, 10),
+    exactBar(T0, [{ priceBin: 100, buyVol: 15, sellVol: 5, buyCount: 3, sellCount: 2, count: 5 }]),
+    ohlcvBar(T0 + MIN, 100, 102, 100, 101, 20),
+    exactBar(T0 + 2 * MIN, [{ priceBin: 102, buyVol: 8, sellVol: 12, buyCount: 2, sellCount: 4, count: 6 }]),
   ];
   const metrics = ["volume", "delta", "trade-count", "average-trade-size"];
   const sides = ["total", "buy", "sell"];
@@ -408,7 +405,7 @@ test("an exact footprint bar makes OHLCV estimates in the entire window inert", 
       assert.deepStrictEqual(withFallbackEnabled, baseline, `${profileMetric}/${profileSide}`);
       assert.equal(withFallbackEnabled.provenance, "exact", `${profileMetric}/${profileSide}`);
       assert.equal(withFallbackEnabled.isEstimated, false, `${profileMetric}/${profileSide}`);
-      assert.equal(withFallbackEnabled.exactBarCount, 1, `${profileMetric}/${profileSide}`);
+      assert.equal(withFallbackEnabled.exactBarCount, 2, `${profileMetric}/${profileSide}`);
       assert.equal(withFallbackEnabled.estimatedBarCount, 0, `${profileMetric}/${profileSide}`);
       assert.equal(withFallbackEnabled.totalVolume, 40, `${profileMetric}/${profileSide}`);
       assert.deepEqual(withFallbackEnabled.levels.map((level) => level.priceBin), [100, 102]);
