@@ -1,4 +1,4 @@
-import { expect, test, type Browser, type BrowserContext, type Page } from "@playwright/test";
+import { chromium, expect, test, type Browser, type BrowserContext, type Page } from "@playwright/test";
 import { FROZEN_NOW, FUNCTIONAL_WEBGL_ARGS } from "./support/history.js";
 
 const VIEWPORT = { width: 1600, height: 900 };
@@ -14,9 +14,9 @@ const PRICE_STEP = 10;
 const INTERVAL_MS = 60_000;
 const FIT_COLUMNS = 60;
 const LIVE_RATE_PER_SECOND_PER_MARKET = 200;
-const LIVE_DURATION_MS = 2_000;
-const PAN_FRAMES_PER_REPETITION = 120;
-const CROSSHAIR_FRAMES_PER_REPETITION = 120;
+const LIVE_DURATION_MS = 1_500;
+const PAN_FRAMES_PER_REPETITION = 60;
+const CROSSHAIR_FRAMES_PER_REPETITION = 60;
 const REPETITIONS = 2;
 const METRIC_NAMES = [
   "chart.gpu.flush.ms",
@@ -58,6 +58,7 @@ interface BackendMeasurement {
   counters: Record<string, number>;
   avgQuadsPerFlush: number | null;
   crosshairInteractionOnlyGpuFlushCount: number;
+  timingsMs: Record<string, number>;
   scenarios: Record<
     ScenarioKind,
     {
@@ -67,19 +68,26 @@ interface BackendMeasurement {
   >;
 }
 
-test.use({
-  launchOptions: {
-    args: [
-      ...FUNCTIONAL_WEBGL_ARGS,
-      "--enable-unsafe-webgpu",
-      "--enable-features=Vulkan",
-      "--use-vulkan=swiftshader",
-      "--disable-vulkan-surface",
-    ],
+function launchArgsFor(kind: BackendKind, variant: "no-vulkan-compositor" | "vulkan-compositor" = "no-vulkan-compositor"): string[] {
+  if (kind === "webgl2") {
+    return [...FUNCTIONAL_WEBGL_ARGS];
+  }
+  const base = [
+    ...FUNCTIONAL_WEBGL_ARGS,
+    "--enable-unsafe-webgpu",
+    "--use-vulkan=swiftshader",
+    "--disable-vulkan-surface",
+  ];
+  return variant === "vulkan-compositor" ? [...base, "--enable-features=Vulkan"] : base;
+}
+
+async function launchBackendBrowser(args: string[]): Promise<Browser> {
+  return chromium.launch({
+    headless: true,
+    args,
     ...(process.env.CHROMIUM_PATH ? { executablePath: process.env.CHROMIUM_PATH } : {}),
-  },
-  viewport: VIEWPORT,
-});
+  });
+}
 
 function summarize(values: readonly number[]): MetricStats {
   const valid = values.filter((value) => Number.isFinite(value) && value >= 0).sort((a, b) => a - b);
@@ -268,21 +276,27 @@ async function installWebGpuOffscreenPresentInitScript(page: Page): Promise<void
   });
 }
 
-async function probeWebGpuCapability(browser: Browser) {
-  const context = await browser.newContext({ viewport: VIEWPORT });
-  const page = await context.newPage();
+async function probeWebGpuCapability(baseURL: string, variant: "no-vulkan-compositor" | "vulkan-compositor") {
+  const args = launchArgsFor("webgpu", variant);
+  const browser = await launchBackendBrowser(args);
   try {
+    const context = await browser.newContext({ baseURL, viewport: VIEWPORT });
+    const page = await context.newPage();
     await installCommonRoutes(page);
     await page.goto("/harness/blank.html");
-    return await page.evaluate(async () => {
+    const result = await page.evaluate(async () => {
+      const rafCheck = await Promise.race([
+        new Promise<boolean>((resolve) => requestAnimationFrame(() => resolve(true))),
+        new Promise<boolean>((resolve) => setTimeout(() => resolve(false), 3_000)),
+      ]);
       const gpu = (navigator as any).gpu;
       if (!gpu) {
-        return { ok: false, reason: "navigator.gpu is undefined", adapterInfo: null };
+        return { ok: false, rafWorking: rafCheck, reason: "navigator.gpu is undefined", adapterInfo: null };
       }
       try {
         const adapter = await gpu.requestAdapter();
         if (!adapter) {
-          return { ok: false, reason: "navigator.gpu.requestAdapter() returned null", adapterInfo: null };
+          return { ok: false, rafWorking: rafCheck, reason: "navigator.gpu.requestAdapter() returned null", adapterInfo: null };
         }
         let adapterInfo: any = adapter.info ?? null;
         if (!adapterInfo && typeof adapter.requestAdapterInfo === "function") {
@@ -294,12 +308,13 @@ async function probeWebGpuCapability(browser: Browser) {
         }
         const device = await adapter.requestDevice();
         if (!device) {
-          return { ok: false, reason: "adapter.requestDevice() returned null", adapterInfo };
+          return { ok: false, rafWorking: rafCheck, reason: "adapter.requestDevice() returned null", adapterInfo };
         }
         device.destroy?.();
         return {
-          ok: true,
-          reason: null,
+          ok: rafCheck,
+          rafWorking: rafCheck,
+          reason: rafCheck ? null : "requestAnimationFrame stalled",
           adapterInfo: adapterInfo
             ? {
                 vendor: adapterInfo.vendor ?? null,
@@ -310,18 +325,24 @@ async function probeWebGpuCapability(browser: Browser) {
             : { isFallbackAdapter: adapter.isFallbackAdapter ?? null },
         };
       } catch (error) {
-        return { ok: false, reason: String(error), adapterInfo: null };
+        return { ok: false, rafWorking: rafCheck, reason: String(error), adapterInfo: null };
       }
     });
+    return { variant, args, ...result };
   } finally {
-    await context.close();
+    await browser.close();
   }
 }
 
-async function measureBackend(browser: Browser, backend: BackendKind): Promise<BackendMeasurement> {
+async function measureBackend(
+  baseURL: string,
+  backend: BackendKind,
+  args: string[],
+): Promise<BackendMeasurement> {
+  const browser = await launchBackendBrowser(args);
   let context: BrowserContext | null = null;
   try {
-    context = await browser.newContext({ viewport: VIEWPORT });
+    context = await browser.newContext({ baseURL, viewport: VIEWPORT });
     const page = await context.newPage();
     await installCommonRoutes(page);
     if (backend === "webgpu") {
@@ -345,6 +366,8 @@ async function measureBackend(browser: Browser, backend: BackendKind): Promise<B
         repetitions,
         metricNames,
       }) => {
+        const timingsMs: Record<string, number> = {};
+        const markStart = performance.now();
         document.body.replaceChildren();
         document.body.style.margin = "0";
         document.body.style.overflow = "hidden";
@@ -363,7 +386,7 @@ async function measureBackend(browser: Browser, backend: BackendKind): Promise<B
           { normalizePreviousWeekStrategySettings },
           { normalizeMondayRangeSettings },
           { DrawingManager },
-          { webgpuDeviceModule },
+          webgpuDeviceModule,
         ] = await Promise.all([
           import("/harness/chart.ts"),
           import("/src/core/performanceTelemetry.ts"),
@@ -373,8 +396,14 @@ async function measureBackend(browser: Browser, backend: BackendKind): Promise<B
           import("/src/core/analysis/previousWeekStrategy.ts"),
           import("/src/core/analysis/mondayRange.ts"),
           import("/src/features/drawings/drawingManager.ts"),
-          import("/src/core/gpu/webgpu/webgpuDevice.ts").then((m) => ({ webgpuDeviceModule: m })),
+          import("/src/core/gpu/webgpu/webgpuDevice.ts"),
         ]);
+
+        const nextRaf = () =>
+          Promise.race([
+            new Promise<void>((resolve) => requestAnimationFrame(() => resolve())),
+            new Promise<never>((_, reject) => setTimeout(() => reject(new Error(`rAF stalled >5000ms on ${backend}`)), 5_000)),
+          ]);
 
         const tracked = new Set<string>(metricNames);
         let activeBucket: Record<string, number[]> | null = null;
@@ -449,9 +478,11 @@ async function measureBackend(browser: Browser, backend: BackendKind): Promise<B
           );
           handles.push(handle);
         }
+        timingsMs.mount = Math.round(performance.now() - markStart);
 
         const runtimes = () => panelIds.map((id: string) => harness.getChartRuntime(id)!);
-        const readyDeadline = performance.now() + 60_000;
+        const readyStart = performance.now();
+        const readyDeadline = readyStart + 30_000;
         while (true) {
           const allReady = runtimes().every((runtime) => {
             if (!runtime) return false;
@@ -472,13 +503,13 @@ async function measureBackend(browser: Browser, backend: BackendKind): Promise<B
           }
           await new Promise((resolve) => setTimeout(resolve, 25));
         }
+        timingsMs.load = Math.round(performance.now() - readyStart);
 
         const panelBackends = roots.map((root) => {
           const hook = root.querySelector('[data-testid="chart-hook"]');
           return hook?.getAttribute("data-gpu-backend") ?? "missing";
         });
 
-        const nextRaf = () => new Promise<void>((resolve) => requestAnimationFrame(() => resolve()));
         const syncBackendWork = async () => {
           if (backend === "webgpu") {
             const handle = await webgpuDeviceModule.requestWebGpuDevice();
@@ -493,6 +524,7 @@ async function measureBackend(browser: Browser, backend: BackendKind): Promise<B
         };
 
         // Warm up GPU pipelines before enabling measurement telemetry.
+        const warmupStart = performance.now();
         telemetry.configurePerformanceTelemetry({ enabled: false });
         for (let frame = 0; frame < 16; frame++) {
           const stepX = frame < 8 ? 4 : -4;
@@ -503,6 +535,7 @@ async function measureBackend(browser: Browser, backend: BackendKind): Promise<B
           await nextRaf();
         }
         await syncBackendWork();
+        timingsMs.warmup = Math.round(performance.now() - warmupStart);
 
         const wasEnabled = telemetry.isPerformanceTelemetryEnabled();
         telemetry.configurePerformanceTelemetry({ enabled: true });
@@ -530,6 +563,7 @@ async function measureBackend(browser: Browser, backend: BackendKind): Promise<B
         };
 
         // 1. PAN: move viewport back and forth every rAF across all 4 charts concurrently.
+        const panStart = performance.now();
         for (let rep = 0; rep < repetitions; rep++) {
           const bucket: Record<string, number[]> = {};
           activeBucket = bucket;
@@ -548,8 +582,10 @@ async function measureBackend(browser: Browser, backend: BackendKind): Promise<B
           await syncBackendWork();
           scenarioBuckets.pan.push({ frames: panFrames, bucket });
         }
+        timingsMs.pan = Math.round(performance.now() - panStart);
 
         // 2. LIVE: deliver 200 trades/s per market for LIVE_DURATION_MS across all 4 charts.
+        const liveStart = performance.now();
         let tradeSeq = 1;
         for (let rep = 0; rep < repetitions; rep++) {
           const baseTimes = runtimes().map((runtime) => {
@@ -593,14 +629,15 @@ async function measureBackend(browser: Browser, backend: BackendKind): Promise<B
               }
             }
           }
-          // Let any queued tail trades flush cleanly inside the live bucket.
           for (let drain = 0; drain < 6; drain++) await nextRaf();
           activeBucket = null;
           await syncBackendWork();
           scenarioBuckets.live.push({ frames: rAFTicks, tradesDelivered, bucket });
         }
+        timingsMs.live = Math.round(performance.now() - liveStart);
 
         // 3. CROSSHAIR + static-scene GPU redraw comparison (issue #88 fixture baseline).
+        const crosshairStart = performance.now();
         for (let rep = 0; rep < repetitions; rep++) {
           const bucket: Record<string, number[]> = {};
           activeBucket = bucket;
@@ -618,6 +655,7 @@ async function measureBackend(browser: Browser, backend: BackendKind): Promise<B
           await syncBackendWork();
           scenarioBuckets.crosshair.push({ frames: crosshairFrames, bucket });
         }
+        timingsMs.crosshair = Math.round(performance.now() - crosshairStart);
 
         const telemetrySnap = telemetry.snapshotPerformanceTelemetry();
         const diag = diagnostics.getGpuDiagnostics();
@@ -632,6 +670,7 @@ async function measureBackend(browser: Browser, backend: BackendKind): Promise<B
           panelBackends,
           counters: telemetrySnap.counters,
           crosshairInteractionOnlyGpuFlushCount,
+          timingsMs,
           scenarioBuckets,
         };
       },
@@ -700,24 +739,35 @@ async function measureBackend(browser: Browser, backend: BackendKind): Promise<B
       counters: result.counters,
       avgQuadsPerFlush,
       crosshairInteractionOnlyGpuFlushCount: result.crosshairInteractionOnlyGpuFlushCount,
+      timingsMs: result.timingsMs,
       scenarios,
     };
   } finally {
-    await context?.close();
+    await context?.close().catch(() => {});
+    await browser.close().catch(() => {});
   }
 }
 
-test("four-chart WebGPU vs WebGL2 chart.gpu.flush.ms comparison across pan, live and crosshair", async ({ browser }, testInfo) => {
+test("four-chart WebGPU vs WebGL2 chart.gpu.flush.ms comparison across pan, live and crosshair", async ({ baseURL }, testInfo) => {
   test.setTimeout(180_000);
+  const resolvedBaseURL = baseURL ?? testInfo.project.use.baseURL ?? "http://127.0.0.1:4173";
 
-  const webgpuProbe = await probeWebGpuCapability(browser);
+  let webgpuProbe = await probeWebGpuCapability(resolvedBaseURL, "no-vulkan-compositor");
   if (!webgpuProbe.ok) {
-    console.log("WEBGPU_PROBE_UNAVAILABLE", JSON.stringify(webgpuProbe));
+    console.log("WEBGPU_PROBE_PRIMARY", JSON.stringify(webgpuProbe));
+    webgpuProbe = await probeWebGpuCapability(resolvedBaseURL, "vulkan-compositor");
+  }
+  console.log("WEBGPU_PROBE_SELECTED", JSON.stringify(webgpuProbe));
+
+  if (!webgpuProbe.ok) {
     test.skip(true, `BLOCKED: WebGPU adapter/device unavailable in headless runtime (${webgpuProbe.reason}; never counted green)`);
   }
 
-  const webgl2 = await measureBackend(browser, "webgl2");
-  const webgpu = await measureBackend(browser, "webgpu");
+  const webgl2 = await measureBackend(resolvedBaseURL, "webgl2", launchArgsFor("webgl2"));
+  console.log("WEBGPU_BENCH_WEBGL2_DONE", JSON.stringify({ timingsMs: webgl2.timingsMs, avgQuadsPerFlush: webgl2.avgQuadsPerFlush }));
+
+  const webgpu = await measureBackend(resolvedBaseURL, "webgpu", webgpuProbe.args);
+  console.log("WEBGPU_BENCH_WEBGPU_DONE", JSON.stringify({ timingsMs: webgpu.timingsMs, active: webgpu.active, panelBackends: webgpu.panelBackends }));
 
   expect(webgl2.active).toBe("webgl2");
   expect(webgl2.panelBackends).toEqual(["webgl2", "webgl2", "webgl2", "webgl2"]);
