@@ -48,7 +48,7 @@ export class AnnotationPassCache<T> {
     const previousBytes = retained ? retained.canvas.width * retained.canvas.height * 4 : 0;
     // Reserve one bitmap for the axis pass, which is last in scene order. At
     // high DPR, earlier static layers must not consume its whole cache budget.
-    const reserve = pass.id === "axis" ? 0 : required;
+    const reserve = pass.id === "axis" || this.entries.has("axis") ? 0 : required;
     if (!canvas.ownerDocument?.createElement || !ctx.getTransform || required + reserve > MAX_RETAINED_BYTES - this.bytes + previousBytes) return false;
     // Reuse each pass's own backing store during full/history frames. Repeated
     // streaming-history invalidations must not allocate fresh full-size canvases.
