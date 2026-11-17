@@ -256,17 +256,21 @@ test("Fixed Range analysis snapshot exposes a localized estimated tooltip label 
   })();
   const noFootprint = [ohlcvBar(0, 100, 101, 10), ohlcvBar(1, 100, 102, 30), ohlcvBar(2, 101, 102, 20)];
   const estimatedHarness = makeDrawingHarness(noFootprint);
-  const exactHarness = makeDrawingHarness([exactBar(0, 100, 8, 2), exactBar(1, 101, 4, 6), exactBar(2, 102, 7, 3)]);
+  const exactHarness = makeDrawingHarness([exactBar(0, 100, 8, 2), exactBar(1, 101, 20, 10), exactBar(2, 102, 7, 3)]);
   try {
     configureLocale("en-US");
-    const enProfile = profileSnapshot(estimatedHarness.series, estimatedHarness.drawing).drawings[0].profile;
+    const enDrawing = profileSnapshot(estimatedHarness.series, estimatedHarness.drawing).drawings[0];
+    const enProfile = enDrawing.profile;
     assert.equal(enProfile.provenance, "estimated");
     assert.equal(enProfile.sourceLabel, "Estimated (OHLCV)");
+    assert.ok(enDrawing.warnings.includes("Estimated (OHLCV)"));
 
     configureLocale("tr-TR");
-    const trProfile = profileSnapshot(estimatedHarness.series, estimatedHarness.drawing).drawings[0].profile;
+    const trDrawing = profileSnapshot(estimatedHarness.series, estimatedHarness.drawing).drawings[0];
+    const trProfile = trDrawing.profile;
     assert.equal(trProfile.provenance, "estimated");
     assert.equal(trProfile.sourceLabel, "Tahmini (OHLCV)");
+    assert.ok(trDrawing.warnings.includes("Tahmini (OHLCV)"));
 
     const exactProfile = profileSnapshot(exactHarness.series, exactHarness.drawing).drawings[0].profile;
     assert.equal(exactProfile.poc, 101);
