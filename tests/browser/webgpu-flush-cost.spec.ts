@@ -1,5 +1,5 @@
 import { expect, test } from "@playwright/test";
-import { execFileSync } from "node:child_process";
+import { readFileSync } from "node:fs";
 import * as ts from "typescript";
 import { FUNCTIONAL_WEBGL_ARGS } from "./support/history.js";
 
@@ -8,7 +8,7 @@ test.use({ launchOptions: { args: [...FUNCTIONAL_WEBGL_ARGS, "--enable-unsafe-we
 test("four-surface WebGPU flush measurements preserve resolution reuse and empty-layer behavior", async ({ page }, testInfo) => {
   test.setTimeout(180_000);
   const baselineCommit = "5ce5c7eab84640757e7358c5785e5c45b70e134e";
-  const baselineSource = execFileSync("git", ["show", `${baselineCommit}:src/core/gpu/webgpu/webgpuQuadPipeline.ts`], { encoding: "utf8" });
+  const baselineSource = readFileSync(new URL("./fixtures/webgpu-quad-main-5ce5c7e.ts.fixture", import.meta.url), "utf8");
   const baselineJs = ts.transpileModule(baselineSource, { compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.ES2022 } }).outputText;
   await page.goto("/harness/");
   const report = await page.evaluate(async ({ baselineJs, baselineCommit }) => {
