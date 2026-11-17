@@ -1,5 +1,5 @@
 import { expect, test } from "@playwright/test";
-import { installHistory, openHarness, INTERVAL_MS } from "./support/history.js";
+import { installHistory, openHarness, FROZEN_NOW, INTERVAL_MS } from "./support/history.js";
 
 test("replay hides future and partially future drawings after panning past the replay tail", async ({ page }) => {
   test.setTimeout(60_000);
@@ -21,9 +21,31 @@ test("replay hides future and partially future drawings after panning past the r
       return original.apply(this, args);
     };
   });
+  // Keep the runtime's requested history window aligned with the fixed bars served by this fixture.
+  // Date.now is pinned while RAF, performance.now, and browser timers remain real.
+  await page.addInitScript((frozenNow: number) => {
+    const RealDate = Date;
+    class FrozenDate extends RealDate {
+      constructor(...args: unknown[]) { super(...((args.length ? args : [frozenNow]) as [value?: number])); }
+      static now() { return frozenNow; }
+    }
+    (window as unknown as Record<string, unknown>).Date = FrozenDate;
+  }, FROZEN_NOW);
   await openHarness(page);
 
-  const evidence = await page.evaluate(async () => {
+  let evidence: {
+    seekTime: number;
+    lastTime: number;
+    futureEnd: number;
+    replayVirtualTime: number | null;
+    liveStrokes: string[];
+    futureStrokesBeyondLastBar: number;
+    replaySeekAndReturnMatches: boolean;
+    replayMatchesFullRedraw: boolean;
+    restoredStrokes: string[];
+  };
+  try {
+    evidence = await page.evaluate(async () => {
     const [{ mountChart }, { createChartSurfaceModel }, { getChartRuntime }, { DrawingManager }, { DEFAULT_VOLUME_PROFILE_SETTINGS }, { normalizePreviousWeekStrategySettings }, { normalizeMondayRangeSettings }] = await Promise.all([
       import("/harness/chart.ts"),
       import("/harness/chart.ts"),
@@ -165,7 +187,11 @@ test("replay hides future and partially future drawings after panning past the r
       handle.dispose();
       root.remove();
     }
-  });
+    }) as typeof evidence;
+  } catch (error) {
+    const servedHistory = historyRequests.map((url) => url.href);
+    throw new Error(`${error instanceof Error ? error.message : String(error)}; locally served history requests: ${JSON.stringify(servedHistory)}`);
+  }
 
   expect(evidence.replayVirtualTime).toBe(evidence.seekTime);
   expect(evidence.futureEnd).toBeGreaterThan(evidence.lastTime);
