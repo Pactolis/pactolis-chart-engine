@@ -431,7 +431,11 @@ async function measureBackend(
         window.requestAnimationFrame = ((callback: FrameRequestCallback) =>
           nativeRequestAnimationFrame((timestamp) => {
             currentFrameTimestamp = timestamp;
-            callback(timestamp);
+            try {
+              callback(timestamp);
+            } finally {
+              currentFrameTimestamp = null;
+            }
           })) as typeof window.requestAnimationFrame;
         let activeFrameTimestamps: number[] | null = null;
         let activeFrameEvents: FrameMetricEvent[] | null = null;
