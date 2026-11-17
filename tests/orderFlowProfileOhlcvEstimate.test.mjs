@@ -497,8 +497,11 @@ test("incremental tail cache on OHLCV-only and mixed series equals full recomput
     // Non-footprint OHLCV-only market (meta.footprint.allowed = false) keeps tail updates in pure estimated mode.
     recordFootprintSupport("BYBIT:solusdt", false);
     try {
+      const pureOhlcvBars = Array.from({ length: 40 }, (_, i) =>
+        ohlcvBar(T0 + i * MIN, 100, 103, 100, 102, 30 + (i % 5)),
+      );
       const ohlcvSeries = new FootprintSeries({ intervalMs: MIN, priceStep: 1, referenceMarket: "BYBIT:solusdt" });
-      ohlcvSeries.loadBars(initialBars);
+      ohlcvSeries.loadBars(pureOhlcvBars);
       const { drawCtx: ohlcvCtx } = makeIndicatorCtx(ohlcvSeries, [10, 40], { mode: "visible", pocMode: "both" });
       const ohlcvFull = () => calculateOrderFlowProfile(ohlcvSeries.listReadonly().slice(10, 40), {
         profileMetric: "volume",
@@ -514,7 +517,7 @@ test("incremental tail cache on OHLCV-only and mixed series equals full recomput
       assert.deepStrictEqual(ohlcvP0.meta.result, ohlcvFull());
       for (let k = 0; k < 3; k++) {
         ohlcvSeries.addTrades([{
-          time: initialBars.at(-1).startTime + 2_000 + k,
+          time: pureOhlcvBars.at(-1).startTime + 2_000 + k,
           price: 102,
           qty: 5,
           isBuy: k % 2 === 0,

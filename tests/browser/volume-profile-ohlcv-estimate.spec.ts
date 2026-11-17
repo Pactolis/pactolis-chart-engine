@@ -215,10 +215,12 @@ test("Order Flow Profile renders Estimated OHLCV profile on non-footprint market
   });
 
   // Exact market preserves normal numeric levels & delta support with zero Estimated/Tahmini tags.
+  // (Delta intentionally has no static POC/VA levels so analysisSnapshot marks shape unsupported rather than no-data.)
   expect(evidence.exact.snapTotalInd.status).toBe("ok");
   expect(evidence.exact.snapTotalInd.warnings).toEqual([]);
   expect(evidence.exact.snapTotalInd.series.find((s: any) => s.key === "poc")?.samples[0]?.value).toBe(101);
-  expect(evidence.exact.snapDeltaTrInd.status).toBe("ok");
+  expect(evidence.exact.snapDeltaTrInd.status).toBe("unsupported");
+  expect(evidence.exact.snapDeltaTrInd.warnings.some((w: string) => /estimated|tahmini|footprint/i.test(w))).toBe(false);
   expect(evidence.exact.enTexts.some((t: string) => /estimated|tahmini/i.test(t))).toBe(false);
   expect(evidence.exact.trTexts.some((t: string) => /estimated|tahmini/i.test(t))).toBe(false);
 
