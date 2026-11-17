@@ -781,6 +781,17 @@ test("benchmark: 1,000 and 100,000 bar replay seek p50/p95/p99, cloneFootprintBa
     coord100k.coordinator.seek(T0 + idx * MIN);
     coordSeek100kMs.push(performance.now() - t0);
     assert.equal(coord100k.series.length, Math.min(idx, MAX_SERIES_BARS));
+    const firstVisibleIndex = Math.max(0, idx - MAX_SERIES_BARS);
+    assert.equal(
+      coord100k.series.at(0)?.startTime,
+      T0 + firstVisibleIndex * MIN,
+      "a capped replay rebuild keeps the newest MAX_SERIES_BARS bars",
+    );
+    assert.equal(
+      coord100k.series.at(coord100k.series.length - 1)?.startTime,
+      T0 + (idx - 1) * MIN,
+      "a capped replay rebuild keeps the latest completed replay bar",
+    );
   }
   coord100k.coordinator.exit({ reloadHistory: false });
 

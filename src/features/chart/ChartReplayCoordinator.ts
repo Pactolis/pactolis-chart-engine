@@ -1,4 +1,5 @@
 import { ChartChange, chartChangeForDataUpdate } from "../../core/render/scene/chartScene.js";
+import { MAX_SERIES_BARS } from "../../core/model/footprint.js";
 import type { ChartReplayServices } from "./ChartServicePorts.js";
 import type { FootprintBar } from "../../core/types.js";
 import { classifyReplayStepUpdate, makeDataUpdateEvent, snapshotFromSeries } from "../../core/dataUpdateEvent.js";
@@ -197,8 +198,10 @@ export class ChartReplayCoordinator {
 
   private replaceSeries(visibleBars: FootprintBar[]): void {
     const series = this.host.pipeline.series;
-    series.clear();
-    for (const bar of visibleBars) series.upsertBar(bar);
+    const retainedBars = visibleBars.length > MAX_SERIES_BARS
+      ? visibleBars.slice(-MAX_SERIES_BARS)
+      : visibleBars;
+    series.loadBars(retainedBars);
     this.host.timeViewport.placeReplayPrefixEnd(series.length);
     this.host.svc.updateAnalysisFromSeries(this.host.getMarket(), series, series.config.priceStep);
     this.host.autoFit();
