@@ -344,10 +344,15 @@ test.describe.serial("#147 multi-chart live-trade flush & frame budget census", 
                 throw new Error(`Chart ${id} did not finish loading 250 bars`);
               }
             }
+            // Let any immediate live-OHLC seed request settle before snapshotting baseline volume.
+            await new Promise((r) => setTimeout(r, 250));
             await nextFrames(6);
 
             const tailStartTime = Math.max(
-              ...panelIds.map((id) => harness.getChartRuntime(id)!.pipeline.series.at(-1)!.startTime),
+              ...panelIds.map((id) => {
+                const s = harness.getChartRuntime(id)!.pipeline.series;
+                return s.at(s.length - 1)!.startTime;
+              }),
             );
 
             const sumVolumes = () =>
