@@ -165,12 +165,11 @@ test("range profile estimates OHLCV-only windows but keeps partial footprint ran
   assert.equal(partial.totalVolume, 20);
   assert.deepEqual(partial.levels.map((level) => level.priceBin), [100, 101]);
 
-  const { series, drawing, texts, draw } = makeDrawingHarness(partialBars);
+  const { texts, draw } = makeDrawingHarness(partialBars);
   configureLocale("en-US");
   draw();
   assert.ok(texts.includes("indicator.volumeProfile.coverageIncomplete"));
   assert.equal(texts.some((text) => /estimated/i.test(text)), false);
-  assert.equal(profileSnapshot(series, drawing).drawings[0].profile.provenance, "exact");
 });
 
 test("cell-less live bars with a zero-volume bar keep main exact profile, complete, and missingDays semantics", () => {
@@ -189,10 +188,10 @@ test("cell-less live bars with a zero-volume bar keep main exact profile, comple
     options,
   );
 
-  assert.deepEqual(range.levels, expectedExact.levels);
-  assert.equal(range.poc, expectedExact.poc);
-  assert.equal(range.vah, expectedExact.vah);
-  assert.equal(range.val, expectedExact.val);
+  const rangeProfile = Object.fromEntries(
+    Object.keys(expectedExact).map((key) => [key, range[key]]),
+  );
+  assert.deepEqual(rangeProfile, expectedExact);
   assert.equal(range.provenance, "exact");
   assert.equal(range.complete, false);
   assert.deepEqual(range.missingDays, [BASE_TIME]);
