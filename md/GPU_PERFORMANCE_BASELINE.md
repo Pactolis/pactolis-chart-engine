@@ -107,3 +107,21 @@ GitHub Actions PR runner'larında SwiftShader varyansını tolere etmek ve sahte
 - **Aktif Faz Motor Telemetrisi Kapsamı (#89):** Etkileşim (`load`, `crosshair`, `pan`) ve canlı/burst (`load`, `baseline`, `burst`, `recovery`) fazlarında `chart.frame.render.ms` `count > 0` zorunludur
 - **Canlı Akış Gecikme Tavanı (#50):** `LIVE_BURST_LATENCY_P95_BUDGET_MS = 3,000 ms`
 - **Endurance Retained Heap Eğimi (#50):** `ENDURANCE_MAX_HEAP_GROWTH_BYTES_PER_MINUTE = 1,118,481 B/dk` (64 MiB/saat)
+
+## 4. CE-3 Stage 4 — gerçek GPU heatmap ölçüm aracı (#74)
+
+Issue #74'ün başlangıç bulguları SwiftShader üzerinde ortalama frame süresini 15.000 hücrede CPU `11,5 ms` / GPU prototipi `4,4 ms`, 40.000 hücrede CPU `39,0 ms` / GPU prototipi `8,8 ms` olarak kaydeder. Bunlar gerçek GPU kararı değildir: Canvas2D yazılım rasterı SwiftShader'da farklı maliyet gösterir ve eski ölçüm p50/p95/p99 dağılımı değildir.
+
+Tek komutlu, açıkça opt-in Playwright koşusu:
+
+```bash
+npm run benchmark:gpu -- --output-dir /tmp/chart-engine-gpu-benchmark
+```
+
+Koşu Chromium'u `--use-gl=angle --use-angle=default --ignore-gpu-blocklist` ile başlatır; SwiftShader'ı zorlamaz. `CHROMIUM_PATH` ortam değişkeni sistem Chromium'unu seçebilir. WebGL2 `WEBGL_debug_renderer_info` sorgusu unmasked renderer/vendor ve başlatma argümanlarıyla JSON/Markdown çıktısına yazılır. SwiftShader, llvmpipe, softpipe ve yazılım renderer kimlikleri `hardwareValid: false` yapar; bu durumda `decision` daima `NOT_EVALUATED_HARDWARE_INVALID` olur. Render ölçümü raporda görünür, fakat hardware GO/NO-GO kararı üretmez.
+
+Sabit matris 15.000 ve 40.000 görünür heatmap hücresi, 1 ve 8 chart, varsayılan olarak her chart için 30 frame örneğiyle CPU cold raster, CPU hot raster ve GPU heatmap koşularından oluşur. Frame dağılımı, örneklenen chart invalidation ölçümlerinin `chart.frame.render.ms` p50/p95/p99 değerlerini raporlar; GPU'nun ilk hazırlık karesi ayrı tutulur. `performance.memory` varsa before/after heap snapshot ve farkı yazılır. WebGL'in portatif VRAM sayacı olmadığı için GPU memory değeri ayrılmış heatmap texture'ları ve instance/quad buffer boyutlarından hesaplanan tahmindir; driver overhead ve diğer sahne kaynakları dahil değildir. CPU tarafında raster cache'in ayrılmış canvas byte sayısı kullanılır; GPU opt-in sonrasında tutuluyorsa GPU toplam retained tahminine de eklenir.
+
+Ölçümden önce sabitlenen karar kuralı bilinçli olarak muhafazakârdır: GPU p95, **15k ve 40k'nın ikisinde ve 1 ile 8 chart sayılarının ikisinde** CPU hot p95'in en fazla `%80`'i olmalı; ayrıca her iki iş yükünde 8-chart GPU tahmini toplam retained byte değeri 8-chart CPU hot değerini aşmamalıdır. Heap API yoksa veya fixture/path sahipliği doğrulanamazsa karar değerlendirilmez. Bu eşikler rapor görüldükten sonra değiştirilmeyecektir.
+
+CI tam performans koşusunu çalıştırmaz veya sonuçtan gate üretmez. `check:browser` browser helper'ı derler; `gpuHeatmapBenchmark.test.mjs` yalnızca `--list` matrisi ile `--dry-run` karar kuralını doğrular. Gerçek renderer koşusu geliştirici tarafından yukarıdaki tek komutla, tercihen donanım GPU'su bulunan yerel sistemde başlatılır.
