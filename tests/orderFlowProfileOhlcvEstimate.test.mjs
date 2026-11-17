@@ -336,12 +336,8 @@ test("OHLCV-only estimator distributes volume deterministically and conserves to
   ]);
 });
 
-test("fail-closed on unsupported metrics/sides in estimated and mixed windows", () => {
+test("fail-closed on unsupported metrics/sides in all-OHLCV estimated windows", () => {
   const ohlcvOnly = [ohlcvBar(T0, 100, 103, 100, 102, 30)];
-  const mixed = [
-    exactBar(T0, [{ priceBin: 100, buyVol: 10, sellVol: 10, buyCount: 2, sellCount: 2, count: 4 }]),
-    ohlcvBar(T0 + MIN, 100, 103, 100, 102, 30),
-  ];
 
   const unsupportedCombos = [
     ["volume", "buy"],
@@ -352,103 +348,98 @@ test("fail-closed on unsupported metrics/sides in estimated and mixed windows", 
     ["average-trade-size", "total"],
   ];
 
-  for (const [label, bars, expectedProvenance] of [
-    ["ohlcvOnly", ohlcvOnly, "estimated"],
-    ["mixed", mixed, "mixed"],
-  ]) {
-    const series = new FootprintSeries({ intervalMs: MIN, priceStep: 1 });
-    series.loadBars(bars);
+  const label = "ohlcvOnly";
+  const bars = ohlcvOnly;
+  const series = new FootprintSeries({ intervalMs: MIN, priceStep: 1 });
+  series.loadBars(bars);
 
-    for (const [profileMetric, profileSide] of unsupportedCombos) {
-      const result = calculateOrderFlowProfile(bars, {
-        profileMetric,
-        profileSide,
-        priceStep: 1,
-        allowOhlcvEstimate: true,
-        developing: true,
+  for (const [profileMetric, profileSide] of unsupportedCombos) {
+    const result = calculateOrderFlowProfile(bars, {
+      profileMetric,
+      profileSide,
+      priceStep: 1,
+      allowOhlcvEstimate: true,
+      developing: true,
+    });
+    assert.equal(result.dataComplete, false, `${label} ${profileMetric}/${profileSide}`);
+    assert.equal(result.isEstimated, true);
+    assert.equal(result.provenance, "estimated");
+    assert.deepEqual(result.levels, []);
+    assert.equal(result.summaryValue, null);
+    assert.deepEqual([result.poc, result.vah, result.val], [null, null, null]);
+
+    for (const [tag, expectedWord] of [["en-US", "Estimated"], ["tr-TR", "Tahmini"]]) {
+      withLocale(tag, () => {
+        const { drawCtx, fillTexts } = makeIndicatorCtx(series, [0, bars.length], { profileMetric, profileSide });
+        const prepared = volumeProfileIndicatorDefinition.prepareData(drawCtx);
+        assert.equal(prepared.status, "no-data", `${label} ${tag} ${profileMetric}/${profileSide} fail-closed`);
+        assert.ok(prepared.message?.includes(expectedWord), `${tag} unsupported message mentions ${expectedWord}: ${prepared.message}`);
+
+        const header = volumeProfileIndicatorDefinition.getHeaderLabel({ settings: drawCtx.settings, prepared });
+        assert.ok(header.includes(expectedWord), `${tag} header still mentions ${expectedWord}: ${header}`);
+
+        volumeProfileIndicatorDefinition.drawPriceOverlay(drawCtx, prepared);
+        assert.ok(fillTexts.some((entry) => entry.text.includes(expectedWord)), `${tag} price-overlay draws fail-closed ${expectedWord} notice`);
+        fillTexts.length = 0;
+        volumeProfileIndicatorDefinition.drawSubPane(drawCtx, prepared);
+        assert.ok(fillTexts.some((entry) => entry.text.includes(expectedWord)), `${tag} pane badge shows ${expectedWord}`);
       });
-      assert.equal(result.dataComplete, false, `${label} ${profileMetric}/${profileSide}`);
-      assert.equal(result.isEstimated, true);
-      assert.equal(result.provenance, expectedProvenance);
-      assert.deepEqual(result.levels, []);
-      assert.equal(result.summaryValue, null);
-      assert.deepEqual([result.poc, result.vah, result.val], [null, null, null]);
-
-      for (const [tag, expectedWord] of [["en-US", "Estimated"], ["tr-TR", "Tahmini"]]) {
-        withLocale(tag, () => {
-          const { drawCtx, fillTexts } = makeIndicatorCtx(series, [0, bars.length], { profileMetric, profileSide });
-          const prepared = volumeProfileIndicatorDefinition.prepareData(drawCtx);
-          assert.equal(prepared.status, "no-data", `${label} ${tag} ${profileMetric}/${profileSide} fail-closed`);
-          assert.ok(prepared.message?.includes(expectedWord), `${tag} unsupported message mentions ${expectedWord}: ${prepared.message}`);
-
-          const header = volumeProfileIndicatorDefinition.getHeaderLabel({ settings: drawCtx.settings, prepared });
-          assert.ok(header.includes(expectedWord), `${tag} header still mentions ${expectedWord}: ${header}`);
-
-          volumeProfileIndicatorDefinition.drawPriceOverlay(drawCtx, prepared);
-          assert.ok(fillTexts.some((entry) => entry.text.includes(expectedWord)), `${tag} price-overlay draws fail-closed ${expectedWord} notice`);
-          fillTexts.length = 0;
-          volumeProfileIndicatorDefinition.drawSubPane(drawCtx, prepared);
-          assert.ok(fillTexts.some((entry) => entry.text.includes(expectedWord)), `${tag} pane badge shows ${expectedWord}`);
-        });
-      }
     }
   }
 });
 
-test("mixed exact+OHLCV window refuses to masquerade as exact and displays TR/EN Estimated badges", () => {
+test("an exact footprint bar makes OHLCV estimates in the entire window inert", () => {
   const bars = [
-    exactBar(T0, [{ priceBin: 100, buyVol: 15, sellVol: 5 }]),
-    ohlcvBar(T0 + MIN, 100, 102, 100, 101, 20),
+    ohlcvBar(T0, 100, 102, 100, 101, 20),
+    exactBar(T0 + MIN, [
+      { priceBin: 100, buyVol: 15, sellVol: 5, buyCount: 3, sellCount: 2, count: 5 },
+      { priceBin: 102, buyVol: 8, sellVol: 12, buyCount: 2, sellCount: 4, count: 6 },
+    ]),
+    ohlcvBar(T0 + 2 * MIN, 101, 103, 101, 102, 10),
   ];
+  const metrics = ["volume", "delta", "trade-count", "average-trade-size"];
+  const sides = ["total", "buy", "sell"];
 
-  const mixed = calculateOrderFlowProfile(bars, {
-    profileMetric: "volume",
-    profileSide: "total",
-    priceStep: 1,
-    allowOhlcvEstimate: true,
-  });
-  assert.equal(mixed.provenance, "mixed");
-  assert.equal(mixed.isEstimated, true);
-  assert.equal(mixed.exactBarCount, 1);
-  assert.equal(mixed.estimatedBarCount, 1);
-  assert.equal(mixed.totalVolume, 40);
-  assert.deepEqual(
-    mixed.levels.map((l) => [l.priceBin, l.totalVol, l.buyValue, l.sellValue]),
-    [
-      [100, 30, null, null],
-      [101, 10, null, null],
-    ],
-  );
+  for (const profileMetric of metrics) {
+    for (const profileSide of sides) {
+      const options = { profileMetric, profileSide, priceStep: 1, developing: true };
+      const baseline = calculateOrderFlowProfile(bars, { ...options, allowOhlcvEstimate: false });
+      const withFallbackEnabled = calculateOrderFlowProfile(bars, { ...options, allowOhlcvEstimate: true });
+      assert.deepStrictEqual(withFallbackEnabled, baseline, `${profileMetric}/${profileSide}`);
+      assert.equal(withFallbackEnabled.provenance, "exact", `${profileMetric}/${profileSide}`);
+      assert.equal(withFallbackEnabled.isEstimated, false, `${profileMetric}/${profileSide}`);
+      assert.equal(withFallbackEnabled.exactBarCount, 1, `${profileMetric}/${profileSide}`);
+      assert.equal(withFallbackEnabled.estimatedBarCount, 0, `${profileMetric}/${profileSide}`);
+      assert.equal(withFallbackEnabled.totalVolume, 40, `${profileMetric}/${profileSide}`);
+      assert.deepEqual(withFallbackEnabled.levels.map((level) => level.priceBin), [100, 102]);
+    }
+  }
 
   const series = new FootprintSeries({ intervalMs: MIN, priceStep: 1 });
   series.loadBars(bars);
-
-  for (const [tag, expectedWord] of [["en-US", "Estimated"], ["tr-TR", "Tahmini"]]) {
+  for (const tag of ["en-US", "tr-TR"]) {
     withLocale(tag, () => {
       const { drawCtx, fillTexts, fillRects, queuedLabels } = makeIndicatorCtx(series, [0, bars.length]);
       const prepared = volumeProfileIndicatorDefinition.prepareData(drawCtx);
       assert.equal(prepared.status, "ok");
-      assert.ok(prepared.message?.includes(expectedWord));
-
+      assert.equal(prepared.message, undefined);
       const header = volumeProfileIndicatorDefinition.getHeaderLabel({ settings: drawCtx.settings, prepared });
-      assert.ok(header.includes(expectedWord), `${tag} mixed header: ${header}`);
+      assert.ok(!/estimated|tahmini/i.test(header), `${tag}: exact header stays unbadged (${header})`);
 
       volumeProfileIndicatorDefinition.drawPriceOverlay(drawCtx, prepared);
-      const overlayTexts = fillTexts.map((entry) => entry.text);
-      assert.ok(overlayTexts.some((text) => text.includes(expectedWord)), `${tag} price-overlay renders ${expectedWord} badge`);
-      const histRects = fillRects.filter((r) => r.alpha === 0.55);
-      assert.ok(histRects.length > 0);
-      assert.ok(histRects.every((r) => r.fillStyle === uiColor.info), `${tag} estimated/mixed draws one-sided neutral histogram`);
-      assert.ok(queuedLabels.some((l) => l.label === "POC (~)"), `${tag} labels POC as approximate`);
-
+      assert.ok(fillTexts.every((entry) => !/estimated|tahmini/i.test(entry.text)), `${tag}: overlay has no estimate badge`);
+      const histRects = fillRects.filter((rect) => rect.alpha === 0.55);
+      assert.ok(histRects.some((rect) => rect.fillStyle === uiColor.buy), `${tag}: exact buy histogram`);
+      assert.ok(histRects.some((rect) => rect.fillStyle === uiColor.sell), `${tag}: exact sell histogram`);
+      assert.ok(queuedLabels.some((label) => label.label === "POC"), `${tag}: exact POC label`);
       fillTexts.length = 0;
       volumeProfileIndicatorDefinition.drawSubPane(drawCtx, prepared);
-      assert.ok(fillTexts.some((entry) => entry.text.includes(expectedWord)), `${tag} subpane shows ${expectedWord}`);
+      assert.ok(fillTexts.every((entry) => !/estimated|tahmini/i.test(entry.text)), `${tag}: subpane has no estimate badge`);
     });
   }
 });
 
-test("incremental tail cache on OHLCV-only and mixed series equals full recompute bit-for-bit and keys on priceStep", () => {
+test("incremental tail cache matches exact fallback gating and keys on priceStep", () => {
   const prevTelemetryEnabled = snapshotPerformanceTelemetry().enabled;
   configurePerformanceTelemetry({ enabled: true });
   try {
@@ -476,7 +467,7 @@ test("incremental tail cache on OHLCV-only and mixed series equals full recomput
     assert.equal(p0.status, "ok");
     assert.deepStrictEqual(p0.meta.result, fullRef(drawCtx.range));
 
-    // Tail trades turn the last OHLCV bar into a mixed exact-tail bar incrementally.
+    // Tail trades add an exact bar, which disables estimates for the visible window.
     for (let k = 0; k < 4; k++) {
       series.addTrades([{
         time: initialBars.at(-1).startTime + 1_000 + k,
@@ -487,12 +478,12 @@ test("incremental tail cache on OHLCV-only and mixed series equals full recomput
       }]);
       const pTail = volumeProfileIndicatorDefinition.prepareData(drawCtx);
       assert.equal(pTail.status, "ok");
-      assert.equal(pTail.meta.result.provenance, "mixed");
+      assert.equal(pTail.meta.result.provenance, "exact");
       assert.deepStrictEqual(pTail.meta.result, fullRef(drawCtx.range), `tail trade ${k} strict parity`);
     }
 
     const hitsAfter = snapshotPerformanceTelemetry().counters["indicator.incremental.hit.volumeProfile"] ?? 0;
-    assert.equal(hitsAfter - hitsBefore, 4, "estimated/mixed tail ticks must use incremental path");
+    assert.equal(hitsAfter - hitsBefore, 4, "exact tail ticks must use incremental path");
 
     // Non-footprint OHLCV-only market (meta.footprint.allowed = false) keeps tail updates in pure estimated mode.
     recordFootprintSupport("BYBIT:solusdt", false);

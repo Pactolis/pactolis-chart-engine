@@ -45,6 +45,35 @@ test("pass interests retain closed output through tail frames and invalidate on 
   cache.clear();
 });
 
+test("overlay frame key invalidates static passes on priceStep and historical provenance changes", () => {
+  const { mainCtx } = makeOverlayMockDocument();
+  const { series } = makeOverlaySeries();
+  const view = makeOverlayView();
+  const crosshair = { x: 0, y: 0, visible: false };
+  let drawCalls = 0;
+  const overlay = new Overlay(
+    mainCtx,
+    () => { drawCalls++; },
+    () => ({ ...DEFAULT_VOLUME_PROFILE_SETTINGS, enabled: false }),
+  );
+  const layers = ["drawings"];
+
+  overlay.renderAnnotations(view, series, crosshair, [0, 20], layers, ChartChange.All);
+  overlay.renderAnnotations(view, series, crosshair, [0, 20], layers, ChartChange.DataTail);
+  assert.equal(drawCalls, 1, "unchanged static pass reuses the retained frame");
+
+  // Exercise the explicit frame-key dependency without also changing series length.
+  series.config.priceStep = 2;
+  overlay.renderAnnotations(view, series, crosshair, [0, 20], layers, ChartChange.DataTail);
+  assert.equal(drawCalls, 2, "priceStep change invalidates retained annotations");
+
+  const historicalBar = series.at(5);
+  assert.ok(historicalBar);
+  series.upsertBar({ ...historicalBar, sources: [...(historicalBar.sources ?? []), "history-repair"] });
+  overlay.renderAnnotations(view, series, crosshair, [0, 20], layers, ChartChange.DataTail);
+  assert.equal(drawCalls, 3, "non-tail provenance revision invalidates retained annotations");
+});
+
 test("tail-dependent indicators and last price never reuse a static pass", () => {
   const cache = new AnnotationPassCache();
   const { ctx } = fixture();

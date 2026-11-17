@@ -21,7 +21,7 @@ export interface OrderFlowProfileOptions {
   developing?: boolean;
   /** Price bin step used for deterministic OHLCV distribution when `allowOhlcvEstimate` is true. */
   priceStep?: number;
-  /** When true, bars with `cells.size === 0` and positive volume fall back to OHLCV distribution (`volume`/`total` only). */
+  /** When true, an all-OHLCV window can fall back to OHLCV distribution (`volume`/`total` only). */
   allowOhlcvEstimate?: boolean;
 }
 
@@ -190,22 +190,48 @@ export function accumulateOrderFlowProfileBar(
   acc.fromTime = acc.fromTime === null ? bar.startTime : Math.min(acc.fromTime, bar.startTime);
   acc.toTime = acc.toTime === null ? bar.startTime : Math.max(acc.toTime, bar.startTime);
   if (bar.cells.size > 0) {
+    if (acc.exactBarCount === 0 && acc.estimatedBarCount > 0) {
+      // OHLCV is a window-level fallback. Once any exact footprint bar appears,
+      // preserve the historical exact behavior for the whole window: discard
+      // earlier estimates and leave every cell-less bar out of the profile.
+      acc.byPrice.clear();
+      acc.estimatedBarCount = 0;
+      acc.hasUnsupportedEstimate = false;
+      if (acc.developing.length > 0) {
+        const empty = buildSnapshot({
+          byPrice: new Map(),
+          exactBarCount: 0,
+          estimatedBarCount: 0,
+          hasUnsupportedEstimate: false,
+        }, resolved.profileMetric, resolved.profileSide, resolved.valueAreaPercent);
+        acc.developing = acc.developing.map(({ time }) => ({
+          time,
+          poc: empty.dataComplete ? empty.poc : null,
+          vah: empty.dataComplete ? empty.vah : null,
+          val: empty.dataComplete ? empty.val : null,
+          valid: empty.dataComplete,
+        }));
+      }
+    }
     acc.exactBarCount += 1;
     for (const cell of bar.cells.values()) {
       accumulateCell(acc.byPrice, cell);
     }
-  } else if (
-    resolved.allowOhlcvEstimate
-    && resolved.priceStep !== undefined
-    && isValidVolume(bar.volume)
-    && bar.volume > 0
-    && isValidPriceRange(bar.low, bar.high)
-  ) {
-    acc.estimatedBarCount += 1;
-    if (resolved.profileMetric === "volume" && resolved.profileSide === "total") {
-      accumulateEstimatedOhlcvBar(acc.byPrice, bar.low, bar.high, bar.volume, resolved.priceStep);
-    } else {
-      acc.hasUnsupportedEstimate = true;
+  } else {
+    if (
+      acc.exactBarCount === 0
+      && resolved.allowOhlcvEstimate
+      && resolved.priceStep !== undefined
+      && isValidVolume(bar.volume)
+      && bar.volume > 0
+      && isValidPriceRange(bar.low, bar.high)
+    ) {
+      acc.estimatedBarCount += 1;
+      if (resolved.profileMetric === "volume" && resolved.profileSide === "total") {
+        accumulateEstimatedOhlcvBar(acc.byPrice, bar.low, bar.high, bar.volume, resolved.priceStep);
+      } else {
+        acc.hasUnsupportedEstimate = true;
+      }
     }
   }
   if (resolved.developing) {
