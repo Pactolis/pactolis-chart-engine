@@ -9,7 +9,7 @@ globalThis.performance ??= { now: () => Date.now() };
 
 const { ReplayController, cloneFootprintBarForReplay } = await import("../dist/features/replay/replayController.js");
 const { ChartReplayCoordinator } = await import("../dist/features/chart/ChartReplayCoordinator.js");
-const { FootprintSeries } = await import("../dist/core/model/footprint.js");
+const { FootprintSeries, MAX_SERIES_BARS } = await import("../dist/core/model/footprint.js");
 const { calculateOrderFlowProfile } = await import("../dist/core/analysis/orderFlowProfile.js");
 const { calculateVolumeProfile } = await import("../dist/core/analysis/volumeProfile.js");
 const { calculateAnchoredVwap } = await import("../dist/core/analysis/anchoredVwap.js");
@@ -723,7 +723,13 @@ test("PROBE P3: OrderbookHeatmapOverlay does not mark the replay tail bar as liv
   let prevSettingsSource = null;
   try { prevSettingsSource = orderbookHeatmapSettingsSource(); } catch { prevSettingsSource = null; }
   configureOrderbookHeatmapSettingsSource({
-    settingsFor: () => ({ ...DEFAULT_ORDERBOOK_HEATMAP_SETTINGS, mode: "on", bucketStep: 25, unit: "btc", minBtc: 0 }),
+    settingsFor: () => ({
+      ...DEFAULT_ORDERBOOK_HEATMAP_SETTINGS,
+      mode: "aggregated",
+      unit: "btc",
+      bucketStep: 25,
+      aggregated: { usd: 0, btc: 0 },
+    }),
     onChange: () => () => {},
   });
 
@@ -908,7 +914,7 @@ test("benchmark: 1,000 and 100,000 bar replay seek p50/p95/p99, cloneFootprintBa
     const t0 = performance.now();
     coord100k.coordinator.seek(T0 + idx * MIN);
     coordSeek100kMs.push(performance.now() - t0);
-    assert.equal(coord100k.series.length, idx);
+    assert.equal(coord100k.series.length, Math.min(idx, MAX_SERIES_BARS));
   }
   coord100k.coordinator.exit({ reloadHistory: false });
 
@@ -950,6 +956,7 @@ test("benchmark: 1,000 and 100,000 bar replay seek p50/p95/p99, cloneFootprintBa
     seek100k: {
       controller: summarizeMs(ctrlSeek100kMs),
       coordinatorRebuild: summarizeMs(coordSeek100kMs),
+      seriesCap: MAX_SERIES_BARS,
     },
     timerDrift: driftReport,
   };

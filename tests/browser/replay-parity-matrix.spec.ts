@@ -147,11 +147,11 @@ test("ChartRuntime replay parity: TPO (#144), 10 indicators, timeframe round-tri
 
     const makeIndicators = async () => Promise.all(indicatorTypes.map((type, idx) => createIndicatorInstanceAsync(type, idx)));
 
-    const waitReady = async (panelId: string, minBars: number) => {
+    const waitReady = async (panelId: string, surface: any, minBars: number) => {
       const deadline = performance.now() + 20_000;
       while (performance.now() < deadline) {
         const rt = harness.getChartRuntime(panelId);
-        if (rt && rt.pipeline.series.length >= minBars) return rt;
+        if (rt && rt.pipeline.series.length >= minBars && !surface.historyOverlay && !surface.historyBackground) return rt;
         await new Promise((r) => setTimeout(r, 20));
       }
       throw new Error(`Timed out waiting for ${panelId}`);
@@ -195,13 +195,13 @@ test("ChartRuntime replay parity: TPO (#144), 10 indicators, timeframe round-tri
     try {
       const owner = await mountPanel("r-owner", "BINANCE_FUTURES:btcusdt", 0, 0, "tpo", true);
       const oracle = await mountPanel("r-oracle", "BINANCE_FUTURES:ethusdt", 430, 0, "tpo", true);
-      await mountPanel("r-linked", "BINANCE_FUTURES:btcusdt", 0, 360, "footprint", false);
+      const linked = await mountPanel("r-linked", "BINANCE_FUTURES:btcusdt", 0, 360, "footprint", false);
       const live = await mountPanel("r-live", "BINANCE_FUTURES:solusdt", 430, 360, "footprint", false);
 
-      const rtOwner = await waitReady("r-owner", 90) as any;
-      const rtOracle = await waitReady("r-oracle", 35) as any;
-      const rtLinked = await waitReady("r-linked", 90) as any;
-      const rtLive = await waitReady("r-live", 90) as any;
+      const rtOwner = await waitReady("r-owner", owner.surface, 90) as any;
+      const rtOracle = await waitReady("r-oracle", oracle.surface, 35) as any;
+      const rtLinked = await waitReady("r-linked", linked.surface, 90) as any;
+      const rtLive = await waitReady("r-live", live.surface, 90) as any;
 
       // Link r-linked to r-owner replay clock
       const unsubLink = rtOwner.subscribeReplayState((snap: any) => {
@@ -238,6 +238,7 @@ test("ChartRuntime replay parity: TPO (#144), 10 indicators, timeframe round-tri
       const liveVolAfter = rtLive.pipeline.series.at(rtLive.pipeline.series.length - 1)!.volume;
 
       // Compare TPO cache groups, 10 indicator snapshots, pane header labels & bars/cells parity between r-owner (35 via backward seek+step) and r-oracle (fresh 35)
+      const linkedLength = rtLinked.pipeline.series.length;
       const ownerBars35 = serializeBars(rtOwner);
       const oracleBars35 = serializeBars(rtOracle);
       const ownerTpoGroups = (rtOwner.overlay?.tpoCache?.groups ?? []).map((g: any) => g.result);
@@ -292,7 +293,7 @@ test("ChartRuntime replay parity: TPO (#144), 10 indicators, timeframe round-tri
         oracleHeadersLabels: oracleHeaders.map((h: any) => h.label),
         ownerIndSnapshots,
         oracleIndSnapshots,
-        linkedLength: rtLinked.pipeline.series.length,
+        linkedLength,
         liveVolDelta: liveVolAfter - liveVolBefore,
         vtBeforeTf,
         tf5m: { vt: snap5m.virtualTime, count: bars5m.length, maxEnd: Math.max(...bars5m.map((b: any) => b.startTime + 5 * minMs)) },
@@ -360,6 +361,7 @@ test("BROWSER PROBE: ChartRuntime drawing overlay skips future drawings (> virtu
     document.body.appendChild(root);
     const svc = createHarnessServices({ priceStep: 10, priceStepResolved: true });
     svc.drawings.setMarket("BINANCE_FUTURES:btcusdt");
+    const probeSurface = harness.createChartSurfaceModel();
     const handle = harness.mountChart(root, {
       type: "chart",
       market: "BINANCE_FUTURES:btcusdt",
@@ -367,13 +369,13 @@ test("BROWSER PROBE: ChartRuntime drawing overlay skips future drawings (> virtu
       scaleMode: "linear",
       chartType: "candlestick",
       candles: true,
-    } as any, svc, "browser-probe-draw", harness.createChartSurfaceModel());
+    } as any, svc, "browser-probe-draw", probeSurface);
 
     try {
       const deadline = performance.now() + 15_000;
       while (performance.now() < deadline) {
         const rt = harness.getChartRuntime("browser-probe-draw");
-        if (rt && rt.pipeline.series.length >= 60) break;
+        if (rt && rt.pipeline.series.length >= 60 && !probeSurface.historyOverlay && !probeSurface.historyBackground) break;
         await new Promise((r) => setTimeout(r, 20));
       }
       const rt = harness.getChartRuntime("browser-probe-draw") as any;
@@ -395,6 +397,8 @@ test("BROWSER PROBE: ChartRuntime drawing overlay skips future drawings (> virtu
         ],
       }]);
 
+      // Pan slightly right into empty future canvas space so futureT1..futureT2 sit inside viewport width
+      rt.view.offsetX -= 450;
       const annotationCanvas = root.querySelector('[data-chart-surface="annotation"]') as HTMLCanvasElement;
       const ctx2d = annotationCanvas.getContext("2d")!;
       const drawnXs: number[] = [];
