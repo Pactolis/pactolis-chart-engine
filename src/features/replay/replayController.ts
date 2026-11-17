@@ -90,14 +90,20 @@ export class ReplayController {
   }
 
   /**
-   * Replace the timeframe dataset without resetting the replay clock.
-   * Only bars completed at virtualTime are returned for immediate rendering.
+   * Replace the timeframe dataset while keeping the replay clock inside its range.
+   * An older clock may fall outside a newly loaded history window, so clamp it to
+   * that window before selecting the completed bars returned for immediate rendering.
    */
   reconfigure(bars: FootprintBar[], intervalMs: number): { visibleBars: FootprintBar[]; resume: boolean } {
     const resume = this.state === "playing";
     this.stopTimer();
     this.bars = bars;
     this.intervalMs = Math.max(1, intervalMs);
+    if (this.bars.length > 0) {
+      const firstStart = this.rangeStart();
+      const lastEnd = this.rangeEnd();
+      this.virtualTime = Math.max(firstStart, Math.min(this.virtualTime, lastEnd));
+    }
     this.cursor = 0;
     while (
       this.cursor < this.bars.length
