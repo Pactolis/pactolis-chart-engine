@@ -510,3 +510,249 @@ test("empty visible cells, pull-mode off, failed 2d context, and repeated releas
     assert.equal(getHeatmapCpuRasterModuleReservedBytes(), 0);
   }
 });
+
+function makeVisibilityAwareHarness(initialWidth, initialHeight) {
+  const base = makeCanvasHarness(initialWidth, initialHeight);
+  let visibilityState = "visible";
+  let isConnected = true;
+  const listeners = new Map();
+  let addedVisibilityListeners = 0;
+  let removedVisibilityListeners = 0;
+  const observerRecords = [];
+
+  class MockIntersectionObserver {
+    constructor(callback) {
+      this.callback = callback;
+      this.targets = new Set();
+      this.disconnected = false;
+      observerRecords.push(this);
+    }
+    observe(target) {
+      this.targets.add(target);
+    }
+    disconnect() {
+      this.disconnected = true;
+      this.targets.clear();
+    }
+  }
+
+  const ownerDocument = {
+    get visibilityState() {
+      return visibilityState;
+    },
+    defaultView: {
+      IntersectionObserver: MockIntersectionObserver,
+    },
+    createElement(tag) {
+      return base.ctx.canvas.ownerDocument.createElement(tag);
+    },
+    addEventListener(type, listener) {
+      let set = listeners.get(type);
+      if (!set) {
+        set = new Set();
+        listeners.set(type, set);
+      }
+      if (!set.has(listener)) {
+        set.add(listener);
+        if (type === "visibilitychange") addedVisibilityListeners++;
+      }
+    },
+    removeEventListener(type, listener) {
+      const set = listeners.get(type);
+      if (set && set.delete(listener) && type === "visibilitychange") {
+        removedVisibilityListeners++;
+      }
+    },
+  };
+
+  const ctx = {
+    ...base.ctx,
+    canvas: {
+      get width() { return base.ctx.canvas.width; },
+      get height() { return base.ctx.canvas.height; },
+      get isConnected() { return isConnected; },
+      ownerDocument,
+    },
+  };
+
+  return {
+    ctx,
+    stats: base.stats,
+    resetPaintCounters: base.resetPaintCounters,
+    dispatchVisibility(nextState) {
+      visibilityState = nextState;
+      for (const listener of [...(listeners.get("visibilitychange") ?? [])]) {
+        listener();
+      }
+    },
+    triggerIntersection(isIntersecting) {
+      for (const record of observerRecords) {
+        if (!record.disconnected && record.targets.has(ctx.canvas)) {
+          record.callback([{ target: ctx.canvas, isIntersecting }]);
+        }
+      }
+    },
+    setConnected(nextConnected) {
+      isConnected = nextConnected;
+    },
+    observerStats() {
+      return {
+        addedVisibilityListeners,
+        removedVisibilityListeners,
+        activeVisibilityListeners: listeners.get("visibilitychange")?.size ?? 0,
+        createdObservers: observerRecords.length,
+        activeObservers: observerRecords.filter((record) => !record.disconnected).length,
+      };
+    },
+  };
+}
+
+test("hidden panel/tab visibility transitions release rasterCache without double-release and restore on next draw", async () => {
+  const overlays = [];
+  const wasTelemetryEnabled = isPerformanceTelemetryEnabled();
+  configurePerformanceTelemetry({ enabled: true });
+
+  try {
+    await withSettingsSource(() => ({
+      mode: "single",
+      unit: "usd",
+      bucketStep: 50,
+      single: { usd: 1, btc: 1 },
+      aggregated: { usd: 1, btc: 1 },
+    }), async () => {
+      const series = makeTestSeries();
+      const view = makeTestView();
+
+      const anchor = await createWarmOverlay(overlays);
+      const hAnchor = makeVisibilityAwareHarness(1000, 1000);
+      await warmChunk(anchor, hAnchor.ctx, view, series);
+      anchor.draw(hAnchor.ctx, view, series, [0, 0]);
+      const anchorBytes = 4_000_000;
+      assert.equal(getHeatmapCpuRasterModuleReservedBytes(), anchorBytes);
+
+      const overlay = await createWarmOverlay(overlays);
+      const h = makeVisibilityAwareHarness(1200, 800);
+      const expectedBytes = 1200 * 800 * 4;
+      await warmChunk(overlay, h.ctx, view, series);
+      overlay.draw(h.ctx, view, series, [0, 0]);
+      assert.equal(overlay.reservedRasterBytes(), expectedBytes);
+      assert.equal(getHeatmapCpuRasterModuleReservedBytes(), anchorBytes + expectedBytes);
+
+      // 1. document visibilitychange -> hidden releases immediately; drawing while hidden paints directly without caching; restore rebuilds cleanly
+      h.dispatchVisibility("hidden");
+      assert.equal(overlay.reservedRasterBytes(), 0);
+      assert.equal(getHeatmapCpuRasterModuleReservedBytes(), anchorBytes);
+      assert.equal(h.stats().offscreenCanvases[0].width, 0);
+      assert.equal(h.stats().offscreenCanvases[0].height, 0);
+
+      h.resetPaintCounters();
+      overlay.draw(h.ctx, view, series, [0, 0]);
+      assert.equal(overlay.reservedRasterBytes(), 0);
+      assert.equal(h.stats().drawImageCount, 0);
+      assert.equal(h.stats().mainFillRectCalls, 4);
+      assert.equal(getHeatmapCpuRasterModuleReservedBytes(), anchorBytes);
+
+      h.dispatchVisibility("visible");
+      h.resetPaintCounters();
+      overlay.draw(h.ctx, view, series, [0, 0]);
+      assert.equal(overlay.reservedRasterBytes(), expectedBytes);
+      assert.equal(getHeatmapCpuRasterModuleReservedBytes(), anchorBytes + expectedBytes);
+      assert.equal(h.stats().drawImageCount, 1);
+      assert.equal(h.stats().mainFillRectCalls, 0);
+
+      // 2. IntersectionObserver !isIntersecting releases immediately; restore rebuilds cleanly
+      h.triggerIntersection(false);
+      assert.equal(overlay.reservedRasterBytes(), 0);
+      assert.equal(getHeatmapCpuRasterModuleReservedBytes(), anchorBytes);
+
+      h.resetPaintCounters();
+      overlay.draw(h.ctx, view, series, [0, 0]);
+      assert.equal(overlay.reservedRasterBytes(), 0);
+      assert.equal(h.stats().mainFillRectCalls, 4);
+
+      h.triggerIntersection(true);
+      h.resetPaintCounters();
+      overlay.draw(h.ctx, view, series, [0, 0]);
+      assert.equal(overlay.reservedRasterBytes(), expectedBytes);
+      assert.equal(getHeatmapCpuRasterModuleReservedBytes(), anchorBytes + expectedBytes);
+      assert.equal(h.stats().drawImageCount, 1);
+
+      // 3. Disconnected canvas (isConnected === false) releases & skips cache until reconnected
+      h.setConnected(false);
+      h.resetPaintCounters();
+      overlay.draw(h.ctx, view, series, [0, 0]);
+      assert.equal(overlay.reservedRasterBytes(), 0);
+      assert.equal(getHeatmapCpuRasterModuleReservedBytes(), anchorBytes);
+      assert.equal(h.stats().mainFillRectCalls, 4);
+
+      h.setConnected(true);
+      h.resetPaintCounters();
+      overlay.draw(h.ctx, view, series, [0, 0]);
+      assert.equal(overlay.reservedRasterBytes(), expectedBytes);
+      assert.equal(getHeatmapCpuRasterModuleReservedBytes(), anchorBytes + expectedBytes);
+
+      // 4. Direct test bypass toggle cleanly routes to direct paint & re-enables cache
+      overlay.setRasterCacheDisabledForTest(true);
+      assert.equal(overlay.reservedRasterBytes(), 0);
+      assert.equal(getHeatmapCpuRasterModuleReservedBytes(), anchorBytes);
+      h.resetPaintCounters();
+      const beforeDirect = snapshotPerformanceTelemetry().counters;
+      overlay.draw(h.ctx, view, series, [0, 0]);
+      const afterDirect = snapshotPerformanceTelemetry().counters;
+      assert.equal(
+        (afterDirect["chart.cpu.heatmap.raster.direct"] ?? 0) - (beforeDirect["chart.cpu.heatmap.raster.direct"] ?? 0),
+        1,
+      );
+      assert.equal(h.stats().mainFillRectCalls, 4);
+      assert.equal(h.stats().drawImageCount, 0);
+
+      overlay.setRasterCacheDisabledForTest(false);
+      overlay.draw(h.ctx, view, series, [0, 0]);
+      assert.equal(overlay.reservedRasterBytes(), expectedBytes);
+      assert.equal(getHeatmapCpuRasterModuleReservedBytes(), anchorBytes + expectedBytes);
+
+      // 5. setVisible(false/true), stacked hide events, and double dispose never double-release anchor or leak observers
+      overlay.setVisible(false);
+      assert.equal(overlay.reservedRasterBytes(), 0);
+      assert.equal(getHeatmapCpuRasterModuleReservedBytes(), anchorBytes);
+
+      h.dispatchVisibility("hidden");
+      h.triggerIntersection(false);
+      overlay.releaseRasterCache();
+      overlay.setVisible(true);
+      h.dispatchVisibility("visible");
+      h.triggerIntersection(true);
+      overlay.draw(h.ctx, view, series, [0, 0]);
+      assert.equal(overlay.reservedRasterBytes(), expectedBytes);
+      assert.equal(getHeatmapCpuRasterModuleReservedBytes(), anchorBytes + expectedBytes);
+
+      overlay.setVisible(false);
+      h.dispatchVisibility("hidden");
+      overlay.dispose();
+      overlay.dispose();
+      assert.equal(overlay.reservedRasterBytes(), 0);
+      assert.equal(getHeatmapCpuRasterModuleReservedBytes(), anchorBytes, "stacked hide + dispose must never undercount open charts");
+      assert.deepEqual(h.observerStats(), {
+        addedVisibilityListeners: 1,
+        removedVisibilityListeners: 1,
+        activeVisibilityListeners: 0,
+        createdObservers: 1,
+        activeObservers: 0,
+      });
+
+      anchor.dispose();
+      assert.equal(getHeatmapCpuRasterModuleReservedBytes(), 0);
+      assert.deepEqual(hAnchor.observerStats(), {
+        addedVisibilityListeners: 1,
+        removedVisibilityListeners: 1,
+        activeVisibilityListeners: 0,
+        createdObservers: 1,
+        activeObservers: 0,
+      });
+    });
+  } finally {
+    for (const overlay of overlays) overlay.dispose();
+    configurePerformanceTelemetry({ enabled: wasTelemetryEnabled });
+    assert.equal(getHeatmapCpuRasterModuleReservedBytes(), 0);
+  }
+});

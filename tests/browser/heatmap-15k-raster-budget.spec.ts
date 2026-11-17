@@ -33,6 +33,8 @@ type RuntimeProbe = {
     prepareGpuCells(view: View, series: FootprintSeries, range: [number, number]): HeatmapGpuCellFrame | null;
     reservedRasterBytes(): number;
     releaseRasterCache(): void;
+    setVisible(visible: boolean): void;
+    setRasterCacheDisabledForTest(disabled: boolean): void;
   };
   session: {
     gl: WebGL2RenderingContext;
@@ -217,9 +219,9 @@ test("15,000-cell SwiftShader benchmark and CPU raster cache budget / GPU takeov
       await new Promise((resolve) => setTimeout(resolve, 25));
     }
 
-    const root = document.querySelector(`[data-testid="chart-hook"][data-panel-id="${id}"]`)?.parentElement;
+    const root = document.querySelector(`[data-testid="chart-hook"][data-panel-id="${id}"]`)?.parentElement as HTMLElement | null;
     const annotation = root?.querySelector<HTMLCanvasElement>('canvas[data-chart-surface="annotation"]');
-    if (!annotation || annotation.width <= 0 || annotation.height <= 0) {
+    if (!root || !annotation || annotation.width <= 0 || annotation.height <= 0) {
       throw new Error("Annotation canvas unavailable");
     }
     const expectedRasterBytes = annotation.width * annotation.height * 4;
@@ -270,12 +272,42 @@ test("15,000-cell SwiftShader benchmark and CPU raster cache budget / GPU takeov
 
     telemetry.configurePerformanceTelemetry({ enabled: true });
 
-    // Phase 1: CPU Cold (rasterCache miss — rebuilds 15k cells into offscreen rasterCache)
+    // Phase 0: CPU Direct (no rasterCache — paints 15k cells directly to annotation canvas each frame)
     r.heatmapTexturePrototypeEnabled = false;
+    r.orderbookHeatmap.setRasterCacheDisabledForTest(true);
+    // Unmeasured warm-up frame ensures steady JIT parity before direct vs cold sampling.
+    r.invalidate();
+    await r.session.captureCompositePng();
+    const reservedDuringDirect = r.orderbookHeatmap.reservedRasterBytes();
+    const cpuDirectFrameMs: number[] = [];
+    const cpuDirectAnnotationMs: number[] = [];
+    const cpuDirectHeatmapMs: number[] = [];
+    let cpuDirectDraws = 0;
+    let cpuDirectMisses = 0;
+    let cpuDirectHits = 0;
+    for (let i = 0; i < 6; i++) {
+      const b = telemetry.snapshotPerformanceTelemetry();
+      r.invalidate();
+      await r.session.captureCompositePng();
+      const a = telemetry.snapshotPerformanceTelemetry();
+      const frame = metricDelta(b, a, "chart.frame.render.ms");
+      const ann = metricDelta(b, a, "chart.surface.annotation.draw.ms");
+      const hm = metricDelta(b, a, "chart.cpu.heatmap.draw.ms");
+      if (frame.count > 0) cpuDirectFrameMs.push(frame.totalMs / frame.count);
+      if (ann.count > 0) cpuDirectAnnotationMs.push(ann.totalMs / ann.count);
+      if (hm.count > 0) cpuDirectHeatmapMs.push(hm.totalMs / hm.count);
+      cpuDirectDraws += counterDelta(b, a, "chart.cpu.heatmap.raster.direct");
+      cpuDirectMisses += counterDelta(b, a, "chart.cpu.heatmap.raster.miss");
+      cpuDirectHits += counterDelta(b, a, "chart.cpu.heatmap.raster.hit");
+    }
+    r.orderbookHeatmap.setRasterCacheDisabledForTest(false);
+
+    // Phase 1: CPU Cold (rasterCache miss — rebuilds 15k cells into offscreen rasterCache)
     const cpuColdFrameMs: number[] = [];
     const cpuColdAnnotationMs: number[] = [];
     const cpuColdHeatmapMs: number[] = [];
     let cpuColdMisses = 0;
+    let cpuColdDirectDraws = 0;
     let cpuColdBudgetFallbacks = 0;
     for (let i = 0; i < 6; i++) {
       r.orderbookHeatmap.releaseRasterCache();
@@ -290,6 +322,7 @@ test("15,000-cell SwiftShader benchmark and CPU raster cache budget / GPU takeov
       if (ann.count > 0) cpuColdAnnotationMs.push(ann.totalMs / ann.count);
       if (hm.count > 0) cpuColdHeatmapMs.push(hm.totalMs / hm.count);
       cpuColdMisses += counterDelta(b, a, "chart.cpu.heatmap.raster.miss");
+      cpuColdDirectDraws += counterDelta(b, a, "chart.cpu.heatmap.raster.direct");
       cpuColdBudgetFallbacks += counterDelta(b, a, "chart.cpu.heatmap.raster.budgetFallback");
     }
     const reservedDuringCpu = r.orderbookHeatmap.reservedRasterBytes();
@@ -363,11 +396,66 @@ test("15,000-cell SwiftShader benchmark and CPU raster cache budget / GPU takeov
       gpuWarmCpuHeatmapDraws += cpuDraw.count;
     }
 
-    // Phase 4: Return to CPU -> re-acquires rasterCache; mode === "off" -> deterministic release to 0.
+    // Phase 4: Return to CPU -> hide/show panel (IntersectionObserver + setVisible) -> mode === "off".
     r.heatmapTexturePrototypeEnabled = false;
     r.invalidate();
     await r.session.captureCompositePng();
     const reservedAfterGpuOff = r.orderbookHeatmap.reservedRasterBytes();
+
+    const waitUntil = (predicate: () => boolean, label: string): Promise<void> =>
+      new Promise((resolve, reject) => {
+        let frames = 0;
+        const step = () => {
+          if (predicate()) {
+            resolve();
+            return;
+          }
+          if (++frames >= 120) {
+            reject(new Error(`Timed out waiting for ${label}`));
+            return;
+          }
+          requestAnimationFrame(step);
+        };
+        requestAnimationFrame(step);
+      });
+
+    root.style.display = "none";
+    await waitUntil(
+      () => r.orderbookHeatmap.reservedRasterBytes() === 0 && getHeatmapCpuRasterModuleReservedBytes() === 0,
+      "hidden panel IntersectionObserver rasterCache release",
+    );
+    const reservedAfterContainerHide = r.orderbookHeatmap.reservedRasterBytes();
+    const moduleReservedAfterContainerHide = getHeatmapCpuRasterModuleReservedBytes();
+
+    const becameVisible = new Promise<void>((resolve, reject) => {
+      const deadline = setTimeout(() => {
+        io.disconnect();
+        reject(new Error("Timed out waiting for restored panel IntersectionObserver"));
+      }, 5_000);
+      const io = new IntersectionObserver((entries) => {
+        const last = entries[entries.length - 1];
+        if (last?.isIntersecting) {
+          clearTimeout(deadline);
+          io.disconnect();
+          resolve();
+        }
+      });
+      io.observe(annotation);
+    });
+    root.style.display = "";
+    await becameVisible;
+    r.invalidate();
+    await r.session.captureCompositePng();
+    const reservedAfterContainerShow = r.orderbookHeatmap.reservedRasterBytes();
+    const moduleReservedAfterContainerShow = getHeatmapCpuRasterModuleReservedBytes();
+
+    r.orderbookHeatmap.setVisible(false);
+    const reservedImmediatelyOnSetVisibleFalse = r.orderbookHeatmap.reservedRasterBytes();
+    const moduleReservedImmediatelyOnSetVisibleFalse = getHeatmapCpuRasterModuleReservedBytes();
+    r.orderbookHeatmap.setVisible(true);
+    r.invalidate();
+    await r.session.captureCompositePng();
+    const reservedAfterSetVisibleTrue = r.orderbookHeatmap.reservedRasterBytes();
 
     setOrderbookHeatmapModeFor("BINANCE_FUTURES:btcusdt", "off");
     const reservedImmediatelyOnModeOff = r.orderbookHeatmap.reservedRasterBytes();
@@ -385,8 +473,18 @@ test("15,000-cell SwiftShader benchmark and CPU raster cache budget / GPU takeov
         moduleBytes: HEATMAP_CPU_RASTER_MODULE_BUDGET_BYTES,
       },
       visibleCells: visibleCellsMain,
+      cpuDirect: {
+        draws: cpuDirectDraws,
+        misses: cpuDirectMisses,
+        hits: cpuDirectHits,
+        reservedDuringDirect,
+        frameMs: summarize(cpuDirectFrameMs),
+        annotationMs: summarize(cpuDirectAnnotationMs),
+        heatmapMs: summarize(cpuDirectHeatmapMs),
+      },
       cpuCold: {
         misses: cpuColdMisses,
+        directDraws: cpuColdDirectDraws,
         budgetFallbacks: cpuColdBudgetFallbacks,
         frameMs: summarize(cpuColdFrameMs),
         annotationMs: summarize(cpuColdAnnotationMs),
@@ -415,6 +513,13 @@ test("15,000-cell SwiftShader benchmark and CPU raster cache budget / GPU takeov
         reservedAfterGpuTakeover,
         moduleReservedAfterGpuTakeover,
         reservedAfterGpuOff,
+        reservedAfterContainerHide,
+        moduleReservedAfterContainerHide,
+        reservedAfterContainerShow,
+        moduleReservedAfterContainerShow,
+        reservedImmediatelyOnSetVisibleFalse,
+        moduleReservedImmediatelyOnSetVisibleFalse,
+        reservedAfterSetVisibleTrue,
         reservedImmediatelyOnModeOff,
         moduleReservedImmediatelyOnModeOff,
         reservedAfterModeOffPaint,
@@ -438,7 +543,12 @@ test("15,000-cell SwiftShader benchmark and CPU raster cache budget / GPU takeov
   });
 
   expect(report.visibleCells).toBe(EXPECTED_VISIBLE_CELLS);
+  expect(report.cpuDirect.draws).toBe(6);
+  expect(report.cpuDirect.misses).toBe(0);
+  expect(report.cpuDirect.hits).toBe(0);
+  expect(report.cpuDirect.reservedDuringDirect).toBe(0);
   expect(report.cpuCold.misses).toBe(6);
+  expect(report.cpuCold.directDraws).toBe(0);
   expect(report.cpuCold.budgetFallbacks).toBe(0);
   expect(report.cpuWarm.hits).toBe(20);
   expect(report.cpuWarm.misses).toBe(0);
@@ -452,6 +562,13 @@ test("15,000-cell SwiftShader benchmark and CPU raster cache budget / GPU takeov
   expect(report.memoryBytes.reservedAfterGpuTakeover).toBe(0);
   expect(report.memoryBytes.moduleReservedAfterGpuTakeover).toBe(0);
   expect(report.memoryBytes.reservedAfterGpuOff).toBe(report.annotationCanvas.expectedRasterBytes);
+  expect(report.memoryBytes.reservedAfterContainerHide).toBe(0);
+  expect(report.memoryBytes.moduleReservedAfterContainerHide).toBe(0);
+  expect(report.memoryBytes.reservedAfterContainerShow).toBe(report.annotationCanvas.expectedRasterBytes);
+  expect(report.memoryBytes.moduleReservedAfterContainerShow).toBe(report.annotationCanvas.expectedRasterBytes);
+  expect(report.memoryBytes.reservedImmediatelyOnSetVisibleFalse).toBe(0);
+  expect(report.memoryBytes.moduleReservedImmediatelyOnSetVisibleFalse).toBe(0);
+  expect(report.memoryBytes.reservedAfterSetVisibleTrue).toBe(report.annotationCanvas.expectedRasterBytes);
   expect(report.memoryBytes.reservedImmediatelyOnModeOff).toBe(0);
   expect(report.memoryBytes.moduleReservedImmediatelyOnModeOff).toBe(0);
   expect(report.memoryBytes.reservedAfterModeOffPaint).toBe(0);
