@@ -73,6 +73,8 @@ jobs:
       - env:
           SPECS: ${{ needs.changes.outputs.browser_specs }}
         run: npm run test:browser -- --project=default $SPECS
+      - name: Repeat heatmap raster budget 30 times without retries
+        run: npm run test:browser -- --project=default tests/browser/heatmap-15k-raster-budget.spec.ts --repeat-each=30 --retries=0
       - if: failure()
         uses: actions/upload-artifact@v7
         with:
