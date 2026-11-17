@@ -352,6 +352,41 @@ test("15,000-cell SwiftShader benchmark and CPU raster cache budget / GPU takeov
       cpuWarmMisses += counterDelta(b, a, "chart.cpu.heatmap.raster.miss");
     }
 
+    // Same viewport-changing workload for direct and adaptive paths. The injected
+    // clock makes every sampled frame active motion independently of CI wall time.
+    const motionOverlay = r.orderbookHeatmap as typeof r.orderbookHeatmap & { now: () => number };
+    const originalNow = motionOverlay.now;
+    let motionClock = originalNow();
+    motionOverlay.now = () => motionClock;
+    const panSamples: Record<string, { heatmapMs: ReturnType<typeof summarize>; misses: number; hits: number; skips: number }> = {};
+    for (const [name, direct] of [["direct", true], ["adaptive", false]] as const) {
+      r.orderbookHeatmap.setRasterCacheDisabledForTest(direct);
+      r.orderbookHeatmap.releaseRasterCache();
+      r.invalidate();
+      await r.session.captureCompositePng();
+      const samples: number[] = [];
+      let misses = 0;
+      let hits = 0;
+      let skips = 0;
+      for (let i = 0; i < 30; i++) {
+        motionClock += 16;
+        v.offsetX += 0.25;
+        const b = telemetry.snapshotPerformanceTelemetry();
+        r.invalidate();
+        await r.session.captureCompositePng();
+        const a = telemetry.snapshotPerformanceTelemetry();
+        const hm = metricDelta(b, a, "chart.cpu.heatmap.draw.ms");
+        if (hm.count > 0) samples.push(hm.totalMs / hm.count);
+        misses += counterDelta(b, a, "chart.cpu.heatmap.raster.miss");
+        hits += counterDelta(b, a, "chart.cpu.heatmap.raster.hit");
+        skips += counterDelta(b, a, "chart.cpu.heatmap.raster.skip");
+      }
+      panSamples[name] = { heatmapMs: summarize(samples), misses, hits, skips };
+    }
+    v.offsetX = calibratedOffsetX;
+    r.orderbookHeatmap.releaseRasterCache();
+    motionOverlay.now = originalNow;
+
     // Phase 3: GPU Prototype Cold + Steady (takeover releases CPU rasterCache immediately)
     r.heatmapTexturePrototypeEnabled = true;
     await r.whenHeatmapGpuRendererReady();
@@ -466,6 +501,7 @@ test("15,000-cell SwiftShader benchmark and CPU raster cache budget / GPU takeov
     const moduleReservedAfterModeOffPaint = getHeatmapCpuRasterModuleReservedBytes();
 
     return {
+      continuousPan: panSamples,
       viewport: { width: window.innerWidth, height: window.innerHeight, dpr: window.devicePixelRatio },
       annotationCanvas: { width: annotation.width, height: annotation.height, expectedRasterBytes },
       budgets: {
@@ -552,6 +588,11 @@ test("15,000-cell SwiftShader benchmark and CPU raster cache budget / GPU takeov
   expect(report.cpuCold.budgetFallbacks).toBe(0);
   expect(report.cpuWarm.hits).toBe(20);
   expect(report.cpuWarm.misses).toBe(0);
+  expect(report.cpuWarm.heatmapMs.meanMs).toBeLessThan(0.1);
+  expect(report.continuousPan.adaptive.skips).toBe(30);
+  expect(report.continuousPan.adaptive.misses).toBe(0);
+  expect(report.continuousPan.adaptive.hits).toBe(0);
+  expect(report.continuousPan.adaptive.heatmapMs.meanMs).toBeLessThanOrEqual(report.continuousPan.direct.heatmapMs.meanMs * 1.1);
   expect(report.gpuCold.prepareMs.samples).toBe(6);
   expect(report.gpuCold.renderMs.samples).toBe(6);
   expect(report.gpuWarm.renderMs.samples).toBe(20);

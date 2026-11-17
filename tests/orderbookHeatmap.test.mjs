@@ -454,6 +454,10 @@ test("CPU raster cache skips cell fillRect loop when data and viewport stay unch
     // 4. Viewport change invalidates raster cache
     view.offsetX += 16;
     overlay.draw(ctx, view, series, [0, 0]);
+    assert.equal(offClearRectCalls, 2, "moving viewport paints directly");
+    assert.equal(mainFillRectCalls, 4);
+    overlay.now = () => 60_150;
+    overlay.draw(ctx, view, series, [0, 0]);
     assert.equal(offClearRectCalls, 3);
     assert.equal(offFillRectCalls, 12, "viewport change refreshes raster cache");
     assert.equal(drawImageCalls.length, 4);
