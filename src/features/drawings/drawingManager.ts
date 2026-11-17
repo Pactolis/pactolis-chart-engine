@@ -3,7 +3,7 @@ import type { View } from "../../core/engine/view.js";
 import type { FootprintSeries } from "../../core/model/footprint.js";
 import { drawAnalysisDrawings } from "../../core/render/analysisDrawings.js";
 import { t } from "../../core/chartLocale.js";
-import type { Drawing, DrawingContext, DrawingType } from "../../core/drawingTypes.js";
+import { drawingIsAvailableAsOf, type Drawing, type DrawingContext, type DrawingType } from "../../core/drawingTypes.js";
 import { applyLineStyle, clamp01, drawLine, drawObjectName, drawingDisplayName, isAnnotationTool, isFibonacciTool, isMeasurementTool, isZoneTool, queuePriceAxisLabel, queueTimeAxisLabel, queueTrendPriceLabels, queueZonePriceLabels, queueZoneTimeLabels, renderAnnotationTool, renderBrush, renderEllipse, renderFibonacciTool, renderGannFan, renderGannGrid, renderMeasurementTool, renderParallelChannel, renderPitchfork, renderRegressionChannel, renderTriangle, screenPoint, trendRenderLine, zoneRenderBox } from "./drawingPrimitives.js";
 import { DrawingGestures } from "./drawingGestures.js";
 
@@ -57,7 +57,7 @@ export class DrawingManager extends DrawingGestures {
       view,
       series,
       time,
-      this.drawings,
+      time.asOfTime === undefined ? this.drawings : this.drawings.filter((drawing) => drawingIsAvailableAsOf(drawing, time.asOfTime)),
       market ?? this.currentMarket,
       onLineObject,
     );
@@ -78,7 +78,7 @@ export class DrawingManager extends DrawingGestures {
     ctx.save();
     ctx.font = "12px ui-monospace, monospace";
     for (const drawing of this.drawings) {
-      if (!drawing.visible || drawing.points.length < 2 || drawing.market !== renderMarket) continue;
+      if (!drawing.visible || drawing.points.length < 2 || drawing.market !== renderMarket || !drawingIsAvailableAsOf(drawing, time.asOfTime)) continue;
       const a = screenPoint(drawing.points[0], view, time);
       const b = screenPoint(drawing.points[1], view, time);
       ctx.strokeStyle = drawing.color;
