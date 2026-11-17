@@ -33,14 +33,14 @@ export class AnnotationPassCache<T> {
   }
 
   render(ctx: CanvasRenderingContext2D, pass: ChartRenderPass, key: string,
-    changes: ChartChange, draw: (target: CanvasRenderingContext2D) => T, replay: (effects: T) => void): boolean {
+    changes: ChartChange, draw: (target: CanvasRenderingContext2D) => T, replay: (effects: T) => void): "hit" | "miss" | false {
     if (changes === ChartChange.None || (pass.interests & ChartChange.DataTail) !== 0) return false;
     const entryKey = `${pass.id}:${key}`;
     const retained = changes === ChartChange.DataTail ? this.entries.get(entryKey) : undefined;
     if (retained) {
       replay(retained.effects);
       this.blit(ctx, retained.canvas);
-      return true;
+      return "hit";
     }
     const { canvas } = ctx;
     const required = canvas.width * canvas.height * 4;
@@ -63,7 +63,7 @@ export class AnnotationPassCache<T> {
     this.entries.set(entryKey, { canvas: bitmap, effects });
     this.bytes += required;
     this.blit(ctx, bitmap);
-    return true;
+    return "miss";
   }
 
   private blit(ctx: CanvasRenderingContext2D, bitmap: HTMLCanvasElement): void {

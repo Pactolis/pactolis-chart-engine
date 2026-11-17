@@ -23,7 +23,7 @@ import type { NakedPocLevel } from "../analysis/nakedPoc.js";
 import type { ReferenceLevel } from "../analysis/referenceLevels.js";
 import type { PreviousWeekStrategyLevel, PreviousWeekStrategySettings } from "../analysis/previousWeekStrategy.js";
 import type { MondayRangeLevel, MondayRangeSettings } from "../analysis/mondayRange.js";
-import { isPerformanceTelemetryEnabled, recordPerformanceDuration } from "../performanceTelemetry.js";
+import { incrementPerformanceCounter, isPerformanceTelemetryEnabled, recordPerformanceDuration } from "../performanceTelemetry.js";
 import { resolveChartDisplayOptions, type ResolvedChartDisplayOptions } from "../model/chartDisplayOptions.js";
 import { drawHud, type HudRendererDeps } from "./overlay/hudRenderer.js";
 import {
@@ -337,69 +337,69 @@ export class Overlay {
       const metricLayer = isIndicatorLayer ? "indicators" : layerId;
       const layerStartedAt = telemetryEnabled ? performance.now() : null;
       const paint = () => {
-      try {
-        if (isIndicatorLayer) {
-          indicatorBatchDrawn = true;
-          drawSubPanes(this.annotationHost, view, series, range, crosshair, false);
-          if (!mainSuppressed) drawIndicatorPriceOverlays(this.annotationHost, view, series, range, crosshair);
-          return;
-        }
-
-        if (layerId === "axis") {
-          if (!mainSuppressed && !empty) {
-            drawLineLabels(this.annotationHost, view);
-            this.axisCache.renderPriceAxis(
-              ctx,
-              view,
-              series,
-              priceAxisKeepOut(view, crosshair),
-              this.displayOptions,
-            );
-
+        try {
+          if (isIndicatorLayer) {
+            indicatorBatchDrawn = true;
+            drawSubPanes(this.annotationHost, view, series, range, crosshair, false);
+            if (!mainSuppressed) drawIndicatorPriceOverlays(this.annotationHost, view, series, range, crosshair);
+            return;
           }
-          this.axisCache.renderTimeAxis(ctx, view, series, this.timeMarkers);
-          return;
-        }
 
-        if (empty || mainSuppressed) return;
-        switch (layerId) {
-          case "orderbook-heatmap":
-            this.drawOrderbookHeatmap?.(ctx, view, series, range);
-            break;
-          case "footprint-text":
-            this.paintRetainedAnnotationPass("closed-footprint-text", "", changes, () => {
-              drawCells(this.annotationHost, view, series, [range[0], Math.min(range[1], series.length - 1)]);
-            });
-            if (range[1] > series.length - 1) drawCells(this.annotationHost, view, series, [Math.max(range[0], series.length - 1), range[1]]);
-            break;
-          case "volume-profile":
-            drawVolumeProfile(this.annotationHost, view, series, range);
-            break;
-          case "tpo":
-            drawTpo(this.tpoHost, view, series, range);
-            break;
-          case "strategy-levels":
-            drawPreviousWeekStrategy(this.annotationHost, view, series);
-            drawMondayRange(this.annotationHost, view, series);
-            break;
-          case "naked-poc":
-            drawNakedPocs(this.annotationHost, view, series);
-            break;
-          case "reference-levels":
-            drawReferenceLevels(this.annotationHost, view, series);
-            break;
-          case "drawings":
-            this.drawForeground?.(ctx, view, series);
-            break;
-          case "last-price":
-            if (settings.lastPrice) drawLastPrice(this.annotationHost, view, series);
-            break;
+          if (layerId === "axis") {
+            if (!mainSuppressed && !empty) {
+              drawLineLabels(this.annotationHost, view);
+              this.axisCache.renderPriceAxis(
+                ctx,
+                view,
+                series,
+                priceAxisKeepOut(view, crosshair),
+                this.displayOptions,
+              );
+
+            }
+            this.axisCache.renderTimeAxis(ctx, view, series, this.timeMarkers);
+            return;
+          }
+
+          if (empty || mainSuppressed) return;
+          switch (layerId) {
+            case "orderbook-heatmap":
+              this.drawOrderbookHeatmap?.(ctx, view, series, range);
+              break;
+            case "footprint-text":
+              this.paintRetainedAnnotationPass("closed-footprint-text", "", changes, () => {
+                drawCells(this.annotationHost, view, series, [range[0], Math.min(range[1], series.length - 1)]);
+              });
+              if (range[1] > series.length - 1) drawCells(this.annotationHost, view, series, [Math.max(range[0], series.length - 1), range[1]]);
+              break;
+            case "volume-profile":
+              drawVolumeProfile(this.annotationHost, view, series, range);
+              break;
+            case "tpo":
+              drawTpo(this.tpoHost, view, series, range);
+              break;
+            case "strategy-levels":
+              drawPreviousWeekStrategy(this.annotationHost, view, series);
+              drawMondayRange(this.annotationHost, view, series);
+              break;
+            case "naked-poc":
+              drawNakedPocs(this.annotationHost, view, series);
+              break;
+            case "reference-levels":
+              drawReferenceLevels(this.annotationHost, view, series);
+              break;
+            case "drawings":
+              this.drawForeground?.(ctx, view, series);
+              break;
+            case "last-price":
+              if (settings.lastPrice) drawLastPrice(this.annotationHost, view, series);
+              break;
+          }
+        } finally {
+          if (layerStartedAt !== null) {
+            recordPerformanceDuration(`chart.annotation.layer.${metricLayer}.ms`, performance.now() - layerStartedAt);
+          }
         }
-      } finally {
-        if (layerStartedAt !== null) {
-          recordPerformanceDuration(`chart.annotation.layer.${metricLayer}.ms`, performance.now() - layerStartedAt);
-        }
-      }
       };
       const key = layerId === "axis" ? JSON.stringify([this.lineLabels, this.timeMarkers, crosshair.touch]) : "";
       const retained = this.paintRetainedAnnotationPass(layerId, key, changes, () => {
@@ -436,7 +436,7 @@ export class Overlay {
       this.lineLabels.push(...effects.labels);
     });
     if (!handled) draw();
-    return handled;
+    return handled === "hit";
   }
 
   /** High-frequency pointer/selection surface. Scene layer order is the render authority. */

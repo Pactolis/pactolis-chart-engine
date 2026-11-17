@@ -23,9 +23,9 @@ test("pass interests retain closed output through tail frames and invalidate on 
     cache.begin(changes, key);
     return cache.render(ctx, annotationPass("axis"), "", changes, draw, (value) => { effects += value; });
   };
-  assert.equal(paint(ChartChange.All), true);
-  assert.equal(paint(ChartChange.DataTail), true);
-  assert.equal(paint(ChartChange.DataTail), true);
+  assert.equal(paint(ChartChange.All), "miss");
+  assert.equal(paint(ChartChange.DataTail), "hit");
+  assert.equal(paint(ChartChange.DataTail), "hit");
   assert.equal(paints, 1);
   assert.equal(effects, 14);
   assert.equal(images.length, 3);
