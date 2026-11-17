@@ -370,6 +370,8 @@ async function measureBackend(
       async ({
         backend,
         markets,
+        viewportWidth,
+        viewportHeight,
         barCount,
         cellsPerBar,
         priceStep,
@@ -434,9 +436,9 @@ async function measureBackend(
         // Keep plot width constant at both chart counts so the 8-chart setup
         // stays above the engine's 6px footprint LOD cutoff.
         const columns = 2;
-        const cellW = 1_600 / columns;
+        const cellW = viewportWidth / columns;
         const rows = markets.length / columns;
-        const cellH = VIEWPORT.height / rows;
+        const cellH = viewportHeight / rows;
 
         for (let idx = 0; idx < markets.length; idx++) {
           const market = markets[idx];
@@ -708,6 +710,8 @@ async function measureBackend(
       {
         backend,
         markets: [...markets],
+        viewportWidth: VIEWPORT.width,
+        viewportHeight: VIEWPORT.height,
         barCount: BAR_COUNT,
         cellsPerBar: CELLS_PER_BAR,
         priceStep: PRICE_STEP,
