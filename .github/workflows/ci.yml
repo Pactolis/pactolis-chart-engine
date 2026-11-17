@@ -82,7 +82,7 @@ jobs:
 
   census:
     needs: changes
-    if: github.event_name == 'pull_request' && needs.changes.outputs.census == 'true'
+    if: github.event_name == 'pull_request'
     runs-on: ubuntu-24.04
     timeout-minutes: 60
     steps:
