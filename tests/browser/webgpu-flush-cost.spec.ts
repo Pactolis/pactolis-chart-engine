@@ -1,6 +1,6 @@
 import { expect, test } from "@playwright/test";
 import { readFileSync } from "node:fs";
-import * as ts from "typescript";
+import ts from "typescript";
 import { FUNCTIONAL_WEBGL_ARGS } from "./support/history.js";
 
 test.use({ launchOptions: { args: [...FUNCTIONAL_WEBGL_ARGS, "--enable-unsafe-webgpu", "--enable-features=Vulkan", "--use-vulkan=swiftshader", "--disable-vulkan-surface"] } });
