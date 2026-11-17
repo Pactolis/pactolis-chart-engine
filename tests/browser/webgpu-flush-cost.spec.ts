@@ -10,6 +10,10 @@ test("four-surface WebGPU flush measurements preserve resolution reuse and empty
   const baselineCommit = "5ce5c7eab84640757e7358c5785e5c45b70e134e";
   const baselineSource = readFileSync(new URL("./fixtures/webgpu-quad-main-5ce5c7e.ts.fixture", import.meta.url), "utf8");
   const baselineJs = ts.transpileModule(baselineSource, { compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.ES2022 } }).outputText;
+  await page.route("**/*", (route) => {
+    const url = new URL(route.request().url());
+    return ["127.0.0.1", "localhost"].includes(url.hostname) ? route.continue() : route.abort("blockedbyclient");
+  });
   await page.goto("/harness/");
   const report = await page.evaluate(async ({ baselineJs, baselineCommit }) => {
     const { WebGpuSurface } = await import("/src/core/gpu/webgpu/webgpuSurface.ts");
