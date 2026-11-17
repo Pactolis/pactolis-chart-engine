@@ -58,3 +58,17 @@ test("cache is bounded and absent canvas capabilities use the direct path", () =
   ctx.canvas.ownerDocument = null;
   assert.equal(cache.render(ctx, annotationPass("drawings"), "", ChartChange.All, () => {}, () => {}), false);
 });
+
+
+test("high-DPR closed text cannot exhaust the later axis pass reservation", () => {
+  const cache = new AnnotationPassCache();
+  const { ctx } = fixture();
+  ctx.canvas.width = 1800;
+  ctx.canvas.height = 1040;
+  cache.begin(ChartChange.All, "dpr2");
+  assert.equal(cache.render(ctx, annotationPass("closed-footprint-text"), "", ChartChange.All, () => {}, () => {}), "miss");
+  assert.equal(cache.render(ctx, annotationPass("strategy-levels"), "", ChartChange.All, () => {}, () => {}), false);
+  assert.equal(cache.render(ctx, annotationPass("axis"), "", ChartChange.All, () => {}, () => {}), "miss");
+  cache.begin(ChartChange.DataTail, "dpr2");
+  assert.equal(cache.render(ctx, annotationPass("axis"), "", ChartChange.DataTail, () => {}, () => {}), "hit");
+});

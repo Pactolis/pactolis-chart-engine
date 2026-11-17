@@ -44,7 +44,10 @@ export class AnnotationPassCache<T> {
     }
     const { canvas } = ctx;
     const required = canvas.width * canvas.height * 4;
-    if (!canvas.ownerDocument?.createElement || !ctx.getTransform || required > MAX_RETAINED_BYTES - this.bytes) return false;
+    // Reserve one bitmap for the axis pass, which is last in scene order. At
+    // high DPR, earlier static layers must not consume its whole cache budget.
+    const reserve = pass.id === "axis" ? 0 : required;
+    if (!canvas.ownerDocument?.createElement || !ctx.getTransform || required + reserve > MAX_RETAINED_BYTES - this.bytes) return false;
     const bitmap = canvas.ownerDocument.createElement("canvas");
     bitmap.width = canvas.width;
     bitmap.height = canvas.height;
