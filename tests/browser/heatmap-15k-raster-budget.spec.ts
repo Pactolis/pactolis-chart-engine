@@ -396,23 +396,21 @@ test("15,000-cell SwiftShader benchmark and CPU raster cache budget / GPU takeov
         : [["adaptive", false], ["direct", true]];
       for (const [name, direct] of order) await samplePanFrame(name, direct);
     }
-    const median = (values: number[]) => {
+    const trimmedMean = (values: number[], trimFraction = 0.1) => {
       const sorted = [...values].sort((a, b) => a - b);
-      const middle = Math.floor(sorted.length / 2);
-      return sorted.length % 2 === 0
-        ? ((sorted[middle - 1] ?? 0) + (sorted[middle] ?? 0)) / 2
-        : (sorted[middle] ?? 0);
+      const trimCount = Math.floor(sorted.length * trimFraction);
+      const retained = sorted.slice(trimCount, sorted.length - trimCount);
+      return retained.reduce((total, value) => total + value, 0) / retained.length;
     };
-    const pairedRatios = panSampleValues.direct.heatmapMs.map((directMs, index) => {
-      const adaptiveMs = panSampleValues.adaptive.heatmapMs[index];
-      return directMs > 0 && adaptiveMs !== undefined ? adaptiveMs / directMs : Number.POSITIVE_INFINITY;
-    });
+    const directTrimmedMeanMs = trimmedMean(panSampleValues.direct.heatmapMs);
+    const adaptiveTrimmedMeanMs = trimmedMean(panSampleValues.adaptive.heatmapMs);
     const panSamples = {
       direct: { ...panSampleValues.direct, heatmapMs: summarize(panSampleValues.direct.heatmapMs) },
       adaptive: { ...panSampleValues.adaptive, heatmapMs: summarize(panSampleValues.adaptive.heatmapMs) },
       paired: {
-        samples: pairedRatios.length,
-        medianAdaptiveToDirectRatio: Number(median(pairedRatios).toFixed(4)),
+        samples: Math.min(panSampleValues.direct.heatmapMs.length, panSampleValues.adaptive.heatmapMs.length),
+        adaptiveToDirectTrimmedMeanRatio: adaptiveTrimmedMeanMs / directTrimmedMeanMs,
+        trimFraction: 0.1,
         order: "alternating AB/BA",
       },
     };
@@ -638,7 +636,7 @@ test("15,000-cell SwiftShader benchmark and CPU raster cache budget / GPU takeov
   expect(report.continuousPan.adaptive.misses).toBe(0);
   expect(report.continuousPan.adaptive.hits).toBe(0);
   expect(report.continuousPan.paired.samples).toBe(30);
-  expect(report.continuousPan.paired.medianAdaptiveToDirectRatio).toBeLessThanOrEqual(1.1);
+  expect(report.continuousPan.paired.adaptiveToDirectTrimmedMeanRatio).toBeLessThanOrEqual(1.1);
   expect(report.gpuCold.prepareMs.samples).toBe(6);
   expect(report.gpuCold.renderMs.samples).toBe(6);
   expect(report.gpuWarm.renderMs.samples).toBe(20);
