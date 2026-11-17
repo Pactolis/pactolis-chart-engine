@@ -110,11 +110,13 @@ test("Order Flow Profile renders Estimated OHLCV profile on non-footprint market
       { createHarnessServices },
       { createIndicatorInstanceAsync },
       { chartLocale, configureChartLocale },
+      { drawAnalysisDrawings },
     ] = await Promise.all([
       import("/harness/chart.ts"),
       import("/harness/services.ts"),
       import("/src/features/indicators/registry.ts"),
       import("/src/core/chartLocale.ts"),
+      import("/src/core/render/analysisDrawings.ts"),
     ]);
 
     const mountWithProfile = async (market: string, panelId: string, priceStep: number) => {
@@ -149,7 +151,6 @@ test("Order Flow Profile renders Estimated OHLCV profile on non-footprint market
       }
       const rt = harness.getChartRuntime(panelId)!;
       const requestCount = (window as Window & { __historyRequestCount: () => Promise<number> }).__historyRequestCount;
-      const requestsBeforeProfileDrawing = await requestCount();
       const drawingFrom = rt.pipeline.series.timeOfIndex(0);
       const drawingTo = rt.pipeline.series.timeOfIndex(rt.pipeline.series.length - 1);
       const profileDrawing = {
@@ -176,26 +177,27 @@ test("Order Flow Profile renders Estimated OHLCV profile on non-footprint market
         return maxW === undefined ? origFillText(text, x, y) : origFillText(text, x, y, maxW);
       };
 
-      // Capture indicator text on its own so the next delta proves the drawing's label.
+      // Capture the indicator text separately, then exercise the drawing renderer directly.
       rt.invalidate();
       await rt.session.captureCompositePng();
-      const enWithoutDrawing = [...drawnTexts];
-      services.drawings.replace([profileDrawing as any]);
-      drawnTexts.length = 0;
-      rt.invalidate();
-      await rt.session.captureCompositePng();
-      const enTexts = [...drawnTexts];
-      const subtractExisting = (after: string[], before: string[]) => {
-        const counts = new Map<string, number>();
-        for (const text of before) counts.set(text, (counts.get(text) ?? 0) + 1);
-        return after.filter((text) => {
-          const count = counts.get(text) ?? 0;
-          if (count === 0) return true;
-          counts.set(text, count - 1);
-          return false;
-        });
+      const enIndicatorTexts = [...drawnTexts];
+      const drawingTime = {
+        indexForTime: (time: number) => rt.pipeline.series.indexOfTime(time),
+        timeForIndex: (index: number) => rt.pipeline.series.timeOfIndex(Math.round(index)),
       };
-      const enDrawingTexts = subtractExisting(enTexts, enWithoutDrawing);
+      const drawProfile = () => drawAnalysisDrawings(
+        ctx2d,
+        rt.view,
+        rt.pipeline.series,
+        drawingTime,
+        [profileDrawing as any],
+        market,
+      );
+      const requestsBeforeProfileDrawing = await requestCount();
+      drawnTexts.length = 0;
+      drawProfile();
+      const enDrawingTexts = [...drawnTexts];
+      const enTexts = [...enIndicatorTexts, ...enDrawingTexts];
       const requestsAfterProfileDrawing = await requestCount();
 
       const lastTime = rt.pipeline.series.timeOfIndex(rt.pipeline.series.length - 1);
@@ -218,18 +220,14 @@ test("Order Flow Profile renders Estimated OHLCV profile on non-footprint market
       let snapDeltaTr: any;
       let trDrawingTexts: string[] = [];
       try {
-        services.drawings.replace([]);
         drawnTexts.length = 0;
         rt.invalidate();
         await rt.session.captureCompositePng();
-        const trWithoutDrawing = [...drawnTexts];
-        services.drawings.replace([profileDrawing as any]);
+        const trIndicatorTexts = [...drawnTexts];
         drawnTexts.length = 0;
-        rt.invalidate();
-        await rt.session.captureCompositePng();
-        const trWithDrawing = [...drawnTexts];
-        trDrawingTexts = subtractExisting(trWithDrawing, trWithoutDrawing);
-        trTexts.push(...trWithDrawing);
+        drawProfile();
+        trDrawingTexts = [...drawnTexts];
+        trTexts.push(...trIndicatorTexts, ...trDrawingTexts);
 
         handle.updateState({
           ...rt.getState(),

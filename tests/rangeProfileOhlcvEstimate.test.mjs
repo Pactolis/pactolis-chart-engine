@@ -13,6 +13,7 @@ import {
 } from "../dist/core/performanceTelemetry.js";
 
 const MINUTE = 60_000;
+const BASE_TIME = Date.UTC(2024, 0, 1);
 const options = {
   profileMetric: "volume",
   profileSide: "total",
@@ -23,7 +24,7 @@ const options = {
 
 function ohlcvBar(index, low, high, volume) {
   return {
-    startTime: index * MINUTE,
+    startTime: BASE_TIME + index * MINUTE,
     open: low,
     high,
     low,
@@ -104,7 +105,7 @@ test("range profile estimates OHLCV-only windows and uses whole-range fallback f
     ohlcvBar(1, 100, 102, 30),
     ohlcvBar(2, 101, 102, 20),
   ];
-  const noFootprint = calculateOrderFlowRangeProfile(bars, 0, 2 * MINUTE, options);
+  const noFootprint = calculateOrderFlowRangeProfile(bars, BASE_TIME, BASE_TIME + 2 * MINUTE, options);
   assert.equal(noFootprint.provenance, "estimated");
   assert.equal(noFootprint.isEstimated, true);
   assert.equal(noFootprint.exactBarCount, 0);
@@ -122,20 +123,20 @@ test("range profile estimates OHLCV-only windows and uses whole-range fallback f
     ohlcvBar(1, 100, 102, 30),
     exactBar(2, 101, 4, 6),
   ];
-  const partial = calculateOrderFlowRangeProfile(partialBars, 0, 2 * MINUTE, options);
+  const partial = calculateOrderFlowRangeProfile(partialBars, BASE_TIME, BASE_TIME + 2 * MINUTE, options);
   assert.equal(partial.provenance, "estimated");
   assert.equal(partial.isEstimated, true);
   assert.equal(partial.exactBarCount, 0);
   assert.equal(partial.estimatedBarCount, 3);
   assert.equal(partial.coveredBars, 2);
   assert.equal(partial.coverage, 2 / 3);
-  assert.deepEqual(partial.missingDays, [0]);
+  assert.deepEqual(partial.missingDays, [BASE_TIME]);
   assert.equal(partial.complete, false);
-  assert.equal(partial.totalVolume, 60);
+  assert.equal(partial.totalVolume, 50);
   assert.deepEqual(partial.levels.map((level) => level.priceBin), [100, 101, 102]);
 
   // Exact-only metric/side settings fail closed in an estimated range.
-  const unsupported = calculateOrderFlowRangeProfile(partialBars, 0, 2 * MINUTE, {
+  const unsupported = calculateOrderFlowRangeProfile(partialBars, BASE_TIME, BASE_TIME + 2 * MINUTE, {
     ...options,
     profileMetric: "delta",
   });
@@ -148,11 +149,11 @@ test("range profile estimates OHLCV-only windows and uses whole-range fallback f
 test("full footprint range remains identical to the exact order-flow profile fixture", () => {
   const bars = [exactBar(0, 100, 8, 2), exactBar(1, 101, 4, 6), exactBar(2, 102, 7, 3)];
   const exact = calculateOrderFlowProfile(bars, options);
-  const range = calculateOrderFlowRangeProfile(bars, 0, 2 * MINUTE, options);
+  const range = calculateOrderFlowRangeProfile(bars, BASE_TIME, BASE_TIME + 2 * MINUTE, options);
   assert.deepStrictEqual(range, {
     ...exact,
-    requestedFrom: 0,
-    requestedTo: 2 * MINUTE,
+    requestedFrom: BASE_TIME,
+    requestedTo: BASE_TIME + 2 * MINUTE,
     coveredBars: 3,
     totalBars: 3,
     coverage: 1,
