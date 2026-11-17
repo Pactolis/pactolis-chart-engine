@@ -150,6 +150,8 @@ export interface OrderbookHeatmapOverlayOptions {
   invalidate: () => void;
   /** The chart's current market; the overlay only draws on the BTCUSDT perp chart. */
   getMarket: () => string;
+  /** Reads replay state from the owning chart coordinator so the live tail stays out of replay. */
+  isReplayActive?: () => boolean;
   now?: () => number;
   /**
    * Optional live-tail invalidation or push subscription.
@@ -170,6 +172,7 @@ export class OrderbookHeatmapOverlay {
   private readonly invalidate: () => void;
   private readonly now: () => number;
   private readonly getMarket: () => string;
+  private readonly isReplayActive: () => boolean;
   private readonly subscribeLiveTail?: (
     listener: (event?: LiveHeatmapTailEvent) => void,
     request?: LiveHeatmapTailRequest,
@@ -217,6 +220,7 @@ export class OrderbookHeatmapOverlay {
     this.fetchHeatmap = options.fetch;
     this.invalidate = options.invalidate;
     this.getMarket = options.getMarket;
+    this.isReplayActive = options.isReplayActive ?? (() => false);
     this.now = options.now ?? Date.now;
     this.subscribeLiveTail = options.subscribeLiveTail;
     this.liveDebounceMs = Math.max(50, options.liveDebounceMs ?? DEFAULT_LIVE_DEBOUNCE_MS);
@@ -878,7 +882,7 @@ export class OrderbookHeatmapOverlay {
     let ceiling = 0;
     let emitted = 0;
     for (let index = frame.first; index <= frame.last; index++) {
-      const live = index === series.length - 1;
+      const live = !this.isReplayActive() && index === series.length - 1;
       const bar = (live ? liveHeatmapSubBar : lastHeatmapSubBar)(
         this.bars, series.timeOfIndex(index), series.timeOfIndex(index + 1), frame.tier);
       if (!bar || bar.cells.length === 0) continue;
@@ -939,7 +943,7 @@ export class OrderbookHeatmapOverlay {
     let extCount = 0;
     let ceiling = 0;
     for (let index = preamble.first; index <= preamble.last; index++) {
-      const live = index === series.length - 1;
+      const live = !this.isReplayActive() && index === series.length - 1;
       const bar = (live ? liveHeatmapSubBar : lastHeatmapSubBar)(
         this.bars, series.timeOfIndex(index), series.timeOfIndex(index + 1), preamble.tier);
       if (!bar || bar.cells.length === 0) continue;
@@ -1049,7 +1053,7 @@ export class OrderbookHeatmapOverlay {
   private rasterCacheThreshold = 0;
 
   private frameCacheKey(view: View, series: FootprintSeries, frame: HeatmapFramePreamble): string {
-    return `${this.dataKey}|${frame.settings.unit}|${frame.threshold}|${this.barsRevision}|${series.length}|${frame.first}|${frame.last}|${view.colWidth}|${view.offsetX}|${view.area.left}|${view.area.top}|${view.area.width}|${view.area.height}|${view.priceTop}|${view.pricePerPx}|${view.priceScaleMode}`;
+    return `${this.dataKey}|${frame.settings.unit}|${frame.threshold}|${this.barsRevision}|${series.length}|${frame.first}|${frame.last}|${this.isReplayActive()}|${view.colWidth}|${view.offsetX}|${view.area.left}|${view.area.top}|${view.area.width}|${view.area.height}|${view.priceTop}|${view.pricePerPx}|${view.priceScaleMode}`;
   }
 
   /** Collects the visible density cells and refreshes chunk requests/ceiling. */
@@ -1205,15 +1209,19 @@ export class OrderbookHeatmapOverlay {
     const rows = Array.from({ length: HEATMAP_HOVER_SPAN }, (_, offset) => bucket + (half - offset) * step);
     const windowFrom = series.timeOfIndex(columns[0]);
     const windowTo = series.timeOfIndex(columns[columns.length - 1] + 1);
-    const liveSlot = columns[columns.length - 1] === series.length - 1 ? Math.floor(this.now() / LIVE_REFRESH_MS) : 0;
-    const hoverKey = `${this.dataKey}|${windowFrom}|${windowTo}|${bucket}|${liveSlot}`;
+    const replayActive = this.isReplayActive();
+    const liveSlot = !replayActive && columns[columns.length - 1] === series.length - 1
+      ? Math.floor(this.now() / LIVE_REFRESH_MS)
+      : 0;
+    const hoverKey = `${this.dataKey}|${windowFrom}|${windowTo}|${bucket}|${replayActive}|${liveSlot}`;
     const hover = this.hoverWindows.get(hoverKey);
     if (!hover) this.scheduleHover(hoverKey, series, columns, rows, tier);
 
     const threshold = activeOrderbookHeatmapThreshold(settings);
     const values = rows.map((price) => columns.map((index) => {
       if (hover?.status !== "ready") return null;
-      const bar = (index === series.length - 1 ? liveHeatmapSubBar : lastHeatmapSubBar)(
+      const live = !replayActive && index === series.length - 1;
+      const bar = (live ? liveHeatmapSubBar : lastHeatmapSubBar)(
         hover.bars, series.timeOfIndex(index), series.timeOfIndex(index + 1), tier);
       const cell = bar?.cells.find((candidate) => candidate[0] === price);
       return heatmapValueInUnit(cell ? heatmapCellUsd(cell) : 0, price, step, settings.unit);

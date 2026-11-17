@@ -22,6 +22,11 @@ const {
 } = await import("../dist/core/analysis/tpoProfile.js");
 const { drawTpo } = await import("../dist/core/render/overlay/tpoPaintHelpers.js");
 const { View } = await import("../dist/core/engine/view.js");
+const { OrderbookHeatmapOverlay } = await import("../dist/features/orderbook/heatmapOverlay.js");
+const {
+  configureOrderbookHeatmapSettingsSource,
+  orderbookHeatmapSettingsSource,
+} = await import("../dist/features/orderbook/heatmapSettingsSource.js");
 const { configureIndicatorDataSource, indicatorDataSource } = await import("../dist/features/indicators/indicatorDataSource.js");
 const { IndicatorPrepareCache } = await import("../dist/features/indicators/prepareCache.js");
 const { volumeProfileIndicatorDefinition } = await import("../dist/features/indicators/builtins/volumeProfile.js");
@@ -547,6 +552,75 @@ test("replay parity matrix row: Options GEX Wall hides cached/live surfaces and 
   assert.equal(fetchedLiveOptions, 1, "replay does not refresh the live options request");
   assert.equal(paintCalls.length, cachedReplayPaintStart, "the cached surface paints nothing during replay");
   coordinator.exit({ reloadHistory: false });
+});
+
+test("replay parity matrix row: Orderbook heatmap suppresses the live extension during replay and restores it after exit", async () => {
+  let previousHeatmapSource = null;
+  try { previousHeatmapSource = orderbookHeatmapSettingsSource(); } catch {}
+  configureOrderbookHeatmapSettingsSource({
+    settingsFor: () => ({
+      mode: "single",
+      unit: "usd",
+      bucketStep: 50,
+      single: { usd: 1, btc: 1 },
+      aggregated: { usd: 1, btc: 1 },
+    }),
+    onChange: () => () => {},
+  });
+
+  const fullBars = buildDataset(4, MIN, 4);
+  const { coordinator, series } = createReplayCoordinatorFor(fullBars, MIN);
+  const currentTime = T0 + fullBars.length * MIN;
+  const overlay = new OrderbookHeatmapOverlay({
+    fetch: async (request) => ({
+      schemaVersion: 1,
+      generatedAt: currentTime,
+      base: "BTC",
+      source: request.source,
+      resolution: request.resolution,
+      bucketStep: request.bucketStep,
+      from: request.from,
+      to: request.to,
+      bars: [],
+    }),
+    invalidate: () => {},
+    getMarket: () => "BINANCE_FUTURES:btcusdt",
+    isReplayActive: () => coordinator.isActive(),
+    now: () => currentTime,
+  });
+  const view = new View();
+  view.area = { left: 0, top: 0, width: 800, height: 400 };
+  view.colWidth = 8;
+  view.priceTop = 50_100;
+  const lastBar = fullBars.at(-1);
+  const liveHeatmapBar = {
+    t: lastBar.startTime,
+    cells: [[50_000, 1_000, 1_000]],
+  };
+
+  try {
+    // Resolve the tier before pushing a mocked local tail, then compare the same frame inputs.
+    overlay.prepareGpuCells(view, series, [0, series.length - 1]);
+    overlay.applyLiveTailBars([liveHeatmapBar]);
+    const liveBeforeReplay = overlay.prepareGpuCells(view, series, [0, series.length - 1]);
+    assert.equal(liveBeforeReplay.extension.length, 1, "live chart draws the final bar's right-edge extension");
+
+    coordinator.start();
+    assert.equal(coordinator.isActive(), true);
+    const replayFrame = overlay.prepareGpuCells(view, series, [0, series.length - 1]);
+    const extensionCount = replayFrame.extension.length;
+    assert.equal(extensionCount, 0, "replay does not draw a live heatmap extension");
+    assert.equal(replayFrame.main.length, liveBeforeReplay.main.length, "historical cells remain visible during replay");
+
+    coordinator.exit({ reloadHistory: false });
+    assert.equal(coordinator.isActive(), false);
+    const liveAfterReplay = overlay.prepareGpuCells(view, series, [0, series.length - 1]);
+    assert.equal(liveAfterReplay.extension.length, 1, "leaving replay restores the ordinary live extension");
+  } finally {
+    overlay.dispose();
+    coordinator.exit({ reloadHistory: false });
+    if (previousHeatmapSource) configureOrderbookHeatmapSettingsSource(previousHeatmapSource);
+  }
 });
 
 test("replay as-of parity: external OI, Funding, Liquidations, and Futures Positioning align to prefix and ignore future spikes", () => {
