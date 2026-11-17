@@ -7,7 +7,7 @@ function fixture() {
   const images = [];
   const make = () => {
     const canvas = { width: 64, height: 32, ownerDocument: { createElement: () => make().canvas } };
-    const ctx = { canvas, save() {}, restore() {}, setTransform() {}, getTransform: () => ({ a: 2, b: 0, c: 0, d: 2, e: 0, f: 0 }), drawImage: (...args) => images.push(args) };
+    const ctx = { canvas, save() {}, restore() {}, clearRect() {}, setTransform() {}, getTransform: () => ({ a: 2, b: 0, c: 0, d: 2, e: 0, f: 0 }), drawImage: (...args) => images.push(args) };
     canvas.getContext = () => ctx;
     return ctx;
   };
@@ -71,4 +71,18 @@ test("high-DPR closed text cannot exhaust the later axis pass reservation", () =
   assert.equal(cache.render(ctx, annotationPass("axis"), "", ChartChange.All, () => {}, () => {}), "miss");
   cache.begin(ChartChange.DataTail, "dpr2");
   assert.equal(cache.render(ctx, annotationPass("axis"), "", ChartChange.DataTail, () => {}, () => {}), "hit");
+});
+
+
+test("full-frame invalidation redraws into the same pass backing store", () => {
+  const cache = new AnnotationPassCache();
+  const { ctx, images } = fixture();
+  for (let index = 0; index < 3; index++) {
+    cache.begin(ChartChange.DataNonTail, `history-${index}`);
+    assert.equal(cache.render(ctx, annotationPass("axis"), "", ChartChange.DataNonTail, () => index, () => {}), "miss");
+  }
+  assert.equal(images[0][0], images[1][0]);
+  assert.equal(images[1][0], images[2][0]);
+  cache.clear();
+  assert.equal(images[0][0].width, 0);
 });

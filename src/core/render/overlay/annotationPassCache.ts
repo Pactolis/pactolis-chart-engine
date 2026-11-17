@@ -13,7 +13,7 @@ export function annotationPass(id: string): ChartRenderPass {
 }
 
 const MAX_RETAINED_BYTES = 16 * 1024 * 1024;
-interface Entry<T> { canvas: HTMLCanvasElement; effects: T }
+interface Entry<T> { canvas: HTMLCanvasElement; effects: T; key: string; valid: boolean }
 
 /** Bounded per-overlay bitmaps; every non-tail change invalidates retained output. */
 export class AnnotationPassCache<T> {
@@ -22,7 +22,9 @@ export class AnnotationPassCache<T> {
   private bytes = 0;
 
   begin(changes: ChartChange, key: string): void {
-    if (changes !== ChartChange.DataTail || key !== this.frameKey) this.clear();
+    if (changes !== ChartChange.DataTail || key !== this.frameKey) {
+      for (const entry of this.entries.values()) entry.valid = false;
+    }
     this.frameKey = key;
   }
 
@@ -35,36 +37,33 @@ export class AnnotationPassCache<T> {
   render(ctx: CanvasRenderingContext2D, pass: ChartRenderPass, key: string,
     changes: ChartChange, draw: (target: CanvasRenderingContext2D) => T, replay: (effects: T) => void): "hit" | "miss" | false {
     if (changes === ChartChange.None || (pass.interests & ChartChange.DataTail) !== 0) return false;
-    const entryKey = `${pass.id}:${key}`;
-    const retained = changes === ChartChange.DataTail ? this.entries.get(entryKey) : undefined;
-    if (retained) {
+    const retained = this.entries.get(pass.id);
+    if (changes === ChartChange.DataTail && retained?.valid && retained.key === key) {
       replay(retained.effects);
       this.blit(ctx, retained.canvas);
       return "hit";
     }
     const { canvas } = ctx;
     const required = canvas.width * canvas.height * 4;
+    const previousBytes = retained ? retained.canvas.width * retained.canvas.height * 4 : 0;
     // Reserve one bitmap for the axis pass, which is last in scene order. At
     // high DPR, earlier static layers must not consume its whole cache budget.
     const reserve = pass.id === "axis" ? 0 : required;
-    if (!canvas.ownerDocument?.createElement || !ctx.getTransform || required + reserve > MAX_RETAINED_BYTES - this.bytes) return false;
-    const bitmap = canvas.ownerDocument.createElement("canvas");
-    bitmap.width = canvas.width;
-    bitmap.height = canvas.height;
+    if (!canvas.ownerDocument?.createElement || !ctx.getTransform || required + reserve > MAX_RETAINED_BYTES - this.bytes + previousBytes) return false;
+    // Reuse each pass's own backing store during full/history frames. Repeated
+    // streaming-history invalidations must not allocate fresh full-size canvases.
+    const bitmap = retained?.canvas ?? canvas.ownerDocument.createElement("canvas");
+    if (bitmap.width !== canvas.width) bitmap.width = canvas.width;
+    if (bitmap.height !== canvas.height) bitmap.height = canvas.height;
     const target = bitmap.getContext("2d");
     if (!target) return false;
+    target.setTransform(1, 0, 0, 1, 0, 0);
+    target.clearRect(0, 0, bitmap.width, bitmap.height);
     const tx = ctx.getTransform();
     target.setTransform(tx.a, tx.b, tx.c, tx.d, tx.e, tx.f);
-    for (const [oldKey, oldEntry] of this.entries) {
-      if (oldKey.startsWith(`${pass.id}:`)) {
-        this.bytes -= oldEntry.canvas.width * oldEntry.canvas.height * 4;
-        oldEntry.canvas.width = 0; oldEntry.canvas.height = 0;
-        this.entries.delete(oldKey);
-      }
-    }
     const effects = draw(target);
-    this.entries.set(entryKey, { canvas: bitmap, effects });
-    this.bytes += required;
+    this.entries.set(pass.id, { canvas: bitmap, effects, key, valid: true });
+    this.bytes += required - previousBytes;
     this.blit(ctx, bitmap);
     return "miss";
   }
