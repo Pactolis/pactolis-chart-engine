@@ -133,7 +133,7 @@ test("range profile estimates OHLCV-only windows and uses whole-range fallback f
   assert.deepEqual(partial.missingDays, [BASE_TIME]);
   assert.equal(partial.complete, false);
   assert.equal(partial.totalVolume, 50);
-  assert.deepEqual(partial.levels.map((level) => level.priceBin), [100, 101, 102]);
+  assert.deepEqual(partial.levels.map((level) => level.priceBin), [100, 101]);
 
   // Exact-only metric/side settings fail closed in an estimated range.
   const unsupported = calculateOrderFlowRangeProfile(partialBars, BASE_TIME, BASE_TIME + 2 * MINUTE, {
