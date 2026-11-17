@@ -82,7 +82,6 @@ jobs:
 
   census:
     needs: changes
-    # Temporary evidence-only edit: this workflow diff forces full CI test selection.
     if: github.event_name == 'pull_request' && needs.changes.outputs.census == 'true'
     runs-on: ubuntu-24.04
     timeout-minutes: 60
