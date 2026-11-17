@@ -7,10 +7,12 @@ const MARKETS = [
   "BINANCE_FUTURES:ethusdt",
   "BINANCE_FUTURES:solusdt",
   "BINANCE_FUTURES:avaxusdt",
-  "BINANCE_FUTURES:linkusdt",
-  "BINANCE_FUTURES:bnbusdt",
-  "BINANCE_FUTURES:adausdt",
-  "BINANCE_FUTURES:dogeusdt",
+  "BINANCE_FUTURES:xauusdt",
+  "BINANCE_FUTURES:xagusdt",
+  "BINANCE_FUTURES:clusdt",
+  // Eight active panels use the seven markets enabled by the browser harness.
+  // The repeated BTC panel is a separate runtime and shares the same deterministic feed.
+  "BINANCE_FUTURES:btcusdt",
 ] as const;
 const BAR_COUNT = 600;
 const CELLS_PER_BAR = 40;
@@ -594,10 +596,10 @@ async function measureBackend(
         const liveStart = performance.now();
         let tradeSeq = 1;
         for (let rep = 0; rep < repetitions; rep++) {
-          const baseTimes = runtimes().map((runtime) => {
+          const baseTimes = new Map(runtimes().map((runtime, index) => {
             const s = runtime.pipeline.series;
-            return s.timeOfIndex(s.length - 1);
-          });
+            return [markets[index], s.timeOfIndex(s.length - 1)] as const;
+          }));
           const bucket: Record<string, number[]> = {};
           activeBucket = bucket;
           let tradesDelivered = 0;
@@ -611,10 +613,10 @@ async function measureBackend(
             carryTrades += (liveRatePerMarket * dt) / 1_000;
             const perMarketCount = Math.max(1, Math.floor(carryTrades));
             carryTrades = Math.max(0, carryTrades - perMarketCount);
-            for (let mIdx = 0; mIdx < markets.length; mIdx++) {
-              const listeners = tradeListeners.get(markets[mIdx]);
+            for (const market of new Set(markets)) {
+              const listeners = tradeListeners.get(market);
               if (!listeners || listeners.size === 0) continue;
-              const ts = baseTimes[mIdx] + Math.min(intervalMs - 1_000, Math.floor(now - startedAt));
+              const ts = (baseTimes.get(market) ?? 0) + Math.min(intervalMs - 1_000, Math.floor(now - startedAt));
               for (let tIdx = 0; tIdx < perMarketCount; tIdx++) {
                 const price = 60_000 + ((tradeSeq + tIdx) % cellsPerBar) * priceStep;
                 const trade = {
@@ -823,6 +825,7 @@ test("4- and 8-chart WebGPU vs WebGL2 chart.gpu.flush.ms comparison across pan, 
         barsPerChart: BAR_COUNT,
         cellsPerBar: CELLS_PER_BAR,
         fitColumns: FIT_COLUMNS,
+        uniqueMarkets: new Set(markets).size,
         liveRatePerMarketPerSecond: LIVE_RATE_PER_SECOND_PER_MARKET,
         repetitions: REPETITIONS,
         avgQuadsPerFlushWebgl2: webgl2.avgQuadsPerFlush,
