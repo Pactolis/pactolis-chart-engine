@@ -380,6 +380,7 @@
   ],
   "scripts": {
     "build": "node -e \"require('fs').rmSync('dist',{recursive:true,force:true})\" && tsc -p tsconfig.build.json",
+    "bench:tpo-viewport": "node scripts/bench-tpo-viewport.mjs",
     "check": "tsc --noEmit",
     "check:exports": "node scripts/check-exports.mjs",
     "check:default-import-graph": "node scripts/check-default-import-graph.mjs",
@@ -387,7 +388,8 @@
     "prepack": "npm run build",
     "check:browser": "tsc -p tsconfig.browser.json",
     "test:browser": "playwright test",
-    "harness": "vite"
+    "harness": "vite",
+    "benchmark:gpu": "node scripts/gpu-heatmap-benchmark.mjs"
   },
   "devDependencies": {
     "@playwright/test": "^1.65.0",

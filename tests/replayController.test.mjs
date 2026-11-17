@@ -39,6 +39,26 @@ test("reconfigure preserves virtual time and exposes only completed bars", () =>
   assert.equal(states.at(-1).visibleBars, 0);
 });
 
+test("reconfigure clamps an old replay clock into the replacement timeframe window", () => {
+  const controller = new ReplayController(() => {}, () => {});
+  controller.loadForSelection([bar(0), bar(60_000), bar(120_000)], 60_000);
+  controller.seek(60_000);
+  assert.equal(controller.snapshot().virtualTime, 60_000);
+
+  const replacement = [bar(1_000_000), bar(1_300_000), bar(1_600_000)];
+  const result = controller.reconfigure(replacement, 300_000);
+
+  assert.equal(controller.snapshot().rangeStart, 1_000_000);
+  assert.equal(controller.snapshot().rangeEnd, 1_900_000);
+  assert.equal(controller.snapshot().virtualTime, 1_000_000);
+  assert.equal(controller.snapshot().state, "paused");
+  assert.equal(result.visibleBars.length, 0, "the first new-timeframe bar is not complete at the clamped range start");
+
+  assert.equal(controller.seek(1_300_000).length, 1);
+  assert.equal(controller.snapshot().virtualTime, 1_300_000);
+  controller.dispose();
+});
+
 test("reconfigure reports whether playing state should resume", () => {
   const controller = new ReplayController(() => {}, () => {});
   controller.load([bar(0), bar(60_000)], 0, 60_000);
