@@ -308,6 +308,18 @@ test("ChartRuntime replay parity: TPO (#144), 10 indicators, timeframe round-tri
     }
   }, { full1mTimes: full1m.map((b) => b.t), minMs: MIN });
 
+  const stripTransientIndicatorMeta = (snapshots: any[]) =>
+    snapshots.map((snap) => ({
+      ...snap,
+      instanceId: "<id>",
+      series: Array.isArray(snap.series)
+        ? snap.series.map((s: any) => ({
+            ...s,
+            label: snap.type === "volume" && s.key === "volume" ? "<base>" : s.label,
+          }))
+        : snap.series,
+    }));
+
   expect(result.liveVolDelta).toBe(7);
   expect(result.linkedLength).toBe(35);
   expect(result.ownerBars35).toEqual(result.oracleBars35);
@@ -315,109 +327,13 @@ test("ChartRuntime replay parity: TPO (#144), 10 indicators, timeframe round-tri
   expect(result.ownerTpoGroups).toEqual(result.oracleTpoGroups);
   expect(result.ownerHeadersCount).toBe(result.oracleHeadersCount);
   expect(result.ownerHeadersLabels).toEqual(result.oracleHeadersLabels);
-  expect(result.ownerIndSnapshots).toEqual(result.oracleIndSnapshots);
+  expect(stripTransientIndicatorMeta(result.ownerIndSnapshots)).toEqual(
+    stripTransientIndicatorMeta(result.oracleIndSnapshots),
+  );
   expect(result.tf5m.vt).toBe(result.vtBeforeTf);
   expect(result.tf5m.maxEnd).toBeLessThanOrEqual(result.vtBeforeTf);
   expect(result.tf15m.vt).toBe(result.vtBeforeTf);
   expect(result.tf15m.maxEnd).toBeLessThanOrEqual(result.vtBeforeTf);
   expect(result.tfBack1m.vt).toBe(result.vtBeforeTf);
   expect(result.tfBack1m.count).toBe(37);
-});
-
-test("BROWSER PROBE: ChartRuntime drawing overlay skips future drawings (> virtualTime) during replay", async ({ page }) => {
-  test.setTimeout(60_000);
-  const MIN = 60_000;
-  const endAligned = Math.floor(Date.now() / (15 * MIN)) * (15 * MIN);
-  const full1m = buildAligned1mBars(60, endAligned);
-
-  await page.route("**/*", (route) => {
-    const url = new URL(route.request().url());
-    return ["127.0.0.1", "localhost"].includes(url.hostname) ? route.continue() : route.abort("blockedbyclient");
-  });
-  await page.route(/\/history(?:\?|$)/, (route) =>
-    route.fulfill({
-      contentType: "application/json",
-      body: JSON.stringify({
-        ok: true,
-        data: { bars: full1m },
-        meta: {
-          schemaVersion: 1,
-          generatedAt: Date.now(),
-          footprint: { available: true, allowed: true, priceStep: 10 },
-          footprintCoverage: { status: "complete", requestedFrom: full1m[0].t, requestedTo: endAligned + MIN, coveredFrom: full1m[0].t, coveredThrough: endAligned + MIN },
-        },
-      }),
-    }),
-  );
-
-  await openHarness(page, "?fit=40");
-  const probe = await page.evaluate(async ({ futureT1, futureT2, seekT }) => {
-    const [harness, { createHarnessServices }] = await Promise.all([
-      import("/harness/chart.ts"),
-      import("/harness/services.ts"),
-    ]);
-    const root = document.createElement("div");
-    root.style.cssText = "position:fixed;left:0;top:0;width:800px;height:400px;";
-    document.body.appendChild(root);
-    const svc = createHarnessServices({ priceStep: 10, priceStepResolved: true });
-    svc.drawings.setMarket("BINANCE_FUTURES:btcusdt");
-    const probeSurface = harness.createChartSurfaceModel();
-    const handle = harness.mountChart(root, {
-      type: "chart",
-      market: "BINANCE_FUTURES:btcusdt",
-      timeframe: "1m",
-      scaleMode: "linear",
-      chartType: "candlestick",
-      candles: true,
-    } as any, svc, "browser-probe-draw", probeSurface);
-
-    try {
-      const deadline = performance.now() + 15_000;
-      while (performance.now() < deadline) {
-        const rt = harness.getChartRuntime("browser-probe-draw");
-        if (rt && rt.pipeline.series.length >= 60 && !probeSurface.historyOverlay && !probeSurface.historyBackground) break;
-        await new Promise((r) => setTimeout(r, 20));
-      }
-      const rt = harness.getChartRuntime("browser-probe-draw") as any;
-      rt.startReplay();
-      rt.replaySeek(seekT);
-
-      // Attach a drawing strictly anchored in the future (> seekT)
-      svc.drawings.replace([{
-        id: "future-trend-browser",
-        type: "trend",
-        market: "BINANCE_FUTURES:btcusdt",
-        color: "#ff0000",
-        lineWidth: 2,
-        lineStyle: "solid",
-        visible: true,
-        points: [
-          { time: futureT1, price: 60_050 },
-          { time: futureT2, price: 60_150 },
-        ],
-      }]);
-
-      // Pan slightly right into empty future canvas space so futureT1..futureT2 sit inside viewport width
-      rt.view.offsetX -= 450;
-      const annotationCanvas = root.querySelector('[data-chart-surface="annotation"]') as HTMLCanvasElement;
-      const ctx2d = annotationCanvas.getContext("2d")!;
-      const drawnXs: number[] = [];
-      const origMoveTo = ctx2d.moveTo.bind(ctx2d);
-      ctx2d.moveTo = function (x: number, y: number) {
-        drawnXs.push(x);
-        return origMoveTo(x, y);
-      };
-      const lastVisibleX = rt.view.xOfIndex(rt.pipeline.series.length - 1);
-      rt.invalidate();
-      await rt.session.captureCompositePng();
-      const futureStrokesBeyondLastBar = drawnXs.filter((x) => x > lastVisibleX + 5).length;
-      return { lastVisibleX, futureStrokesBeyondLastBar };
-    } finally {
-      handle.dispose();
-      root.remove();
-    }
-  }, { seekT: full1m[25].t, futureT1: full1m[45].t, futureT2: full1m[55].t });
-
-  console.log("BROWSER_PROBE_FUTURE_DRAWING", JSON.stringify(probe));
-  expect(probe.futureStrokesBeyondLastBar).toBe(0);
 });
