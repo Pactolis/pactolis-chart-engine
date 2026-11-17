@@ -159,8 +159,7 @@ export class Overlay {
     private readonly drawForeground?: (
       ctx: CanvasRenderingContext2D,
       view: View,
-      series: FootprintSeries,
-      asOfTime?: number,
+      series: FootprintSeries
     ) => void,
     private readonly getProfileSettings?: () => VolumeProfileSettings,
     private readonly getPreviousWeekStrategySettings?: () => PreviousWeekStrategySettings,
@@ -392,7 +391,7 @@ export class Overlay {
               drawReferenceLevels(this.annotationHost, view, series);
               break;
             case "drawings":
-              this.drawForeground?.(ctx, view, series, asOfTime);
+              this.drawForeground?.(ctx, view, series);
               break;
             case "last-price":
               if (settings.lastPrice) drawLastPrice(this.annotationHost, view, series);

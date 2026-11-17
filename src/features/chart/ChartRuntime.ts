@@ -403,9 +403,10 @@ class ChartRuntimeImpl implements ChartRuntime, ChartInputHost {
 
     this.overlay = new Overlay(
       annotationCtx2d,
-      (ctx, activeView, activeSeries, asOfTime) => {
+      (ctx, activeView, activeSeries) => {
         const analysisCtx = this.analysisContextForChart();
         if (!analysisCtx.drawings) return;
+        const asOfTime = this.replayCoordinator?.getSnapshot()?.virtualTime;
         const drawingTime = {
           indexForTime: (time: number) => activeSeries.indexOfTime(time),
           timeForIndex: (index: number) => activeSeries.timeOfIndex(Math.round(index)),

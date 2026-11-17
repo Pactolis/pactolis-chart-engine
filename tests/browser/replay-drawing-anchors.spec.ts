@@ -2,12 +2,15 @@ import { expect, test } from "@playwright/test";
 import { installHistory, openHarness, INTERVAL_MS } from "./support/history.js";
 
 test("replay hides future and partially future drawings after panning past the replay tail", async ({ page }) => {
+  test.setTimeout(60_000);
+  const blockedExternalRequests: string[] = [];
   await page.route("**/*", (route) => {
     const url = new URL(route.request().url());
     if (url.hostname === "localhost" || url.hostname === "127.0.0.1" || url.hostname === "::1") return route.continue();
+    blockedExternalRequests.push(url.href);
     return route.abort("blockedbyclient");
   });
-  await installHistory(page);
+  const { historyRequests } = await installHistory(page);
   await page.addInitScript(() => {
     const colors = new Set(["#f000ff", "#00f0ff"]);
     const probe = window as typeof window & { __futureDrawingStrokes: string[] };
@@ -76,7 +79,15 @@ test("replay hides future and partially future drawings after panning past the r
       chartType: "candlestick",
       candles: true,
     } as never, services as never, panelId, createChartSurfaceModel());
-    const runtime = await new Promise<{
+    const waitFor = async (predicate: () => boolean, description: string) => {
+      for (let attempt = 0; attempt < 750; attempt++) {
+        if (predicate()) return;
+        await new Promise((resolve) => window.setTimeout(resolve, 20));
+      }
+      throw new Error(`Timed out waiting for ${description}`);
+    };
+    await waitFor(() => Boolean(getChartRuntime(panelId)), "chart runtime");
+    const runtime = getChartRuntime(panelId) as unknown as {
       pipeline: { series: { length: number; at(index: number): { startTime: number }; indexOfTime(time: number): number } };
       view: { scrollToIndex(index: number, rightPadCols?: number): void };
       session: { invalidate(): void };
@@ -84,19 +95,9 @@ test("replay hides future and partially future drawings after panning past the r
       replaySeek(time: number): void;
       exitReplay(): void;
       getReplaySnapshot(): { virtualTime: number } | null;
-    }>((resolve, reject) => {
-      let framesRemaining = 900;
-      const poll = () => {
-        const value = getChartRuntime(panelId) as unknown as ReturnType<typeof getChartRuntime> & {
-          pipeline?: { series?: { length?: number } };
-        };
-        if (value?.pipeline?.series && value.pipeline.series.length > 30) resolve(value as never);
-        else if (framesRemaining-- <= 0) reject(new Error("Timed out waiting for chart history"));
-        else requestAnimationFrame(poll);
-      };
-      poll();
-    });
+    };
     const runtimeInternal = runtime as typeof runtime & { pipeline: { series: { length: number; at(index: number): { startTime: number }; indexOfTime(time: number): number } }; view: { scrollToIndex(index: number, rightPadCols?: number): void } };
+    await waitFor(() => runtimeInternal.pipeline.series.length > 30, "mock history bars");
     const series = runtimeInternal.pipeline.series;
     const seekTime = series.at(Math.floor(series.length / 2)).startTime;
     const lastTime = series.at(series.length - 1).startTime;
@@ -146,7 +147,7 @@ test("replay hides future and partially future drawings after panning past the r
 
       probe.__futureDrawingStrokes = [];
       runtime.exitReplay();
-      panToFutureEnd();
+      runtimeInternal.view.scrollToIndex(series.indexOfTime(futureEnd), 2);
       await settleRender();
       const restoredStrokes = [...probe.__futureDrawingStrokes];
       return {
@@ -173,5 +174,7 @@ test("replay hides future and partially future drawings after panning past the r
   expect(evidence.replaySeekAndReturnMatches).toBe(true);
   expect(evidence.replayMatchesFullRedraw).toBe(true);
   expect(evidence.restoredStrokes).toEqual(expect.arrayContaining(["#f000ff", "#00f0ff"]));
+  expect(historyRequests.length, "the browser fixture must answer history locally").toBeGreaterThan(0);
+  expect(blockedExternalRequests, "no external host was requested by this browser fixture").toEqual([]);
   test.info().attach("replay-drawing-anchors.json", { body: JSON.stringify(evidence, null, 2), contentType: "application/json" });
 });

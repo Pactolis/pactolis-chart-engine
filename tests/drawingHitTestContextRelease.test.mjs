@@ -67,6 +67,17 @@ test("releasing a chart's hit-test context stops hit tests from using its mappin
   assert.equal(manager.hitTestAt(FAR_POINT, nearLine(a.view)), null);
 });
 
+test("replay hit testing excludes drawings with any future anchor", () => {
+  const manager = managerWithLine();
+  const a = chart();
+  manager.setHitTestContext(a.view, { ...a.time, asOfTime: 5_000 });
+
+  assert.equal(manager.hitTestAt({ time: 5_000, price: LINE_PRICE }, nearLine(a.view)), null, "a partially future line is hidden from replay hit tests");
+
+  manager.setHitTestContext(a.view, a.time);
+  assert.equal(manager.hitTestAt({ time: 5_000, price: LINE_PRICE }, nearLine(a.view))?.id, "line", "live mode keeps its existing hit-test behavior");
+});
+
 test("releasing also drops the context that render captured", () => {
   const manager = new DrawingManager(() => {});
   const a = chart();
