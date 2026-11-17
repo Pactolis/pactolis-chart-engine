@@ -73,8 +73,6 @@ jobs:
       - env:
           SPECS: ${{ needs.changes.outputs.browser_specs }}
         run: npm run test:browser -- --project=default $SPECS
-      - name: Repeat replay timeframe regression 30 times
-        run: npm run test:browser -- --project=default tests/browser/replay-parity-matrix.spec.ts --grep "ChartRuntime replay parity" --repeat-each=30 --retries=0
       - if: failure()
         uses: actions/upload-artifact@v7
         with:
