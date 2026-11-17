@@ -1,6 +1,4 @@
 import { expect, test, type Page } from "@playwright/test";
-import { readFileSync } from "node:fs";
-import ts from "typescript";
 import type { ChartCaptureReadiness } from "../../src/features/chart/captureReadiness.js";
 import type { View } from "../../src/core/engine/view.js";
 import type { FootprintSeries } from "../../src/core/model/footprint.js";
@@ -139,11 +137,9 @@ async function install15kFixture(page: Page): Promise<string> {
 
 test("15,000-cell SwiftShader benchmark and CPU raster cache budget / GPU takeover release", async ({ page }, testInfo) => {
   test.setTimeout(60_000);
-  const baselineSource = readFileSync(new URL("./fixtures/heatmap-draw-main-5ce5c7e.ts.fixture", import.meta.url), "utf8");
-  const baselineJs = ts.transpileModule(baselineSource, { compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.ES2022 } }).outputText;
   const id = await install15kFixture(page);
 
-  const report = await page.evaluate(async ({ id, barsCount, expectedCells, basePrice, bucketStep, levelsPerBar, intervalMs, baselineJs }) => {
+  const report = await page.evaluate(async ({ id, barsCount, expectedCells, basePrice, bucketStep, levelsPerBar, intervalMs }) => {
     const {
       getChartRuntime,
       updateOrderbookHeatmapSettings,
@@ -358,21 +354,19 @@ test("15,000-cell SwiftShader benchmark and CPU raster cache budget / GPU takeov
 
     // Same viewport-changing workload for direct and adaptive paths. The injected
     // clock makes every sampled frame active motion independently of CI wall time.
-    const baselineDraw = (await import(URL.createObjectURL(new Blob([baselineJs.replaceAll('"/src/', `"${location.origin}/src/`)], { type: "text/javascript" })))).draw;
-    const motionOverlay = r.orderbookHeatmap as typeof r.orderbookHeatmap & { now: () => number; draw: typeof baselineDraw };
-    const branchDraw = motionOverlay.draw;
+    const motionOverlay = r.orderbookHeatmap as typeof r.orderbookHeatmap & { now: () => number };
     const originalNow = motionOverlay.now;
     let motionClock = originalNow();
     motionOverlay.now = () => motionClock;
-    const panSamples: Record<string, { heatmapMs: ReturnType<typeof summarize>; misses: number; hits: number; skips: number }> = {};
-    for (const [name, direct] of [["direct", true], ["main", false], ["adaptive", false]] as const) {
-      motionOverlay.draw = name === "main" ? baselineDraw : branchDraw;
+    const panSamples: Record<string, { heatmapMs: ReturnType<typeof summarize>; directs: number; misses: number; hits: number; skips: number }> = {};
+    for (const [name, direct] of [["direct", true], ["adaptive", false]] as const) {
       v.offsetX = calibratedOffsetX;
       r.orderbookHeatmap.setRasterCacheDisabledForTest(direct);
       r.orderbookHeatmap.releaseRasterCache();
       r.invalidate();
       await r.session.captureCompositePng();
       const samples: number[] = [];
+      let directs = 0;
       let misses = 0;
       let hits = 0;
       let skips = 0;
@@ -385,16 +379,17 @@ test("15,000-cell SwiftShader benchmark and CPU raster cache budget / GPU takeov
         const a = telemetry.snapshotPerformanceTelemetry();
         const hm = metricDelta(b, a, "chart.cpu.heatmap.draw.ms");
         if (hm.count > 0) samples.push(hm.totalMs / hm.count);
+        directs += counterDelta(b, a, "chart.cpu.heatmap.raster.direct");
         misses += counterDelta(b, a, "chart.cpu.heatmap.raster.miss");
         hits += counterDelta(b, a, "chart.cpu.heatmap.raster.hit");
         skips += counterDelta(b, a, "chart.cpu.heatmap.raster.skip");
       }
-      panSamples[name] = { heatmapMs: summarize(samples), misses, hits, skips };
+      panSamples[name] = { heatmapMs: summarize(samples), directs, misses, hits, skips };
     }
     v.offsetX = calibratedOffsetX;
+    r.orderbookHeatmap.setRasterCacheDisabledForTest(false);
     r.orderbookHeatmap.releaseRasterCache();
     motionOverlay.now = originalNow;
-    motionOverlay.draw = branchDraw;
 
     // Phase 3: GPU Prototype Cold + Steady (takeover releases CPU rasterCache immediately)
     r.heatmapTexturePrototypeEnabled = true;
@@ -579,7 +574,6 @@ test("15,000-cell SwiftShader benchmark and CPU raster cache budget / GPU takeov
     bucketStep: BUCKET_STEP,
     levelsPerBar: LEVELS_PER_BAR,
     intervalMs: INTERVAL_MS,
-    baselineJs,
   });
 
   console.log("HEATMAP_15K_SWIFTSHADER_EVIDENCE", JSON.stringify(report));
@@ -599,9 +593,12 @@ test("15,000-cell SwiftShader benchmark and CPU raster cache budget / GPU takeov
   expect(report.cpuWarm.hits).toBe(20);
   expect(report.cpuWarm.misses).toBe(0);
   expect(report.cpuWarm.heatmapMs.meanMs).toBeLessThan(0.1);
-  expect(report.continuousPan.main.misses).toBe(30);
-  expect(report.continuousPan.main.skips).toBe(0);
+  expect(report.continuousPan.direct.directs).toBe(30);
+  expect(report.continuousPan.direct.misses).toBe(0);
+  expect(report.continuousPan.direct.hits).toBe(0);
+  expect(report.continuousPan.direct.skips).toBe(0);
   expect(report.continuousPan.adaptive.skips).toBe(30);
+  expect(report.continuousPan.adaptive.directs).toBe(30);
   expect(report.continuousPan.adaptive.misses).toBe(0);
   expect(report.continuousPan.adaptive.hits).toBe(0);
   expect(report.continuousPan.adaptive.heatmapMs.meanMs).toBeLessThanOrEqual(report.continuousPan.direct.heatmapMs.meanMs * 1.1);
