@@ -1,5 +1,6 @@
 import { ChartChange, chartChangeForDataUpdate } from "../../core/render/scene/chartScene.js";
 import type { ChartPanelState } from "../../core/chartPanelState.js";
+import type { FootprintBar } from "../../core/types.js";
 import type { ChartHistoryServices } from "./ChartServicePorts.js";
 import { TIMEFRAMES } from "../../core/timeframes.js";
 import { bucketStart } from "../../core/time.js";
@@ -58,7 +59,8 @@ export interface ChartHistoryCapturePort {
 export interface ChartHistoryReplayPort {
   isActive(): boolean;
   getSnapshot(): ReplaySnapshot | null;
-  reconfigureAfterTimeframeChange(intervalMs: number): void;
+  prepareForTimeframeChange(): void;
+  reconfigureAfterTimeframeChange(intervalMs: number, bars?: readonly FootprintBar[]): void;
 }
 
 export interface ChartHistoryControllerHost {
@@ -206,7 +208,14 @@ export class ChartHistoryController {
 
   async loadHistory(
     intervalMs?: number,
-    options: { rebuildKlines?: boolean; preferCache?: boolean; twoPhase?: boolean; preserveViewport?: boolean } = {},
+    options: {
+      rebuildKlines?: boolean;
+      preferCache?: boolean;
+      twoPhase?: boolean;
+      preserveViewport?: boolean;
+      maxVisibleBarEnd?: number;
+      onHistoryBars?: (bars: readonly FootprintBar[]) => void;
+    } = {},
   ): Promise<void> {
     this.cancelRecentCoverageRetry();
     this.cancelCandleGapRetry();
@@ -240,6 +249,8 @@ export class ChartHistoryController {
         rebuildKlines: options.rebuildKlines ?? false,
         preferCache: options.preferCache,
         twoPhase: options.twoPhase,
+        maxVisibleBarEnd: options.maxVisibleBarEnd,
+        onHistoryBars: options.onHistoryBars,
       });
       this.scheduleLiveBarOHLCSeed(requestedMarket, requestedTimeframe, resolvedIntervalMs);
       logLoadTrace(this.host.pipeline.activeHistoryTraceId, "live_ohlc_seed.started", { market: requestedMarket, intervalMs: resolvedIntervalMs });
@@ -657,6 +668,11 @@ export class ChartHistoryController {
         ? (this.pendingTimeframeCenterTime ?? this.visibleCenterTime())
         : null;
 
+    const timeframeChanged = config.intervalMs !== undefined && config.intervalMs !== previousIntervalMs;
+    if (replaySnapshot && timeframeChanged && config.market === undefined) {
+      this.host.replay.prepareForTimeframeChange();
+    }
+
     await this.host.pipeline.changeConfig(config);
     if (this.host.isDisposed() || generation !== this.refreshGeneration) return;
     if (config.intervalMs !== undefined && config.intervalMs !== previousIntervalMs) {
@@ -664,7 +680,23 @@ export class ChartHistoryController {
     }
     this.syncLiveOhlcRefresh();
 
-    await this.loadHistory(targetIntervalMs, { twoPhase: true });
+    const maxReplayBarEnd = replaySnapshot && timeframeChanged && config.market === undefined
+      ? replaySnapshot.virtualTime
+      : undefined;
+    const futureReplayBars = new Map<number, FootprintBar>();
+    await this.loadHistory(targetIntervalMs, {
+      twoPhase: true,
+      maxVisibleBarEnd: maxReplayBarEnd,
+      onHistoryBars: maxReplayBarEnd === undefined
+        ? undefined
+        : (bars) => {
+            const intervalMs = targetIntervalMs ?? this.host.pipeline.intervalMs;
+            for (const bar of bars) {
+              if (bar.startTime + intervalMs > maxReplayBarEnd) futureReplayBars.set(bar.startTime, bar);
+            }
+          },
+    });
+    if (this.host.isDisposed() || generation !== this.refreshGeneration) return;
     // Only the newest cover owner may uncover: a tracked replacement load (step reset)
     // does not bump refreshGeneration, and a disposed host must not write cover state.
     if (coverSeq === this.initialCoverSeq && !this.host.isDisposed() && generation === this.refreshGeneration) {
@@ -672,8 +704,16 @@ export class ChartHistoryController {
     }
     if (preserveCenterTime != null) this.restoreViewToTime(preserveCenterTime, generation);
     if (generation === this.refreshGeneration) this.pendingTimeframeCenterTime = null;
+    let replayBarsForTimeframe: FootprintBar[] | undefined;
     if (replaySnapshot && this.host.replay.isActive() && config.market === undefined) {
-      this.host.replay.reconfigureAfterTimeframeChange(targetIntervalMs ?? this.host.pipeline.intervalMs);
+      const barsByStart = new Map<number, FootprintBar>();
+      for (const bar of this.host.pipeline.series.listReadonly()) barsByStart.set(bar.startTime, bar);
+      for (const bar of futureReplayBars.values()) barsByStart.set(bar.startTime, bar);
+      replayBarsForTimeframe = [...barsByStart.values()].sort((a, b) => a.startTime - b.startTime);
+      this.host.replay.reconfigureAfterTimeframeChange(
+        targetIntervalMs ?? this.host.pipeline.intervalMs,
+        replayBarsForTimeframe,
+      );
     }
 
     const corrected = await this.host.pipeline.pendingStepCorrection;
@@ -684,8 +724,12 @@ export class ChartHistoryController {
     // unmanaged reload here would duplicate that load and its HTTP epoch.
     if (preserveCenterTime != null) this.restoreViewToTime(preserveCenterTime, generation);
     if (replaySnapshot && this.host.replay.isActive() && config.market === undefined) {
-      this.host.replay.reconfigureAfterTimeframeChange(targetIntervalMs ?? this.host.pipeline.intervalMs);
-    }    } finally {
+      this.host.replay.reconfigureAfterTimeframeChange(
+        targetIntervalMs ?? this.host.pipeline.intervalMs,
+        replayBarsForTimeframe,
+      );
+    }
+    } finally {
       this.selectionRefreshInFlight = Math.max(0, this.selectionRefreshInFlight - 1);
       if (!this.host.isDisposed() && generation === this.refreshGeneration && this.selectionRefreshInFlight === 0) {
         const state = this.host.getState();
