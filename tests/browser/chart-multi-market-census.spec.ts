@@ -94,6 +94,7 @@ const RENDER_TELEMETRY_METRICS = [
   "chart.surface.gpu.draw.ms",
   "chart.surface.annotation.draw.ms",
   "chart.surface.interaction.draw.ms",
+  "chart.annotation.layer.axis.ms",
   "chart.gpu.footprint.ms",
   "chart.gpu.flush.ms",
   "chart.liveUpdate.toRenderEnd.ms",

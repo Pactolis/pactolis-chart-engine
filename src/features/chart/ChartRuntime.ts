@@ -550,9 +550,9 @@ class ChartRuntimeImpl implements ChartRuntime, ChartInputHost {
       renderer,
 
       annotation: {
-        render: (v, s, c, r) => {
+        render: (v, s, c, r, changes) => {
           this.overlay.setTpoMergeLeftSessionStarts(this.tpoMergeLeftSessionStarts);
-          this.overlay.renderAnnotations(v, s, c, r, this.renderCoordinator?.getAnnotationLayerOrder() ?? []);
+          this.overlay.renderAnnotations(v, s, c, r, this.renderCoordinator?.getAnnotationLayerOrder() ?? [], changes);
         },
         requiresInteractionRedraw: () => this.indicatorController.requiresAnnotationInteractionRedraw(),
       },

@@ -294,7 +294,7 @@ for (const deviceScaleFactor of [1, 2]) {
         const scenarios: ScenarioEvidence[] = [];
         const telemetry = await import("/src/core/performanceTelemetry.ts");
         telemetry.configurePerformanceTelemetry({ enabled: true });
-        const surfaceMetricNames = ["chart.surface.gpu.draw.ms", "chart.surface.annotation.draw.ms", "chart.surface.interaction.draw.ms"];
+        const surfaceMetricNames = ["chart.surface.gpu.draw.ms", "chart.surface.annotation.draw.ms", "chart.surface.interaction.draw.ms", "chart.annotation.layer.axis.ms"];
         const surfaceTimingSince = (before: ReturnType<typeof telemetry.snapshotPerformanceTelemetry>, after: ReturnType<typeof telemetry.snapshotPerformanceTelemetry>) =>
           Object.fromEntries(surfaceMetricNames.map((name) => {
             const start = before.metrics[name];
@@ -549,6 +549,11 @@ for (const deviceScaleFactor of [1, 2]) {
       const common = result.commonGeometry!;
       const tailTiming = byName.get("tail data")!.surfaceTiming;
       console.log("chart.surface.*.draw.ms scoped tail vs same-state full reference", JSON.stringify(tailTiming));
+      if (!isBase) {
+        expect(tailTiming.scoped["chart.annotation.layer.axis.ms"].count, "fixed tail reuses the axis pass").toBe(0);
+        expect(tailTiming.scoped["chart.surface.interaction.draw.ms"].count, "fixed tail leaves interaction clean").toBe(0);
+        expect(byName.get("auto-scale widen")!.surfaceTiming.scoped["chart.annotation.layer.axis.ms"].count, "autoscale discards retained axis output").toBeGreaterThan(0);
+      }
       const hoverTiming = Object.fromEntries(
         ["pointer hover activation", "pointer hover successive", "pointer hover successive 2", "pointer leave", "sync time activation", "sync time unchanged", "sync time changed", "sync time cleared"]
           .map((name) => [name, byName.get(name)!.surfaceTiming]),
