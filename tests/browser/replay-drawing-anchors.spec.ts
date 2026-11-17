@@ -43,6 +43,8 @@ test("replay hides future and partially future drawings after panning past the r
     futureStrokesBeyondLastBar: number;
     replaySeekAndReturnMatches: boolean;
     replayMatchesFullRedraw: boolean;
+    liveDrawingPixelCounts: { magenta: number; cyan: number };
+    replayDrawingPixelCounts: { magenta: number; cyan: number };
     restoredStrokes: string[];
   };
   try {
@@ -139,10 +141,38 @@ test("replay hides future and partially future drawings after panning past the r
     const probe = window as typeof window & { __futureDrawingStrokes: string[] };
     const annotationCanvas = root.querySelector<HTMLCanvasElement>('canvas[data-chart-surface="annotation"]');
     if (!annotationCanvas) throw new Error("Chart annotation canvas was not mounted");
+    const targetPixels = () => {
+      const context = annotationCanvas.getContext("2d");
+      if (!context) throw new Error("Chart annotation canvas has no 2D context");
+      const { data } = context.getImageData(0, 0, annotationCanvas.width, annotationCanvas.height);
+      const magenta: number[] = [];
+      const cyan: number[] = [];
+      for (let offset = 0; offset < data.length; offset += 4) {
+        const red = data[offset];
+        const green = data[offset + 1];
+        const blue = data[offset + 2];
+        const alpha = data[offset + 3];
+        if (alpha === 0) continue;
+        const pixel = offset / 4;
+        if (red >= 220 && green <= 30 && blue >= 220) magenta.push(pixel);
+        if (red <= 30 && green >= 220 && blue >= 220) cyan.push(pixel);
+      }
+      return { magenta, cyan, width: annotationCanvas.width, height: annotationCanvas.height };
+    };
+    const sameTargetPixels = (left: ReturnType<typeof targetPixels>, right: ReturnType<typeof targetPixels>) =>
+      left.width === right.width
+      && left.height === right.height
+      && left.magenta.length === right.magenta.length
+      && left.magenta.every((pixel, index) => pixel === right.magenta[index])
+      && left.cyan.length === right.cyan.length
+      && left.cyan.every((pixel, index) => pixel === right.cyan[index]);
+    const targetPixelCounts = (pixels: ReturnType<typeof targetPixels>) => ({
+      magenta: pixels.magenta.length,
+      cyan: pixels.cyan.length,
+    });
     const settleRender = async () => {
       await new Promise<void>((resolve) => requestAnimationFrame(() => requestAnimationFrame(() => resolve())));
     };
-    const annotationImage = () => annotationCanvas.toDataURL("image/png");
     const panToFutureEnd = () => {
       runtimeInternal.view.scrollToIndex(series.indexOfTime(futureEnd), 2);
       runtime.session.invalidate();
@@ -151,13 +181,14 @@ test("replay hides future and partially future drawings after panning past the r
       panToFutureEnd();
       await settleRender();
       const liveStrokes = [...probe.__futureDrawingStrokes];
+      const liveDrawingPixels = targetPixels();
 
       probe.__futureDrawingStrokes = [];
       runtime.startReplay();
       runtime.replaySeek(seekTime);
       panToFutureEnd();
       await settleRender();
-      const initialReplayImage = annotationImage();
+      const initialReplayPixels = targetPixels();
       runtime.replaySeek(seekTime + 3 * INTERVAL_MS);
       runtime.view.scrollToIndex(series.indexOfTime(futureEnd), 2);
       runtime.session.invalidate();
@@ -165,10 +196,10 @@ test("replay hides future and partially future drawings after panning past the r
       runtime.replaySeek(seekTime);
       panToFutureEnd();
       await settleRender();
-      const returnedReplayImage = annotationImage();
+      const returnedReplayPixels = targetPixels();
       runtime.session.invalidate();
       await settleRender();
-      const fullRedrawImage = annotationImage();
+      const fullRedrawPixels = targetPixels();
       const replayVirtualTime = runtime.getReplaySnapshot()?.virtualTime ?? null;
       const futureStrokesBeyondLastBar = probe.__futureDrawingStrokes.length;
 
@@ -184,8 +215,10 @@ test("replay hides future and partially future drawings after panning past the r
         replayVirtualTime,
         liveStrokes,
         futureStrokesBeyondLastBar,
-        replaySeekAndReturnMatches: returnedReplayImage === initialReplayImage,
-        replayMatchesFullRedraw: returnedReplayImage === fullRedrawImage,
+        liveDrawingPixelCounts: targetPixelCounts(liveDrawingPixels),
+        replayDrawingPixelCounts: targetPixelCounts(returnedReplayPixels),
+        replaySeekAndReturnMatches: sameTargetPixels(returnedReplayPixels, initialReplayPixels),
+        replayMatchesFullRedraw: sameTargetPixels(returnedReplayPixels, fullRedrawPixels),
         restoredStrokes,
       };
     } finally {
@@ -198,14 +231,17 @@ test("replay hides future and partially future drawings after panning past the r
     throw new Error(`${error instanceof Error ? error.message : String(error)}; locally served history requests: ${JSON.stringify(servedHistory)}; blocked external requests: ${JSON.stringify(blockedExternalRequests)}`);
   }
 
+  test.info().attach("replay-drawing-anchors.json", { body: JSON.stringify(evidence, null, 2), contentType: "application/json" });
   expect(evidence.replayVirtualTime).toBe(evidence.seekTime);
   expect(evidence.futureEnd).toBeGreaterThan(evidence.lastTime);
   expect(evidence.liveStrokes).toEqual(expect.arrayContaining(["#f000ff", "#00f0ff"]));
+  expect(evidence.liveDrawingPixelCounts.magenta).toBeGreaterThan(0);
+  expect(evidence.liveDrawingPixelCounts.cyan).toBeGreaterThan(0);
+  expect(evidence.replayDrawingPixelCounts).toEqual({ magenta: 0, cyan: 0 });
   expect(evidence.futureStrokesBeyondLastBar).toBe(0);
   expect(evidence.replaySeekAndReturnMatches).toBe(true);
   expect(evidence.replayMatchesFullRedraw).toBe(true);
   expect(evidence.restoredStrokes).toEqual(expect.arrayContaining(["#f000ff", "#00f0ff"]));
   expect(historyRequests.length, "the browser fixture must answer history locally").toBeGreaterThan(0);
   expect(blockedExternalRequests, "no external host was requested by this browser fixture").toEqual([]);
-  test.info().attach("replay-drawing-anchors.json", { body: JSON.stringify(evidence, null, 2), contentType: "application/json" });
 });
