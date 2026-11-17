@@ -57,11 +57,6 @@ test("Order Flow Profile renders Estimated OHLCV profile on non-footprint market
   test.setTimeout(60_000);
   const ohlcvBars = buildOhlcvOnlyBars(40);
   const footprintBars = buildFootprintBars(40);
-  let historyRequestCount = 0;
-  page.on("request", (request) => {
-    if (new URL(request.url()).pathname === "/history") historyRequestCount++;
-  });
-  await page.exposeFunction("__historyRequestCount", () => historyRequestCount);
 
   await page.route("**/*", (route) => {
     const url = new URL(route.request().url());
@@ -150,7 +145,13 @@ test("Order Flow Profile renders Estimated OHLCV profile on non-footprint market
         await new Promise((r) => setTimeout(r, 25));
       }
       const rt = harness.getChartRuntime(panelId)!;
-      const requestCount = (window as Window & { __historyRequestCount: () => Promise<number> }).__historyRequestCount;
+      const historyResourceCount = () => performance.getEntriesByType("resource").filter((entry) => {
+        try {
+          return new URL(entry.name, location.href).pathname === "/history";
+        } catch {
+          return false;
+        }
+      }).length;
       const drawingFrom = rt.pipeline.series.timeOfIndex(0);
       const drawingTo = rt.pipeline.series.timeOfIndex(rt.pipeline.series.length - 1);
       const profileDrawing = {
@@ -193,12 +194,12 @@ test("Order Flow Profile renders Estimated OHLCV profile on non-footprint market
         [profileDrawing as any],
         market,
       );
-      const requestsBeforeProfileDrawing = await requestCount();
+      const requestsBeforeProfileDrawing = historyResourceCount();
       drawnTexts.length = 0;
       drawProfile();
       const enDrawingTexts = [...drawnTexts];
       const enTexts = [...enIndicatorTexts, ...enDrawingTexts];
-      const requestsAfterProfileDrawing = await requestCount();
+      const requestsAfterProfileDrawing = historyResourceCount();
 
       const lastTime = rt.pipeline.series.timeOfIndex(rt.pipeline.series.length - 1);
       const snapTotal = rt.getAnalysisSnapshot({
