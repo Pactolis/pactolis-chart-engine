@@ -6,6 +6,7 @@ import { chartLocale, configureChartLocale } from "../dist/core/chartLocale.js";
 import { View } from "../dist/core/engine/view.js";
 import { FootprintSeries } from "../dist/core/model/footprint.js";
 import { drawAnalysisDrawings } from "../dist/core/render/analysisDrawings.js";
+import { buildChartAnalysisSnapshot } from "../dist/features/chart/analysisSnapshot.js";
 import {
   configurePerformanceTelemetry,
   isPerformanceTelemetryEnabled,
@@ -96,6 +97,35 @@ function configureLocale(tag) {
     timeZone: () => "UTC",
     translate: (key) => key,
     onLocaleChange: () => () => {},
+  });
+}
+
+function profileSnapshot(series, drawing) {
+  return buildChartAnalysisSnapshot({
+    panelId: "frvp-tooltip-test",
+    market: drawing.market,
+    timeframe: "1m",
+    intervalMs: MINUTE,
+    selectionGeneration: 1,
+    series,
+    analysis: {
+      market: drawing.market,
+      profileSettings: { enabled: false, mode: "visible", valueAreaPercent: 0.7, showPoc: true, showVah: true, showVal: true },
+      previousWeekStrategySettings: { enabled: false, visible: {}, groups: [], levels: [], labelFormat: "label", presets: [] },
+      previousWeekStrategyLevels: [],
+      mondayRangeSettings: { enabled: false, visible: {}, groups: [], levels: [], labelFormat: "label", presets: [] },
+      mondayRangeLevels: [],
+      nakedPocs: [],
+      referenceLevels: [],
+      drawings: { listForMarket: () => [drawing] },
+    },
+    analysisRevision: {
+      revision: 1,
+      market: drawing.market,
+      canonical: { status: "complete", market: drawing.market, runKey: "frvp-tooltip-test", generation: 1, revision: 1, failedPeriods: [] },
+    },
+    indicators: [],
+    options: { now: BASE_TIME + 5 * MINUTE },
   });
 }
 
@@ -216,6 +246,33 @@ test("fixed-range label follows chartLocale, and footprint arrival invalidates t
     assert.ok(texts.includes("Tahmini (OHLCV)"));
   } finally {
     configurePerformanceTelemetry({ enabled: wasTelemetryEnabled });
+    if (previousLocale) configureChartLocale(previousLocale);
+  }
+});
+
+test("Fixed Range analysis snapshot exposes a localized estimated tooltip label and preserves exact mode", () => {
+  const previousLocale = (() => {
+    try { return chartLocale(); } catch { return null; }
+  })();
+  const noFootprint = [ohlcvBar(0, 100, 101, 10), ohlcvBar(1, 100, 102, 30), ohlcvBar(2, 101, 102, 20)];
+  const estimatedHarness = makeDrawingHarness(noFootprint);
+  const exactHarness = makeDrawingHarness([exactBar(0, 100, 8, 2), exactBar(1, 101, 4, 6), exactBar(2, 102, 7, 3)]);
+  try {
+    configureLocale("en-US");
+    const enProfile = profileSnapshot(estimatedHarness.series, estimatedHarness.drawing).drawings[0].profile;
+    assert.equal(enProfile.provenance, "estimated");
+    assert.equal(enProfile.sourceLabel, "Estimated (OHLCV)");
+
+    configureLocale("tr-TR");
+    const trProfile = profileSnapshot(estimatedHarness.series, estimatedHarness.drawing).drawings[0].profile;
+    assert.equal(trProfile.provenance, "estimated");
+    assert.equal(trProfile.sourceLabel, "Tahmini (OHLCV)");
+
+    const exactProfile = profileSnapshot(exactHarness.series, exactHarness.drawing).drawings[0].profile;
+    assert.equal(exactProfile.poc, 101);
+    assert.equal(exactProfile.sourceLabel, undefined);
+    assert.equal(exactProfile.provenance, undefined);
+  } finally {
     if (previousLocale) configureChartLocale(previousLocale);
   }
 });

@@ -67,8 +67,9 @@ Kaynak: [rangeProfile.ts](../src/core/analysis/rangeProfile.ts),
   aralığın zaten chart serisinde bulunan mumlarını okur; history isteği, backfill veya abonelik açmaz.
 - Sonuçtaki `provenance` / `isEstimated`, profildeki kaynak türünü gösterir. `coverage` exact footprint
   kapsamını, `dataComplete` ise hesaplanan metriğin geçerliliğini anlatır; estimate'in exact veri
-  olduğunu belirtmez. Çizim `Estimated (OHLCV)` / `Tahmini (OHLCV)` etiketini aktif chart locale'iyle
-  görünür kılar.
+  olduğunu belirtmez. Çizim etiketi ile Fixed Range analysis snapshot/tooltip, `Estimated (OHLCV)` /
+  `Tahmini (OHLCV)` kaynağını aktif chart locale'iyle görünür kılar; tamamen exact sonuçların snapshot
+  alanları değişmez.
 
 ## GPU loss counters
 
