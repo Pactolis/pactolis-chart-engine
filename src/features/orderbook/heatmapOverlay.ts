@@ -54,6 +54,9 @@ export const HEATMAP_CPU_RASTER_CHART_BUDGET_BYTES = 32 * 1024 * 1024;
 /** Maximum combined RGBA byte footprint across all concurrent CPU heatmap raster caches (128 MiB). */
 export const HEATMAP_CPU_RASTER_MODULE_BUDGET_BYTES = 128 * 1024 * 1024;
 
+/** Rebuild once after a viewport has been quiet for 150 ms; motion paints directly. */
+export const HEATMAP_CPU_RASTER_QUIET_MS = 150;
+
 let moduleCpuRasterReservedBytes = 0;
 
 /** Computes RGBA8 backing-store byte size (`width * height * 4`) for valid positive dimensions. */
@@ -195,6 +198,8 @@ export class OrderbookHeatmapOverlay {
   private visibleCeiling = 0;
   private explicitVisible = true;
   private rasterCacheDisabledForTest = false;
+  private lastRasterViewportKey = "";
+  private rasterViewportChangedAt = Number.NEGATIVE_INFINITY;
   private visibilityObservedDoc: Document | null = null;
   private visibilityObservedCanvas: HTMLCanvasElement | null = null;
   private visibilityObserver: IntersectionObserver | null = null;
@@ -496,6 +501,8 @@ export class OrderbookHeatmapOverlay {
   /** Releases this overlay's offscreen CPU raster canvas and returns reserved bytes once. */
   releaseRasterCache(): void {
     this.lastRasterKey = "";
+    this.lastRasterViewportKey = "";
+    this.rasterViewportChangedAt = Number.NEGATIVE_INFINITY;
     this.rasterCacheHasCells = false;
     this.rasterCacheCeiling = 0;
     this.rasterCacheThreshold = 0;
@@ -608,7 +615,14 @@ export class OrderbookHeatmapOverlay {
       const canvasWidth = ctx.canvas?.width ?? 0;
       const canvasHeight = ctx.canvas?.height ?? 0;
       const rasterKey = `${this.frameCacheKey(view, series, frame)}|${canvasWidth}|${canvasHeight}`;
-      const canUseRasterCache =
+      const viewportKey = `${view.offsetX}|${view.colWidth}|${view.priceTop}|${view.pricePerPx}`;
+      const now = this.now();
+      if (this.lastRasterViewportKey && this.lastRasterViewportKey !== viewportKey) {
+        this.rasterViewportChangedAt = now;
+      }
+      this.lastRasterViewportKey = viewportKey;
+      const viewportMoving = now - this.rasterViewportChangedAt < HEATMAP_CPU_RASTER_QUIET_MS;
+      const rasterEligible =
         !this.rasterCacheDisabledForTest &&
         !hidden &&
         canvasWidth > 0 &&
@@ -616,7 +630,11 @@ export class OrderbookHeatmapOverlay {
         typeof ctx.canvas?.ownerDocument?.createElement === "function" &&
         typeof ctx.drawImage === "function";
 
-      if (!canUseRasterCache && (this.rasterCacheCanvas || this.rasterReservedBytes > 0)) {
+      const canUseRasterCache = rasterEligible && !viewportMoving;
+      if (rasterEligible && viewportMoving) {
+        incrementPerformanceCounter("chart.cpu.heatmap.raster.skip");
+      }
+      if (!rasterEligible && (this.rasterCacheCanvas || this.rasterReservedBytes > 0)) {
         this.releaseRasterCache();
       }
 
