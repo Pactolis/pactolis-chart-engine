@@ -52,6 +52,10 @@ interface RepetitionMeasurement {
   frames: number;
   tradesDelivered?: number;
   metrics: Record<MetricName, MetricStats>;
+  frameTotal: MetricStats;
+  flushEvents: number;
+  submitEvents: number;
+  unframedCostEvents: number;
 }
 
 interface BackendMeasurement {
@@ -79,8 +83,20 @@ interface BackendMeasurement {
     {
       repetitions: RepetitionMeasurement[];
       combined: Record<MetricName, MetricStats>;
+      combinedFrameTotal: MetricStats;
     }
   >;
+}
+
+interface FrameMetricEvent {
+  frameTimestamp: number | null;
+  metric: MetricName;
+  durationMs: number;
+}
+
+interface FrameCostBucket {
+  frameTimestamps: number[];
+  events: FrameMetricEvent[];
 }
 
 function launchArgsFor(kind: BackendKind, variant: "no-vulkan-compositor" | "vulkan-compositor" = "no-vulkan-compositor"): string[] {
@@ -137,6 +153,30 @@ function combineBuckets(buckets: Array<Record<string, number[]> | undefined>): R
       summarize(buckets.flatMap((bucket) => bucket?.[metric] ?? [])),
     ]),
   ) as Record<MetricName, MetricStats>;
+}
+
+function summarizeFrameTotal(bucket: FrameCostBucket, backend: BackendKind): MetricStats {
+  const totalByFrame = new Map<number, number>(bucket.frameTimestamps.map((timestamp): [number, number] => [timestamp, 0]));
+  for (const event of bucket.events) {
+    if (event.frameTimestamp === null) continue;
+    if (event.metric !== "chart.gpu.flush.ms"
+      && !(backend === "webgpu" && event.metric === "gpu.backend.webgpu.frame.submit.ms")) continue;
+    totalByFrame.set(event.frameTimestamp, (totalByFrame.get(event.frameTimestamp) ?? 0) + event.durationMs);
+  }
+  return summarize([...totalByFrame.values()]);
+}
+
+function combineFrameTotals(buckets: FrameCostBucket[], backend: BackendKind): MetricStats {
+  return summarize(buckets.flatMap((bucket) => {
+    const totalByFrame = new Map<number, number>(bucket.frameTimestamps.map((timestamp): [number, number] => [timestamp, 0]));
+    for (const event of bucket.events) {
+      if (event.frameTimestamp === null) continue;
+      if (event.metric !== "chart.gpu.flush.ms"
+        && !(backend === "webgpu" && event.metric === "gpu.backend.webgpu.frame.submit.ms")) continue;
+      totalByFrame.set(event.frameTimestamp, (totalByFrame.get(event.frameTimestamp) ?? 0) + event.durationMs);
+    }
+    return [...totalByFrame.values()];
+  }));
 }
 
 function buildDenseFootprintBars(anchorTo: number) {
@@ -386,6 +426,15 @@ async function measureBackend(
       }) => {
         const timingsMs: Record<string, number> = {};
         const markStart = performance.now();
+        let currentFrameTimestamp: number | null = null;
+        const nativeRequestAnimationFrame = window.requestAnimationFrame.bind(window);
+        window.requestAnimationFrame = ((callback: FrameRequestCallback) =>
+          nativeRequestAnimationFrame((timestamp) => {
+            currentFrameTimestamp = timestamp;
+            callback(timestamp);
+          })) as typeof window.requestAnimationFrame;
+        let activeFrameTimestamps: number[] | null = null;
+        let activeFrameEvents: FrameMetricEvent[] | null = null;
         document.body.replaceChildren();
         document.body.style.margin = "0";
         document.body.style.overflow = "hidden";
@@ -417,9 +466,12 @@ async function measureBackend(
           import("/src/core/gpu/webgpu/webgpuDevice.ts"),
         ]);
 
-        const nextRaf = () =>
+        const nextRaf = (recordFrame = true) =>
           Promise.race([
-            new Promise<void>((resolve) => requestAnimationFrame(() => resolve())),
+            new Promise<void>((resolve) => requestAnimationFrame((timestamp) => {
+              if (recordFrame) activeFrameTimestamps?.push(timestamp);
+              resolve();
+            })),
             new Promise<never>((_, reject) => setTimeout(() => reject(new Error(`rAF stalled >5000ms on ${backend}`)), 5_000)),
           ]);
 
@@ -428,6 +480,11 @@ async function measureBackend(
         (globalThis as any).__webgpuFlushBenchRecord = (name: string, durationMs: number) => {
           if (!activeBucket || !tracked.has(name)) return;
           (activeBucket[name] ??= []).push(durationMs);
+          activeFrameEvents?.push({
+            frameTimestamp: currentFrameTimestamp,
+            metric: name as MetricName,
+            durationMs,
+          });
         };
 
         const tradeListeners = new Map<string, Set<(trade: any) => void>>();
@@ -592,7 +649,12 @@ async function measureBackend(
         activeBucket = null;
         const crosshairInteractionOnlyGpuFlushCount = (interactionCheckBucket["chart.gpu.flush.ms"] ?? []).length;
 
-        const scenarioBuckets: Record<ScenarioKind, Array<{ frames: number; tradesDelivered?: number; bucket: Record<string, number[]> }>> = {
+        const scenarioBuckets: Record<ScenarioKind, Array<{
+          frames: number;
+          tradesDelivered?: number;
+          bucket: Record<string, number[]>;
+          frameBucket: FrameCostBucket;
+        }>> = {
           pan: [],
           live: [],
           "crosshair-static-redraw": [],
@@ -602,7 +664,10 @@ async function measureBackend(
         const panStart = performance.now();
         for (let rep = 0; rep < repetitions; rep++) {
           const bucket: Record<string, number[]> = {};
+          const frameBucket: FrameCostBucket = { frameTimestamps: [], events: [] };
           activeBucket = bucket;
+          activeFrameTimestamps = frameBucket.frameTimestamps;
+          activeFrameEvents = frameBucket.events;
           const half = Math.floor(panFrames / 2);
           for (let frame = 0; frame < panFrames; frame++) {
             // Positive offsetX shifts bar 0 right (pans backward into older bars),
@@ -615,8 +680,10 @@ async function measureBackend(
             await nextRaf();
           }
           activeBucket = null;
+          activeFrameTimestamps = null;
+          activeFrameEvents = null;
           await syncBackendWork();
-          scenarioBuckets.pan.push({ frames: panFrames, bucket });
+          scenarioBuckets.pan.push({ frames: panFrames, bucket, frameBucket });
         }
         timingsMs.pan = Math.round(performance.now() - panStart);
 
@@ -629,7 +696,10 @@ async function measureBackend(
             return [markets[index], s.timeOfIndex(s.length - 1)] as const;
           }));
           const bucket: Record<string, number[]> = {};
+          const frameBucket: FrameCostBucket = { frameTimestamps: [], events: [] };
           activeBucket = bucket;
+          activeFrameTimestamps = frameBucket.frameTimestamps;
+          activeFrameEvents = frameBucket.events;
           let tradesDelivered = 0;
           const startedAt = performance.now();
           let lastTickAt = startedAt;
@@ -661,10 +731,12 @@ async function measureBackend(
             }
             await nextRaf();
           }
-          for (let drain = 0; drain < 4; drain++) await nextRaf();
+          for (let drain = 0; drain < 4; drain++) await nextRaf(false);
           activeBucket = null;
+          activeFrameTimestamps = null;
+          activeFrameEvents = null;
           await syncBackendWork();
-          scenarioBuckets.live.push({ frames: liveFrames, tradesDelivered, bucket });
+          scenarioBuckets.live.push({ frames: liveFrames, tradesDelivered, bucket, frameBucket });
         }
         timingsMs.live = Math.round(performance.now() - liveStart);
 
@@ -673,7 +745,10 @@ async function measureBackend(
         const crosshairStart = performance.now();
         for (let rep = 0; rep < repetitions; rep++) {
           const bucket: Record<string, number[]> = {};
+          const frameBucket: FrameCostBucket = { frameTimestamps: [], events: [] };
           activeBucket = bucket;
+          activeFrameTimestamps = frameBucket.frameTimestamps;
+          activeFrameEvents = frameBucket.events;
           for (let frame = 0; frame < crosshairFrames; frame++) {
             for (const runtime of runtimes()) {
               const area = runtime.view.area;
@@ -685,8 +760,10 @@ async function measureBackend(
             await nextRaf();
           }
           activeBucket = null;
+          activeFrameTimestamps = null;
+          activeFrameEvents = null;
           await syncBackendWork();
-          scenarioBuckets["crosshair-static-redraw"].push({ frames: crosshairFrames, bucket });
+          scenarioBuckets["crosshair-static-redraw"].push({ frames: crosshairFrames, bucket, frameBucket });
         }
         timingsMs.crosshair = Math.round(performance.now() - crosshairStart);
 
@@ -726,32 +803,34 @@ async function measureBackend(
       },
     );
 
+    const summarizeScenario = (entries: Array<{
+      frames: number;
+      tradesDelivered?: number;
+      bucket: Record<string, number[]>;
+      frameBucket: FrameCostBucket;
+    }>) => ({
+      repetitions: entries.map((entry, idx) => {
+        const costEvents = entry.frameBucket.events.filter((event) =>
+          event.metric === "chart.gpu.flush.ms" || event.metric === "gpu.backend.webgpu.frame.submit.ms",
+        );
+        return {
+          repetition: idx + 1,
+          frames: entry.frames,
+          ...(entry.tradesDelivered !== undefined ? { tradesDelivered: entry.tradesDelivered } : {}),
+          metrics: summarizeBucket(entry.bucket),
+          frameTotal: summarizeFrameTotal(entry.frameBucket, backend),
+          flushEvents: costEvents.filter((event) => event.metric === "chart.gpu.flush.ms").length,
+          submitEvents: costEvents.filter((event) => event.metric === "gpu.backend.webgpu.frame.submit.ms").length,
+          unframedCostEvents: costEvents.filter((event) => event.frameTimestamp === null).length,
+        };
+      }),
+      combined: combineBuckets(entries.map((entry) => entry.bucket)),
+      combinedFrameTotal: combineFrameTotals(entries.map((entry) => entry.frameBucket), backend),
+    });
     const scenarios = {
-      pan: {
-        repetitions: result.scenarioBuckets.pan.map((entry, idx) => ({
-          repetition: idx + 1,
-          frames: entry.frames,
-          metrics: summarizeBucket(entry.bucket),
-        })),
-        combined: combineBuckets(result.scenarioBuckets.pan.map((entry) => entry.bucket)),
-      },
-      live: {
-        repetitions: result.scenarioBuckets.live.map((entry, idx) => ({
-          repetition: idx + 1,
-          frames: entry.frames,
-          tradesDelivered: entry.tradesDelivered,
-          metrics: summarizeBucket(entry.bucket),
-        })),
-        combined: combineBuckets(result.scenarioBuckets.live.map((entry) => entry.bucket)),
-      },
-      "crosshair-static-redraw": {
-        repetitions: result.scenarioBuckets["crosshair-static-redraw"].map((entry, idx) => ({
-          repetition: idx + 1,
-          frames: entry.frames,
-          metrics: summarizeBucket(entry.bucket),
-        })),
-        combined: combineBuckets(result.scenarioBuckets["crosshair-static-redraw"].map((entry) => entry.bucket)),
-      },
+      pan: summarizeScenario(result.scenarioBuckets.pan),
+      live: summarizeScenario(result.scenarioBuckets.live),
+      "crosshair-static-redraw": summarizeScenario(result.scenarioBuckets["crosshair-static-redraw"]),
     };
 
     const totalFlushCount =
@@ -785,9 +864,10 @@ async function measureBackend(
   }
 }
 
-test("4- and 8-chart WebGPU vs WebGL2 chart.gpu.flush.ms comparison across pan, live and crosshair", async ({ baseURL }, testInfo) => {
+test("4- and 8-chart per-frame GPU cost comparison across pan, live and crosshair", async ({ baseURL }, testInfo) => {
   test.setTimeout(600_000);
   const resolvedBaseURL = baseURL ?? testInfo.project.use.baseURL ?? "http://127.0.0.1:4173";
+  const mainWithoutCoordinatorBaseline = process.env.CE_GPU_FRAME_BASELINE === "main";
 
   let webgpuProbe = await probeWebGpuCapability(resolvedBaseURL, "no-vulkan-compositor");
   if (!webgpuProbe.ok) {
@@ -824,12 +904,18 @@ test("4- and 8-chart WebGPU vs WebGL2 chart.gpu.flush.ms comparison across pan, 
     expect(webgpu.active).toBe("webgpu");
     expect(webgpu.panelBackends).toEqual(markets.map(() => "webgpu"));
     expect(webgpu.fallbacks).toEqual([]);
-    expect(webgpu.counters["gpu.backend.webgpu.frame.submits"] ?? 0).toBeGreaterThan(0);
+    if (mainWithoutCoordinatorBaseline) {
+      expect(webgpu.counters["gpu.backend.webgpu.frame.submits"] ?? 0).toBe(0);
+    } else {
+      expect(webgpu.counters["gpu.backend.webgpu.frame.submits"] ?? 0).toBeGreaterThan(0);
+    }
     expect(webgpu.crosshairInteractionOnlyGpuFlushCount).toBe(0);
 
     const comparison = (["pan", "live", "crosshair-static-redraw"] as const).map((scenario) => {
       const glFlush = webgl2.scenarios[scenario].combined["chart.gpu.flush.ms"];
       const gpuFlush = webgpu.scenarios[scenario].combined["chart.gpu.flush.ms"];
+      const glFrameTotal = webgl2.scenarios[scenario].combinedFrameTotal;
+      const gpuFrameTotal = webgpu.scenarios[scenario].combinedFrameTotal;
       const glFootprint = webgl2.scenarios[scenario].combined["chart.gpu.footprint.ms"];
       const gpuFootprint = webgpu.scenarios[scenario].combined["chart.gpu.footprint.ms"];
       const glDraw = webgl2.scenarios[scenario].combined["chart.surface.gpu.draw.ms"];
@@ -838,23 +924,36 @@ test("4- and 8-chart WebGPU vs WebGL2 chart.gpu.flush.ms comparison across pan, 
 
       for (const rep of webgl2.scenarios[scenario].repetitions) {
         expect(rep.metrics["chart.gpu.flush.ms"].count, `webgl2 ${chartCount} charts ${scenario} rep ${rep.repetition} count`).toBeGreaterThan(0);
+        expect(rep.frameTotal.count, `webgl2 ${chartCount} charts ${scenario} rep ${rep.repetition} measured frames`).toBe(rep.frames);
+        expect(rep.unframedCostEvents, `webgl2 ${chartCount} charts ${scenario} rep ${rep.repetition} unframed cost events`).toBe(0);
+        expect(rep.flushEvents, `webgl2 ${chartCount} charts ${scenario} rep ${rep.repetition} chart flushes`).toBe(chartCount * rep.frames);
       }
       for (const rep of webgpu.scenarios[scenario].repetitions) {
         expect(rep.metrics["chart.gpu.flush.ms"].count, `webgpu ${chartCount} charts ${scenario} rep ${rep.repetition} count`).toBeGreaterThan(0);
-        const sharedSubmits = rep.metrics["gpu.backend.webgpu.frame.submit.ms"].count;
-        expect(sharedSubmits, `webgpu ${chartCount} charts ${scenario} rep ${rep.repetition} shared submits`).toBeGreaterThan(0);
-        expect(sharedSubmits, `webgpu ${chartCount} charts ${scenario} rep ${rep.repetition} at most one submit per frame`).toBeLessThanOrEqual(rep.frames);
+        expect(rep.frameTotal.count, `webgpu ${chartCount} charts ${scenario} rep ${rep.repetition} measured frames`).toBe(rep.frames);
+        expect(rep.unframedCostEvents, `webgpu ${chartCount} charts ${scenario} rep ${rep.repetition} unframed cost events`).toBe(0);
+        expect(rep.flushEvents, `webgpu ${chartCount} charts ${scenario} rep ${rep.repetition} chart flushes`).toBe(chartCount * rep.frames);
+        if (mainWithoutCoordinatorBaseline) {
+          expect(rep.submitEvents, `webgpu main ${chartCount} charts ${scenario} rep ${rep.repetition} separate submit metrics`).toBe(0);
+        } else {
+          expect(rep.submitEvents, `webgpu ${chartCount} charts ${scenario} rep ${rep.repetition} shared submits`).toBe(rep.frames);
+          expect(rep.submitEvents, `webgpu ${chartCount} charts ${scenario} rep ${rep.repetition} at most one submit per frame`).toBeLessThanOrEqual(rep.frames);
+        }
       }
 
       const round3 = (v: number) => Math.round(v * 1_000) / 1_000;
       const flushMeanRatio = glFlush.meanMs > 0 ? round3(gpuFlush.meanMs / glFlush.meanMs) : null;
       const flushP95Ratio = glFlush.p95Ms > 0 ? round3(gpuFlush.p95Ms / glFlush.p95Ms) : null;
+      const frameTotalMeanRatio = glFrameTotal.meanMs > 0 ? round3(gpuFrameTotal.meanMs / glFrameTotal.meanMs) : null;
+      const frameTotalP95Ratio = glFrameTotal.p95Ms > 0 ? round3(gpuFrameTotal.p95Ms / glFrameTotal.p95Ms) : null;
       return {
         scenario,
-        webgl2: { flush: glFlush, footprint: glFootprint, surfaceGpuDraw: glDraw },
-        webgpu: { flush: gpuFlush, footprint: gpuFootprint, surfaceGpuDraw: gpuDraw, sharedFrameSubmit: gpuFrameSubmit },
+        webgl2: { flush: glFlush, frameTotal: glFrameTotal, footprint: glFootprint, surfaceGpuDraw: glDraw },
+        webgpu: { flush: gpuFlush, frameTotal: gpuFrameTotal, footprint: gpuFootprint, surfaceGpuDraw: gpuDraw, sharedFrameSubmit: gpuFrameSubmit },
         flushMeanRatio,
         flushP95Ratio,
+        frameTotalMeanRatio,
+        frameTotalP95Ratio,
         within2xMeanBudget: flushMeanRatio !== null ? flushMeanRatio <= 2 : null,
         within2xP95Budget: flushP95Ratio !== null ? flushP95Ratio <= 2 : null,
       };
@@ -881,10 +980,14 @@ test("4- and 8-chart WebGPU vs WebGL2 chart.gpu.flush.ms comparison across pan, 
     });
   }
 
-  const report = { webgpuProbe, measurements };
+  const report = {
+    implementation: mainWithoutCoordinatorBaseline ? "main without WebGpuFrameCoordinator" : "PR branch with WebGpuFrameCoordinator",
+    webgpuProbe,
+    measurements,
+  };
 
-  console.log("WEBGPU_FLUSH_COMPARISON_EVIDENCE", JSON.stringify(report));
-  await testInfo.attach("webgpu-flush-stage3-evidence.json", {
+  console.log("WEBGPU_FRAME_TOTAL_EVIDENCE", JSON.stringify(report));
+  await testInfo.attach("webgpu-frame-total-stage3-evidence.json", {
     body: JSON.stringify(report, null, 2),
     contentType: "application/json",
   });
