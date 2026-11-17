@@ -1,174 +1,76 @@
 // Canvas2D layer: cell volume numbers, price/time axes, crosshair, HUD.
 import type { View } from "../engine/view.js";
 import type { FootprintBar } from "../types.js";
-import { neighbourBin, quantizeToStep } from "../priceStep.js";
-import { cellImbalance, type FootprintSeries } from "../model/footprint.js";
-import { cellAverageTradeSize, cellAverageTradeSizes, cellDeltaPercent, cellTradeCounts, quoteVolumeForBar } from "../model/footprintCellMetrics.js";
+import type { FootprintSeries } from "../model/footprint.js";
 import { settings, type ChartViewConfig } from "../settings.js";
-import { cellTextModeFor } from "./chartLod.js";
 import type { IndicatorPaneRender } from "../indicatorTypes.js";
 import {
-  drawIndicatorScaleControls,
-  drawPriceScaleControls,
-  touchPriceScaleControlSpan,
   type IndicatorScaleControlRect,
   type PriceScaleControlId,
   type PriceScaleControlRect,
 } from "./axisControlsRenderer.js";
 import {
-  drawTouchMenuButton,
   pointInTouchControl,
-  touchMenuButtonRect,
-  TOUCH_MENU_BUTTON_RESERVE,
   type TouchMenuButtonRect,
 } from "./touchControlsRenderer.js";
-import { HUD_ROW_HEIGHT, hudMaxRows, layoutHud, type HudPart } from "./hudLayout.js";
-import { configDecimals, placeVerticalLabels } from "../axisLabelUtils.js";
 import { AxisLayerCache } from "./axisLayerCache.js";
-import { drawCrosshairPriceLabel, drawPriceMarkers, type PriceAxisKeepOut, type PriceMarker } from "./priceAxisRenderer.js";
-import { drawCrosshairTimeLabel, type TimeMarker } from "./timeAxisRenderer.js";
-import {
-  calculateVolumeProfile,
-  sessionBars,
-  type VolumeProfileResult,
-  type VolumeProfileSettings,
-} from "../analysis/volumeProfile.js";
-import {
-  aggregateTpoBrackets,
-  buildTpoBracketSpans,
-  calculateTpoProfile,
-  effectiveTpoBracketMs,
-  mergeTpoSessionSpans,
-  tpoBracketLabel,
-  tpoSessionRange,
-  tpoSessionPartial,
-  type TpoBracketBar,
-} from "../analysis/tpoProfile.js";
+import { drawPriceMarkers, type PriceMarker } from "./priceAxisRenderer.js";
+import { type TimeMarker } from "./timeAxisRenderer.js";
+import type { VolumeProfileSettings } from "../analysis/volumeProfile.js";
 import type { NakedPocLevel } from "../analysis/nakedPoc.js";
 import type { ReferenceLevel } from "../analysis/referenceLevels.js";
 import type { PreviousWeekStrategyLevel, PreviousWeekStrategySettings } from "../analysis/previousWeekStrategy.js";
 import type { MondayRangeLevel, MondayRangeSettings } from "../analysis/mondayRange.js";
-import type { StrategyLevel, StrategyLineStyle } from "../analysis/strategyLevels.js";
-import { periodPrefix, periodUnit } from "../analysis/periods.js";
-import { uiColor, tpoPalette, cellDimSell, cellDimBuy, nakedPocPalette, lineLabelPillBg, crosshairLineColor, syncCrosshairLineColor } from "../ui/seriesPalette.js";
-import { levelStartX } from "./levelAnchor.js";
 import { isPerformanceTelemetryEnabled, recordPerformanceDuration } from "../performanceTelemetry.js";
 import { resolveChartDisplayOptions, type ResolvedChartDisplayOptions } from "../model/chartDisplayOptions.js";
+import { drawHud, type HudRendererDeps } from "./overlay/hudRenderer.js";
+import {
+  drawTpo,
+  type TpoCacheState,
+  type TpoProfileHit,
+  type TpoProfileHitZone,
+  type TpoRenderHost,
+} from "./overlay/tpoPaintHelpers.js";
+import {
+  renderInteractionPass,
+  type Crosshair,
+  type InteractionOverlayHost,
+} from "./overlay/interactionOverlayRenderer.js";
+import {
+  drawCells,
+  drawIndicatorPriceOverlays,
+  drawLastPrice,
+  drawLineLabels,
+  drawMondayRange,
+  drawNakedPocs,
+  drawPreviousWeekStrategy,
+  drawReferenceLevels,
+  drawSubPanes,
+  drawVolumeProfile,
+  lineLabelPriority,
+  priceAxisKeepOut,
+  type AnnotationRendererHost,
+  type FormattedCellText,
+  type IndicatorAxisRect,
+  type LineLabelEntry,
+  type VolumeProfileCacheState,
+} from "./overlay/annotationRenderer.js";
 
-export interface Crosshair {
-  x: number;
-  y: number;
-  visible: boolean;
-  /** The user is on a touch screen: the overlay shows finger-sized scale buttons and the corner menu button. */
-  touch?: boolean;
-}
-
-export interface TpoProfileHit {
-  sessionStart: number;
-  groupSessionStarts: readonly number[];
-  canMergeLeft: boolean;
-  canUndoMerges: boolean;
-}
-
-interface TpoProfileHitZone extends TpoProfileHit {
-  left: number;
-  right: number;
-}
-
-const hudNumberFormatters = new Map<string, Intl.NumberFormat>();
-
-function fmtFixed(v: number, digits: number, locale?: string, grouping = false): string {
-  const legacyValue = v.toFixed(digits);
-  if (!locale || (locale === "en-US" && !grouping) || !Number.isInteger(digits) || digits < 0 || digits > 100) return legacyValue;
-  const key = `${locale}:${digits}:${grouping}`;
-  let formatter = hudNumberFormatters.get(key);
-  if (!formatter) {
-    formatter = new Intl.NumberFormat(locale, { useGrouping: grouping, minimumFractionDigits: digits, maximumFractionDigits: digits });
-    if (hudNumberFormatters.size >= 32) hudNumberFormatters.clear();
-    hudNumberFormatters.set(key, formatter);
-  }
-  return formatter.format(Number(legacyValue));
-}
-
-function fmtVol(v: number, locale?: string): string {
-  if (v >= 1000) return fmtFixed(v / 1000, 1, locale) + "k";
-  if (v >= 100) return fmtFixed(v, 0, locale);
-  if (v >= 1) return fmtFixed(v, 1, locale);
-  return fmtFixed(v, 3, locale);
-}
-
-/** Format a USDT notional value (qty * price) compactly. */
-function fmtNotional(v: number, locale?: string): string {
-  if (v >= 1e6) return fmtFixed(v / 1e6, 2, locale) + "M";
-  if (v >= 1e3) return fmtFixed(v / 1e3, 1, locale) + "k";
-  return fmtFixed(v, 0, locale);
-}
-
-function lineLabelPriority(text: string): number {
-  if (/current|last/i.test(text)) return 100;
-  if (/PPOC|POC|NPOC/i.test(text)) return 70;
-  if (/VAH|VAL|VWAP/i.test(text)) return 60;
-  if (/LVW|HVW|D-H|D-L|H-H|H-L/i.test(text)) return 50;
-  return 40;
-}
-
-const TPO_BLOCK_TONES = [-0.2, -0.1, 0.03, -0.15, 0.07, -0.05];
-const TPO_MIN_BLOCK_CELL_HEIGHT = 2;
-const TPO_MIN_BLOCK_CELL_WIDTH = 1.5;
-const tpoBlockColorCache = new Map<string, string>();
-
-function tpoBlockFillColor(baseColor: string, bracketIndex: number): string {
-  const toneIndex = Math.abs(bracketIndex) % TPO_BLOCK_TONES.length;
-  const key = `${baseColor}:${toneIndex}`;
-  const cached = tpoBlockColorCache.get(key);
-  if (cached) return cached;
-  const color = mixHexColor(baseColor, TPO_BLOCK_TONES[toneIndex]);
-  tpoBlockColorCache.set(key, color);
-  return color;
-}
-
-function mixHexColor(hex: string, amount: number): string {
-  const raw = hex.startsWith("#") ? hex.slice(1) : hex;
-  if (raw.length !== 6) return hex;
-  const value = Number.parseInt(raw, 16);
-  if (!Number.isFinite(value)) return hex;
-  const mix = amount < 0 ? 0 : 255;
-  const ratio = Math.min(1, Math.abs(amount));
-  const r = ((value >> 16) & 255) + (mix - ((value >> 16) & 255)) * ratio;
-  const g = ((value >> 8) & 255) + (mix - ((value >> 8) & 255)) * ratio;
-  const b = (value & 255) + (mix - (value & 255)) * ratio;
-  return `#${toHexByte(r)}${toHexByte(g)}${toHexByte(b)}`;
-}
-
-function toHexByte(value: number): string {
-  return Math.round(value).toString(16).padStart(2, "0");
-}
-
-function fmtCellValue(v: number, bp: number, showNotional: boolean): string {
-  return showNotional ? fmtNotional(v * bp) : fmtVol(v);
-}
-
-interface FormattedCellText {
-  centerText?: string;
-  centerColor?: string;
-  leftText?: string;
-  leftColor?: string;
-  rightText?: string;
-  rightColor?: string;
-}
+export type { Crosshair } from "./overlay/interactionOverlayRenderer.js";
+export type { TpoProfileHit } from "./overlay/tpoPaintHelpers.js";
 
 export class Overlay {
   /** When true, cell/HUD volumes are shown as USDT notional (qty * price). */
   showNotional = true;
-  private profileCache: { key: string; result: VolumeProfileResult; maxVolume: number } | null = null;
-  private tpoCache: { key: string; brackets: TpoBracketBar[]; groups: { sessionStarts: number[]; firstBracketIndex: number; lastBracketIndex: number; firstIdx: number; lastIdx: number; firstSpanIndex: number; partial: boolean; result: ReturnType<typeof calculateTpoProfile> }[] } | null = null;
+  private profileCache: VolumeProfileCacheState | null = null;
+  private tpoCache: TpoCacheState | null = null;
   private priceMarkers: PriceMarker[] = [];
   private timeMarkers: TimeMarker[] = [];
-  private lineLabels: { price: number; text: string; color: string; priority: number }[] = [];
+  private lineLabels: LineLabelEntry[] = [];
   private priceScaleControlRects: PriceScaleControlRect[] = [];
   private indicatorScaleControlRects: IndicatorScaleControlRect[] = [];
   private touchMenuButton: TouchMenuButtonRect | null = null;
-  private indicatorAxisRects: Array<{ paneId: string; plotX: number; x: number; y: number; w: number; h: number }> = [];
+  private indicatorAxisRects: IndicatorAxisRect[] = [];
   private tpoMergeLeftSessionStarts: ReadonlySet<number> = new Set();
   private tpoProfileHitZones: TpoProfileHitZone[] = [];
   private interactionHudWasActive = false;
@@ -177,6 +79,10 @@ export class Overlay {
   private chartConfig: ChartViewConfig | null = null;
   private readonly axisCache = new AxisLayerCache();
   private readonly cellTextCache = new WeakMap<FootprintBar, { key: string; cellRevision: number; entries: Map<number, FormattedCellText> }>();
+  private readonly hudDeps: HudRendererDeps;
+  private readonly tpoHost: TpoRenderHost;
+  private readonly interactionHost: InteractionOverlayHost;
+  private readonly annotationHost: AnnotationRendererHost;
 
   getPriceScaleControlAt(x: number, y: number): PriceScaleControlId | null {
     const hit = this.priceScaleControlRects.find((rect) =>
@@ -293,7 +199,67 @@ export class Overlay {
       crosshair: Crosshair,
     ) => void,
     private readonly getDisplayOptions?: () => ResolvedChartDisplayOptions,
-  ) {}
+  ) {
+    const self = this;
+    this.hudDeps = {
+      get showNotional() { return self.showNotional; },
+      get displayOptions() { return self.displayOptions; },
+      get getSyncCrosshairTime() { return self.getSyncCrosshairTime; },
+      get onHudText() { return self.onHudText; },
+    };
+    this.tpoHost = {
+      get ctx() { return self.ctx; },
+      get chartConfig() { return self.chartConfig; },
+      get tpoCache() { return self.tpoCache; },
+      set tpoCache(value) { self.tpoCache = value; },
+      get tpoMergeLeftSessionStarts() { return self.tpoMergeLeftSessionStarts; },
+      get getProfileSettings() { return self.getProfileSettings; },
+      pushTpoProfileHitZone(zone) { self.tpoProfileHitZones.push(zone); },
+    };
+    this.interactionHost = {
+      get ctx() { return self.ctx; },
+      get interactionCtx() { return self.interactionCtx; },
+      get showNotional() { return self.showNotional; },
+      get displayOptions() { return self.displayOptions; },
+      get getSyncCrosshairTime() { return self.getSyncCrosshairTime; },
+      get onHudText() { return self.onHudText; },
+      get isMainChartSuppressed() { return self.isMainChartSuppressed; },
+      get getIndicatorPanes() { return self.getIndicatorPanes; },
+      get drawInteractionForeground() { return self.drawInteractionForeground; },
+      get drawOrderbookHover() { return self.drawOrderbookHover; },
+      resetInteractionHitRects() {
+        self.priceScaleControlRects = [];
+        self.indicatorScaleControlRects = [];
+        self.touchMenuButton = null;
+      },
+      setPriceScaleControlRects(rects) { self.priceScaleControlRects = rects; },
+      pushIndicatorScaleControlRects(rects) { self.indicatorScaleControlRects.push(...rects); },
+      setTouchMenuButton(rect) { self.touchMenuButton = rect; },
+    };
+    this.annotationHost = {
+      get ctx() { return self.ctx; },
+      get showNotional() { return self.showNotional; },
+      get chartConfig() { return self.chartConfig; },
+      get profileCache() { return self.profileCache; },
+      set profileCache(value) { self.profileCache = value; },
+      get cellTextCache() { return self.cellTextCache; },
+      get lineLabels() { return self.lineLabels; },
+      get getProfileSettings() { return self.getProfileSettings; },
+      get getPreviousWeekStrategySettings() { return self.getPreviousWeekStrategySettings; },
+      get getPreviousWeekStrategyLevels() { return self.getPreviousWeekStrategyLevels; },
+      get getMondayRangeSettings() { return self.getMondayRangeSettings; },
+      get getMondayRangeLevels() { return self.getMondayRangeLevels; },
+      get getNakedPocs() { return self.getNakedPocs; },
+      get getReferenceLevels() { return self.getReferenceLevels; },
+      get getIndicatorPanes() { return self.getIndicatorPanes; },
+      get getIndicatorPriceOverlays() { return self.getIndicatorPriceOverlays; },
+      get drawIndicatorPaneBackgroundFn() { return self.drawIndicatorPaneBackgroundFn; },
+      pushIndicatorAxisRect(rect) { self.indicatorAxisRects.push(rect); },
+      pushIndicatorScaleControlRects(rects) { self.indicatorScaleControlRects.push(...rects); },
+      queueLineObject(price, text, color, priority) { self.queueLineObject(price, text, color, priority); },
+      queuePriceMarker(price, color, priority) { self.queuePriceMarker(price, color, priority); },
+    };
+  }
 
   private readonly defaultDisplayOptions = resolveChartDisplayOptions(undefined);
 
@@ -366,19 +332,19 @@ export class Overlay {
       try {
         if (isIndicatorLayer) {
           indicatorBatchDrawn = true;
-          this.drawSubPanes(view, series, range, crosshair, false);
-          if (!mainSuppressed) this.drawIndicatorPriceOverlays(view, series, range, crosshair);
+          drawSubPanes(this.annotationHost, view, series, range, crosshair, false);
+          if (!mainSuppressed) drawIndicatorPriceOverlays(this.annotationHost, view, series, range, crosshair);
           continue;
         }
 
         if (layerId === "axis") {
           if (!mainSuppressed && !empty) {
-            this.drawLineLabels(view);
+            drawLineLabels(this.annotationHost, view);
             this.axisCache.renderPriceAxis(
               ctx,
               view,
               series,
-              this.priceAxisKeepOut(view, crosshair),
+              priceAxisKeepOut(view, crosshair),
               this.displayOptions,
             );
             drawPriceMarkers(ctx, view, this.priceMarkers, series.config.priceStep, series.config.pricePrecision, this.displayOptions);
@@ -393,29 +359,29 @@ export class Overlay {
             this.drawOrderbookHeatmap?.(ctx, view, series, range);
             break;
           case "footprint-text":
-            this.drawCells(view, series, range);
+            drawCells(this.annotationHost, view, series, range);
             break;
           case "volume-profile":
-            this.drawVolumeProfile(view, series, range);
+            drawVolumeProfile(this.annotationHost, view, series, range);
             break;
           case "tpo":
-            this.drawTpo(view, series, range);
+            drawTpo(this.tpoHost, view, series, range);
             break;
           case "strategy-levels":
-            this.drawPreviousWeekStrategy(view, series);
-            this.drawMondayRange(view, series);
+            drawPreviousWeekStrategy(this.annotationHost, view, series);
+            drawMondayRange(this.annotationHost, view, series);
             break;
           case "naked-poc":
-            this.drawNakedPocs(view, series);
+            drawNakedPocs(this.annotationHost, view, series);
             break;
           case "reference-levels":
-            this.drawReferenceLevels(view, series);
+            drawReferenceLevels(this.annotationHost, view, series);
             break;
           case "drawings":
             this.drawForeground?.(ctx, view, series);
             break;
           case "last-price":
-            if (settings.lastPrice) this.drawLastPrice(view, series);
+            if (settings.lastPrice) drawLastPrice(this.annotationHost, view, series);
             break;
         }
       } finally {
@@ -428,7 +394,7 @@ export class Overlay {
     if (empty || mainSuppressed) this.onHudText?.(null);
     else if (!crosshair.visible) {
       // The default latest-bar HUD depends on tail data, so keep it on Annotation.
-      this.drawHud(ctx, view, series, crosshair, range);
+      drawHud(ctx, view, series, crosshair, range, this.hudDeps);
     }
     ctx.restore();
   }
@@ -441,60 +407,7 @@ export class Overlay {
     range: [number, number],
     layerOrder?: readonly string[],
   ): void {
-    void range;
-    const ctx = this.interactionCtx ?? this.ctx;
-    const orderedLayers = layerOrder ?? ["crosshair", "hud", "interaction-controls"];
-    ctx.clearRect(0, 0, ctx.canvas.width, ctx.canvas.height);
-    this.priceScaleControlRects = [];
-    this.indicatorScaleControlRects = [];
-    this.touchMenuButton = null;
-
-    if (series.length === 0) {
-      this.onHudText?.(null);
-      return;
-    }
-
-    const mainSuppressed = this.isMainChartSuppressed?.() === true;
-    for (const layerId of orderedLayers) {
-      switch (layerId) {
-        case "crosshair": {
-          if (mainSuppressed) {
-            if (crosshair.visible) drawCrosshairTimeLabel(ctx, view, series, crosshair);
-            break;
-          }
-          const syncTime = this.getSyncCrosshairTime?.();
-          if (syncTime != null) {
-            const startTime = series.at(0)?.startTime;
-            if (startTime !== undefined) {
-              const idx = (syncTime - startTime) / series.config.intervalMs;
-              const x = view.xOfIndex(idx) + view.colWidth / 2;
-              this.drawSyncCrosshair(ctx, view, x);
-            }
-          }
-          if (crosshair.visible) {
-            this.drawCrosshair(ctx, view, crosshair);
-            drawCrosshairPriceLabel(ctx, view, series, crosshair, this.displayOptions);
-            drawCrosshairTimeLabel(ctx, view, series, crosshair);
-          }
-          break;
-        }
-        case "hud":
-          // Hovered HUD remains above the crosshair on Interaction; default HUD lives on Annotation.
-          if (!mainSuppressed && crosshair.visible) this.drawHud(ctx, view, series, crosshair, range);
-          if (!mainSuppressed) this.drawOrderbookHover?.(ctx, view, series, crosshair);
-          break;
-        case "interaction-controls":
-          if (!mainSuppressed) this.drawInteractionForeground?.(ctx, view, series);
-          if (!mainSuppressed) this.priceScaleControlRects = drawPriceScaleControls(ctx, view, crosshair);
-          this.drawIndicatorInteractionControls(ctx, view, crosshair);
-          // The crosshair has the plot to itself while the finger inspects.
-          if (crosshair.touch && !crosshair.visible) {
-            this.touchMenuButton = touchMenuButtonRect(view);
-            if (this.touchMenuButton) drawTouchMenuButton(ctx, this.touchMenuButton);
-          }
-          break;
-      }
-    }
+    renderInteractionPass(this.interactionHost, view, series, crosshair, range, layerOrder);
   }
 
   /** Whether an interaction changed Annotation-owned HUD visibility or synchronized selection. */
@@ -526,671 +439,9 @@ export class Overlay {
     return (this.getIndicatorPanes?.().length ?? 0) > 0 || (this.getIndicatorPriceOverlays?.().length ?? 0) > 0;
   }
 
-  private drawIndicatorInteractionControls(
-    ctx: CanvasRenderingContext2D,
-    view: View,
-    crosshair: Crosshair,
-  ): void {
-    const panes = this.getIndicatorPanes?.() ?? [];
-    if (!panes.length || view.priceAxisW <= 0) return;
-    const axisX = view.area.left + view.area.width;
-    let top = view.area.top + view.area.height;
-    for (const pane of panes) {
-      this.indicatorScaleControlRects.push(...drawIndicatorScaleControls(
-        ctx, axisX, view.priceAxisW,
-        { id: pane.id, top, height: pane.height, scaleMode: pane.scaleMode },
-        crosshair,
-      ));
-      top += pane.height;
-    }
-  }
-
   /** ChartRuntime her state değişiminde effective config'i buraya iter. */
   setChartConfig(config: ChartViewConfig): void {
     this.chartConfig = config;
-  }
-
-  private drawPreviousWeekStrategy(view: View, series: FootprintSeries): void {
-    const cfg = this.getPreviousWeekStrategySettings?.();
-    if (!cfg) return;
-    this.drawStrategyLevels(view, series, cfg, this.getPreviousWeekStrategyLevels?.() ?? []);
-  }
-
-  private drawMondayRange(view: View, series: FootprintSeries): void {
-    const cfg = this.getMondayRangeSettings?.();
-    if (!cfg) return;
-    this.drawStrategyLevels(view, series, cfg, this.getMondayRangeLevels?.() ?? []);
-  }
-
-  private drawStrategyLevels<TId extends string, TGroup extends string>(
-    view: View,
-    series: FootprintSeries,
-    cfg: { enabled: boolean; visible: Record<TId, boolean> },
-    rawLevels: readonly StrategyLevel<TId, TGroup>[]
-  ): void {
-    if (!cfg.enabled) return;
-    const levels = rawLevels.filter((level) => cfg.visible[level.id] !== false);
-    if (!levels.length) return;
-    const ctx = this.ctx;
-    const x = levelStartX(view, series, levels[0].sourceEnd);
-    const right = view.area.left + view.area.width;
-    const zoneLevels: typeof levels = [];
-    const lineLevels: typeof levels = [];
-    for (const item of levels) {
-      if (item.kind === "zone") zoneLevels.push(item);
-      else if (item.kind === "line") lineLevels.push(item);
-    }
-    ctx.save();
-    for (const level of zoneLevels) {
-      if (level.fromPrice == null || level.toPrice == null) continue;
-      const y1 = view.yOfPrice(level.fromPrice);
-      const y2 = view.yOfPrice(level.toPrice);
-      const top = Math.min(y1, y2);
-      const bottom = Math.max(y1, y2);
-      if (bottom < view.area.top || top > view.area.top + view.area.height) continue;
-      ctx.globalAlpha = level.fillOpacity ?? 0.14;
-      ctx.fillStyle = level.color;
-      ctx.fillRect(
-        x,
-        Math.max(view.area.top, top),
-        right - x,
-        Math.max(1, Math.min(view.area.top + view.area.height, bottom) - Math.max(view.area.top, top))
-      );
-      ctx.globalAlpha = 1;
-      const mid = (level.fromPrice + level.toPrice) / 2;
-      this.queueLineObject(mid, level.label, level.color, level.priority ?? 62);
-    }
-    for (const level of lineLevels) {
-      if (level.price == null) continue;
-      const y = view.yOfPrice(level.price);
-      if (y < view.area.top || y > view.area.top + view.area.height) continue;
-      ctx.strokeStyle = level.color;
-      ctx.lineWidth = level.lineWidth ?? 1.2;
-      ctx.setLineDash(lineDash(level.lineStyle));
-      ctx.beginPath();
-      ctx.moveTo(x, y);
-      ctx.lineTo(right, y);
-      ctx.stroke();
-      this.queueLineObject(level.price, level.label, level.color, level.priority);
-    }
-    ctx.setLineDash([]);
-    ctx.restore();
-  }
-
-
-  private drawVolumeProfile(
-    view: View,
-    series: FootprintSeries,
-    [from, to]: [number, number]
-  ): void {
-    const cfg = this.getProfileSettings?.();
-    if (!cfg || !settings.volumeProfile || from >= to) return;
-    const all = series.listReadonly();
-    const visible = all.slice(from, to);
-    const anchor = visible[visible.length - 1]?.startTime;
-    const selected = cfg.mode === "session" && anchor !== undefined ? sessionBars(all, anchor) : visible;
-    const last = selected[selected.length - 1];
-    const key = [
-      cfg.mode, cfg.valueAreaPercent, selected.length, selected[0]?.startTime ?? 0,
-      last?.startTime ?? 0, series.revision,
-    ].join("|");
-    if (this.profileCache?.key !== key) {
-      const result = calculateVolumeProfile(selected, cfg.valueAreaPercent);
-      let maxVolume = 0;
-      for (const level of result.levels) {
-        if (level.totalVol > maxVolume) maxVolume = level.totalVol;
-      }
-      this.profileCache = { key, result, maxVolume };
-    }
-    const result = this.profileCache.result;
-    if (!result.levels.length) return;
-
-    const ctx = this.ctx;
-    const step = series.config.priceStep;
-    const maxVolume = this.profileCache.maxVolume;
-    const maxWidth = Math.min(180, Math.max(80, view.area.width * 0.22));
-    const right = view.area.left + view.area.width - 4;
-    ctx.save();
-    for (const level of result.levels) {
-      const yTop = view.yOfPrice(level.priceBin + step);
-      const yBottom = view.yOfPrice(level.priceBin);
-      if (yBottom < view.area.top || yTop > view.area.top + view.area.height) continue;
-      const width = maxWidth * (level.totalVol / maxVolume);
-      const buyWidth = width * (level.buyVol / Math.max(level.totalVol, Number.EPSILON));
-      ctx.globalAlpha = 0.55;
-      ctx.fillStyle = uiColor.sell;
-      ctx.fillRect(right - width, yTop, width - buyWidth, Math.max(1, yBottom - yTop - 1));
-      ctx.fillStyle = uiColor.buy;
-      ctx.fillRect(right - buyWidth, yTop, buyWidth, Math.max(1, yBottom - yTop - 1));
-    }
-    ctx.globalAlpha = 1;
-    this.drawProfileLevel(view, result.poc, "PPOC", uiColor.warn, settings.profilePoc);
-    this.drawProfileLevel(view, result.vah, "VAH", uiColor.info, settings.profileVah);
-    this.drawProfileLevel(view, result.val, "VAL", uiColor.info, settings.profileVal);
-    ctx.restore();
-  }
-
-  /**
-   * TPO (Market Profile) chart type: one horizontal count-histogram per UTC-day
-   * session, anchored in that session's own x-region. Bar length = number of
-   * brackets (bars) that touched the price level. POC/VAH/VAL reuse the volume
-   * profile level toggles + value-area percent.
-   */
-  private drawTpo(view: View, series: FootprintSeries, [from, to]: [number, number]): void {
-    const chartCfg = this.chartConfig ?? settings;
-    if (chartCfg.chartType !== "tpo" || from >= to) return;
-    const cfg = this.getProfileSettings?.();
-    const vaPercent = cfg?.valueAreaPercent ?? 0.7;
-    const all = series.listReadonly();
-    const step = series.config.priceStep;
-
-    const bracketMs = effectiveTpoBracketMs(chartCfg.tpoBracketSize, series.config.intervalMs);
-    const [sessionFrom, sessionTo] = tpoSessionRange(all, from, to, chartCfg.tpoProfilePeriod, this.tpoMergeLeftSessionStarts);
-    const key = [vaPercent, step, series.revision, chartCfg.tpoProfilePeriod, chartCfg.tpoBracketSize,
-      bracketMs, sessionFrom, sessionTo, ...[...this.tpoMergeLeftSessionStarts].sort((a, b) => a - b)].join("|");
-    if (this.tpoCache?.key !== key) {
-      const brackets = aggregateTpoBrackets(all, sessionFrom, sessionTo, bracketMs);
-      const spans = buildTpoBracketSpans(brackets, chartCfg.tpoProfilePeriod);
-      const groupsMeta = mergeTpoSessionSpans(spans, this.tpoMergeLeftSessionStarts);
-      this.tpoCache = {
-        key,
-        brackets,
-        groups: groupsMeta.map((g) => ({
-          sessionStarts: [...g.sessionStarts],
-          firstBracketIndex: g.firstBracketIndex,
-          lastBracketIndex: g.lastBracketIndex,
-          firstIdx: g.firstIdx,
-          lastIdx: g.lastIdx,
-          firstSpanIndex: g.firstSpanIndex,
-          partial: tpoSessionPartial(all, g.firstIdx, g.lastIdx, chartCfg.tpoProfilePeriod, series.config.intervalMs),
-          result: calculateTpoProfile(
-            brackets.slice(g.firstBracketIndex, g.lastBracketIndex + 1).map((bracket) => bracket.bar),
-            step,
-            vaPercent
-          ),
-        })),
-      };
-    }
-
-    const brackets = this.tpoCache.brackets;
-    const ctx = this.ctx;
-    // Letters mode needs vertical room per price row and horizontal room per
-    // bracket column; otherwise fall back to the collapsed histogram.
-    const midPrice = view.priceOfY(view.area.top + view.area.height / 2);
-    const cellH = Math.abs(view.yOfPrice(midPrice) - view.yOfPrice(midPrice + step));
-    let minBracketWidth = Number.POSITIVE_INFINITY;
-    for (const bracket of brackets) {
-      const width = view.xOfIndex(bracket.lastIdx + 1) - view.xOfIndex(bracket.firstIdx);
-      if (width < minBracketWidth) minBracketWidth = width;
-    }
-    const lettersMode = chartCfg.tpoMode === "letters" && cellH >= 9 && minBracketWidth >= 8;
-
-    ctx.save();
-    if (lettersMode) {
-      ctx.font = `${Math.min(11, cellH - 1)}px ui-monospace, Menlo, monospace`;
-      ctx.textBaseline = "middle";
-      ctx.textAlign = "center";
-    }
-    for (const g of this.tpoCache.groups) {
-      if (g.lastIdx < from || g.firstIdx >= to) continue;
-      const result = g.result;
-      if (!result.levels.length) continue;
-
-      const left = view.xOfIndex(g.firstIdx);
-      const right = view.xOfIndex(g.lastIdx + 1);
-      const labelX = right - 2;
-      const canUndoMerges = g.sessionStarts.some((sessionStart, index) =>
-        index > 0 && this.tpoMergeLeftSessionStarts.has(sessionStart)
-      );
-      this.tpoProfileHitZones.push({
-        left,
-        right,
-        sessionStart: g.sessionStarts[0],
-        groupSessionStarts: [...g.sessionStarts],
-        canMergeLeft: g.firstSpanIndex > 0,
-        canUndoMerges,
-      });
-      // MMT-style red marker: only the latest/current price bin of the session,
-      // not every price row touched by the last bracket's full high-low range.
-      const lastBar = brackets[g.lastBracketIndex]?.bar;
-      const lastCloseBin = lastBar ? quantizeToStep(lastBar.close, step) : NaN;
-
-      if (lettersMode) {
-        for (let i = g.firstBracketIndex; i <= g.lastBracketIndex; i++) {
-          const bracket = brackets[i];
-          if (!bracket) continue;
-          const bar = bracket.bar;
-          const label = tpoBracketLabel(i - g.firstBracketIndex);
-          const cx = (view.xOfIndex(bracket.firstIdx) + view.xOfIndex(bracket.lastIdx + 1)) / 2;
-          const lo = quantizeToStep(bar.low, step);
-          const hi = quantizeToStep(bar.high, step);
-          const isLast = i === g.lastBracketIndex;
-          const ticks = Math.max(0, Math.round((hi - lo) / step));
-          let bin = lo;
-          for (let tick = 0; tick <= ticks; tick++) {
-            const yMid = view.yOfPrice(bin + step / 2);
-            if (yMid >= view.area.top && yMid <= view.area.top + view.area.height) {
-              ctx.fillStyle = isLast && bin === lastCloseBin ? tpoPalette.latest : bin === result.poc ? tpoPalette.pocLetters : tpoPalette.letters;
-              ctx.fillText(label, cx, yMid);
-            }
-            bin = neighbourBin(bin, step, 1);
-          }
-        }
-      } else {
-        // Market-Profile block columns: each square is one profile-local bracket
-        // occurrence. Non-POC squares get a slight bracket-based tone variation.
-        const maxCount = Math.max(...result.levels.map((l) => l.count));
-        if (maxCount <= 0) continue;
-        const sessionPx = Math.max(view.colWidth, view.xOfIndex(g.lastIdx + 1) - left);
-        const maxWidth = Math.max(8, sessionPx);
-        const vaLo = result.val;
-        const vaHi = result.vah;
-        const rawSquare = Math.min(Math.max(cellH, 4), maxWidth / maxCount);
-        const blockMode = cellH >= TPO_MIN_BLOCK_CELL_HEIGHT && rawSquare >= TPO_MIN_BLOCK_CELL_WIDTH;
-
-        if (blockMode) {
-          const sqH = Math.max(cellH - 1, 1);
-          for (const level of result.levels) {
-            const yTop = view.yOfPrice(level.priceBin + step);
-            if (yTop > view.area.top + view.area.height || yTop + cellH < view.area.top) continue;
-            const inVA = vaLo !== null && vaHi !== null && level.priceBin >= vaLo && level.priceBin <= vaHi;
-            const baseColor = level.priceBin === result.poc ? tpoPalette.poc
-              : inVA ? tpoPalette.valueArea
-              : tpoPalette.outside;
-            const latestPriceBin = level.priceBin === lastCloseBin;
-            const latestLocalBracketIndex = g.lastBracketIndex - g.firstBracketIndex;
-            const occurrenceIndices = level.bracketIndices.length
-              ? level.bracketIndices
-              : Array.from({ length: level.count }, (_, index) => index);
-            for (let k = 0; k < occurrenceIndices.length; k++) {
-              const bracketIndex = occurrenceIndices[k];
-              const x = left + k * rawSquare;
-              if (x - left > maxWidth) break;
-              ctx.fillStyle = latestPriceBin && bracketIndex === latestLocalBracketIndex ? tpoPalette.latest
-                : level.priceBin === result.poc ? baseColor
-                : tpoBlockFillColor(baseColor, bracketIndex);
-              ctx.fillRect(x, yTop, Math.max(rawSquare - 1, 1), sqH);
-            }
-          }
-        } else {
-          // Rows too small for blocks: keep TPO colors in a collapsed proportional bar.
-          ctx.globalAlpha = 0.55;
-          for (const level of result.levels) {
-            const yTop = view.yOfPrice(level.priceBin + step);
-            const yBottom = view.yOfPrice(level.priceBin);
-            if (yBottom < view.area.top || yTop > view.area.top + view.area.height) continue;
-            const inVA = vaLo !== null && vaHi !== null && level.priceBin >= vaLo && level.priceBin <= vaHi;
-            const latestPriceBin = level.priceBin === lastCloseBin;
-            ctx.fillStyle = latestPriceBin ? tpoPalette.latest
-              : level.priceBin === result.poc ? tpoPalette.poc
-              : inVA ? tpoPalette.valueArea
-              : tpoPalette.outside;
-            ctx.fillRect(left, yTop, maxWidth * (level.count / maxCount), Math.max(1, yBottom - yTop - 1));
-          }
-          ctx.globalAlpha = 1;
-        }
-      }
-
-      if (g.partial) {
-        ctx.save();
-        ctx.fillStyle = tpoPalette.leaderVa;
-        ctx.font = "9px ui-monospace, Menlo, monospace";
-        ctx.textAlign = "left";
-        ctx.fillText("partial", Math.max(left + 3, view.area.left + 3), view.area.top + 12);
-        ctx.restore();
-      }
-      // Level leaders + labels (both modes): solid white POC, dashed VA.
-      if (settings.profilePoc && result.poc !== null) this.drawTpoLeader(view, result.poc + step / 2, "POC", tpoPalette.leaderPoc, left, labelX, false);
-      if (settings.profileVah && result.vah !== null) this.drawTpoLeader(view, result.vah + step / 2, "VAH", tpoPalette.leaderVa, left, labelX, true);
-      if (settings.profileVal && result.val !== null) this.drawTpoLeader(view, result.val + step / 2, "VAL", tpoPalette.leaderVa, left, labelX, true);
-    }
-    ctx.restore();
-  }
-
-  /** Level leader line (left→labelX) plus a text label, inside one TPO session. */
-  private drawTpoLeader(
-    view: View,
-    centerPrice: number,
-    label: string,
-    color: string,
-    left: number,
-    labelX: number,
-    dashed: boolean
-  ): void {
-    const y = view.yOfPrice(centerPrice);
-    if (y < view.area.top || y > view.area.top + view.area.height) return;
-    const ctx = this.ctx;
-    ctx.save();
-    ctx.strokeStyle = color;
-    ctx.globalAlpha = dashed ? 0.7 : 0.9;
-    ctx.setLineDash(dashed ? [4, 3] : []);
-    ctx.beginPath();
-    ctx.moveTo(left, y);
-    ctx.lineTo(labelX, y);
-    ctx.stroke();
-    ctx.setLineDash([]);
-    ctx.globalAlpha = 1;
-    ctx.font = "9px ui-monospace, Menlo, monospace";
-    ctx.textBaseline = "middle";
-    ctx.textAlign = "left";
-    ctx.fillStyle = color;
-    ctx.fillText(label, labelX + 3, y);
-    ctx.restore();
-  }
-
-  private drawProfileLevel(
-    view: View,
-    price: number | null,
-    label: string,
-    color: string,
-    enabled: boolean
-  ): void {
-    if (!enabled || price === null) return;
-    const y = view.yOfPrice(price);
-    if (y < view.area.top || y > view.area.top + view.area.height) return;
-    const ctx = this.ctx;
-    ctx.strokeStyle = color;
-    ctx.setLineDash(label === "PPOC" ? [] : [5, 4]);
-    ctx.beginPath();
-    ctx.moveTo(view.area.left, y);
-    ctx.lineTo(view.area.left + view.area.width, y);
-    ctx.stroke();
-    ctx.setLineDash([]);
-    this.queueLineObject(price, label, color);
-  }
-
-  private drawCells(view: View, series: FootprintSeries, [from, to]: [number, number]): void {
-    const ctx = this.ctx;
-    const step = series.config.priceStep;
-    // Representative row height at the screen midpoint (varies per-price in log).
-    const midPrice = view.priceOfY(view.area.top + view.area.height / 2);
-    const cellH = Math.abs(view.yOfPrice(midPrice) - view.yOfPrice(midPrice + step));
-    // Cell text mode depends on the active footprint chart type (separate
-    // memory for Cluster vs Profile). No cell text for plain candlesticks.
-    const chartCfg = this.chartConfig ?? settings;
-    let mode: typeof settings.clusterCellData;
-    if (chartCfg.chartType === "footprint") mode = chartCfg.clusterCellData;
-    else if (chartCfg.chartType === "footprintProfile") mode = chartCfg.profileCellData;
-    else return;
-    if (!chartCfg.cellNumbers) return;
-
-    const candleW = view.candleStripWidth();
-    const fpW = view.colWidth - candleW;
-    const textMode = cellTextModeFor(cellH, fpW);
-    if (textMode === "none") return;
-    // Between the heat layer's threshold and a full bid/ask pair there is a wide band
-    // where cells were shaded but never labelled. There, one centred value per cell is
-    // readable where two are not.
-    const compact = textMode === "compact";
-    const pTop = view.priceOfY(view.area.top);
-    const pBot = view.priceOfY(view.area.top + view.area.height);
-    const minVisPrice = Math.min(pTop, pBot) - step;
-    const maxVisPrice = Math.max(pTop, pBot) + step;
-    const showNotional = this.showNotional;
-
-    ctx.font = `${Math.min(12, cellH - 2)}px ui-monospace, Menlo, monospace`;
-    ctx.textBaseline = "middle";
-
-    const cacheKey = `${mode}|${compact ? 1 : 0}|${showNotional ? 1 : 0}|${step}`;
-
-    for (let i = from; i < to; i++) {
-      const bar = series.at(i);
-      if (!bar) continue;
-      const fpLeft = view.xOfIndex(i) + candleW;
-      const half = fpW / 2;
-
-      let barCache: { key: string; cellRevision: number; entries: Map<number, FormattedCellText> } | null = null;
-      if (bar.cellRevision !== undefined) {
-        const existing = this.cellTextCache.get(bar);
-        if (existing && existing.key === cacheKey && existing.cellRevision === bar.cellRevision) {
-          barCache = existing;
-        } else {
-          barCache = { key: cacheKey, cellRevision: bar.cellRevision, entries: new Map() };
-          this.cellTextCache.set(bar, barCache);
-        }
-      }
-
-      for (const cell of bar.cells.values()) {
-        if (cell.priceBin + step < minVisPrice || cell.priceBin > maxVisPrice) continue;
-        const yMid = view.yOfPrice(cell.priceBin + step / 2);
-        if (yMid < view.area.top || yMid > view.area.top + view.area.height) continue;
-
-        let entry: FormattedCellText | undefined = barCache?.entries.get(cell.priceBin);
-        if (!entry) {
-          const binPrice = cell.priceBin + step / 2;
-          if (mode === "bidask") {
-            const imb = cellImbalance(cell);
-            if (compact) {
-              entry = {
-                centerText: fmtCellValue(cell.buyVol + cell.sellVol, binPrice, showNotional),
-                centerColor: imb > 0.3 ? uiColor.buy : imb < -0.3 ? uiColor.sell : uiColor.text,
-              };
-            } else {
-              entry = {
-                leftText: fmtCellValue(cell.sellVol, binPrice, showNotional),
-                leftColor: imb < -0.3 ? uiColor.sell : cellDimSell,
-                rightText: fmtCellValue(cell.buyVol, binPrice, showNotional),
-                rightColor: imb > 0.3 ? uiColor.buy : cellDimBuy,
-              };
-            }
-          } else if (mode === "volume") {
-            entry = {
-              centerText: fmtCellValue(cell.buyVol + cell.sellVol, binPrice, showNotional),
-              centerColor: uiColor.text,
-            };
-          } else if (mode === "count") {
-            const counts = cellTradeCounts(cell);
-            entry = {
-              centerText: fmtVol(counts.total),
-              centerColor: uiColor.text,
-            };
-          } else if (mode === "countBidask") {
-            const counts = cellTradeCounts(cell);
-            if (compact) {
-              entry = {
-                centerText: fmtVol(counts.total),
-                centerColor: uiColor.text,
-              };
-            } else {
-              entry = {
-                leftText: fmtVol(counts.sell),
-                leftColor: counts.sell > counts.buy ? uiColor.sell : cellDimSell,
-                rightText: fmtVol(counts.buy),
-                rightColor: counts.buy > counts.sell ? uiColor.buy : cellDimBuy,
-              };
-            }
-          } else if (mode === "deltaPct") {
-            const deltaPct = cellDeltaPercent(cell);
-            const sign = deltaPct > 0 ? "+" : deltaPct < 0 ? "-" : "";
-            entry = {
-              centerText: `${sign}${Math.abs(deltaPct).toFixed(0)}%`,
-              centerColor: deltaPct > 0 ? uiColor.buy : deltaPct < 0 ? uiColor.sell : uiColor.textSecondary,
-            };
-          } else if (mode === "avgTradeSize") {
-            entry = {
-              centerText: fmtCellValue(cellAverageTradeSize(cell), binPrice, showNotional),
-              centerColor: uiColor.text,
-            };
-          } else if (mode === "avgTradeSizeBidask") {
-            const averages = cellAverageTradeSizes(cell);
-            if (compact) {
-              entry = {
-                centerText: fmtCellValue(cellAverageTradeSize(cell), binPrice, showNotional),
-                centerColor: uiColor.text,
-              };
-            } else {
-              entry = {
-                leftText: fmtCellValue(averages.sell, binPrice, showNotional),
-                leftColor: averages.sell > averages.buy ? uiColor.sell : cellDimSell,
-                rightText: fmtCellValue(averages.buy, binPrice, showNotional),
-                rightColor: averages.buy > averages.sell ? uiColor.buy : cellDimBuy,
-              };
-            }
-          } else {
-            const delta = cell.buyVol - cell.sellVol;
-            const sign = delta > 0 ? "+" : delta < 0 ? "-" : "";
-            entry = {
-              centerText: sign + fmtCellValue(Math.abs(delta), binPrice, showNotional),
-              centerColor: delta > 0 ? uiColor.buy : delta < 0 ? uiColor.sell : uiColor.textSecondary,
-            };
-          }
-          if (barCache) {
-            barCache.entries.set(cell.priceBin, entry);
-          }
-        }
-
-        if (entry.centerText !== undefined) {
-          ctx.fillStyle = entry.centerColor!;
-          ctx.textAlign = "center";
-          ctx.fillText(entry.centerText, fpLeft + half, yMid);
-        } else {
-          ctx.fillStyle = entry.leftColor!;
-          ctx.textAlign = "right";
-          ctx.fillText(entry.leftText!, fpLeft + half - 4, yMid);
-
-          ctx.fillStyle = entry.rightColor!;
-          ctx.textAlign = "left";
-          ctx.fillText(entry.rightText!, fpLeft + half + 4, yMid);
-        }
-      }
-    }
-  }
-
-  /** Indicator sub-panes in the band below the plot, above the time axis. */
-  private drawSubPanes(
-    view: View,
-    series: FootprintSeries,
-    range: [number, number],
-    crosshair?: Crosshair,
-    drawControls = true,
-  ): void {
-    if (view.subPanesH <= 0) return;
-    const ctx = this.ctx;
-    const indicatorPanes = this.getIndicatorPanes?.() ?? [];
-    if (indicatorPanes.length) {
-      // Fill the price-axis gutter band next to the sub-panes up front so
-      // indicator axis ticks drawn into it survive; drawPriceAxis only fills
-      // the gutter down to the main plot bottom.
-      const axisX = view.area.left + view.area.width;
-      if (view.priceAxisW > 0) {
-        ctx.fillStyle = uiColor.bgApp;
-        ctx.fillRect(axisX, view.area.top + view.area.height, view.priceAxisW, view.subPanesH);
-        ctx.strokeStyle = uiColor.separator;
-        ctx.beginPath();
-        ctx.moveTo(axisX + 0.5, view.area.top + view.area.height);
-        ctx.lineTo(axisX + 0.5, view.area.top + view.area.height + view.subPanesH);
-        ctx.stroke();
-      }
-      let top = view.area.top + view.area.height;
-      for (const pane of indicatorPanes) {
-        const rect = { top, height: pane.height };
-        this.indicatorAxisRects.push({ paneId: pane.id, plotX: view.area.left, x: axisX, y: top, w: view.priceAxisW, h: pane.height });
-        if (view.priceAxisW > 0) {
-          ctx.strokeStyle = uiColor.separatorStrong;
-          ctx.beginPath();
-          ctx.moveTo(axisX, top + 0.5);
-          ctx.lineTo(axisX + view.priceAxisW, top + 0.5);
-          ctx.stroke();
-        }
-        this.drawIndicatorPaneBackgroundFn?.(ctx, view, rect);
-        pane.draw(ctx, view, series, rect, range, crosshair);
-        if (drawControls) {
-          this.indicatorScaleControlRects.push(...drawIndicatorScaleControls(
-            ctx,
-            axisX,
-            view.priceAxisW,
-            { ...rect, id: pane.id, scaleMode: pane.scaleMode },
-            crosshair,
-          ));
-        }
-        top += pane.height;
-      }
-      if (view.priceAxisW > 0) {
-        ctx.strokeStyle = uiColor.separatorStrong;
-        ctx.beginPath();
-        ctx.moveTo(axisX, top - 0.5);
-        ctx.lineTo(axisX + view.priceAxisW, top - 0.5);
-        ctx.stroke();
-      }
-    }
-  }
-
-  private drawIndicatorPriceOverlays(view: View, series: FootprintSeries, range: [number, number], crosshair?: Crosshair): void {
-    const overlays = this.getIndicatorPriceOverlays?.() ?? [];
-    if (!overlays.length) return;
-    const rect = { top: view.area.top, height: view.area.height };
-    for (const overlay of overlays) {
-      overlay.draw(this.ctx, view, series, rect, range, crosshair);
-    }
-  }
-
-  /** Horizontal dashed line + colored axis label at the latest bar's close. */
-  private drawLastPrice(view: View, series: FootprintSeries): void {
-    const bar = series.at(series.length - 1);
-    if (!bar) return;
-    const prev = series.at(series.length - 2);
-    const up = !prev || bar.close >= prev.close;
-    const color = up ? uiColor.buy : uiColor.sell;
-    const y = view.yOfPrice(bar.close);
-    if (y < view.area.top || y > view.area.top + view.area.height) return;
-    const ctx = this.ctx;
-    const axisX = view.area.left + view.area.width;
-
-    ctx.strokeStyle = color;
-    ctx.globalAlpha = 0.6;
-    ctx.setLineDash([3, 3]);
-    ctx.beginPath();
-    ctx.moveTo(view.area.left, y);
-    ctx.lineTo(axisX, y);
-    ctx.stroke();
-    ctx.setLineDash([]);
-    ctx.globalAlpha = 1;
-
-    this.queuePriceMarker(bar.close, color, 100);
-  }
-
-  private drawNakedPocs(view: View, series: FootprintSeries): void {
-    const levels = this.getNakedPocs?.() ?? [];
-    const ctx = this.ctx;
-    ctx.save();
-    ctx.lineWidth = 1;
-    ctx.setLineDash([7, 4]);
-    for (const level of levels) {
-      const y = view.yOfPrice(level.price);
-      if (y < view.area.top || y > view.area.top + view.area.height) continue;
-      const x = levelStartX(view, series, level.periodEnd);
-      const prefix = periodPrefix(level.period);
-      const unit = periodUnit(level.period);
-      const color = nakedPocColor(level.period);
-      ctx.strokeStyle = color;
-      ctx.beginPath();
-      ctx.moveTo(x, y);
-      ctx.lineTo(view.area.left + view.area.width, y);
-      ctx.stroke();
-      this.queueLineObject(level.price, `${prefix}-NPOC · ${level.age} ${unit}`, color);
-    }
-    ctx.restore();
-  }
-
-  private drawReferenceLevels(view: View, series: FootprintSeries): void {
-    const levels = this.getReferenceLevels?.() ?? [];
-    const ctx = this.ctx;
-    ctx.save();
-    ctx.lineWidth = 1;
-    for (const level of levels) {
-      const y = view.yOfPrice(level.price);
-      if (y < view.area.top || y > view.area.top + view.area.height) continue;
-      const start = level.family === "open" ? level.sourceStart : level.sourceEnd;
-      const x = levelStartX(view, series, start);
-      ctx.strokeStyle = level.color;
-      ctx.setLineDash(level.family === "level" ? [4, 3] : level.family === "eq" ? [8, 4] : []);
-      ctx.beginPath();
-      ctx.moveTo(x, y);
-      ctx.lineTo(view.area.left + view.area.width, y);
-      ctx.stroke();
-      this.queueLineObject(level.price, level.label, level.color);
-    }
-    ctx.restore();
   }
 
   queueLineObject(price: number, text: string, color: string, priority = lineLabelPriority(text)): void {
@@ -1209,236 +460,4 @@ export class Overlay {
   queueTimeObject(time: number, text: string, color: string, priority = lineLabelPriority(text)): void {
     this.timeMarkers.push({ time, text, color, priority });
   }
-
-  private drawLineLabels(view: View): void {
-    const ctx = this.ctx;
-    ctx.save();
-    ctx.font = "10px ui-monospace, monospace";
-    ctx.textAlign = "right";
-    ctx.textBaseline = "middle";
-    const boxH = 14;
-    const candidates = this.lineLabels
-      .map((label) => ({ ...label, desiredY: view.yOfPrice(label.price), boxH }))
-      .filter((label) => label.desiredY >= view.area.top && label.desiredY <= view.area.top + view.area.height);
-    const labels = placeVerticalLabels(candidates, view.area.top, view.area.top + view.area.height, 2);
-    for (const label of labels) {
-      const width = ctx.measureText(label.text).width + 12;
-      const x = view.area.left + view.area.width - 4;
-      const boxX = x - width;
-      const boxY = label.y - boxH / 2;
-      drawOverlayPill(ctx, boxX, boxY, width, boxH, 4, lineLabelPillBg, "rgba(148, 163, 184, 0.22)");
-      ctx.fillStyle = label.color;
-      ctx.fillRect?.(boxX + 1, boxY + 2, 2, Math.max(2, boxH - 4));
-      ctx.fillText(label.text, x - 4, label.y);
-    }
-    ctx.restore();
-  }
-
-  private drawCrosshair(ctx: CanvasRenderingContext2D, view: View, ch: Crosshair): void {
-    ctx.strokeStyle = crosshairLineColor;
-    ctx.setLineDash([4, 4]);
-    ctx.beginPath();
-    ctx.moveTo(ch.x, view.area.top);
-    ctx.lineTo(ch.x, view.area.top + view.area.height);
-    ctx.moveTo(view.area.left, ch.y);
-    ctx.lineTo(view.area.left + view.area.width, ch.y);
-    ctx.stroke();
-    ctx.setLineDash([]);
-  }
-
-  /** Draw a ghost/sync crosshair as a vertical dashed line. Only vertical line is drawn;
-   *  no horizontal or HUD labels. */
-  private drawSyncCrosshair(ctx: CanvasRenderingContext2D, view: View, x: number): void {
-    ctx.save();
-    ctx.strokeStyle = syncCrosshairLineColor;
-    ctx.setLineDash([4, 4]);
-    ctx.beginPath();
-    ctx.moveTo(x, view.area.top);
-    ctx.lineTo(x, view.area.top + view.area.height);
-    ctx.stroke();
-    ctx.restore();
-  }
-
-  private drawHud(
-    ctx: CanvasRenderingContext2D,
-    view: View,
-    series: FootprintSeries,
-    crosshair: Crosshair,
-    [, to]: [number, number]
-  ): void {
-    // Bar priority: local crosshair, then synchronized ghost crosshair, else latest bar.
-    let bar = series.at(to - 1);
-    let hovered = false;
-    if (crosshair.visible) {
-      const idx = Math.floor(view.indexOfX(crosshair.x));
-      const b = series.at(idx);
-      if (b) {
-        bar = b;
-        hovered = true;
-      }
-    } else {
-      const syncTime = this.getSyncCrosshairTime?.();
-      if (syncTime != null) {
-        const startTime = series.at(0)?.startTime;
-        if (startTime !== undefined) {
-          const idx = Math.floor((syncTime - startTime) / series.config.intervalMs);
-          const b = series.at(idx);
-          if (b) {
-            bar = b;
-            hovered = true;
-          }
-        }
-      }
-    }
-    if (!bar) {
-      this.onHudText?.(null);
-      return;
-    }
-
-    const unit = this.showNotional ? "$" : "₿";
-    const displayOptions = this.displayOptions;
-    const locale = displayOptions.numberLocale;
-    const labels = displayOptions.labels;
-    const volTxt = this.showNotional ? fmtNotional(quoteVolumeForBar(bar), locale) : fmtVol(bar.volume, locale);
-    const deltaTxt = this.showNotional
-      ? fmtNotional(Math.abs(bar.delta) * bar.close, locale)
-      : fmtFixed(Math.abs(bar.delta), 2, locale);
-    const rangePct = bar.low > 0 ? ((bar.high - bar.low) / bar.low) * 100 : 0;
-    const changePct = bar.open > 0 ? ((bar.close - bar.open) / bar.open) * 100 : 0;
-    const pd = configDecimals(series.config);
-    const x = view.area.left + 8;
-
-    ctx.font = "12px ui-monospace, monospace";
-    ctx.textAlign = "left";
-    ctx.textBaseline = "top";
-    ctx.fillStyle = uiColor.textHeading;
-    const hudText = `O ${fmtFixed(bar.open, pd, locale)} H ${fmtFixed(bar.high, pd, locale)} L ${fmtFixed(bar.low, pd, locale)} `
-      + `C ${fmtFixed(bar.close, pd, locale)} ${labels.volume} ${unit}${volTxt} Δ ${bar.delta >= 0 ? "+" : "-"}${unit}${deltaTxt} `
-      + `${labels.trades} ${bar.count} ${labels.range} ${fmtFixed(rangePct, 2, locale)}% ${labels.change} ${changePct >= 0 ? "+" : ""}${fmtFixed(changePct, 2, locale)}%`;
-    this.onHudText?.(hudText);
-
-    const prefix = `${hovered ? "◆ " : ""}O ${fmtFixed(bar.open, pd, locale)}  H ${fmtFixed(bar.high, pd, locale)}  L ${fmtFixed(bar.low, pd, locale)}  C ${fmtFixed(bar.close, pd, locale)}  ${labels.volume} ${unit}${volTxt}`;
-    const prefixWidth = ctx.measureText(prefix + "   ").width;
-    const deltaPart = `Δ ${bar.delta >= 0 ? "+" : "-"}${unit}${deltaTxt}`;
-    const deltaWidth = ctx.measureText(deltaPart + "   ").width;
-    const tradesPart = `${labels.trades} ${fmtFixed(bar.count, 0, locale, true)}`;
-    const tradesWidth = ctx.measureText(tradesPart + "   ").width;
-
-    const rangePart = `${labels.range} ${fmtFixed(rangePct, 2, locale)}%`;
-    const rangeX = x + prefixWidth + deltaWidth + tradesWidth;
-    const rangeWidth = ctx.measureText(rangePart + "   ").width;
-
-    const chgPart = `${labels.change} ${changePct >= 0 ? "+" : ""}${fmtFixed(changePct, 2, locale)}%`;
-    const chgWidth = ctx.measureText(chgPart).width;
-
-    // A plot too narrow for one line (a phone, a small pane) gets the readout in rows instead of
-    // running over the price axis. The corner menu button keeps its column in touch mode.
-    const reserved = crosshair.touch && touchMenuButtonRect(view) !== null ? TOUCH_MENU_BUTTON_RESERVE : 0;
-    const maxWidth = view.area.width - 16 - reserved;
-    if (prefixWidth + deltaWidth + tradesWidth + rangeWidth + chgWidth > maxWidth) {
-      const hover = hovered ? "◆ " : "";
-      const parts: HudPart[] = [
-        { text: `${hover}O ${fmtFixed(bar.open, pd, locale)}`, color: uiColor.textHeading, dropOrder: 0 },
-        { text: `H ${fmtFixed(bar.high, pd, locale)}`, color: uiColor.textHeading, dropOrder: 0 },
-        { text: `L ${fmtFixed(bar.low, pd, locale)}`, color: uiColor.textHeading, dropOrder: 0 },
-        { text: `C ${fmtFixed(bar.close, pd, locale)}`, color: uiColor.textHeading, dropOrder: 0 },
-        { text: `${labels.volume} ${unit}${volTxt}`, color: uiColor.textHeading, dropOrder: 2 },
-        { text: deltaPart, color: bar.delta >= 0 ? uiColor.buy : uiColor.sell, dropOrder: 3 },
-        { text: tradesPart, color: uiColor.textSecondary, dropOrder: 4 },
-        { text: rangePart, color: uiColor.textSecondary, dropOrder: 5 },
-        { text: chgPart, color: changePct >= 0 ? uiColor.buy : uiColor.sell, dropOrder: 1 },
-      ];
-      this.drawHudRows(ctx, view, x, maxWidth, parts);
-      return;
-    }
-
-    const pillW = Math.min(
-      Math.max(0, view.area.width - 8),
-      prefixWidth + deltaWidth + tradesWidth + rangeWidth + chgWidth + 12,
-    );
-    drawOverlayPill(ctx, x - 6, 4, pillW, 20, 5, "rgba(11, 16, 24, 0.78)", "rgba(148, 163, 184, 0.16)");
-
-    ctx.fillStyle = uiColor.textHeading;
-    ctx.fillText(prefix, x, 8);
-    ctx.fillStyle = bar.delta >= 0 ? uiColor.buy : uiColor.sell;
-    ctx.fillText(deltaPart, x + prefixWidth, 8);
-    ctx.fillStyle = uiColor.textSecondary;
-    ctx.fillText(tradesPart, x + prefixWidth + deltaWidth, 8);
-    ctx.fillText(rangePart, rangeX, 8);
-    ctx.fillStyle = changePct >= 0 ? uiColor.buy : uiColor.sell;
-    ctx.fillText(chgPart, rangeX + rangeWidth, 8);
-  }
-
-  /** Price tick labels keep clear of the finger-sized scale buttons, which stand in the gutter in touch mode. */
-  private priceAxisKeepOut(view: View, crosshair: Crosshair): PriceAxisKeepOut[] {
-    if (!crosshair.touch) return [];
-    const span = touchPriceScaleControlSpan(view);
-    return span ? [span] : [];
-  }
-
-  /** The readout as rows of `parts`, widest row no wider than `maxWidth`; see layoutHud for what gives way. */
-  private drawHudRows(ctx: CanvasRenderingContext2D, view: View, x: number, maxWidth: number, parts: readonly HudPart[]): void {
-    if (maxWidth < 60) return;
-    const layout = layoutHud(parts, (text) => ctx.measureText(text).width, maxWidth, hudMaxRows(view.area.height), ctx.measureText("  ").width);
-    const pillW = Math.min(Math.max(0, view.area.width - 8), layout.width + 12);
-    drawOverlayPill(ctx, x - 6, 4, pillW, 20 + (layout.rows.length - 1) * HUD_ROW_HEIGHT, 5, "rgba(11, 16, 24, 0.78)", "rgba(148, 163, 184, 0.16)");
-    layout.rows.forEach((row, index) => {
-      for (const part of row.parts) {
-        ctx.fillStyle = part.color;
-        ctx.fillText(part.text, x + part.x, 8 + index * HUD_ROW_HEIGHT);
-      }
-    });
-  }
-}
-
-function drawOverlayPill(
-  ctx: CanvasRenderingContext2D,
-  x: number,
-  y: number,
-  w: number,
-  h: number,
-  radius: number,
-  fill: string,
-  stroke?: string,
-): void {
-  if (w <= 0 || h <= 0) return;
-  ctx.fillStyle = fill;
-  if (
-    typeof ctx.roundRect === "function" &&
-    typeof ctx.fill === "function" &&
-    typeof ctx.beginPath === "function" &&
-    typeof ctx.stroke === "function"
-  ) {
-    ctx.beginPath();
-    ctx.roundRect(x, y, w, h, radius);
-    ctx.fill();
-    if (stroke) {
-      ctx.strokeStyle = stroke;
-      ctx.beginPath();
-      ctx.roundRect(x + 0.5, y + 0.5, Math.max(0, w - 1), Math.max(0, h - 1), Math.max(0, radius - 0.5));
-      ctx.stroke();
-    }
-    return;
-  }
-  ctx.fillRect?.(x, y, w, h);
-  if (stroke) {
-    ctx.strokeStyle = stroke;
-    ctx.strokeRect?.(x + 0.5, y + 0.5, Math.max(0, w - 1), Math.max(0, h - 1));
-  }
-}
-
-function nakedPocColor(period: NakedPocLevel["period"]): string {
-  return period === "daily" ? nakedPocPalette.daily
-    : period === "weekly" ? nakedPocPalette.weekly
-    : period === "monthly" ? nakedPocPalette.monthly
-    : period === "quarterly" ? nakedPocPalette.quarterly
-    : period === "half-yearly" ? nakedPocPalette.halfYearly
-    : nakedPocPalette.yearly;
-}
-
-function lineDash(style: StrategyLineStyle | undefined): number[] {
-  if (style === "dashed") return [6, 4];
-  if (style === "dotted") return [3, 3];
-  if (style === "long-dashed") return [10, 4];
-  return [];
 }
