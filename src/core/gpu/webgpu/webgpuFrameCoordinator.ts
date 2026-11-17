@@ -44,7 +44,7 @@ export class WebGpuFrameCoordinator {
     const id = state.nextCallbackId++;
     state.callbacks.set(id, callback);
     if (state.rafId === null) {
-      state.rafId = win.requestAnimationFrame((timestamp) => this.dispatch(win, state, timestamp));
+      state.rafId = win.requestAnimationFrame((timestamp) => this.dispatch(state, timestamp));
     }
     return id;
   }
@@ -115,7 +115,7 @@ export class WebGpuFrameCoordinator {
     return state;
   }
 
-  private dispatch(win: Window, state: FrameState, timestamp: number): void {
+  private dispatch(state: FrameState, timestamp: number): void {
     state.rafId = null;
     state.encoder = null;
     state.hasCommands = false;
