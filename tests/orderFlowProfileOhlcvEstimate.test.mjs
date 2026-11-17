@@ -534,8 +534,11 @@ test("incremental tail cache on OHLCV-only and mixed series equals full recomput
     }
 
     // Changing priceStep must invalidate the cached key rather than reusing step=1 bins.
+    const step2Bars = Array.from({ length: 40 }, (_, i) =>
+      ohlcvBar(T0 + i * MIN, 100, 103, 100, 102, 30 + (i % 5)),
+    );
     const seriesStep2 = new FootprintSeries({ intervalMs: MIN, priceStep: 2 });
-    seriesStep2.loadBars(initialBars);
+    seriesStep2.loadBars(step2Bars);
     const { drawCtx: ctxStep2 } = makeIndicatorCtx(seriesStep2, [10, 40], { mode: "visible" });
     ctxStep2.instance.id = drawCtx.instance.id;
     const preparedStep2 = volumeProfileIndicatorDefinition.prepareData(ctxStep2);
