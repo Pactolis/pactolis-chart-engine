@@ -630,6 +630,7 @@ class ChartRuntimeImpl implements ChartRuntime, ChartInputHost {
       autoFit: () => this._autoFit(),
       updateHook: () => this._updateHook(),
       loadHistory: () => this.historyController.loadHistory(),
+      onReplaySettled: () => this.historyController.flushDeferredDayRefreshes(),
     });
 
     this.syncController = new ChartSyncController({

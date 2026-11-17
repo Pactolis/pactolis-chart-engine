@@ -1,8 +1,9 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { ChartHistoryController } from "../dist/features/chart/ChartHistoryController.js";
+import { ChartReplayCoordinator } from "../dist/features/chart/ChartReplayCoordinator.js";
 import { FootprintSeries } from "../dist/core/model/footprint.js";
-import { useFakeChartDataSource } from "./support/fakeChartDataSource.mjs";
+import { historyBar, useFakeChartDataSource } from "./support/fakeChartDataSource.mjs";
 
 // Real controller, deferred pipeline/host ports; no source extraction or fake readiness.
 function deferred() {
@@ -15,8 +16,9 @@ async function drain() {
 }
 function fixture() {
   let disposed = false;
+  let replayActive = true;
   let state = { type: "chart", market: "TEST:old", timeframe: "1m", scaleMode: "linear" };
-  const loads = [], loading = [], settled = [];
+  const loads = [], loading = [], settled = [], patchDayCalls = [];
   const pipeline = {
     series: new FootprintSeries({ intervalMs: 60_000, priceStep: 10 }),
     intervalMs: 60_000,
@@ -25,11 +27,14 @@ function fixture() {
     activeHistoryFootprintAvailable: false,
     activeHistoryCandleSourceGap: null,
     cancelHistoryLoad() {},
+    cancelPatchDay() {},
+    setPaused() {},
     cancelRecentFootprintCoverageRepair() {},
     async changeConfig(config) {
       if (config.intervalMs !== undefined) this.intervalMs = config.intervalMs;
     },
     loadHistory() { const load = deferred(); loads.push(load); return load.promise; },
+    patchDay(dayTs) { patchDayCalls.push(dayTs); return Promise.resolve(); },
   };
   const host = {
     pipeline,
@@ -46,7 +51,7 @@ function fixture() {
       failHistoryLoad() {},
     },
     // An active replay disables unrelated open-bucket HTTP maintenance; no render/health is faked.
-    replay: { isActive: () => true, getSnapshot: () => null },
+    replay: { isActive: () => replayActive, getSnapshot: () => null },
     isDisposed: () => disposed,
     getState: () => state,
     autoFit() {}, shouldAutoFitSameBarLiveUpdate: () => false,
@@ -56,7 +61,8 @@ function fixture() {
   };
   const controller = new ChartHistoryController(host);
   return {
-    controller, loads, loading, settled,
+    controller, pipeline, loads, loading, settled, patchDayCalls,
+    setReplayActive(value) { replayActive = value; },
     select(market) {
       const previous = state;
       state = { ...state, market };
@@ -65,6 +71,42 @@ function fixture() {
     dispose() { disposed = true; controller.dispose(); },
   };
 }
+
+test("refreshDay defers during replay and coalesces one patch after replay exits", async (t) => {
+  useFakeChartDataSource(t);
+  const f = fixture();
+  const day = Date.UTC(2026, 0, 15, 0, 0, 0);
+  f.pipeline.series.upsertBar(historyBar(day, { open: 1, high: 2, low: 0, close: 1, volume: 1 }));
+  const replay = new ChartReplayCoordinator({
+    pipeline: f.pipeline,
+    session: { invalidate() {} },
+    timeViewport: { applyDataUpdate() {}, placeReplayPrefixEnd() {} },
+    svc: { updateAnalysisFromSeries() {} },
+    isDisposed: () => false,
+    getMarket: () => "TEST:old",
+    autoFit() {},
+    updateHook() {},
+    async loadHistory() {},
+    onReplaySettled() {
+      f.setReplayActive(false);
+      f.controller.flushDeferredDayRefreshes();
+    },
+  });
+  try {
+    replay.start();
+    f.controller.refreshDay(day);
+    f.controller.refreshDay(day + 60_000);
+    assert.deepEqual(f.patchDayCalls, [], "replay must keep the current series untouched");
+
+    replay.exit();
+    await drain();
+    assert.equal(f.patchDayCalls.length, 1, "the deferred day refresh is applied once after replay");
+    assert.equal(f.patchDayCalls[0], day + 60_000, "the latest requested time in the day is retained");
+  } finally {
+    replay.dispose();
+    f.dispose();
+  }
+});
 
 for (const outcome of ["success", "error"]) {
   test(`F2 replacement cover survives older same-selection ${outcome} settlement`, async (t) => {

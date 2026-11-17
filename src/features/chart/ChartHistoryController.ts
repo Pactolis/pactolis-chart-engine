@@ -122,6 +122,7 @@ export class ChartHistoryController {
   };
   private candleGapRetryTimer: ReturnType<typeof setTimeout> | null = null;
   private candleGapRetryToken = 0;
+  private readonly pendingDayRefreshes = new Map<string, { dayTs: number; market: string; timeframe: string }>();
 
   constructor(private readonly host: ChartHistoryControllerHost) {
     this.host.pipeline?.setRecentCoverageRetryScheduler?.((attempt, retry, reason) => this.queueLiveRepairRetry(attempt, retry, reason));
@@ -348,10 +349,36 @@ export class ChartHistoryController {
 
   refreshDay(dayTs: number): void {
     if (this.host.isDisposed()) return;
+    const state = this.host.getState();
+    if (this.host.replay.isActive()) {
+      const dayStart = bucketStart(dayTs, DAY_MS);
+      const key = `${state.market}\u0000${state.timeframe}\u0000${dayStart}`;
+      this.pendingDayRefreshes.set(key, { dayTs, market: state.market, timeframe: state.timeframe });
+      return;
+    }
+    this.runDayRefresh(dayTs, state.market, state.timeframe);
+  }
+
+  /** Called after replay exits and its replacement history has settled. */
+  flushDeferredDayRefreshes(): void {
+    if (this.host.isDisposed() || this.host.replay.isActive()) return;
+    const state = this.host.getState();
+    const pending = [...this.pendingDayRefreshes.values()];
+    this.pendingDayRefreshes.clear();
+    for (const refresh of pending) {
+      if (refresh.market === state.market && refresh.timeframe === state.timeframe) {
+        this.runDayRefresh(refresh.dayTs, refresh.market, refresh.timeframe);
+      }
+    }
+  }
+
+  private runDayRefresh(dayTs: number, market: string, timeframe: string): void {
     void this.host.pipeline.patchDay(dayTs).then(() => {
-      if (this.host.isDisposed()) return;
+      if (this.host.isDisposed() || this.host.replay.isActive()) return;
+      const state = this.host.getState();
+      if (state.market !== market || state.timeframe !== timeframe) return;
       this.host.svc.updateAnalysisFromSeries(
-        this.host.getState().market,
+        state.market,
         this.host.pipeline.series,
         this.host.pipeline.series.config.priceStep,
       );
@@ -375,6 +402,7 @@ export class ChartHistoryController {
     this.liveOhlcTimer = null;
     this.pendingHistoryAnchor = null;
     this.pendingTimeframeCenterTime = null;
+    this.pendingDayRefreshes.clear();
   }
 
   private cancelRecentCoverageRetry(): void {

@@ -119,6 +119,36 @@ function createReplayCoordinatorFor(bars, intervalMs = MIN, market = "BINANCE_FU
   return { coordinator: new ChartReplayCoordinator(host), series, reloads };
 }
 
+test("replay start cancels history writes and settles deferred day refreshes after replacement history", async () => {
+  const series = new FootprintSeries({ intervalMs: MIN, priceStep: 1 });
+  series.loadBars([buildRichBar(0), buildRichBar(1)]);
+  const calls = { cancelHistory: 0, cancelPatchDay: 0, reloadHistory: 0, replaySettled: 0 };
+  const coordinator = new ChartReplayCoordinator({
+    pipeline: {
+      series,
+      intervalMs: MIN,
+      cancelHistoryLoad() { calls.cancelHistory++; },
+      cancelPatchDay() { calls.cancelPatchDay++; },
+      setPaused() {},
+    },
+    session: { invalidate() {} },
+    timeViewport: { applyDataUpdate() {}, placeReplayPrefixEnd() {} },
+    svc: { updateAnalysisFromSeries() {} },
+    isDisposed: () => false,
+    getMarket: () => "TEST:replay-history-guard",
+    autoFit() {},
+    updateHook() {},
+    async loadHistory() { calls.reloadHistory++; },
+    onReplaySettled() { calls.replaySettled++; },
+  });
+
+  coordinator.start();
+  assert.deepEqual(calls, { cancelHistory: 1, cancelPatchDay: 1, reloadHistory: 0, replaySettled: 0 });
+  coordinator.exit();
+  await new Promise(setImmediate);
+  assert.deepEqual(calls, { cancelHistory: 1, cancelPatchDay: 1, reloadHistory: 1, replaySettled: 1 });
+});
+
 function createFreshOracleSeries(barsSlice, intervalMs = MIN) {
   const series = new FootprintSeries({ intervalMs, priceStep: 1 });
   series.loadBars(barsSlice.map(cloneFootprintBarForReplay));
