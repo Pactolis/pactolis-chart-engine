@@ -126,6 +126,7 @@ export interface ChartInputHost extends ChartCommandTarget {
   readonly timeViewport: TimeScaleViewportController;
   readonly state: ChartPanelState;
   readonly panelId: string;
+  getReplaySnapshot(): { virtualTime: number } | null;
   /** Re-entrancy guard owned by ChartRuntime (link-group sync); input reads only. */
   readonly applyingExternal: boolean;
 
@@ -995,6 +996,7 @@ function attachChartInput(canvas: HTMLCanvasElement, crosshair: Crosshair, host:
       drawings.setHitTestContext(view, {
         indexForTime: (time: number) => host.pipeline.series.indexOfTime(time),
         timeForIndex: (index: number) => host.pipeline.series.timeOfIndex(Math.round(index)),
+        asOfTime: host.getReplaySnapshot()?.virtualTime,
       });
       const hit = drawings.hitTestAt(host.screenToDrawingPoint(cx, cy), { x: cx, y: cy });
       if (hit?.type === "text" || hit?.type === "callout-note") {

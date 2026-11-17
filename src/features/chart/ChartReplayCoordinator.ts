@@ -118,6 +118,7 @@ export class ChartReplayCoordinator {
     this.emit(null);
     this.host.updateHook();
     this.host.pipeline.setPaused(false);
+    this.host.session.invalidate(ChartChange.DataNonTail | ChartChange.Viewport);
     if (options.reloadHistory !== false) {
       void this.host.loadHistory()
         .catch((error: unknown) => {
