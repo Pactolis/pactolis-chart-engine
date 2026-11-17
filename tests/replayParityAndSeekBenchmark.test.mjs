@@ -120,6 +120,28 @@ function createReplayCoordinatorFor(bars, intervalMs = MIN, market = "BINANCE_FU
   return { coordinator: new ChartReplayCoordinator(host), series, reloads };
 }
 
+test("timeframe replay rebuild consumes source bars and clamps an old virtual time into range", () => {
+  const { coordinator, series } = createReplayCoordinatorFor(buildDataset(3, MIN, 4), MIN);
+  coordinator.start();
+  coordinator.seek(T0 + MIN);
+  assert.equal(coordinator.getSnapshot().virtualTime, T0 + MIN);
+
+  withFakeClock(() => {
+    coordinator.play();
+    coordinator.prepareForTimeframeChange();
+    const sourceBars = [100, 101, 102].map((index) => buildRichBar(index, 5 * MIN, 4));
+
+    coordinator.reconfigureAfterTimeframeChange(5 * MIN, sourceBars);
+
+    const snapshot = coordinator.getSnapshot();
+    assert.equal(snapshot.rangeStart, sourceBars[0].startTime);
+    assert.equal(snapshot.virtualTime, sourceBars[0].startTime);
+    assert.equal(snapshot.state, "playing", "a replay playing before refresh resumes after the timeframe rebuild");
+    assert.equal(series.length, 0, "no new-timeframe bar is complete at the clamped range start");
+    coordinator.exit({ reloadHistory: false });
+  });
+});
+
 test("replay start cancels history writes and settles deferred day refreshes after replacement history", async () => {
   const series = new FootprintSeries({ intervalMs: MIN, priceStep: 1 });
   series.loadBars([buildRichBar(0), buildRichBar(1)]);
