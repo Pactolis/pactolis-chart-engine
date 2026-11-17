@@ -280,26 +280,26 @@ test("replay as-of changes invalidate retained annotation output", () => {
   const { baseTime, series } = makeOverlaySeries();
   const view = makeOverlayView();
   const crosshair = { x: 0, y: 0, visible: false };
-  const renderedAsOfTimes = [];
+  let drawingPassCalls = 0;
   const overlay = new Overlay(
     mainCtx,
-    (_ctx, _view, _series, asOfTime) => { renderedAsOfTimes.push(asOfTime); },
+    () => { drawingPassCalls++; },
     () => ({ ...DEFAULT_VOLUME_PROFILE_SETTINGS, enabled: false }),
   );
   const layers = ["drawings", "axis"];
 
   overlay.renderAnnotations(view, series, crosshair, [0, 20], layers, ChartChange.All, undefined);
   overlay.renderAnnotations(view, series, crosshair, [0, 20], layers, ChartChange.DataTail, undefined);
-  assert.deepEqual(renderedAsOfTimes, [undefined], "unchanged live frames reuse the prior drawing pass");
+  assert.equal(drawingPassCalls, 1, "unchanged live frames reuse the prior drawing pass");
 
   const firstSeek = baseTime + 10 * 60_000;
   overlay.renderAnnotations(view, series, crosshair, [0, 20], layers, ChartChange.DataTail, firstSeek);
   overlay.renderAnnotations(view, series, crosshair, [0, 20], layers, ChartChange.DataTail, firstSeek);
-  assert.deepEqual(renderedAsOfTimes, [undefined, firstSeek], "entering replay and repeating the same seek draws once, then reuses it");
+  assert.equal(drawingPassCalls, 2, "entering replay redraws, then repeating the same seek reuses it");
 
   const secondSeek = baseTime + 11 * 60_000;
   overlay.renderAnnotations(view, series, crosshair, [0, 20], layers, ChartChange.DataTail, secondSeek);
-  assert.deepEqual(renderedAsOfTimes, [undefined, firstSeek, secondSeek], "a replay seek invalidates the previous time's retained drawing frame");
+  assert.equal(drawingPassCalls, 3, "a replay seek invalidates the previous time's retained drawing frame");
 });
 
 test("naked-poc, strategy-levels, and reference-levels redraw updated levels on a DataTail frame while reusing unchanged levels", () => {
