@@ -57,6 +57,11 @@ test("Order Flow Profile renders Estimated OHLCV profile on non-footprint market
   test.setTimeout(60_000);
   const ohlcvBars = buildOhlcvOnlyBars(40);
   const footprintBars = buildFootprintBars(40);
+  let historyRequestCount = 0;
+  page.on("request", (request) => {
+    if (new URL(request.url()).pathname === "/history") historyRequestCount++;
+  });
+  await page.exposeFunction("__historyRequestCount", () => historyRequestCount);
 
   await page.route("**/*", (route) => {
     const url = new URL(route.request().url());
@@ -143,6 +148,25 @@ test("Order Flow Profile renders Estimated OHLCV profile on non-footprint market
         await new Promise((r) => setTimeout(r, 25));
       }
       const rt = harness.getChartRuntime(panelId)!;
+      const requestCount = (window as Window & { __historyRequestCount: () => Promise<number> }).__historyRequestCount;
+      const requestsBeforeProfileDrawing = await requestCount();
+      const drawingFrom = rt.pipeline.series.timeOfIndex(0);
+      const drawingTo = rt.pipeline.series.timeOfIndex(rt.pipeline.series.length - 1);
+      const profileDrawing = {
+        id: `${panelId}-frvp`,
+        type: "fixed-range-volume-profile",
+        points: [
+          { time: drawingFrom, price: 100 },
+          { time: drawingTo, price: 103 },
+        ],
+        color: "#ffffff",
+        lineWidth: 1,
+        locked: false,
+        visible: true,
+        market,
+        profileMetric: "volume",
+        profileSide: "total",
+      };
       const drawnTexts: string[] = [];
       const annotationCanvas = root.querySelector('[data-chart-surface="annotation"]') as HTMLCanvasElement;
       const ctx2d = annotationCanvas.getContext("2d")!;
@@ -152,10 +176,27 @@ test("Order Flow Profile renders Estimated OHLCV profile on non-footprint market
         return maxW === undefined ? origFillText(text, x, y) : origFillText(text, x, y, maxW);
       };
 
-      // Force one fresh overlay draw & snapshot readout.
+      // Capture indicator text on its own so the next delta proves the drawing's label.
+      rt.invalidate();
+      await rt.session.captureCompositePng();
+      const enWithoutDrawing = [...drawnTexts];
+      services.drawings.replace([profileDrawing as any]);
+      drawnTexts.length = 0;
       rt.invalidate();
       await rt.session.captureCompositePng();
       const enTexts = [...drawnTexts];
+      const subtractExisting = (after: string[], before: string[]) => {
+        const counts = new Map<string, number>();
+        for (const text of before) counts.set(text, (counts.get(text) ?? 0) + 1);
+        return after.filter((text) => {
+          const count = counts.get(text) ?? 0;
+          if (count === 0) return true;
+          counts.set(text, count - 1);
+          return false;
+        });
+      };
+      const enDrawingTexts = subtractExisting(enTexts, enWithoutDrawing);
+      const requestsAfterProfileDrawing = await requestCount();
 
       const lastTime = rt.pipeline.series.timeOfIndex(rt.pipeline.series.length - 1);
       const snapTotal = rt.getAnalysisSnapshot({
@@ -175,11 +216,20 @@ test("Order Flow Profile renders Estimated OHLCV profile on non-footprint market
         onLocaleChange: () => () => {},
       });
       let snapDeltaTr: any;
+      let trDrawingTexts: string[] = [];
       try {
+        services.drawings.replace([]);
         drawnTexts.length = 0;
         rt.invalidate();
         await rt.session.captureCompositePng();
-        trTexts.push(...drawnTexts);
+        const trWithoutDrawing = [...drawnTexts];
+        services.drawings.replace([profileDrawing as any]);
+        drawnTexts.length = 0;
+        rt.invalidate();
+        await rt.session.captureCompositePng();
+        const trWithDrawing = [...drawnTexts];
+        trDrawingTexts = subtractExisting(trWithDrawing, trWithoutDrawing);
+        trTexts.push(...trWithDrawing);
 
         handle.updateState({
           ...rt.getState(),
@@ -203,8 +253,12 @@ test("Order Flow Profile renders Estimated OHLCV profile on non-footprint market
       root.remove();
       return {
         enTexts,
+        enDrawingTexts,
+        profileDrawingRequestsBefore: requestsBeforeProfileDrawing,
+        profileDrawingRequestsAfter: requestsAfterProfileDrawing,
         snapTotalInd: snapTotal.indicators[0],
         trTexts,
+        trDrawingTexts,
         snapDeltaTrInd: snapDeltaTr.indicators[0],
       };
     };
@@ -223,6 +277,9 @@ test("Order Flow Profile renders Estimated OHLCV profile on non-footprint market
   expect(evidence.exact.snapDeltaTrInd.warnings.some((w: string) => /estimated|tahmini|footprint/i.test(w))).toBe(false);
   expect(evidence.exact.enTexts.some((t: string) => /estimated|tahmini/i.test(t))).toBe(false);
   expect(evidence.exact.trTexts.some((t: string) => /estimated|tahmini/i.test(t))).toBe(false);
+  expect(evidence.exact.profileDrawingRequestsAfter).toBe(evidence.exact.profileDrawingRequestsBefore);
+  expect(evidence.exact.enDrawingTexts.some((t: string) => /estimated|tahmini/i.test(t))).toBe(false);
+  expect(evidence.exact.trDrawingTexts.some((t: string) => /estimated|tahmini/i.test(t))).toBe(false);
 
   // OHLCV-only market produces deterministic estimated total volume profile with explicit EN/TR labels
   // and fails closed when switched to delta.
@@ -231,6 +288,9 @@ test("Order Flow Profile renders Estimated OHLCV profile on non-footprint market
   expect(evidence.ohlcv.snapTotalInd.warnings.some((w: string) => /Estimated/.test(w))).toBe(true);
   expect(evidence.ohlcv.enTexts.some((t: string) => t.includes("Estimated"))).toBe(true);
   expect(evidence.ohlcv.trTexts.some((t: string) => t.includes("Tahmini"))).toBe(true);
+  expect(evidence.ohlcv.enDrawingTexts.some((t: string) => t.includes("Estimated (OHLCV)"))).toBe(true);
+  expect(evidence.ohlcv.trDrawingTexts.some((t: string) => t.includes("Tahmini (OHLCV)"))).toBe(true);
+  expect(evidence.ohlcv.profileDrawingRequestsAfter).toBe(evidence.ohlcv.profileDrawingRequestsBefore);
   expect(evidence.ohlcv.snapDeltaTrInd.status).toBe("no-data");
   expect(evidence.ohlcv.snapDeltaTrInd.warnings.some((w: string) => tHas(w, "Tahmini"))).toBe(true);
 });

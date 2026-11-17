@@ -48,6 +48,28 @@ Kaynak: [src/features/chart/historyContracts.ts](../src/features/chart/historyCo
 Bu belge invariantları **kaynakta ve testlerde** doğrulanmış haliyle işaret eder; burada listelenmeyen
 bir davranış için source'a bakın, bu belgeden davranış çıkarmayın.
 
+## Fixed-range volume profile kaynak ve coverage davranışı
+
+Kaynak: [rangeProfile.ts](../src/core/analysis/rangeProfile.ts),
+[analysisDrawings.ts](../src/core/render/analysisDrawings.ts),
+[orderFlowProfile.ts](../src/core/analysis/orderFlowProfile.ts).
+
+- Seçili bardaki `cells.size > 0`, o bar için exact footprint coverage sayılır. `coverage`, seçili
+  barların kaçının exact hücresi bulunduğunu (`coveredBars / totalBars`) bildirir; `complete`, boş
+  olmayan seçimin her barında exact hücre olduğu zaman true'dur. `missingDays`, hücresi olmayan
+  seçili barların takvim günlerini listeler.
+- Fixed Range çiziminde yalnız `coverage === 1` exact hesaplamaya gider; mevcut footprint hücreleri,
+  metric, yön ve seviyeler değiştirilmeden kullanılır. En az bir seçili barın hücresi yoksa tüm aralık
+  OHLCV fallback'iyle yeniden hesaplanır: hesaplayıcıya verilen kopyalarda bütün `cells` map'leri
+  boşaltılır. Böylece partial exact hücrelerle tahmini hacim aynı histogramda hiçbir zaman karışmaz.
+- OHLCV fallback yalnız `volume` / `total` için anlamlıdır. Delta, buy/sell, trade count ve average
+  trade size gibi exact-only ayarlar açıkça desteklenmez ve boş profil verir. Estimator yalnız seçili
+  aralığın zaten chart serisinde bulunan mumlarını okur; history isteği, backfill veya abonelik açmaz.
+- Sonuçtaki `provenance` / `isEstimated`, profildeki kaynak türünü gösterir. `coverage` exact footprint
+  kapsamını, `dataComplete` ise hesaplanan metriğin geçerliliğini anlatır; estimate'in exact veri
+  olduğunu belirtmez. Çizim `Estimated (OHLCV)` / `Tahmini (OHLCV)` etiketini aktif chart locale'iyle
+  görünür kılar.
+
 ## GPU loss counters
 
 `gpu.device.lost` counts each lost shared WebGPU device once. `chart.gpu.contextLost`

@@ -3,7 +3,7 @@ import { calculateOrderFlowRangeProfile } from "../analysis/rangeProfile.js";
 import type { OrderFlowRangeProfileResult } from "../analysis/rangeProfile.js";
 import type { Drawing, DrawingContext } from "../drawingTypes.js";
 import type { View } from "../engine/view.js";
-import { t } from "../chartLocale.js";
+import { t, tOr } from "../chartLocale.js";
 import type { FootprintSeries } from "../model/footprint.js";
 import {
   levelModeHasDeveloping,
@@ -227,7 +227,13 @@ function cachedRangeProfile(
   const developing = profileSupportsValueArea(settings.profileMetric)
     && [settings.pocMode, settings.vahMode, settings.valMode].some(levelModeHasDeveloping);
   const valueAreaPercent = settings.valueAreaPercent ?? 0.7;
+  const selectedBars = rangeProfileBars(series, from, to);
+  const sourceMode = selectedBars.length === 0
+    ? "none"
+    : selectedBars.every((bar) => bar.cells.size > 0) ? "exact" : "estimated";
   const key = [
+    sourceMode,
+    series.config.priceStep,
     from,
     to,
     valueAreaPercent,
@@ -235,7 +241,6 @@ function cachedRangeProfile(
     settings.profileSide,
     developing ? 1 : 0,
   ].join(":");
-  const selectedBars = rangeProfileBars(series, from, to);
   const cached = rangeProfileCache.get(drawing);
   if (cached && cached.series === series && cached.key === key && sameRangeProfileBars(cached.bars, selectedBars)) {
     incrementPerformanceCounter("analysis.drawings.frvp.cache.hit");
@@ -248,6 +253,8 @@ function cachedRangeProfile(
       profileSide: settings.profileSide,
       valueAreaPercent,
       developing,
+      priceStep: series.config.priceStep,
+      allowOhlcvEstimate: true,
     }));
   let maxMagnitude = 0;
   for (const level of profile.levels) maxMagnitude = Math.max(maxMagnitude, level.magnitude ?? 0);
@@ -375,6 +382,13 @@ function drawRangeProfile(
     drawConfiguredRangeLevel(ctx, view, time, drawing, settings, "vah", result.vah, result.developing.map((point) => ({ time: point.time, price: point.vah, valid: point.valid })), left, right, "VAH", "dVAH", uiColor.info);
     drawConfiguredRangeLevel(ctx, view, time, drawing, settings, "val", result.val, result.developing.map((point) => ({ time: point.time, price: point.val, valid: point.valid })), left, right, "VAL", "dVAL", uiColor.info);
   }
+  const estimatedLabelY = view.area.top + 14;
+  if (result.isEstimated) {
+    ctx.fillStyle = uiColor.warn;
+    ctx.font = "10px ui-monospace, monospace";
+    ctx.textAlign = "left";
+    ctx.fillText(tOr("indicator.volumeProfile.estimated"), left + 4, estimatedLabelY);
+  }
   if (!result.complete || !result.dataComplete) {
     ctx.fillStyle = uiColor.warn;
     ctx.font = "10px ui-monospace, monospace";
@@ -385,7 +399,7 @@ function drawRangeProfile(
         ? t("indicator.volumeProfile.coverageLoading", { percent })
         : t("indicator.volumeProfile.coverageIncomplete", { percent }),
       left + 4,
-      view.area.top + 14
+      estimatedLabelY + (result.isEstimated ? 12 : 0)
     );
   }
   ctx.restore();
