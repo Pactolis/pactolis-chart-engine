@@ -159,7 +159,8 @@ export class Overlay {
     private readonly drawForeground?: (
       ctx: CanvasRenderingContext2D,
       view: View,
-      series: FootprintSeries
+      series: FootprintSeries,
+      asOfTime?: number,
     ) => void,
     private readonly getProfileSettings?: () => VolumeProfileSettings,
     private readonly getPreviousWeekStrategySettings?: () => PreviousWeekStrategySettings,
@@ -300,6 +301,7 @@ export class Overlay {
     range: [number, number],
     layerOrder?: readonly string[],
     changes: ChartChange = ChartChange.None,
+    asOfTime?: number,
   ): void {
     let ctx = this.ctx;
     const orderedLayers = layerOrder ?? [
@@ -316,7 +318,7 @@ export class Overlay {
       "axis",
     ];
     const transform = ctx.getTransform?.();
-    this.annotationPassCache.begin(changes, JSON.stringify([ctx.canvas.width, ctx.canvas.height, transform?.a, transform?.d, view.area, view.offsetX, view.colWidth, view.priceTop, view.pricePerPx, range, series.length, series.at(series.length - 1)?.startTime, orderedLayers]));
+    this.annotationPassCache.begin(changes, JSON.stringify([ctx.canvas.width, ctx.canvas.height, transform?.a, transform?.d, view.area, view.offsetX, view.colWidth, view.priceTop, view.pricePerPx, range, series.length, series.at(series.length - 1)?.startTime, orderedLayers, asOfTime]));
     const telemetryEnabled = isPerformanceTelemetryEnabled();
     const setupStartedAt = telemetryEnabled ? performance.now() : null;
     ctx.clearRect(0, 0, ctx.canvas.width, ctx.canvas.height);
@@ -390,7 +392,7 @@ export class Overlay {
               drawReferenceLevels(this.annotationHost, view, series);
               break;
             case "drawings":
-              this.drawForeground?.(ctx, view, series);
+              this.drawForeground?.(ctx, view, series, asOfTime);
               break;
             case "last-price":
               if (settings.lastPrice) drawLastPrice(this.annotationHost, view, series);
