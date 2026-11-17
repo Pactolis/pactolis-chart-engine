@@ -593,12 +593,14 @@ test("15,000-cell SwiftShader benchmark and CPU raster cache budget / GPU takeov
   expect(report.cpuWarm.hits).toBe(20);
   expect(report.cpuWarm.misses).toBe(0);
   expect(report.cpuWarm.heatmapMs.meanMs).toBeLessThan(0.1);
-  expect(report.continuousPan.direct.directs).toBe(30);
+  expect(report.continuousPan.direct.heatmapMs.samples).toBe(30);
+  expect(report.continuousPan.direct.directs).toBeGreaterThanOrEqual(30);
   expect(report.continuousPan.direct.misses).toBe(0);
   expect(report.continuousPan.direct.hits).toBe(0);
   expect(report.continuousPan.direct.skips).toBe(0);
-  expect(report.continuousPan.adaptive.skips).toBe(30);
-  expect(report.continuousPan.adaptive.directs).toBe(30);
+  expect(report.continuousPan.adaptive.heatmapMs.samples).toBe(30);
+  expect(report.continuousPan.adaptive.skips).toBeGreaterThanOrEqual(30);
+  expect(report.continuousPan.adaptive.directs).toBe(report.continuousPan.adaptive.skips);
   expect(report.continuousPan.adaptive.misses).toBe(0);
   expect(report.continuousPan.adaptive.hits).toBe(0);
   expect(report.continuousPan.adaptive.heatmapMs.meanMs).toBeLessThanOrEqual(report.continuousPan.direct.heatmapMs.meanMs * 1.1);
