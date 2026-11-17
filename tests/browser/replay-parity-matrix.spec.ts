@@ -211,8 +211,9 @@ test("a late two-phase history response cannot extend the active replay series",
 
 test("ChartRuntime replay parity: TPO (#144), 10 indicators, timeframe round-trip (1m->5m->15m->1m), linked follower, and live unlinked chart", async ({ page }) => {
   test.setTimeout(90_000);
+  await page.clock.setFixedTime(new Date(FROZEN_NOW));
   const MIN = 60_000;
-  const endAligned = Math.floor(Date.now() / (15 * MIN)) * (15 * MIN);
+  const endAligned = Math.floor(FROZEN_NOW / (15 * MIN)) * (15 * MIN);
   const full1m = buildAligned1mBars(90, endAligned);
   const full5m = aggregateWireBars(full1m, 5 * MIN);
   const full15m = aggregateWireBars(full1m, 15 * MIN);
@@ -244,7 +245,7 @@ test("ChartRuntime replay parity: TPO (#144), 10 indicators, timeframe round-tri
         data: { bars },
         meta: {
           schemaVersion: 1,
-          generatedAt: Date.now(),
+          generatedAt: FROZEN_NOW,
           footprint: { available: true, allowed: true, priceStep: 10 },
           footprintCoverage: {
             status: "complete",
@@ -386,11 +387,33 @@ test("ChartRuntime replay parity: TPO (#144), 10 indicators, timeframe round-tri
       // Timeframe round-trip during active replay at mid-15m timestamp (index 37 -> virtualTime = T0 + 37m)
       rtOwner.replaySeek(full1mTimes[37]);
       const vtBeforeTf = rtOwner.getReplaySnapshot()!.virtualTime;
+      const futureMutationViolations: Array<{ interval: number; virtualTime: number; futureEnds: number[] }> = [];
+      const monitoredSeries: any = rtOwner.pipeline.series;
+      const recordReplayBound = () => {
+        const replay = rtOwner.getReplaySnapshot();
+        if (!replay) return;
+        const interval = rtOwner.pipeline.intervalMs;
+        const futureEnds = monitoredSeries.listReadonly()
+          .map((bar: any) => bar.startTime + interval)
+          .filter((end: number) => end > replay.virtualTime);
+        if (futureEnds.length > 0) futureMutationViolations.push({ interval, virtualTime: replay.virtualTime, futureEnds });
+      };
+      for (const method of ["upsertBar", "replaceRange", "reassertOHLC", "addTrade", "addCandleTrades", "addFootprintTrades", "addTrades", "loadBars"]) {
+        const original = monitoredSeries[method].bind(monitoredSeries);
+        monitoredSeries[method] = (...args: any[]) => {
+          const result = original(...args);
+          recordReplayBound();
+          return result;
+        };
+      }
 
       const waitTf = async (expectedInterval: number) => {
         const deadline = performance.now() + 10_000;
         while (performance.now() < deadline) {
-          if (rtOwner.pipeline.intervalMs === expectedInterval && rtOwner.pipeline.series.length > 0) {
+          if (rtOwner.pipeline.intervalMs === expectedInterval
+            && rtOwner.pipeline.series.length > 0
+            && !owner.surface.historyOverlay
+            && !owner.surface.historyBackground) {
             await new Promise((r) => setTimeout(r, 80));
             return;
           }
@@ -431,9 +454,24 @@ test("ChartRuntime replay parity: TPO (#144), 10 indicators, timeframe round-tri
         linkedLength,
         liveVolDelta: liveVolAfter - liveVolBefore,
         vtBeforeTf,
-        tf5m: { vt: snap5m.virtualTime, count: bars5m.length, maxEnd: Math.max(...bars5m.map((b: any) => b.startTime + 5 * minMs)) },
-        tf15m: { vt: snap15m.virtualTime, count: bars15m.length, maxEnd: Math.max(...bars15m.map((b: any) => b.startTime + 15 * minMs)) },
-        tfBack1m: { vt: snapBack1m.virtualTime, count: barsBack1m.length },
+        futureMutationViolations,
+        tf5m: {
+          vt: snap5m.virtualTime,
+          count: bars5m.length,
+          maxEnd: Math.max(...bars5m.map((b: any) => b.startTime + 5 * minMs)),
+          futureBars: snap5m.totalBars - snap5m.visibleBars,
+        },
+        tf15m: {
+          vt: snap15m.virtualTime,
+          count: bars15m.length,
+          maxEnd: Math.max(...bars15m.map((b: any) => b.startTime + 15 * minMs)),
+          futureBars: snap15m.totalBars - snap15m.visibleBars,
+        },
+        tfBack1m: {
+          vt: snapBack1m.virtualTime,
+          count: barsBack1m.length,
+          futureBars: snapBack1m.totalBars - snapBack1m.visibleBars,
+        },
       };
     } finally {
       for (const m of mounts) {
@@ -471,4 +509,8 @@ test("ChartRuntime replay parity: TPO (#144), 10 indicators, timeframe round-tri
   expect(result.tf15m.maxEnd).toBeLessThanOrEqual(result.vtBeforeTf);
   expect(result.tfBack1m.vt).toBe(result.vtBeforeTf);
   expect(result.tfBack1m.count).toBe(37);
+  expect(result.tf5m.futureBars).toBeGreaterThan(0);
+  expect(result.tf15m.futureBars).toBeGreaterThan(0);
+  expect(result.tfBack1m.futureBars).toBeGreaterThan(0);
+  expect(result.futureMutationViolations).toEqual([]);
 });

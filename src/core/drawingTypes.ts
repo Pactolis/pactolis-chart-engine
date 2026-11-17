@@ -202,6 +202,13 @@ export interface Drawing {
 export interface DrawingContext {
   indexForTime(time: number): number;
   timeForIndex(index: number): number;
+  /** When set, drawings with any anchor after this replay time are hidden. */
+  asOfTime?: number;
+}
+
+/** Partial and wholly future drawings are both unavailable at a replay as-of time. */
+export function drawingIsAvailableAsOf(drawing: Pick<Drawing, "points">, asOfTime: number | undefined): boolean {
+  return asOfTime === undefined || drawing.points.every((point) => point.time <= asOfTime);
 }
 
 /** True for drawing tools whose geometry/output is recomputed from footprint series bars (including live tail updates). */
