@@ -622,6 +622,9 @@ test("WebGpuQuadPipeline skips unchanged resolution writes and updates after res
   const resizedFloats = new Float32Array(writtenBuffers[1].data.buffer);
   assert.equal(resizedFloats[0], 1280);
   assert.equal(resizedFloats[1], 720);
+  assert.equal(writtenBuffers[1].data.buffer, scratchBuffer, "resize reuses the same scratch allocation");
+  for (let frame = 0; frame < 120; frame++) pipeline.updateResolution(1280, 720);
+  assert.equal(writtenBuffers.length, 2, "steady frames never upload resolution");
   pipeline.dispose();
 });
 test("WebGpuSurface renders frame lifecycle and writes instance data via WebGpuQuadSink", () => {
