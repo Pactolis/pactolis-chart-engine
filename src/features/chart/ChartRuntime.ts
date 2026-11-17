@@ -378,6 +378,7 @@ class ChartRuntimeImpl implements ChartRuntime, ChartInputHost {
           if (!this.disposed) this.session?.invalidate();
         },
         getMarket: () => this.state.market,
+        isReplayActive: () => this.replayCoordinator.isActive(),
         subscribeLiveTail: subscribeHeatmapLiveTail,
       })
       : null;
