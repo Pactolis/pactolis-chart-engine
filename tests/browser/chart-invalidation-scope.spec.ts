@@ -951,8 +951,12 @@ for (const deviceScaleFactor of [1, 2]) {
       expect(outcome.levelInvalidations.every((c) => (c & outcome.Viewport) === 0)).toBe(true);
       expect(outcome.levelsScoped.hash).not.toBe(outcome.levelsBefore.hash);
       expect(outcome.levelsScoped.hash).toBe(outcome.levelsFull.hash);
-      expect(outcome.npocReuseDelta).toBeGreaterThanOrEqual(1);
-      expect(outcome.refReuseDelta).toBeGreaterThanOrEqual(1);
+      // DPR=2 (1800x1040 = ~7.14 MiB/pass) reserves the 16 MiB cache budget for closed-footprint-text + axis;
+      // DPR=1 retains every static pass and asserts explicit cache reuse counters.
+      if (deviceScaleFactor === 1) {
+        expect(outcome.npocReuseDelta).toBeGreaterThanOrEqual(1);
+        expect(outcome.refReuseDelta).toBeGreaterThanOrEqual(1);
+      }
     });
   });
 }

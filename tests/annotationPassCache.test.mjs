@@ -333,8 +333,8 @@ test("naked-poc, strategy-levels, and reference-levels redraw updated levels on 
     const allTexts = [...drawnTexts, ...axisTexts];
     assert.ok(allTexts.some((text) => text.includes("REF-2")));
     assert.ok(allTexts.some((text) => text.includes("PW-2")));
-    assert.ok(allTexts.some((text) => text.includes("3 d")));
-    assert.equal(allTexts.some((text) => text.includes("REF-1") || text.includes("PW-1")), false);
+    assert.ok(allTexts.some((text) => text.startsWith("D-NPOC · 3 ")));
+    assert.equal(allTexts.some((text) => text.includes("REF-1") || text.includes("PW-1") || text.startsWith("D-NPOC · 1 ")), false);
 
     const beforeSecondTail = snapshotPerformanceTelemetry().counters;
     overlay.renderAnnotations(view, series, crosshair, [0, 20], layers, ChartChange.DataTail);
