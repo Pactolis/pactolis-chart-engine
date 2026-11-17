@@ -1,5 +1,5 @@
 import { expect, test } from "@playwright/test";
-import { installHistory, openHarness, FROZEN_NOW, INTERVAL_MS } from "./support/history.js";
+import { installHistory, openHarness, FROZEN_NOW } from "./support/history.js";
 
 test("replay hides future and partially future drawings after panning past the replay tail", async ({ page }) => {
   test.setTimeout(60_000);
@@ -47,6 +47,7 @@ test("replay hides future and partially future drawings after panning past the r
   };
   try {
     evidence = await page.evaluate(async () => {
+    const INTERVAL_MS = 15 * 60_000;
     const [{ mountChart }, { createChartSurfaceModel }, { getChartRuntime }, { DrawingManager }, { DEFAULT_VOLUME_PROFILE_SETTINGS }, { normalizePreviousWeekStrategySettings }, { normalizeMondayRangeSettings }] = await Promise.all([
       import("/harness/chart.ts"),
       import("/harness/chart.ts"),
@@ -65,6 +66,9 @@ test("replay hides future and partially future drawings after panning past the r
       previousWeekStrategySettings: normalizePreviousWeekStrategySettings({ enabled: false }),
       mondayRangeSettings: normalizeMondayRangeSettings({ enabled: false }),
       nakedPocs: [],
+      previousWeekStrategyLevels: [],
+      mondayRangeLevels: [],
+      referenceLevels: [],
       drawings,
     };
     const services = {
