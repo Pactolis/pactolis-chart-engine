@@ -32,13 +32,6 @@ jobs:
       - run: npm run check:exports
       - run: npm run check:default-import-graph
       - run: npm pack --dry-run
-      # Temporary evidence-only benchmark for CE #122; remove after recording
-      # the table so the final PR has no workflow diff.
-      - name: Temporary CE 122 viewport benchmark evidence
-        if: ${{ github.event_name == 'pull_request' && github.event.pull_request.number == 203 && matrix.node == 24 }}
-        env:
-          SOURCE_SHA: ${{ github.event.pull_request.head.sha }}
-        run: npm run bench:tpo-viewport | tee -a "$GITHUB_STEP_SUMMARY"
 
   changes:
     # Change-based browser test selection (scripts/select-ci-tests.mjs).
