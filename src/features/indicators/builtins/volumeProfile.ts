@@ -11,7 +11,7 @@ import {
   type ProfileSide,
 } from "../../../core/analysis/orderFlowProfile.js";
 import { sessionBars } from "../../../core/analysis/volumeProfile.js";
-import { t } from "../../../core/chartLocale.js";
+import { t, tOr } from "../../../core/chartLocale.js";
 import {
   levelModeHasDeveloping,
   levelModeHasStatic,
@@ -26,7 +26,7 @@ import type { FootprintSeries } from "../../../core/model/footprint.js";
 import { incrementPerformanceCounter } from "../../../core/performanceTelemetry.js";
 import { uiColor, volumeProfileReadoutTextColor } from "../../../core/ui/seriesPalette.js";
 import type { IndicatorDefinition, IndicatorDrawContext, IndicatorPreparedData, IndicatorSettings } from "../types.js";
-import { compactNumber, drawIndicatorMessage } from "../render/indicatorPaneUi.js";
+import { compactNumber, drawIndicatorBadge, drawIndicatorMessage } from "../render/indicatorPaneUi.js";
 import { numericSetting, stringSetting } from "./taShared.js";
 
 interface VolumeProfileIndicatorSettings extends IndicatorSettings {
@@ -109,17 +109,23 @@ function buildVolumeProfilePrepared(
   selectedBars: number,
 ): VolumeProfilePreparedData {
   const result = profile;
+  if (result.isEstimated && (result.profileMetric !== "volume" || result.profileSide !== "total")) {
+    return emptyPrepared("no-data", tOr("indicator.volumeProfile.estimatedMetricUnsupported"), result);
+  }
   const maxMagnitude = result.levels.reduce((max, level) => Math.max(max, level.magnitude ?? 0), 0);
   const validLevels = result.levels.filter((level) => level.value !== null);
-  if (!result.levels.length || !validLevels.length) return emptyPrepared("no-data", t("indicator.volumeProfile.noData"));
+  if (!result.levels.length || !validLevels.length) return emptyPrepared("no-data", t("indicator.volumeProfile.noData"), result);
   const first = result.levels[0]?.priceBin ?? 0;
   const last = result.levels[result.levels.length - 1]?.priceBin ?? first;
+  const message = result.isEstimated
+    ? (result.provenance === "mixed" ? tOr("indicator.volumeProfile.mixed") : tOr("indicator.volumeProfile.estimated"))
+    : (result.dataComplete ? undefined : t("indicator.volumeProfile.incompleteData"));
   return {
     status: "ok",
     points: [],
     range: { min: first, max: last + ctx.series.config.priceStep },
     meta: { result, maxMagnitude, selectedBars },
-    message: result.dataComplete ? undefined : t("indicator.volumeProfile.incompleteData"),
+    message,
   };
 }
 
@@ -130,14 +136,16 @@ function prepareVolumeProfile(ctx: IndicatorDrawContext<VolumeProfileIndicatorSe
   const profileMetric = settings.profileMetric;
   const developing = profileSupportsValueArea(profileMetric)
     && [settings.pocMode, settings.vahMode, settings.valMode].some(levelModeHasDeveloping);
+  const { series } = ctx;
   const options: OrderFlowProfileOptions = {
     profileMetric,
     profileSide: settings.profileSide,
     valueAreaPercent: numericSetting(settings, "valueAreaPercent", 70, 1, 99) / 100,
     developing,
+    priceStep: series.config.priceStep,
+    allowOhlcvEstimate: true,
   };
-  const { series } = ctx;
-  const key = `${profileMetric}|${options.profileSide}|${options.valueAreaPercent}|${developing}|${stringSetting(settings, "mode", "visible")}|${numericSetting(settings, "lookbackBars", 200, 1, 10_000)}`;
+  const key = `${profileMetric}|${options.profileSide}|${options.valueAreaPercent}|${developing}|${series.config.priceStep}|${stringSetting(settings, "mode", "visible")}|${numericSetting(settings, "lookbackBars", 200, 1, 10_000)}`;
   let perSeries = volumeProfileCaches.get(series);
   if (!perSeries) { perSeries = new Map(); volumeProfileCaches.set(series, perSeries); }
   const firstBar = bars[0];
@@ -214,10 +222,21 @@ function asVolumeProfileData(prepared?: IndicatorPreparedData): VolumeProfilePre
 
 function drawVolumeProfileOverlay(ctx: IndicatorDrawContext<VolumeProfileIndicatorSettings>, prepared?: IndicatorPreparedData): void {
   const data = asVolumeProfileData(prepared);
-  if (data.status !== "ok") return;
-  const settings = normalizedSettings(ctx.settings);
   const { view, series, ctx: canvas } = ctx;
   const { result, maxMagnitude } = data.meta;
+  if (data.status !== "ok") {
+    if (result.isEstimated && ctx.settings.showPlotLabel !== false) {
+      drawIndicatorBadge(
+        canvas,
+        data.message ?? tOr("indicator.volumeProfile.estimatedMetricUnsupported"),
+        view.area.left + view.area.width - 8,
+        view.area.top + 18,
+        { color: uiColor.warn, align: "right", maxWidth: Math.max(180, view.area.width - 16) },
+      );
+    }
+    return;
+  }
+  const settings = normalizedSettings(ctx.settings);
   const step = series.config.priceStep;
   const maxWidth = Math.min(view.area.width * 0.34, numericSetting(settings, "maxWidth", 180, 40, 500));
   const right = view.area.left + view.area.width - 4;
@@ -247,16 +266,29 @@ function drawVolumeProfileOverlay(ctx: IndicatorDrawContext<VolumeProfileIndicat
     let cursor = right;
     for (const part of [...parts].reverse()) {
       const width = maxWidth * (part.value / Math.max(maxMagnitude, Number.EPSILON));
-      canvas.fillStyle = part.side === "sell" ? sellColor : buyColor;
+      canvas.fillStyle = part.side === "sell"
+        ? sellColor
+        : part.side === "total" && result.isEstimated
+          ? uiColor.info
+          : buyColor;
       canvas.fillRect(cursor - width, yTop, width, rowHeight);
       cursor -= width;
     }
   }
   canvas.globalAlpha = 1;
   if (profileSupportsValueArea(result.profileMetric)) {
-    drawConfiguredLevel(ctx, settings, "poc", result.poc, result.developing.map((point) => ({ time: point.time, price: point.poc, valid: point.valid })), "POC", "dPOC", uiColor.warn);
-    drawConfiguredLevel(ctx, settings, "vah", result.vah, result.developing.map((point) => ({ time: point.time, price: point.vah, valid: point.valid })), "VAH", "dVAH", uiColor.info);
-    drawConfiguredLevel(ctx, settings, "val", result.val, result.developing.map((point) => ({ time: point.time, price: point.val, valid: point.valid })), "VAL", "dVAL", uiColor.info);
+    const estSuffix = result.isEstimated ? " (~)" : "";
+    drawConfiguredLevel(ctx, settings, "poc", result.poc, result.developing.map((point) => ({ time: point.time, price: point.poc, valid: point.valid })), `POC${estSuffix}`, `dPOC${estSuffix}`, uiColor.warn);
+    drawConfiguredLevel(ctx, settings, "vah", result.vah, result.developing.map((point) => ({ time: point.time, price: point.vah, valid: point.valid })), `VAH${estSuffix}`, `dVAH${estSuffix}`, uiColor.info);
+    drawConfiguredLevel(ctx, settings, "val", result.val, result.developing.map((point) => ({ time: point.time, price: point.val, valid: point.valid })), `VAL${estSuffix}`, `dVAL${estSuffix}`, uiColor.info);
+  }
+  if (result.isEstimated && settings.showPlotLabel !== false) {
+    const badge = tOr(result.provenance === "mixed" ? "indicator.volumeProfile.mixed" : "indicator.volumeProfile.estimated");
+    drawIndicatorBadge(canvas, badge, right, view.area.top + 16, {
+      color: uiColor.warn,
+      align: "right",
+      maxWidth: Math.max(120, Math.min(240, view.area.width - 16)),
+    });
   }
   canvas.restore();
 }
@@ -376,9 +408,15 @@ function headerLabel({ settings, prepared }: { settings: VolumeProfileIndicatorS
   if (settings.showPlotLabel === false) return "";
   const normalized = normalizedSettings(settings);
   const data = asVolumeProfileData(prepared);
+  const result = data.meta.result;
+  const provenanceTag = result.provenance === "mixed"
+    ? ` · ${tOr("indicator.volumeProfile.mixed")}`
+    : result.isEstimated
+      ? ` · ${tOr("indicator.volumeProfile.estimated")}`
+      : "";
   const count = data.status === "ok" ? ` · ${data.meta.selectedBars} ${t("indicator.volumeProfile.bars")}` : "";
-  const side = normalized.profileMetric === "delta" ? "" : ` · ${sideLabel(normalized.profileSide)}`;
-  return `Order Flow Profile · ${metricLabel(normalized.profileMetric)}${side}${count}`;
+  const side = normalized.profileMetric === "delta" || result.isEstimated ? "" : ` · ${sideLabel(normalized.profileSide)}`;
+  return `Order Flow Profile · ${metricLabel(normalized.profileMetric)}${side}${provenanceTag}${count}`;
 }
 
 function drawProfilePane(ctx: IndicatorDrawContext<VolumeProfileIndicatorSettings>, prepared?: IndicatorPreparedData): void {
@@ -401,16 +439,25 @@ function drawProfilePane(ctx: IndicatorDrawContext<VolumeProfileIndicatorSetting
   canvas.fillStyle = volumeProfileReadoutTextColor;
   canvas.font = "12px ui-sans-serif, system-ui, sans-serif";
   lines.forEach((line, index) => canvas.fillText(line, view.area.left + 10 + index * 135, rect.top + 18));
+  if (result.isEstimated) {
+    canvas.fillStyle = uiColor.warn;
+    const badge = tOr(result.provenance === "mixed" ? "indicator.volumeProfile.mixed" : "indicator.volumeProfile.estimated");
+    canvas.fillText(badge, view.area.left + 10, rect.top + 36);
+  }
   canvas.restore();
 }
 
-function emptyPrepared(status: "hidden" | "no-data", message: string): VolumeProfilePreparedData {
+function emptyPrepared(
+  status: "hidden" | "no-data",
+  message: string,
+  result: OrderFlowProfileResult = calculateOrderFlowProfile([]),
+): VolumeProfilePreparedData {
   return {
     status,
     points: [],
     range: { min: 0, max: 1 },
     meta: {
-      result: calculateOrderFlowProfile([]),
+      result,
       maxMagnitude: 0,
       selectedBars: 0,
     },
