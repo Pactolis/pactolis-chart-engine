@@ -105,6 +105,14 @@ function prepareOptionsGexWall(ctx: IndicatorDrawContext<OptionsGexWallSettings>
     return { status: "hidden", points: [], meta: { base: "" }, message: "hidden" };
   }
   const base = inferBase(ctx.settings, ctx.chart?.market);
+  if (ctx.chart?.asOfTime !== undefined) {
+    return {
+      status: "no-data",
+      points: [],
+      meta: { base },
+      message: "Live options surface is unavailable during replay",
+    };
+  }
   const entry = requestSurface(base, normalizeMaxExpiryDays(ctx.settings.maxExpiryDays), ctx.requestRefresh);
   if (entry.status === "ok") {
     return { status: "ok", points: [], meta: { base, surface: entry.surface } };
