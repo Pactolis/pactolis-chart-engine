@@ -63,6 +63,14 @@ interface BackendMeasurement {
   adapter: unknown;
   counters: Record<string, number>;
   avgQuadsPerFlush: number | null;
+  panelGeometry: Array<{
+    market: string;
+    areaWidth: number;
+    areaHeight: number;
+    columnWidth: number;
+    visibleBars: number;
+    seriesBars: number;
+  }>;
   crosshairInteractionOnlyGpuFlushCount: number;
   timingsMs: Record<string, number>;
   scenarios: Record<
@@ -423,9 +431,12 @@ async function measureBackend(
         const roots: HTMLDivElement[] = [];
         const handles: Array<{ dispose(): void }> = [];
         const panelIds = markets.map((_: string, idx: number) => `webgpu-flush-${backend}-${idx}`);
-        const columns = markets.length === 4 ? 2 : 4;
+        // Keep plot width constant at both chart counts so the 8-chart setup
+        // stays above the engine's 6px footprint LOD cutoff.
+        const columns = 2;
         const cellW = 1_600 / columns;
-        const cellH = 450;
+        const rows = markets.length / columns;
+        const cellH = VIEWPORT.height / rows;
 
         for (let idx = 0; idx < markets.length; idx++) {
           const market = markets[idx];
@@ -516,6 +527,20 @@ async function measureBackend(
         const panelBackends = roots.map((root) => {
           const hook = root.querySelector('[data-testid="chart-hook"]');
           return hook?.getAttribute("data-gpu-backend") ?? "missing";
+        });
+        const panelGeometry = runtimes().map((runtime, index) => {
+          const view = runtime.view;
+          const series = runtime.pipeline.series;
+          const from = Math.max(0, Math.floor(view.indexOfX(view.area.left)));
+          const to = Math.min(series.length, Math.ceil(view.indexOfX(view.area.left + view.area.width)) + 1);
+          return {
+            market: markets[index],
+            areaWidth: Math.round(view.area.width),
+            areaHeight: Math.round(view.area.height),
+            columnWidth: Math.round(view.colWidth * 1_000) / 1_000,
+            visibleBars: Math.max(0, to - from),
+            seriesBars: series.length,
+          };
         });
 
         const syncBackendWork = async () => {
@@ -673,6 +698,7 @@ async function measureBackend(
         return {
           diag,
           panelBackends,
+          panelGeometry,
           counters: telemetrySnap.counters,
           crosshairInteractionOnlyGpuFlushCount,
           timingsMs,
@@ -743,6 +769,7 @@ async function measureBackend(
       adapter: result.diag.adapter ?? null,
       counters: result.counters,
       avgQuadsPerFlush,
+      panelGeometry: result.panelGeometry,
       crosshairInteractionOnlyGpuFlushCount: result.crosshairInteractionOnlyGpuFlushCount,
       timingsMs: result.timingsMs,
       scenarios,
@@ -772,7 +799,14 @@ test("4- and 8-chart WebGPU vs WebGL2 chart.gpu.flush.ms comparison across pan, 
   for (const chartCount of [4, 8] as const) {
     const markets = MARKETS.slice(0, chartCount);
     const webgl2 = await measureBackend(resolvedBaseURL, "webgl2", launchArgsFor("webgl2"), markets);
-    console.log("WEBGPU_BENCH_WEBGL2_DONE", JSON.stringify({ chartCount, timingsMs: webgl2.timingsMs, avgQuadsPerFlush: webgl2.avgQuadsPerFlush }));
+    console.log("WEBGPU_BENCH_WEBGL2_DONE", JSON.stringify({
+      chartCount,
+      timingsMs: webgl2.timingsMs,
+      avgQuadsPerFlush: webgl2.avgQuadsPerFlush,
+      panelGeometry: webgl2.panelGeometry,
+      counters: webgl2.counters,
+      flushCounts: Object.fromEntries(Object.entries(webgl2.scenarios).map(([name, value]) => [name, value.combined["chart.gpu.flush.ms"].count])),
+    }));
 
     const webgpu = await measureBackend(resolvedBaseURL, "webgpu", webgpuProbe.args, markets);
     console.log("WEBGPU_BENCH_WEBGPU_DONE", JSON.stringify({ chartCount, timingsMs: webgpu.timingsMs, active: webgpu.active, panelBackends: webgpu.panelBackends }));
@@ -819,8 +853,8 @@ test("4- and 8-chart WebGPU vs WebGL2 chart.gpu.flush.ms comparison across pan, 
     measurements.push({
       fixture: {
         charts: chartCount,
-        layout: chartCount === 4 ? "2x2" : "4x2",
-        panelSize: chartCount === 4 ? "800x450" : "400x450",
+        layout: chartCount === 4 ? "2 columns x 2 rows" : "2 columns x 4 rows",
+        panelSize: chartCount === 4 ? "800x450" : "800x225",
         viewport: `${VIEWPORT.width}x${VIEWPORT.height}`,
         barsPerChart: BAR_COUNT,
         cellsPerBar: CELLS_PER_BAR,
