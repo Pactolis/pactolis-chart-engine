@@ -57,8 +57,7 @@ export function calculateOrderFlowRangeProfile(
 ): OrderFlowRangeProfileResult {
   const selection = selectRangeBars(bars, from, to);
   const { coveredBars, totalBars } = selection.meta;
-  const incompleteFootprintCoverage = totalBars > 0 && coveredBars < totalBars;
-  const canEstimateWholeRange = incompleteFootprintCoverage
+  const canEstimateWholeRange = totalBars > 0 && coveredBars === 0
     && options.allowOhlcvEstimate === true
     && typeof options.priceStep === "number"
     && Number.isFinite(options.priceStep)
@@ -85,7 +84,7 @@ function selectRangeBars(
   const selected = bars.filter((bar) => bar.startTime >= start && bar.startTime <= end);
   const coveredBars = selected.filter((bar) => bar.cells.size > 0).length;
   const missingDays = [...new Set(selected
-    .filter((bar) => bar.cells.size === 0)
+    .filter((bar) => bar.volume > 0 && bar.cells.size === 0)
     .map((bar) => Math.floor(bar.startTime / DAY) * DAY))]
     .sort((a, b) => a - b);
   const totalBars = selected.length;
@@ -98,7 +97,7 @@ function selectRangeBars(
       totalBars,
       coverage: totalBars ? coveredBars / totalBars : 0,
       missingDays,
-      complete: totalBars > 0 && coveredBars === totalBars,
+      complete: totalBars > 0 && missingDays.length === 0,
     },
   };
 }

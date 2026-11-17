@@ -129,7 +129,7 @@ function profileSnapshot(series, drawing) {
   });
 }
 
-test("range profile estimates OHLCV-only windows and uses whole-range fallback for partial footprint coverage", () => {
+test("range profile estimates OHLCV-only windows but keeps partial footprint ranges exact", () => {
   const bars = [
     ohlcvBar(0, 100, 101, 10),
     ohlcvBar(1, 100, 102, 30),
@@ -146,34 +146,67 @@ test("range profile estimates OHLCV-only windows and uses whole-range fallback f
   assert.equal(noFootprint.dataComplete, true);
   assert.equal(noFootprint.totalVolume, 60);
 
-  // Two exact bars plus one gap use all three candles as OHLCV. Exact cells are
-  // intentionally absent from the estimator input, so the output cannot be mixed.
+  // Any exact footprint coverage preserves the existing exact-only behavior for
+  // the whole selected range; the missing positive-volume bar remains a warning.
   const partialBars = [
     exactBar(0, 100, 9, 1),
     ohlcvBar(1, 100, 102, 30),
     exactBar(2, 101, 4, 6),
   ];
   const partial = calculateOrderFlowRangeProfile(partialBars, BASE_TIME, BASE_TIME + 2 * MINUTE, options);
-  assert.equal(partial.provenance, "estimated");
-  assert.equal(partial.isEstimated, true);
-  assert.equal(partial.exactBarCount, 0);
-  assert.equal(partial.estimatedBarCount, 3);
+  assert.equal(partial.provenance, "exact");
+  assert.equal(partial.isEstimated, false);
+  assert.equal(partial.exactBarCount, 2);
+  assert.equal(partial.estimatedBarCount, 0);
   assert.equal(partial.coveredBars, 2);
   assert.equal(partial.coverage, 2 / 3);
   assert.deepEqual(partial.missingDays, [BASE_TIME]);
   assert.equal(partial.complete, false);
-  assert.equal(partial.totalVolume, 50);
+  assert.equal(partial.totalVolume, 20);
   assert.deepEqual(partial.levels.map((level) => level.priceBin), [100, 101]);
 
-  // Exact-only metric/side settings fail closed in an estimated range.
-  const unsupported = calculateOrderFlowRangeProfile(partialBars, BASE_TIME, BASE_TIME + 2 * MINUTE, {
-    ...options,
-    profileMetric: "delta",
-  });
-  assert.equal(unsupported.provenance, "estimated");
-  assert.equal(unsupported.isEstimated, true);
-  assert.equal(unsupported.dataComplete, false);
-  assert.deepEqual(unsupported.levels, []);
+  const { series, drawing, texts, draw } = makeDrawingHarness(partialBars);
+  configureLocale("en-US");
+  draw();
+  assert.ok(texts.includes("indicator.volumeProfile.coverageIncomplete"));
+  assert.equal(texts.some((text) => /estimated/i.test(text)), false);
+  assert.equal(profileSnapshot(series, drawing).drawings[0].profile.provenance, "exact");
+});
+
+test("cell-less live bars with a zero-volume bar keep main exact profile, complete, and missingDays semantics", () => {
+  const exact = exactBar(0, 100, 9, 1);
+  const liveMissing = ohlcvBar(1, 100, 102, 30);
+  const zeroVolumeMissing = {
+    ...ohlcvBar(2, 101, 102, 0),
+    startTime: BASE_TIME + 86_400_000,
+  };
+  const bars = [exact, liveMissing, zeroVolumeMissing];
+  const expectedExact = calculateOrderFlowProfile([exact], options);
+  const range = calculateOrderFlowRangeProfile(
+    bars,
+    BASE_TIME,
+    zeroVolumeMissing.startTime,
+    options,
+  );
+
+  assert.deepEqual(range.levels, expectedExact.levels);
+  assert.equal(range.poc, expectedExact.poc);
+  assert.equal(range.vah, expectedExact.vah);
+  assert.equal(range.val, expectedExact.val);
+  assert.equal(range.provenance, "exact");
+  assert.equal(range.complete, false);
+  assert.deepEqual(range.missingDays, [BASE_TIME]);
+  assert.equal(range.totalBars, 3);
+  assert.equal(range.coveredBars, 1);
+
+  const zeroVolumeOnlyGap = calculateOrderFlowRangeProfile(
+    [exact, zeroVolumeMissing],
+    BASE_TIME,
+    zeroVolumeMissing.startTime,
+    options,
+  );
+  assert.equal(zeroVolumeOnlyGap.complete, true);
+  assert.deepEqual(zeroVolumeOnlyGap.missingDays, []);
 });
 
 test("full footprint range remains identical to the exact order-flow profile fixture", () => {

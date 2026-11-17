@@ -230,7 +230,7 @@ function cachedRangeProfile(
   const selectedBars = rangeProfileBars(series, from, to);
   const sourceMode = selectedBars.length === 0
     ? "none"
-    : selectedBars.every((bar) => bar.cells.size > 0) ? "exact" : "estimated";
+    : selectedBars.every((bar) => bar.cells.size === 0) ? "estimated" : "exact";
   const key = [
     sourceMode,
     series.config.priceStep,
