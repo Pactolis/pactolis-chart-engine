@@ -304,6 +304,33 @@ test("live series drawing pass interest tracks active visible drawings and never
   }
 });
 
+test("replay as-of changes invalidate retained annotation output", () => {
+  const { mainCtx } = makeOverlayMockDocument();
+  const { baseTime, series } = makeOverlaySeries();
+  const view = makeOverlayView();
+  const crosshair = { x: 0, y: 0, visible: false };
+  let drawingPassCalls = 0;
+  const overlay = new Overlay(
+    mainCtx,
+    () => { drawingPassCalls++; },
+    () => ({ ...DEFAULT_VOLUME_PROFILE_SETTINGS, enabled: false }),
+  );
+  const layers = ["drawings", "axis"];
+
+  overlay.renderAnnotations(view, series, crosshair, [0, 20], layers, ChartChange.All, undefined);
+  overlay.renderAnnotations(view, series, crosshair, [0, 20], layers, ChartChange.DataTail, undefined);
+  assert.equal(drawingPassCalls, 1, "unchanged live frames reuse the prior drawing pass");
+
+  const firstSeek = baseTime + 10 * 60_000;
+  overlay.renderAnnotations(view, series, crosshair, [0, 20], layers, ChartChange.DataTail, firstSeek);
+  overlay.renderAnnotations(view, series, crosshair, [0, 20], layers, ChartChange.DataTail, firstSeek);
+  assert.equal(drawingPassCalls, 2, "entering replay redraws, then repeating the same seek reuses it");
+
+  const secondSeek = baseTime + 11 * 60_000;
+  overlay.renderAnnotations(view, series, crosshair, [0, 20], layers, ChartChange.DataTail, secondSeek);
+  assert.equal(drawingPassCalls, 3, "a replay seek invalidates the previous time's retained drawing frame");
+});
+
 test("naked-poc, strategy-levels, and reference-levels redraw updated levels on a DataTail frame while reusing unchanged levels", () => {
   const wasEnabled = isPerformanceTelemetryEnabled();
   configurePerformanceTelemetry({ enabled: true });
