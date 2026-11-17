@@ -11,6 +11,7 @@ import {
 } from "./chart.js";
 import { createHarnessServices } from "./services.js";
 import { settings } from "../src/core/settings.js";
+import type { OrderbookHeatmapStep } from "../src/core/orderbookHeatmap/settings.js";
 
 export interface GpuHeatmapBenchmarkInput {
   cellCount: 15_000 | 40_000;
@@ -20,7 +21,7 @@ export interface GpuHeatmapBenchmarkInput {
   barsCount: number;
   levelsPerBar: number;
   basePrice: number;
-  bucketStep: number;
+  bucketStep: OrderbookHeatmapStep;
 }
 
 interface CaptureFrame {
