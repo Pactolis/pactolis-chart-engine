@@ -354,6 +354,10 @@ test("15,000-cell SwiftShader benchmark and CPU raster cache budget / GPU takeov
 
     // Same viewport-changing workload for direct and adaptive paths. The injected
     // clock makes every sampled frame active motion independently of CI wall time.
+    // Waiting on requestAnimationFrame after draining two trailing frames avoids
+    // captureCompositePng()'s async PNG encoding gap so background timers cannot
+    // squeeze an extra render between telemetry snapshots.
+    const waitNextFrame = () => new Promise<void>((resolve) => requestAnimationFrame(() => resolve()));
     const motionOverlay = r.orderbookHeatmap as typeof r.orderbookHeatmap & { now: () => number };
     const originalNow = motionOverlay.now;
     let motionClock = originalNow();
@@ -365,6 +369,8 @@ test("15,000-cell SwiftShader benchmark and CPU raster cache budget / GPU takeov
       r.orderbookHeatmap.releaseRasterCache();
       r.invalidate();
       await r.session.captureCompositePng();
+      await waitNextFrame();
+      await waitNextFrame();
       const samples: number[] = [];
       let directs = 0;
       let misses = 0;
@@ -375,7 +381,7 @@ test("15,000-cell SwiftShader benchmark and CPU raster cache budget / GPU takeov
         v.offsetX += 0.25;
         const b = telemetry.snapshotPerformanceTelemetry();
         r.invalidate();
-        await r.session.captureCompositePng();
+        await waitNextFrame();
         const a = telemetry.snapshotPerformanceTelemetry();
         const hm = metricDelta(b, a, "chart.cpu.heatmap.draw.ms");
         if (hm.count > 0) samples.push(hm.totalMs / hm.count);
@@ -577,6 +583,10 @@ test("15,000-cell SwiftShader benchmark and CPU raster cache budget / GPU takeov
   });
 
   console.log("HEATMAP_15K_SWIFTSHADER_EVIDENCE", JSON.stringify(report));
+  console.log("HEATMAP_15K_PAN_SUMMARY", JSON.stringify({
+    cpuWarm: { hits: report.cpuWarm.hits, misses: report.cpuWarm.misses, heatmapMs: report.cpuWarm.heatmapMs },
+    continuousPan: report.continuousPan,
+  }));
   await testInfo.attach("heatmap-15k-swiftshader-evidence.json", {
     body: JSON.stringify(report, null, 2),
     contentType: "application/json",
@@ -594,13 +604,13 @@ test("15,000-cell SwiftShader benchmark and CPU raster cache budget / GPU takeov
   expect(report.cpuWarm.misses).toBe(0);
   expect(report.cpuWarm.heatmapMs.meanMs).toBeLessThan(0.1);
   expect(report.continuousPan.direct.heatmapMs.samples).toBe(30);
-  expect(report.continuousPan.direct.directs).toBeGreaterThanOrEqual(30);
+  expect(report.continuousPan.direct.directs).toBe(30);
   expect(report.continuousPan.direct.misses).toBe(0);
   expect(report.continuousPan.direct.hits).toBe(0);
   expect(report.continuousPan.direct.skips).toBe(0);
   expect(report.continuousPan.adaptive.heatmapMs.samples).toBe(30);
-  expect(report.continuousPan.adaptive.skips).toBeGreaterThanOrEqual(30);
-  expect(report.continuousPan.adaptive.directs).toBe(report.continuousPan.adaptive.skips);
+  expect(report.continuousPan.adaptive.skips).toBe(30);
+  expect(report.continuousPan.adaptive.directs).toBe(30);
   expect(report.continuousPan.adaptive.misses).toBe(0);
   expect(report.continuousPan.adaptive.hits).toBe(0);
   expect(report.continuousPan.adaptive.heatmapMs.meanMs).toBeLessThanOrEqual(report.continuousPan.direct.heatmapMs.meanMs * 1.1);
