@@ -31,6 +31,8 @@ export class ChartReplayCoordinator {
   private replay: ReplayController | null = null;
   /** Market the replay dataset was taken from; replay bars never land on another market's series. */
   private replayMarket: string | null = null;
+  /** A timeframe rebuild temporarily pauses the replay clock while history is replaced. */
+  private resumeAfterTimeframeChange: boolean | null = null;
   private applyingExternal = false;
   private readonly listeners = new Set<(snapshot: ReplaySnapshot | null) => void>();
   onStateChange?: (snapshot: ReplaySnapshot | null) => void;
@@ -88,9 +90,18 @@ export class ChartReplayCoordinator {
     if (this.replay && this.replayMarket !== market) this.exit({ reloadHistory: false });
   }
 
-  play(): void { this.replay?.play(); }
-  pause(): void { this.replay?.pause(); }
-  step(): void { this.replay?.step(); }
+  play(): void {
+    if (this.resumeAfterTimeframeChange !== null) this.resumeAfterTimeframeChange = true;
+    this.replay?.play();
+  }
+  pause(): void {
+    if (this.resumeAfterTimeframeChange !== null) this.resumeAfterTimeframeChange = false;
+    this.replay?.pause();
+  }
+  step(): void {
+    if (this.resumeAfterTimeframeChange !== null) this.resumeAfterTimeframeChange = false;
+    this.replay?.step();
+  }
   setSpeed(speed: number): void { this.replay?.setSpeed(speed); }
 
   seek(time: number): void {
@@ -114,6 +125,7 @@ export class ChartReplayCoordinator {
     // relay; linked charts would read it as a clock to follow and re-enter replay.
     this.replay = null;
     this.replayMarket = null;
+    this.resumeAfterTimeframeChange = null;
     replay.exit();
     this.emit(null);
     this.host.updateHook();
@@ -159,17 +171,34 @@ export class ChartReplayCoordinator {
     if (replay.snapshot().state === "playing") replay.play();
   }
 
-  reconfigureAfterTimeframeChange(intervalMs: number): void {
+  /** Freeze a playing replay at its current virtualTime while new timeframe history loads. */
+  prepareForTimeframeChange(): void {
+    const replay = this.replay;
+    if (!replay) return;
+    const snapshot = replay.snapshot();
+    if (this.resumeAfterTimeframeChange === null) {
+      this.resumeAfterTimeframeChange = snapshot.state === "playing";
+    }
+    if (snapshot.state === "playing") replay.pause();
+  }
+
+  reconfigureAfterTimeframeChange(intervalMs: number, sourceBars?: readonly FootprintBar[]): void {
     if (!this.replay) return;
-    const bars: FootprintBar[] = [];
-    const series = this.host.pipeline.series;
-    for (let index = 0; index < series.length; index++) {
-      const bar = series.at(index);
-      if (bar) bars.push(cloneFootprintBarForReplay(bar));
+    const bars: FootprintBar[] = sourceBars
+      ? sourceBars.map(cloneFootprintBarForReplay)
+      : [];
+    if (!sourceBars) {
+      const series = this.host.pipeline.series;
+      for (let index = 0; index < series.length; index++) {
+        const bar = series.at(index);
+        if (bar) bars.push(cloneFootprintBarForReplay(bar));
+      }
     }
     const result = this.replay.reconfigure(bars, intervalMs);
     this.replaceSeries(result.visibleBars);
-    if (result.resume) this.replay.play();
+    const shouldResume = result.resume || this.resumeAfterTimeframeChange === true;
+    this.resumeAfterTimeframeChange = null;
+    if (shouldResume) this.replay.play();
   }
 
   dispose(): void {
@@ -179,6 +208,7 @@ export class ChartReplayCoordinator {
     if (this.replay) this.replay.dispose();
     this.replay = null;
     this.replayMarket = null;
+    this.resumeAfterTimeframeChange = null;
     this.listeners.clear();
     this.onStateChange = undefined;
   }
