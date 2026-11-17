@@ -39,6 +39,7 @@ const { crossExchangeOpenInterestIndicatorDefinition } = await import("../dist/f
 const { fundingRegimeIndicatorDefinition } = await import("../dist/features/indicators/builtins/fundingRegime.js");
 const { futuresPositioningIndicatorDefinition } = await import("../dist/features/indicators/builtins/futuresPositioning.js");
 const { liquidationsIndicatorDefinition } = await import("../dist/features/indicators/builtins/liquidations.js");
+const { optionsGexWallIndicatorDefinition } = await import("../dist/features/indicators/builtins/optionsGexWall.js");
 
 const MIN = 60_000;
 const DAY = 24 * 60 * MIN;
@@ -409,6 +410,90 @@ test("replay as-of parity: 11 derived indicators match fresh oracle and reset ca
     }
   }
 
+  coordinator.exit({ reloadHistory: false });
+});
+
+test("replay parity matrix row: Options GEX Wall hides cached/live surfaces and fetches once after replay", async () => {
+  const fullBars = buildDataset(80, MIN, 4);
+  const { coordinator, series } = createReplayCoordinatorFor(fullBars, MIN);
+  const settingsOverrides = { base: "HYPE", maxExpiryDays: 7 };
+  const paintCalls = [];
+  const makeCanvas = () => ({
+    save() { paintCalls.push("save"); }, restore() { paintCalls.push("restore"); },
+    setLineDash() {}, beginPath() {}, moveTo() {}, lineTo() {}, stroke() { paintCalls.push("stroke"); },
+    fillRect() { paintCalls.push("fillRect"); }, fillText() { paintCalls.push("fillText"); },
+    measureText: () => ({ width: 20 }),
+  });
+  let fetchedLiveOptions = 0;
+  const source = {
+    requestLiquidationSeries: () => ({ status: "unavailable" }),
+    requestCoinalyzeDerivativeSeries: () => ({ status: "unavailable" }),
+    requestFuturesPositioningSeries: () => ({ status: "unavailable" }),
+    fetchOptionsGexSurface: async () => {
+      fetchedLiveOptions++;
+      return {
+        spotPrice: 50_000,
+        strikeNetGexCrossing: 50_500,
+        maxPain: 50_000,
+        callWall: 52_000,
+        putWall: 48_000,
+        strikes: [],
+        timestamp: T0 + 79 * MIN,
+      };
+    },
+  };
+
+  coordinator.start();
+  coordinator.seek(T0 + 40 * MIN);
+  const virtualTime = coordinator.getSnapshot().virtualTime;
+  const replayContext = makeIndicatorDrawContext(series, optionsGexWallIndicatorDefinition, {
+    settingsOverrides,
+    asOfTime: virtualTime,
+  });
+  replayContext.view.yOfPrice = () => 100;
+  replayContext.ctx = makeCanvas();
+  const replayPrepared = withMockedIndicatorSource(source, () => optionsGexWallIndicatorDefinition.prepareData(replayContext));
+  optionsGexWallIndicatorDefinition.drawPriceOverlay(replayContext, replayPrepared);
+  assert.equal(replayPrepared.status, "no-data", "replay has no historical options surface");
+  assert.equal(replayPrepared.meta.surface, undefined, "a live surface is not exposed in replay metadata");
+  assert.match(optionsGexWallIndicatorDefinition.getHeaderLabel({
+    settings: replayContext.settings,
+    chart: replayContext.chart,
+    prepared: replayPrepared,
+  }), /no-data/, "the indicator header exposes the unavailable replay state");
+  assert.equal(fetchedLiveOptions, 0, "replay never requests the live options API");
+  assert.deepEqual(paintCalls, [], "replay draws no cached or live options levels/zones/bars");
+
+  coordinator.exit({ reloadHistory: false });
+  const liveContext = makeIndicatorDrawContext(series, optionsGexWallIndicatorDefinition, { settingsOverrides });
+  liveContext.view.yOfPrice = () => 100;
+  liveContext.ctx = makeCanvas();
+  const loading = withMockedIndicatorSource(source, () => optionsGexWallIndicatorDefinition.prepareData(liveContext));
+  assert.equal(loading.status, "loading");
+  assert.equal(fetchedLiveOptions, 1, "leaving replay starts the ordinary live request once");
+  await Promise.resolve();
+  const livePrepared = withMockedIndicatorSource(source, () => optionsGexWallIndicatorDefinition.prepareData(liveContext));
+  assert.equal(livePrepared.status, "ok");
+  optionsGexWallIndicatorDefinition.drawPriceOverlay(liveContext, livePrepared);
+  assert.ok(paintCalls.length > 0, "live levels resume after replay");
+  assert.equal(fetchedLiveOptions, 1, "the resolved cache avoids a duplicate request");
+
+  coordinator.start();
+  coordinator.seek(virtualTime);
+  const cachedReplayContext = makeIndicatorDrawContext(series, optionsGexWallIndicatorDefinition, {
+    settingsOverrides,
+    asOfTime: virtualTime,
+  });
+  cachedReplayContext.view.yOfPrice = () => 100;
+  const cachedReplayCanvas = makeCanvas();
+  cachedReplayContext.ctx = cachedReplayCanvas;
+  const cachedReplayPrepared = withMockedIndicatorSource(source, () => optionsGexWallIndicatorDefinition.prepareData(cachedReplayContext));
+  const cachedReplayPaintStart = paintCalls.length;
+  optionsGexWallIndicatorDefinition.drawPriceOverlay(cachedReplayContext, cachedReplayPrepared);
+  assert.equal(cachedReplayPrepared.status, "no-data");
+  assert.equal(cachedReplayPrepared.meta.surface, undefined, "a cached live surface is hidden during replay too");
+  assert.equal(fetchedLiveOptions, 1, "replay does not refresh the live options request");
+  assert.equal(paintCalls.length, cachedReplayPaintStart, "the cached surface paints nothing during replay");
   coordinator.exit({ reloadHistory: false });
 });
 
