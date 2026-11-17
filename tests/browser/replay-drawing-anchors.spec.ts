@@ -4,13 +4,14 @@ import { installHistory, openHarness, FROZEN_NOW, INTERVAL_MS } from "./support/
 test("replay hides future and partially future drawings after panning past the replay tail", async ({ page }) => {
   test.setTimeout(60_000);
   const blockedExternalRequests: string[] = [];
-  const { historyRequests } = await installHistory(page);
   await page.route("**/*", (route) => {
     const url = new URL(route.request().url());
-    if (url.hostname === "localhost" || url.hostname === "127.0.0.1" || url.hostname === "::1") return route.fallback();
+    if (url.hostname === "localhost" || url.hostname === "127.0.0.1" || url.hostname === "::1") return route.continue();
     blockedExternalRequests.push(url.href);
     return route.abort("blockedbyclient");
   });
+  // Add the specific history route after the catch-all so Playwright gives the fixture priority.
+  const { historyRequests } = await installHistory(page);
   await page.addInitScript(() => {
     const colors = new Set(["#f000ff", "#00f0ff"]);
     const probe = window as typeof window & { __futureDrawingStrokes: string[] };
@@ -190,7 +191,7 @@ test("replay hides future and partially future drawings after panning past the r
     }) as typeof evidence;
   } catch (error) {
     const servedHistory = historyRequests.map((url) => url.href);
-    throw new Error(`${error instanceof Error ? error.message : String(error)}; locally served history requests: ${JSON.stringify(servedHistory)}`);
+    throw new Error(`${error instanceof Error ? error.message : String(error)}; locally served history requests: ${JSON.stringify(servedHistory)}; blocked external requests: ${JSON.stringify(blockedExternalRequests)}`);
   }
 
   expect(evidence.replayVirtualTime).toBe(evidence.seekTime);
