@@ -294,7 +294,7 @@ for (const deviceScaleFactor of [1, 2]) {
         const scenarios: ScenarioEvidence[] = [];
         const telemetry = await import("/src/core/performanceTelemetry.ts");
         telemetry.configurePerformanceTelemetry({ enabled: true });
-        const surfaceMetricNames = ["chart.surface.gpu.draw.ms", "chart.surface.annotation.draw.ms", "chart.surface.interaction.draw.ms"];
+        const surfaceMetricNames = ["chart.surface.gpu.draw.ms", "chart.surface.annotation.draw.ms", "chart.surface.interaction.draw.ms", "chart.annotation.layer.axis.ms"];
         const surfaceTimingSince = (before: ReturnType<typeof telemetry.snapshotPerformanceTelemetry>, after: ReturnType<typeof telemetry.snapshotPerformanceTelemetry>) =>
           Object.fromEntries(surfaceMetricNames.map((name) => {
             const start = before.metrics[name];
@@ -549,6 +549,11 @@ for (const deviceScaleFactor of [1, 2]) {
       const common = result.commonGeometry!;
       const tailTiming = byName.get("tail data")!.surfaceTiming;
       console.log("chart.surface.*.draw.ms scoped tail vs same-state full reference", JSON.stringify(tailTiming));
+      if (!isBase) {
+        expect(tailTiming.scoped["chart.annotation.layer.axis.ms"].count, "fixed tail reuses the axis pass").toBe(0);
+        expect(tailTiming.scoped["chart.surface.interaction.draw.ms"].count, "fixed tail leaves interaction clean").toBe(0);
+        expect(byName.get("auto-scale widen")!.surfaceTiming.scoped["chart.annotation.layer.axis.ms"].count, "autoscale discards retained axis output").toBeGreaterThan(0);
+      }
       const hoverTiming = Object.fromEntries(
         ["pointer hover activation", "pointer hover successive", "pointer hover successive 2", "pointer leave", "sync time activation", "sync time unchanged", "sync time changed", "sync time cleared"]
           .map((name) => [name, byName.get(name)!.surfaceTiming]),
@@ -678,6 +683,280 @@ for (const deviceScaleFactor of [1, 2]) {
         body: JSON.stringify({ mode: SOURCE, sourceSHA: SOURCE_SHA, dpr: deviceScaleFactor, hasPendingScope: result.hasPendingScope, commonGeometry: result.commonGeometry, scenarios: result.scenarios.map(({ name, scoped, full, state, geometry, surfaceTiming }) => ({ name, state, geometry, scoped, full, surfaceTiming })), ghostControl: ghost }, null, 2),
         contentType: "application/json",
       });
+    });
+
+    test("anchored-vwap and level updates under tail frames match forced full redraw", async ({ page }) => {
+      test.setTimeout(90_000);
+      const bindingName = "__nativeAvwapLevelHash";
+      await page.exposeBinding(bindingName, async (_source: unknown, selector: string) => {
+        const root = page.locator(selector);
+        const box = await root.boundingBox();
+        if (!box || box.x !== 16 || box.y !== 16 || Math.round(box.width) !== 900) {
+          throw new Error(`native sampling: root drifted from its fixed viewport box: ${JSON.stringify(box)}`);
+        }
+        const png = await root.screenshot({ timeout: 15_000, caret: "initial", animations: "allow", scale: "device" });
+        return { hash: createHash("sha256").update(png).digest("hex"), width: png.readUInt32BE(16), height: png.readUInt32BE(20) };
+      });
+      await installHistory(page);
+      const fixtureBody = () => JSON.stringify({ ok: true, data: { bars: INITIAL_BARS } });
+      await page.route(/\/history(?:\?|$)/, (route) => route.fulfill({ contentType: "application/json", body: fixtureBody() }));
+      await page.addInitScript((frozenNow: number) => {
+        const RealDate = Date;
+        class FrozenDate extends RealDate {
+          constructor(...args: unknown[]) { super(...((args.length ? args : [frozenNow]) as [value?: number])); }
+          static now() { return frozenNow; }
+        }
+        (window as unknown as Record<string, unknown>).Date = FrozenDate;
+      }, FROZEN_NOW);
+      await openHarness(page);
+
+      const outcome = await page.evaluate(async (opts: { bindingName: string; rootSelector: string; tailTime: number; chartId: string; initialBars: typeof INITIAL_BARS; commonRange: { from: number; to: number } }) => {
+        const engineModule = (path: string) => import(/* @vite-ignore */ `/src/${path}`);
+        const [
+          { mountChart, createChartSurfaceModel, getChartRuntime },
+          { ChartSession },
+          { ChartChange },
+          { DrawingManager },
+          { DEFAULT_VOLUME_PROFILE_SETTINGS },
+          { normalizePreviousWeekStrategySettings },
+          { normalizeMondayRangeSettings },
+        ] = await Promise.all([
+          import("/harness/chart.ts"),
+          engineModule("features/chart/ChartSession.ts"),
+          engineModule("core/render/scene/chartScene.ts"),
+          engineModule("features/drawings/drawingManager.ts"),
+          engineModule("core/analysis/volumeProfile.ts"),
+          engineModule("core/analysis/previousWeekStrategy.ts"),
+          engineModule("core/analysis/mondayRange.ts"),
+        ]);
+
+        const BTC = "BINANCE_FUTURES:btcusdt";
+        const root = document.createElement("div");
+        root.style.cssText = "position:fixed;left:16px;top:16px;width:900px;height:520px;overflow:hidden;z-index:2147483647;isolation:isolate;";
+        root.setAttribute("data-native-oracle-root", "1");
+        document.body.appendChild(root);
+
+        let invalidations: number[] = [];
+        let frames: { surfaces: number; changes: number | null }[] = [];
+        type SessionLike = { container: Element; needsRender: boolean; pendingInvalidation: { surfaces: number; changes: number } } & Record<string, unknown>;
+        const proto = ChartSession.prototype as unknown as Record<string, (...args: unknown[]) => unknown>;
+        const originalInvalidate = proto.invalidate;
+        const originalRender = proto.renderDirtySurfaces;
+        proto.invalidate = function (this: SessionLike, ...args: unknown[]) {
+          if (this.container === root) invalidations.push((args[0] as number | undefined) ?? ChartChange.All);
+          return originalInvalidate.apply(this, args);
+        };
+        proto.renderDirtySurfaces = function (this: SessionLike, ...args: unknown[]) {
+          if (this.container === root && this.needsRender) frames.push({ ...this.pendingInvalidation });
+          return originalRender.apply(this, args);
+        };
+
+        const drawings = new DrawingManager(() => {});
+        let currentContext = {
+          market: BTC,
+          profileSettings: { ...DEFAULT_VOLUME_PROFILE_SETTINGS, enabled: false },
+          previousWeekStrategySettings: normalizePreviousWeekStrategySettings({ enabled: false }),
+          mondayRangeSettings: normalizeMondayRangeSettings({ enabled: false }),
+          nakedPocs: [] as unknown[],
+          drawings,
+          previousWeekStrategyLevels: [] as unknown[],
+          mondayRangeLevels: [] as unknown[],
+          referenceLevels: [{
+            id: "ref-1",
+            family: "level",
+            period: "daily",
+            label: "REF-1",
+            price: 60_090,
+            color: "#38bdf8",
+            sourceStart: opts.initialBars[10].t,
+            sourceEnd: opts.initialBars[15].t,
+          }],
+        };
+
+        let pushTrade: ((trade: unknown) => void) | null = null;
+        let historySettled = false;
+        const services = {
+          subscribeToTrades: (_market: string, cb: (trade: unknown) => void) => { pushTrade = cb; return () => { pushTrade = null; }; },
+          fetchPriceStep: async () => 50,
+          fetchPricePrecision: async () => 1,
+          getAnalysisContext: () => currentContext,
+          getAnalysisRevisionSnapshot: (market: string) => ({
+            market, revision: 1,
+            canonical: { status: "complete", market, runKey: `${market}|50`, generation: 1, revision: 1, failedPeriods: [] },
+          }),
+          subscribeAnalysis: () => () => {},
+          subscribeAnalysisRevision: () => () => {},
+          updateAnalysisFromSeries() {},
+          fetchNpocSnapshot: async (market: string) => ({
+            schemaVersion: 3,
+            market,
+            levels: [{ period: "daily", periodStart: opts.initialBars[10].t, pocLower: 60_120, age: 1 }],
+          }),
+          notifyActiveMarket() {},
+          notifyInteractiveCandlesReady() {},
+          notifyInteractiveHistorySettled() { historySettled = true; },
+          triggerAutoSync() {},
+          notifyBarClose() {},
+          notify() {},
+          isFootprintSyncBusy: () => false,
+        };
+
+        const realSetTimeout = window.setTimeout;
+        const waitFor = async (predicate: () => boolean, description: string) => {
+          const deadline = performance.now() + 20_000;
+          while (performance.now() < deadline) {
+            if (predicate()) return;
+            await new Promise((resolve) => realSetTimeout(resolve, 20));
+          }
+          throw new Error(`Timed out waiting for ${description}`);
+        };
+        const nextFrame = () => new Promise((resolve) => requestAnimationFrame(() => resolve(null)));
+
+        const state = {
+          type: "chart", market: BTC, timeframe: "1m", scaleMode: "linear", chartType: "footprint",
+          clusterCellData: "bidask", candles: true, indicators: [],
+          nakedPocVisibility: { daily: true, weekly: false, monthly: false, quarterly: false, "half-yearly": false, yearly: false },
+          referenceVisibility: { level: { daily: true } },
+        };
+        const handle = mountChart(root, state as never, services as never, `${opts.chartId}-stage4`, createChartSurfaceModel());
+        const telemetry = await import("/src/core/performanceTelemetry.ts");
+        telemetry.configurePerformanceTelemetry({ enabled: true });
+
+        try {
+          await waitFor(() => Boolean(getChartRuntime(`${opts.chartId}-stage4`)), "stage4 runtime");
+          const runtime = getChartRuntime(`${opts.chartId}-stage4`) as unknown as {
+            session: { needsRender: boolean; invalidate(changes?: number): void };
+            npocMarket: string | null;
+            npocLevels: unknown[];
+            setVisibleTimeRange(range: { from: number; to: number }): void;
+          };
+          const settle = async () => {
+            const deadline = performance.now() + 20_000;
+            for (let quiet = 0; quiet < 2;) {
+              if (performance.now() >= deadline) throw new Error("settle guard deadline exhausted");
+              const drawn = frames.length;
+              await nextFrame();
+              quiet = frames.length === drawn && !runtime.session.needsRender ? quiet + 1 : 0;
+            }
+          };
+          const sampleNative = () => (window as unknown as Record<string, (selector: string) => Promise<NativeSample>>)[opts.bindingName](opts.rootSelector);
+          const hook = () => root.querySelector("[data-series-len]") as HTMLElement | null;
+
+          await waitFor(() => historySettled && Number(hook()?.dataset.seriesLen ?? 0) === 60 && hook()?.dataset.historyLoading === "false", "history settle");
+          await waitFor(() => pushTrade !== null, "trade subscription");
+          runtime.setVisibleTimeRange(opts.commonRange);
+          await waitFor(() => hook()?.getAttribute("data-npoc-visible-count") === "1", "initial nPOC settled");
+          await settle();
+
+          // 1. Anchored VWAP active: a DataTail update must redraw the drawings pass and match a forced full redraw.
+          drawings.replace([{
+            id: "avwap-live",
+            type: "anchored-vwap",
+            points: [{ time: opts.initialBars[50].t, price: opts.initialBars[50].c }],
+            color: "#f59e0b",
+            lineWidth: 2,
+            locked: false,
+            visible: true,
+            showLabel: true,
+            showPriceLabel: true,
+            market: BTC,
+          }]);
+          runtime.session.invalidate(ChartChange.All);
+          await settle();
+          const avwapBefore = await sampleNative();
+          invalidations = [];
+          const tBeforeAvwap = telemetry.snapshotPerformanceTelemetry();
+          pushTrade!({ time: opts.tailTime, price: 60_480, qty: 200, isBuy: true, market: BTC });
+          await waitFor(() => invalidations.some((c) => (c & ChartChange.DataTail) !== 0), "avwap tail invalidation");
+          await settle();
+          const tAfterAvwap = telemetry.snapshotPerformanceTelemetry();
+          const avwapInvalidations = [...invalidations];
+          const avwapScoped = await sampleNative();
+          runtime.session.invalidate(ChartChange.All);
+          await settle();
+          const avwapFull = await sampleNative();
+
+          // 2. Updated nakedPocs + referenceLevels followed only by a DataTail frame must paint the new levels (not cached stale levels).
+          const levelsBefore = await sampleNative();
+          invalidations = [];
+          runtime.npocMarket = BTC;
+          runtime.npocLevels = [{
+            id: "np-updated",
+            market: BTC,
+            period: "daily",
+            periodStart: opts.initialBars[12].t,
+            periodEnd: opts.initialBars[12].t + 86_400_000,
+            price: 60_370,
+            age: 3,
+            complete: true,
+          }];
+          currentContext = {
+            ...currentContext,
+            referenceLevels: [{
+              id: "ref-2",
+              family: "level",
+              period: "daily",
+              label: "REF-2",
+              price: 60_410,
+              color: "#22d3ee",
+              sourceStart: opts.initialBars[12].t,
+              sourceEnd: opts.initialBars[15].t,
+            }],
+          };
+          pushTrade!({ time: opts.tailTime, price: 60_220, qty: 1, isBuy: true, market: BTC });
+          await waitFor(() => invalidations.some((c) => (c & ChartChange.DataTail) !== 0), "levels tail invalidation");
+          await settle();
+          const levelInvalidations = [...invalidations];
+          const levelsScoped = await sampleNative();
+          runtime.session.invalidate(ChartChange.All);
+          await settle();
+          const levelsFull = await sampleNative();
+
+          // 3. Subsequent DataTail without level mutations hits naked-poc and reference-levels pass caches.
+          invalidations = [];
+          const tBeforeReuse = telemetry.snapshotPerformanceTelemetry();
+          pushTrade!({ time: opts.tailTime, price: 60_230, qty: 1, isBuy: true, market: BTC });
+          await waitFor(() => invalidations.some((c) => (c & ChartChange.DataTail) !== 0), "levels reuse tail");
+          await settle();
+          const tAfterReuse = telemetry.snapshotPerformanceTelemetry();
+
+          return {
+            DataTail: ChartChange.DataTail,
+            Viewport: ChartChange.Viewport,
+            avwapBefore,
+            avwapScoped,
+            avwapFull,
+            avwapInvalidations,
+            avwapDrawingsLayerCount: (tAfterAvwap.metrics["chart.annotation.layer.drawings.ms"]?.count ?? 0) - (tBeforeAvwap.metrics["chart.annotation.layer.drawings.ms"]?.count ?? 0),
+            levelsBefore,
+            levelsScoped,
+            levelsFull,
+            levelInvalidations,
+            npocReuseDelta: (tAfterReuse.counters["chart.annotation.pass.naked-poc.reuse"] ?? 0) - (tBeforeReuse.counters["chart.annotation.pass.naked-poc.reuse"] ?? 0),
+            refReuseDelta: (tAfterReuse.counters["chart.annotation.pass.reference-levels.reuse"] ?? 0) - (tBeforeReuse.counters["chart.annotation.pass.reference-levels.reuse"] ?? 0),
+          };
+        } finally {
+          handle.dispose();
+          proto.invalidate = originalInvalidate;
+          proto.renderDirtySurfaces = originalRender;
+          root.remove();
+        }
+      }, { bindingName, rootSelector: ROOT_SELECTOR, tailTime: TAIL_TIME, chartId: CHART_ID, initialBars: INITIAL_BARS, commonRange: { from: INITIAL_BARS[0].t, to: TAIL_TIME + 2 * 60_000 } });
+
+      expect(outcome.avwapInvalidations.every((c) => (c & outcome.Viewport) === 0)).toBe(true);
+      expect(outcome.avwapDrawingsLayerCount).toBeGreaterThan(0);
+      expect(outcome.avwapScoped.hash).not.toBe(outcome.avwapBefore.hash);
+      expect(outcome.avwapScoped.hash).toBe(outcome.avwapFull.hash);
+
+      expect(outcome.levelInvalidations.every((c) => (c & outcome.Viewport) === 0)).toBe(true);
+      expect(outcome.levelsScoped.hash).not.toBe(outcome.levelsBefore.hash);
+      expect(outcome.levelsScoped.hash).toBe(outcome.levelsFull.hash);
+      // DPR=2 (1800x1040 = ~7.14 MiB/pass) reserves the 16 MiB cache budget for closed-footprint-text + axis;
+      // DPR=1 retains every static pass and asserts explicit cache reuse counters.
+      if (deviceScaleFactor === 1) {
+        expect(outcome.npocReuseDelta).toBeGreaterThanOrEqual(1);
+        expect(outcome.refReuseDelta).toBeGreaterThanOrEqual(1);
+      }
     });
   });
 }

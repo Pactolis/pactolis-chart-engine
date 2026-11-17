@@ -488,6 +488,7 @@ class ChartRuntimeImpl implements ChartRuntime, ChartInputHost {
       (ctx, activeView, activeSeries, activeCrosshair) =>
         this.orderbookHeatmap?.drawHover(ctx, activeView, activeSeries, activeCrosshair),
       () => this.displayOptions,
+      () => this.analysisContextForChart().drawings?.hasLiveSeriesDrawings?.(this.state.market) ?? false,
     );
 
     const view = this.view;
@@ -550,9 +551,9 @@ class ChartRuntimeImpl implements ChartRuntime, ChartInputHost {
       renderer,
 
       annotation: {
-        render: (v, s, c, r) => {
+        render: (v, s, c, r, changes) => {
           this.overlay.setTpoMergeLeftSessionStarts(this.tpoMergeLeftSessionStarts);
-          this.overlay.renderAnnotations(v, s, c, r, this.renderCoordinator?.getAnnotationLayerOrder() ?? []);
+          this.overlay.renderAnnotations(v, s, c, r, this.renderCoordinator?.getAnnotationLayerOrder() ?? [], changes);
         },
         requiresInteractionRedraw: () => this.indicatorController.requiresAnnotationInteractionRedraw(),
       },

@@ -227,6 +227,11 @@ export abstract class DrawingState extends DrawingNotifications {
     return summary;
   }
 
+  /** True when the market has at least one visible drawing whose values change on live series/tail updates. */
+  hasLiveSeriesDrawings(market = this.currentMarket): boolean {
+    return this.marketSummary(market).hasLiveSeriesDrawings;
+  }
+
   update(id: string, patch: Partial<Drawing>, notify = true): void {
     const drawing = this.drawings.find((item) => item.id === id);
     if (!drawing) return;
