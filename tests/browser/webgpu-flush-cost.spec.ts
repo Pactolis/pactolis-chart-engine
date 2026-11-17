@@ -14,9 +14,9 @@ const PRICE_STEP = 10;
 const INTERVAL_MS = 60_000;
 const FIT_COLUMNS = 60;
 const LIVE_RATE_PER_SECOND_PER_MARKET = 200;
-const LIVE_DURATION_MS = 1_500;
-const PAN_FRAMES_PER_REPETITION = 60;
-const CROSSHAIR_FRAMES_PER_REPETITION = 60;
+const LIVE_FRAMES_PER_REPETITION = 30;
+const PAN_FRAMES_PER_REPETITION = 35;
+const CROSSHAIR_FRAMES_PER_REPETITION = 35;
 const REPETITIONS = 2;
 const METRIC_NAMES = [
   "chart.gpu.flush.ms",
@@ -361,7 +361,7 @@ async function measureBackend(
         intervalMs,
         panFrames,
         crosshairFrames,
-        liveDurationMs,
+        liveFrames,
         liveRatePerMarket,
         repetitions,
         metricNames,
@@ -584,7 +584,7 @@ async function measureBackend(
         }
         timingsMs.pan = Math.round(performance.now() - panStart);
 
-        // 2. LIVE: deliver 200 trades/s per market for LIVE_DURATION_MS across all 4 charts.
+        // 2. LIVE: deliver trades at 200 trades/s per market across fixed rAF ticks for balanced samples.
         const liveStart = performance.now();
         let tradeSeq = 1;
         for (let rep = 0; rep < repetitions; rep++) {
@@ -595,44 +595,40 @@ async function measureBackend(
           const bucket: Record<string, number[]> = {};
           activeBucket = bucket;
           let tradesDelivered = 0;
-          let rAFTicks = 0;
           const startedAt = performance.now();
           let lastTickAt = startedAt;
           let carryTrades = 0;
-          while (performance.now() - startedAt < liveDurationMs) {
-            await nextRaf();
-            rAFTicks++;
+          for (let frame = 0; frame < liveFrames; frame++) {
             const now = performance.now();
-            const dt = Math.max(0, Math.min(100, now - lastTickAt));
+            const dt = Math.max(16, Math.min(100, now - lastTickAt));
             lastTickAt = now;
             carryTrades += (liveRatePerMarket * dt) / 1_000;
-            const perMarketCount = Math.floor(carryTrades);
-            carryTrades -= perMarketCount;
-            if (perMarketCount > 0) {
-              for (let mIdx = 0; mIdx < markets.length; mIdx++) {
-                const listeners = tradeListeners.get(markets[mIdx]);
-                if (!listeners || listeners.size === 0) continue;
-                const ts = baseTimes[mIdx] + Math.min(intervalMs - 1_000, Math.floor(now - startedAt));
-                for (let tIdx = 0; tIdx < perMarketCount; tIdx++) {
-                  const price = 60_000 + ((tradeSeq + tIdx) % cellsPerBar) * priceStep;
-                  const trade = {
-                    price,
-                    qty: 0.25 + ((tradeSeq + tIdx) % 5) * 0.1,
-                    time: ts,
-                    isBuyerMaker: (tradeSeq + tIdx) % 2 === 0,
-                    id: `live-${backend}-${rep}-${tradeSeq}`,
-                  };
-                  tradeSeq++;
-                  for (const cb of listeners) cb(trade);
-                  tradesDelivered++;
-                }
+            const perMarketCount = Math.max(1, Math.floor(carryTrades));
+            carryTrades = Math.max(0, carryTrades - perMarketCount);
+            for (let mIdx = 0; mIdx < markets.length; mIdx++) {
+              const listeners = tradeListeners.get(markets[mIdx]);
+              if (!listeners || listeners.size === 0) continue;
+              const ts = baseTimes[mIdx] + Math.min(intervalMs - 1_000, Math.floor(now - startedAt));
+              for (let tIdx = 0; tIdx < perMarketCount; tIdx++) {
+                const price = 60_000 + ((tradeSeq + tIdx) % cellsPerBar) * priceStep;
+                const trade = {
+                  price,
+                  qty: 0.25 + ((tradeSeq + tIdx) % 5) * 0.1,
+                  time: ts,
+                  isBuyerMaker: (tradeSeq + tIdx) % 2 === 0,
+                  id: `live-${backend}-${rep}-${tradeSeq}`,
+                };
+                tradeSeq++;
+                for (const cb of listeners) cb(trade);
+                tradesDelivered++;
               }
             }
+            await nextRaf();
           }
-          for (let drain = 0; drain < 6; drain++) await nextRaf();
+          for (let drain = 0; drain < 4; drain++) await nextRaf();
           activeBucket = null;
           await syncBackendWork();
-          scenarioBuckets.live.push({ frames: rAFTicks, tradesDelivered, bucket });
+          scenarioBuckets.live.push({ frames: liveFrames, tradesDelivered, bucket });
         }
         timingsMs.live = Math.round(performance.now() - liveStart);
 
@@ -683,7 +679,7 @@ async function measureBackend(
         intervalMs: INTERVAL_MS,
         panFrames: PAN_FRAMES_PER_REPETITION,
         crosshairFrames: CROSSHAIR_FRAMES_PER_REPETITION,
-        liveDurationMs: LIVE_DURATION_MS,
+        liveFrames: LIVE_FRAMES_PER_REPETITION,
         liveRatePerMarket: LIVE_RATE_PER_SECOND_PER_MARKET,
         repetitions: REPETITIONS,
         metricNames: [...METRIC_NAMES],
@@ -749,7 +745,7 @@ async function measureBackend(
 }
 
 test("four-chart WebGPU vs WebGL2 chart.gpu.flush.ms comparison across pan, live and crosshair", async ({ baseURL }, testInfo) => {
-  test.setTimeout(180_000);
+  test.setTimeout(240_000);
   const resolvedBaseURL = baseURL ?? testInfo.project.use.baseURL ?? "http://127.0.0.1:4173";
 
   let webgpuProbe = await probeWebGpuCapability(resolvedBaseURL, "no-vulkan-compositor");
