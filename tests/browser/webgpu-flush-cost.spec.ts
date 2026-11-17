@@ -7,6 +7,10 @@ const MARKETS = [
   "BINANCE_FUTURES:ethusdt",
   "BINANCE_FUTURES:solusdt",
   "BINANCE_FUTURES:avaxusdt",
+  "BINANCE_FUTURES:linkusdt",
+  "BINANCE_FUTURES:bnbusdt",
+  "BINANCE_FUTURES:adausdt",
+  "BINANCE_FUTURES:dogeusdt",
 ] as const;
 const BAR_COUNT = 600;
 const CELLS_PER_BAR = 40;
@@ -26,7 +30,7 @@ const METRIC_NAMES = [
 ] as const;
 
 type BackendKind = "webgl2" | "webgpu";
-type ScenarioKind = "pan" | "live" | "crosshair";
+type ScenarioKind = "pan" | "live" | "crosshair-static-redraw";
 type MetricName = (typeof METRIC_NAMES)[number];
 
 interface MetricStats {
@@ -338,6 +342,7 @@ async function measureBackend(
   baseURL: string,
   backend: BackendKind,
   args: string[],
+  markets: readonly string[],
 ): Promise<BackendMeasurement> {
   const browser = await launchBackendBrowser(args);
   let context: BrowserContext | null = null;
@@ -416,13 +421,14 @@ async function measureBackend(
         const roots: HTMLDivElement[] = [];
         const handles: Array<{ dispose(): void }> = [];
         const panelIds = markets.map((_: string, idx: number) => `webgpu-flush-${backend}-${idx}`);
-        const cellW = 800;
+        const columns = markets.length === 4 ? 2 : 4;
+        const cellW = 1_600 / columns;
         const cellH = 450;
 
         for (let idx = 0; idx < markets.length; idx++) {
           const market = markets[idx];
           const root = document.createElement("div");
-          root.style.cssText = `position:fixed;left:${(idx % 2) * cellW}px;top:${Math.floor(idx / 2) * cellH}px;width:${cellW}px;height:${cellH}px;`;
+          root.style.cssText = `position:fixed;left:${(idx % columns) * cellW}px;top:${Math.floor(idx / columns) * cellH}px;width:${cellW}px;height:${cellH}px;`;
           document.body.appendChild(root);
           roots.push(root);
 
@@ -559,7 +565,7 @@ async function measureBackend(
         const scenarioBuckets: Record<ScenarioKind, Array<{ frames: number; tradesDelivered?: number; bucket: Record<string, number[]> }>> = {
           pan: [],
           live: [],
-          crosshair: [],
+          "crosshair-static-redraw": [],
         };
 
         // 1. PAN: move viewport back and forth every rAF across all 4 charts concurrently.
@@ -632,7 +638,8 @@ async function measureBackend(
         }
         timingsMs.live = Math.round(performance.now() - liveStart);
 
-        // 3. CROSSHAIR + static-scene GPU redraw comparison (issue #88 fixture baseline).
+        // 3. Crosshair updates paired with an explicit static-scene GPU redraw.
+        // Interaction-only invalidation is checked above and intentionally produces zero GPU flushes.
         const crosshairStart = performance.now();
         for (let rep = 0; rep < repetitions; rep++) {
           const bucket: Record<string, number[]> = {};
@@ -649,7 +656,7 @@ async function measureBackend(
           }
           activeBucket = null;
           await syncBackendWork();
-          scenarioBuckets.crosshair.push({ frames: crosshairFrames, bucket });
+          scenarioBuckets["crosshair-static-redraw"].push({ frames: crosshairFrames, bucket });
         }
         timingsMs.crosshair = Math.round(performance.now() - crosshairStart);
 
@@ -672,7 +679,7 @@ async function measureBackend(
       },
       {
         backend,
-        markets: [...MARKETS],
+        markets: [...markets],
         barCount: BAR_COUNT,
         cellsPerBar: CELLS_PER_BAR,
         priceStep: PRICE_STEP,
@@ -704,20 +711,20 @@ async function measureBackend(
         })),
         combined: combineBuckets(result.scenarioBuckets.live.map((entry) => entry.bucket)),
       },
-      crosshair: {
-        repetitions: result.scenarioBuckets.crosshair.map((entry, idx) => ({
+      "crosshair-static-redraw": {
+        repetitions: result.scenarioBuckets["crosshair-static-redraw"].map((entry, idx) => ({
           repetition: idx + 1,
           frames: entry.frames,
           metrics: summarizeBucket(entry.bucket),
         })),
-        combined: combineBuckets(result.scenarioBuckets.crosshair.map((entry) => entry.bucket)),
+        combined: combineBuckets(result.scenarioBuckets["crosshair-static-redraw"].map((entry) => entry.bucket)),
       },
     };
 
     const totalFlushCount =
       scenarios.pan.combined["chart.gpu.flush.ms"].count
       + scenarios.live.combined["chart.gpu.flush.ms"].count
-      + scenarios.crosshair.combined["chart.gpu.flush.ms"].count;
+      + scenarios["crosshair-static-redraw"].combined["chart.gpu.flush.ms"].count;
     const uploadBytes = result.counters["gpu.upload.bytes"];
     const avgQuadsPerFlush =
       typeof uploadBytes === "number" && totalFlushCount > 0
@@ -744,8 +751,8 @@ async function measureBackend(
   }
 }
 
-test("four-chart WebGPU vs WebGL2 chart.gpu.flush.ms comparison across pan, live and crosshair", async ({ baseURL }, testInfo) => {
-  test.setTimeout(240_000);
+test("4- and 8-chart WebGPU vs WebGL2 chart.gpu.flush.ms comparison across pan, live and crosshair", async ({ baseURL }, testInfo) => {
+  test.setTimeout(600_000);
   const resolvedBaseURL = baseURL ?? testInfo.project.use.baseURL ?? "http://127.0.0.1:4173";
 
   let webgpuProbe = await probeWebGpuCapability(resolvedBaseURL, "no-vulkan-compositor");
@@ -759,69 +766,78 @@ test("four-chart WebGPU vs WebGL2 chart.gpu.flush.ms comparison across pan, live
     test.skip(true, `BLOCKED: WebGPU adapter/device unavailable in headless runtime (${webgpuProbe.reason}; never counted green)`);
   }
 
-  const webgl2 = await measureBackend(resolvedBaseURL, "webgl2", launchArgsFor("webgl2"));
-  console.log("WEBGPU_BENCH_WEBGL2_DONE", JSON.stringify({ timingsMs: webgl2.timingsMs, avgQuadsPerFlush: webgl2.avgQuadsPerFlush }));
+  const measurements: Array<unknown> = [];
+  for (const chartCount of [4, 8] as const) {
+    const markets = MARKETS.slice(0, chartCount);
+    const webgl2 = await measureBackend(resolvedBaseURL, "webgl2", launchArgsFor("webgl2"), markets);
+    console.log("WEBGPU_BENCH_WEBGL2_DONE", JSON.stringify({ chartCount, timingsMs: webgl2.timingsMs, avgQuadsPerFlush: webgl2.avgQuadsPerFlush }));
 
-  const webgpu = await measureBackend(resolvedBaseURL, "webgpu", webgpuProbe.args);
-  console.log("WEBGPU_BENCH_WEBGPU_DONE", JSON.stringify({ timingsMs: webgpu.timingsMs, active: webgpu.active, panelBackends: webgpu.panelBackends }));
+    const webgpu = await measureBackend(resolvedBaseURL, "webgpu", webgpuProbe.args, markets);
+    console.log("WEBGPU_BENCH_WEBGPU_DONE", JSON.stringify({ chartCount, timingsMs: webgpu.timingsMs, active: webgpu.active, panelBackends: webgpu.panelBackends }));
 
-  expect(webgl2.active).toBe("webgl2");
-  expect(webgl2.panelBackends).toEqual(["webgl2", "webgl2", "webgl2", "webgl2"]);
-  expect(webgl2.avgQuadsPerFlush ?? 0).toBeGreaterThanOrEqual(4_000);
-  expect(webgl2.crosshairInteractionOnlyGpuFlushCount).toBe(0);
+    expect(webgl2.active).toBe("webgl2");
+    expect(webgl2.panelBackends).toEqual(markets.map(() => "webgl2"));
+    expect(webgl2.avgQuadsPerFlush ?? 0).toBeGreaterThanOrEqual(4_000);
+    expect(webgl2.crosshairInteractionOnlyGpuFlushCount).toBe(0);
 
-  expect(webgpu.active).toBe("webgpu");
-  expect(webgpu.panelBackends).toEqual(["webgpu", "webgpu", "webgpu", "webgpu"]);
-  expect(webgpu.fallbacks).toEqual([]);
-  expect(webgpu.crosshairInteractionOnlyGpuFlushCount).toBe(0);
+    expect(webgpu.active).toBe("webgpu");
+    expect(webgpu.panelBackends).toEqual(markets.map(() => "webgpu"));
+    expect(webgpu.fallbacks).toEqual([]);
+    expect(webgpu.crosshairInteractionOnlyGpuFlushCount).toBe(0);
 
-  const comparison = (["pan", "live", "crosshair"] as const).map((scenario) => {
-    const glFlush = webgl2.scenarios[scenario].combined["chart.gpu.flush.ms"];
-    const gpuFlush = webgpu.scenarios[scenario].combined["chart.gpu.flush.ms"];
-    const glFootprint = webgl2.scenarios[scenario].combined["chart.gpu.footprint.ms"];
-    const gpuFootprint = webgpu.scenarios[scenario].combined["chart.gpu.footprint.ms"];
-    const glDraw = webgl2.scenarios[scenario].combined["chart.surface.gpu.draw.ms"];
-    const gpuDraw = webgpu.scenarios[scenario].combined["chart.surface.gpu.draw.ms"];
+    const comparison = (["pan", "live", "crosshair-static-redraw"] as const).map((scenario) => {
+      const glFlush = webgl2.scenarios[scenario].combined["chart.gpu.flush.ms"];
+      const gpuFlush = webgpu.scenarios[scenario].combined["chart.gpu.flush.ms"];
+      const glFootprint = webgl2.scenarios[scenario].combined["chart.gpu.footprint.ms"];
+      const gpuFootprint = webgpu.scenarios[scenario].combined["chart.gpu.footprint.ms"];
+      const glDraw = webgl2.scenarios[scenario].combined["chart.surface.gpu.draw.ms"];
+      const gpuDraw = webgpu.scenarios[scenario].combined["chart.surface.gpu.draw.ms"];
 
-    for (const rep of webgl2.scenarios[scenario].repetitions) {
-      expect(rep.metrics["chart.gpu.flush.ms"].count, `webgl2 ${scenario} rep ${rep.repetition} count`).toBeGreaterThan(0);
-    }
-    for (const rep of webgpu.scenarios[scenario].repetitions) {
-      expect(rep.metrics["chart.gpu.flush.ms"].count, `webgpu ${scenario} rep ${rep.repetition} count`).toBeGreaterThan(0);
-    }
+      for (const rep of webgl2.scenarios[scenario].repetitions) {
+        expect(rep.metrics["chart.gpu.flush.ms"].count, `webgl2 ${chartCount} charts ${scenario} rep ${rep.repetition} count`).toBeGreaterThan(0);
+      }
+      for (const rep of webgpu.scenarios[scenario].repetitions) {
+        expect(rep.metrics["chart.gpu.flush.ms"].count, `webgpu ${chartCount} charts ${scenario} rep ${rep.repetition} count`).toBeGreaterThan(0);
+      }
 
-    const round3 = (v: number) => Math.round(v * 1_000) / 1_000;
-    const flushMeanRatio = glFlush.meanMs > 0 ? round3(gpuFlush.meanMs / glFlush.meanMs) : null;
-    return {
-      scenario,
-      webgl2: { flush: glFlush, footprint: glFootprint, surfaceGpuDraw: glDraw },
-      webgpu: { flush: gpuFlush, footprint: gpuFootprint, surfaceGpuDraw: gpuDraw },
-      flushMeanRatio,
-      within2xBudget: flushMeanRatio !== null ? flushMeanRatio <= 2 : null,
-    };
-  });
+      const round3 = (v: number) => Math.round(v * 1_000) / 1_000;
+      const flushMeanRatio = glFlush.meanMs > 0 ? round3(gpuFlush.meanMs / glFlush.meanMs) : null;
+      const flushP95Ratio = glFlush.p95Ms > 0 ? round3(gpuFlush.p95Ms / glFlush.p95Ms) : null;
+      return {
+        scenario,
+        webgl2: { flush: glFlush, footprint: glFootprint, surfaceGpuDraw: glDraw },
+        webgpu: { flush: gpuFlush, footprint: gpuFootprint, surfaceGpuDraw: gpuDraw },
+        flushMeanRatio,
+        flushP95Ratio,
+        within2xMeanBudget: flushMeanRatio !== null ? flushMeanRatio <= 2 : null,
+        within2xP95Budget: flushP95Ratio !== null ? flushP95Ratio <= 2 : null,
+      };
+    });
 
-  const report = {
-    fixture: {
-      charts: MARKETS.length,
-      layout: "2x2",
-      panelSize: "800x450",
-      viewport: `${VIEWPORT.width}x${VIEWPORT.height}`,
-      barsPerChart: BAR_COUNT,
-      cellsPerBar: CELLS_PER_BAR,
-      fitColumns: FIT_COLUMNS,
-      liveRatePerMarketPerSecond: LIVE_RATE_PER_SECOND_PER_MARKET,
-      repetitions: REPETITIONS,
-      avgQuadsPerFlushWebgl2: webgl2.avgQuadsPerFlush,
-    },
-    webgpuProbe,
-    webgl2,
-    webgpu,
-    comparison,
-  };
+    measurements.push({
+      fixture: {
+        charts: chartCount,
+        layout: chartCount === 4 ? "2x2" : "4x2",
+        panelSize: chartCount === 4 ? "800x450" : "400x450",
+        viewport: `${VIEWPORT.width}x${VIEWPORT.height}`,
+        barsPerChart: BAR_COUNT,
+        cellsPerBar: CELLS_PER_BAR,
+        fitColumns: FIT_COLUMNS,
+        liveRatePerMarketPerSecond: LIVE_RATE_PER_SECOND_PER_MARKET,
+        repetitions: REPETITIONS,
+        avgQuadsPerFlushWebgl2: webgl2.avgQuadsPerFlush,
+        crosshairDefinition: "crosshair position updates plus explicit static-scene GPU-context redraw; interaction-only redraw is verified to flush zero times",
+      },
+      webgl2,
+      webgpu,
+      comparison,
+    });
+  }
+
+  const report = { webgpuProbe, measurements };
 
   console.log("WEBGPU_FLUSH_COMPARISON_EVIDENCE", JSON.stringify(report));
-  await testInfo.attach("webgpu-flush-comparison-evidence.json", {
+  await testInfo.attach("webgpu-flush-stage3-evidence.json", {
     body: JSON.stringify(report, null, 2),
     contentType: "application/json",
   });
