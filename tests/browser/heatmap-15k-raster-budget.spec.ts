@@ -402,16 +402,28 @@ test("15,000-cell SwiftShader benchmark and CPU raster cache budget / GPU takeov
       const retained = sorted.slice(trimCount, sorted.length - trimCount);
       return retained.reduce((total, value) => total + value, 0) / retained.length;
     };
-    const directTrimmedMeanMs = trimmedMean(panSampleValues.direct.heatmapMs);
-    const adaptiveTrimmedMeanMs = trimmedMean(panSampleValues.adaptive.heatmapMs);
+    const pairedBlockRatios: number[] = [];
+    const pairedBlockCount = Math.floor(Math.min(
+      panSampleValues.direct.heatmapMs.length,
+      panSampleValues.adaptive.heatmapMs.length,
+    ) / 2);
+    for (let block = 0; block < pairedBlockCount; block++) {
+      const start = block * 2;
+      const directBlock = panSampleValues.direct.heatmapMs.slice(start, start + 2);
+      const adaptiveBlock = panSampleValues.adaptive.heatmapMs.slice(start, start + 2);
+      const directMean = directBlock.reduce((total, value) => total + value, 0) / directBlock.length;
+      const adaptiveMean = adaptiveBlock.reduce((total, value) => total + value, 0) / adaptiveBlock.length;
+      pairedBlockRatios.push(directMean > 0 ? adaptiveMean / directMean : Number.POSITIVE_INFINITY);
+    }
     const panSamples = {
       direct: { ...panSampleValues.direct, heatmapMs: summarize(panSampleValues.direct.heatmapMs) },
       adaptive: { ...panSampleValues.adaptive, heatmapMs: summarize(panSampleValues.adaptive.heatmapMs) },
       paired: {
         samples: Math.min(panSampleValues.direct.heatmapMs.length, panSampleValues.adaptive.heatmapMs.length),
-        adaptiveToDirectTrimmedMeanRatio: adaptiveTrimmedMeanMs / directTrimmedMeanMs,
+        blocks: pairedBlockCount,
+        adaptiveToDirectTrimmedMeanRatio: trimmedMean(pairedBlockRatios),
         trimFraction: 0.1,
-        order: "alternating AB/BA",
+        blockOrder: "ABBA (direct, adaptive, adaptive, direct)",
       },
     };
     v.offsetX = calibratedOffsetX;
