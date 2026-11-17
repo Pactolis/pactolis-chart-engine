@@ -222,6 +222,12 @@ export class HistoryLoadCoordinator {
     this.historyController = null;
   }
 
+  cancelPatchDay(): void {
+    this.patchDayController?.abort();
+    this.patchDayController = null;
+    this.resetPatchDayQueue();
+  }
+
   cancelLiveBarOHLCRefresh(): void {
     this.liveOhlcController?.abort();
   }

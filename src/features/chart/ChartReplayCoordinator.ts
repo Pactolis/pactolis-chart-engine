@@ -19,6 +19,7 @@ export interface ChartReplayCoordinatorHost {
   autoFit(): void;
   updateHook(): void;
   loadHistory(): Promise<void>;
+  onReplaySettled?(): void;
 }
 
 /**
@@ -55,6 +56,10 @@ export class ChartReplayCoordinator {
     }
     if (bars.length === 0) return;
 
+    // Replay owns the series until exit. Cancel any still-running two-phase
+    // history pass or daily patch before it can backfill bars into that series.
+    this.host.pipeline.cancelHistoryLoad?.();
+    this.host.pipeline.cancelPatchDay?.();
     this.host.pipeline.setPaused(true);
     const market = this.host.getMarket();
     this.replayMarket = market;
@@ -114,10 +119,12 @@ export class ChartReplayCoordinator {
     this.host.updateHook();
     this.host.pipeline.setPaused(false);
     if (options.reloadHistory !== false) {
-      this.host.loadHistory().catch((error: unknown) => {
-        console.warn("[chart.replay] history reload after replay failed", error);
-      });
-    }
+      void this.host.loadHistory()
+        .catch((error: unknown) => {
+          console.warn("[chart.replay] history reload after replay failed", error);
+        })
+        .finally(() => this.host.onReplaySettled?.());
+    } else this.host.onReplaySettled?.();
   }
 
   applyExternal(snapshot: ReplaySnapshot | null): void {
