@@ -1,6 +1,6 @@
 import { expect, test } from "@playwright/test";
 import type { ChartPanelState } from "../../src/core/chartPanelState.js";
-import { FUNCTIONAL_WEBGL_ARGS, openHarness } from "./support/history.js";
+import { FUNCTIONAL_WEBGL_ARGS, FROZEN_NOW, INTERVAL_MS, openHarness } from "./support/history.js";
 
 test.use({
   launchOptions: {
@@ -74,10 +74,146 @@ function aggregateWireBars(bars1m: ReturnType<typeof buildAligned1mBars>, interv
   return [...buckets.values()].sort((a, b) => a.t - b.t);
 }
 
+test("a late two-phase history response cannot extend the active replay series", async ({ page }) => {
+  test.setTimeout(90_000);
+  await page.clock.setFixedTime(new Date(FROZEN_NOW));
+  const liveBucket = Math.floor(FROZEN_NOW / INTERVAL_MS) * INTERVAL_MS;
+  const fastBars = [liveBucket - 4 * INTERVAL_MS, liveBucket - 3 * INTERVAL_MS].map((t, index) => ({
+    t,
+    o: 60_000 + index * 10,
+    h: 60_030 + index * 10,
+    l: 59_990 + index * 10,
+    c: 60_020 + index * 10,
+    v: 3,
+    d: 1,
+    n: 2,
+    cells: [[60_000 + index * 10, 2, 1, 0, 0]],
+    completeness: "complete" as const,
+    updatedAt: FROZEN_NOW,
+  }));
+  const phase2Bars = [
+    ...fastBars,
+    {
+      ...fastBars[1]!,
+      t: liveBucket - 2 * INTERVAL_MS,
+      o: 60_040,
+      h: 60_070,
+      l: 60_030,
+      c: 60_060,
+      cells: [[60_040, 2, 1, 0, 0]],
+    },
+  ];
+  let phase2StartedResolve!: () => void;
+  let phase2Release!: () => void;
+  let phase2SettledResolve!: () => void;
+  let phase2Requested = false;
+  const phase2Started = new Promise<void>((resolve) => { phase2StartedResolve = resolve; });
+  const phase2Gate = new Promise<void>((resolve) => { phase2Release = resolve; });
+  const phase2Settled = new Promise<void>((resolve) => { phase2SettledResolve = resolve; });
+
+  await page.route("**/*", (route) => {
+    const url = new URL(route.request().url());
+    return ["127.0.0.1", "localhost"].includes(url.hostname) ? route.continue() : route.abort("blockedbyclient");
+  });
+  await page.route(/\/history(?:\?|$)/, async (route) => {
+    const url = new URL(route.request().url());
+    const streamedPhase2 = url.searchParams.get("stream") === "1";
+    if (streamedPhase2) {
+      phase2Requested = true;
+      phase2StartedResolve();
+      await phase2Gate;
+      try {
+        await route.fulfill({
+          contentType: "application/json",
+          body: JSON.stringify({ ok: true, data: { bars: phase2Bars } }),
+        });
+      } catch {
+        // Replay intentionally aborts the in-flight fetch. The late fixture response
+        // is still released below to exercise the stale-result boundary.
+      } finally {
+        phase2SettledResolve();
+      }
+      return;
+    }
+    return route.fulfill({
+      contentType: "application/json",
+      body: JSON.stringify({ ok: true, data: { bars: fastBars } }),
+    });
+  });
+  await openHarness(page);
+
+  await page.evaluate(async () => {
+    const [harness, { createHarnessServices }] = await Promise.all([
+      import("/harness/chart.ts"),
+      import("/harness/services.ts"),
+    ]);
+    const root = document.createElement("div");
+    root.style.cssText = "position:fixed;left:0;top:0;width:640px;height:480px";
+    document.body.appendChild(root);
+    const surface = harness.createChartSurfaceModel();
+    const state = { type: "chart", market: "BINANCE_FUTURES:btcusdt", timeframe: "15m", scaleMode: "linear" } as const;
+    const svc = createHarnessServices({ priceStep: 10, priceStepResolved: true });
+    const handle = harness.mountChart(root, state, svc, "replay-phase2-race", surface);
+    (window as any).__replayPhase2Race = { harness, handle, root, surface };
+  });
+  await phase2Started;
+  let before: { historyBackground: boolean; replayTarget: number; maxEnd: number; barEnds: number[] } | null = null;
+  try {
+    await page.waitForFunction(() => {
+      const fixture = (window as any).__replayPhase2Race;
+      const runtime = fixture?.harness.getChartRuntime("replay-phase2-race");
+      return Boolean(runtime && fixture.surface.historyBackground && runtime.pipeline.series.length >= 2);
+    });
+
+    before = await page.evaluate(({ intervalMs }) => {
+      const fixture = (window as any).__replayPhase2Race;
+      const runtime = fixture.harness.getChartRuntime("replay-phase2-race");
+    const historyBackground = fixture.surface.historyBackground;
+      runtime.startReplay();
+      const snapshot = runtime.getReplaySnapshot();
+      const replayTarget = snapshot.rangeStart + 2 * intervalMs;
+      runtime.replaySeek(replayTarget);
+      const bars = runtime.pipeline.series.listReadonly().map((bar: any) => bar.startTime + runtime.pipeline.intervalMs);
+      return {
+      historyBackground,
+        replayTarget,
+        maxEnd: Math.max(...bars),
+        barEnds: bars,
+      };
+    }, { intervalMs: INTERVAL_MS });
+  } finally {
+    phase2Release();
+    if (phase2Requested) await phase2Settled;
+  }
+  await page.waitForFunction(() => {
+    const fixture = (window as any).__replayPhase2Race;
+    return fixture && !fixture.surface.historyBackground && !fixture.surface.historyOverlay;
+  });
+  if (!before) throw new Error("Replay snapshot was not captured before releasing phase 2");
+  expect(before.historyBackground).toBe(true);
+  expect(before.maxEnd).toBeLessThanOrEqual(before.replayTarget);
+  const after = await page.evaluate(() => {
+    const fixture = (window as any).__replayPhase2Race;
+    const runtime = fixture.harness.getChartRuntime("replay-phase2-race");
+    const replayTarget = runtime.getReplaySnapshot().virtualTime;
+    const barEnds = runtime.pipeline.series.listReadonly().map((bar: any) => bar.startTime + runtime.pipeline.intervalMs);
+    return { replayTarget, maxEnd: Math.max(...barEnds), barEnds };
+  });
+  expect(after.maxEnd).toBeLessThanOrEqual(after.replayTarget);
+  expect(after.barEnds).toEqual(before.barEnds);
+  await page.evaluate(() => {
+    const fixture = (window as any).__replayPhase2Race;
+    fixture.handle.dispose();
+    fixture.root.remove();
+    delete (window as any).__replayPhase2Race;
+  });
+});
+
 test("ChartRuntime replay parity: TPO (#144), 10 indicators, timeframe round-trip (1m->5m->15m->1m), linked follower, and live unlinked chart", async ({ page }) => {
   test.setTimeout(90_000);
+  await page.clock.setFixedTime(new Date(FROZEN_NOW));
   const MIN = 60_000;
-  const endAligned = Math.floor(Date.now() / (15 * MIN)) * (15 * MIN);
+  const endAligned = Math.floor(FROZEN_NOW / (15 * MIN)) * (15 * MIN);
   const full1m = buildAligned1mBars(90, endAligned);
   const full5m = aggregateWireBars(full1m, 5 * MIN);
   const full15m = aggregateWireBars(full1m, 15 * MIN);
@@ -109,7 +245,7 @@ test("ChartRuntime replay parity: TPO (#144), 10 indicators, timeframe round-tri
         data: { bars },
         meta: {
           schemaVersion: 1,
-          generatedAt: Date.now(),
+          generatedAt: FROZEN_NOW,
           footprint: { available: true, allowed: true, priceStep: 10 },
           footprintCoverage: {
             status: "complete",
@@ -251,11 +387,33 @@ test("ChartRuntime replay parity: TPO (#144), 10 indicators, timeframe round-tri
       // Timeframe round-trip during active replay at mid-15m timestamp (index 37 -> virtualTime = T0 + 37m)
       rtOwner.replaySeek(full1mTimes[37]);
       const vtBeforeTf = rtOwner.getReplaySnapshot()!.virtualTime;
+      const futureMutationViolations: Array<{ interval: number; virtualTime: number; futureEnds: number[] }> = [];
+      const monitoredSeries: any = rtOwner.pipeline.series;
+      const recordReplayBound = () => {
+        const replay = rtOwner.getReplaySnapshot();
+        if (!replay) return;
+        const interval = rtOwner.pipeline.intervalMs;
+        const futureEnds = monitoredSeries.listReadonly()
+          .map((bar: any) => bar.startTime + interval)
+          .filter((end: number) => end > replay.virtualTime);
+        if (futureEnds.length > 0) futureMutationViolations.push({ interval, virtualTime: replay.virtualTime, futureEnds });
+      };
+      for (const method of ["upsertBar", "replaceRange", "reassertOHLC", "addTrade", "addCandleTrades", "addFootprintTrades", "addTrades", "loadBars"]) {
+        const original = monitoredSeries[method].bind(monitoredSeries);
+        monitoredSeries[method] = (...args: any[]) => {
+          const result = original(...args);
+          recordReplayBound();
+          return result;
+        };
+      }
 
       const waitTf = async (expectedInterval: number) => {
         const deadline = performance.now() + 10_000;
         while (performance.now() < deadline) {
-          if (rtOwner.pipeline.intervalMs === expectedInterval && rtOwner.pipeline.series.length > 0) {
+          if (rtOwner.pipeline.intervalMs === expectedInterval
+            && rtOwner.pipeline.series.length > 0
+            && !owner.surface.historyOverlay
+            && !owner.surface.historyBackground) {
             await new Promise((r) => setTimeout(r, 80));
             return;
           }
@@ -296,9 +454,24 @@ test("ChartRuntime replay parity: TPO (#144), 10 indicators, timeframe round-tri
         linkedLength,
         liveVolDelta: liveVolAfter - liveVolBefore,
         vtBeforeTf,
-        tf5m: { vt: snap5m.virtualTime, count: bars5m.length, maxEnd: Math.max(...bars5m.map((b: any) => b.startTime + 5 * minMs)) },
-        tf15m: { vt: snap15m.virtualTime, count: bars15m.length, maxEnd: Math.max(...bars15m.map((b: any) => b.startTime + 15 * minMs)) },
-        tfBack1m: { vt: snapBack1m.virtualTime, count: barsBack1m.length },
+        futureMutationViolations,
+        tf5m: {
+          vt: snap5m.virtualTime,
+          count: bars5m.length,
+          maxEnd: Math.max(...bars5m.map((b: any) => b.startTime + 5 * minMs)),
+          futureBars: snap5m.totalBars - snap5m.visibleBars,
+        },
+        tf15m: {
+          vt: snap15m.virtualTime,
+          count: bars15m.length,
+          maxEnd: Math.max(...bars15m.map((b: any) => b.startTime + 15 * minMs)),
+          futureBars: snap15m.totalBars - snap15m.visibleBars,
+        },
+        tfBack1m: {
+          vt: snapBack1m.virtualTime,
+          count: barsBack1m.length,
+          futureBars: snapBack1m.totalBars - snapBack1m.visibleBars,
+        },
       };
     } finally {
       for (const m of mounts) {
@@ -336,4 +509,8 @@ test("ChartRuntime replay parity: TPO (#144), 10 indicators, timeframe round-tri
   expect(result.tf15m.maxEnd).toBeLessThanOrEqual(result.vtBeforeTf);
   expect(result.tfBack1m.vt).toBe(result.vtBeforeTf);
   expect(result.tfBack1m.count).toBe(37);
+  expect(result.tf5m.futureBars).toBeGreaterThan(0);
+  expect(result.tf15m.futureBars).toBeGreaterThan(0);
+  expect(result.tfBack1m.futureBars).toBeGreaterThan(0);
+  expect(result.futureMutationViolations).toEqual([]);
 });

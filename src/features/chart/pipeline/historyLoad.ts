@@ -40,6 +40,10 @@ export interface LoadHistoryOpts {
   preferCache?: boolean;
   signal?: AbortSignal;
   twoPhase?: boolean;
+  /** Keep history newer than this completed-bar end out of the visible series (e.g. replay). */
+  maxVisibleBarEnd?: number;
+  /** Observe fetched bars without requiring them to be applied to the visible series. */
+  onHistoryBars?: (bars: readonly FootprintBar[]) => void;
 }
 
 export interface ExplicitHistoryReconcileState {
@@ -220,6 +224,12 @@ export class HistoryLoadCoordinator {
   cancelHistoryLoad(): void {
     this.historyController?.abort();
     this.historyController = null;
+  }
+
+  cancelPatchDay(): void {
+    this.patchDayController?.abort();
+    this.patchDayController = null;
+    this.resetPatchDayQueue();
   }
 
   cancelLiveBarOHLCRefresh(): void {
@@ -436,10 +446,12 @@ export class HistoryLoadCoordinator {
           this._resetExplicitHistoryWatermark(generation);
           const fastBars = await chartDataSource().fetchHistory(fastWindow);
           if (this.host.isDisposed() || generation !== this.host.getGeneration() || controller.signal.aborted) return;
-          this._seedOpenBucketFromHistory(fastBars, bootstrapFrom);
+          opts.onHistoryBars?.(fastBars.filter((bar) => bar.startTime <= opts.to));
+          this._seedOpenBucketFromHistory(fastBars, bootstrapFrom, opts.to, opts.maxVisibleBarEnd);
           const replaceTo = Math.min(fastWindow.to, bootstrapFrom);
           if (replaceTo <= fastWindow.from) continue;
-          const replaceableBars = fastBars.filter((bar) => bar.startTime < bootstrapFrom);
+          const replaceableBars = fastBars.filter((bar) => bar.startTime < bootstrapFrom
+            && this._barWithinVisibleHistoryEnd(bar, intervalMs, opts.maxVisibleBarEnd));
           if (!this._applyExplicitHistorySnapshot(
             fastWindow.from,
             replaceTo,
@@ -511,12 +523,14 @@ export class HistoryLoadCoordinator {
           chunkWindows.unshift(split.newest);
           continue;
         }
+        opts.onHistoryBars?.(receivedBars.filter((bar) => bar.startTime <= opts.to));
         onHistoryMeta(windowMeta);
         // The meta callback may re-enter (server step correction -> setPriceStep)
         // and restart this load; a superseded stack must not mutate the new epoch.
         if (this.host.isDisposed() || generation !== this.host.getGeneration() || controller.signal.aborted) return;
         if (receivedBars.length) {
-          const replaceableBars = receivedBars.filter((bar) => bar.startTime < bootstrapFrom);
+          const replaceableBars = receivedBars.filter((bar) => bar.startTime < bootstrapFrom
+            && this._barWithinVisibleHistoryEnd(bar, intervalMs, opts.maxVisibleBarEnd));
           if (replaceableBars.length) {
             const batchFrom = replaceableBars[0].startTime;
             const batchTo = bucketEnd(replaceableBars[replaceableBars.length - 1]!.startTime, intervalMs);
@@ -578,11 +592,13 @@ export class HistoryLoadCoordinator {
           queue.unshift(split.newest);
           continue;
         }
+        opts.onHistoryBars?.(receivedBars.filter((bar) => bar.startTime <= opts.to));
         onHistoryMeta(windowMeta);
         if (this.host.isDisposed() || generation !== this.host.getGeneration() || controller.signal.aborted) return;
-        this._seedOpenBucketFromHistory(receivedBars, bootstrapFrom);
+        this._seedOpenBucketFromHistory(receivedBars, bootstrapFrom, opts.to, opts.maxVisibleBarEnd);
         if (!receivedBars.length) continue;
-        const replaceableBars = receivedBars.filter((bar) => bar.startTime < bootstrapFrom);
+        const replaceableBars = receivedBars.filter((bar) => bar.startTime < bootstrapFrom
+          && this._barWithinVisibleHistoryEnd(bar, intervalMs, opts.maxVisibleBarEnd));
         if (!replaceableBars.length) continue;
         const batchFrom = replaceableBars[0].startTime;
         const batchTo = bucketEnd(replaceableBars[replaceableBars.length - 1]!.startTime, intervalMs);
@@ -616,8 +632,23 @@ export class HistoryLoadCoordinator {
     logLoadTrace(traceId, "pipeline.history.complete", { seriesBars: this.series.length });
   }
 
-  private _seedOpenBucketFromHistory(bars: readonly FootprintBar[], bootstrapFrom: number): void {
-    const openBars = bars.filter((bar) => bar.startTime >= bootstrapFrom).map(candleOnlyBar);
+  private _barWithinVisibleHistoryEnd(
+    bar: FootprintBar,
+    intervalMs: number,
+    maxVisibleBarEnd?: number,
+  ): boolean {
+    return maxVisibleBarEnd === undefined || bar.startTime + intervalMs <= maxVisibleBarEnd;
+  }
+
+  private _seedOpenBucketFromHistory(
+    bars: readonly FootprintBar[],
+    bootstrapFrom: number,
+    requestedTo: number,
+    maxVisibleBarEnd?: number,
+  ): void {
+    const openBars = bars.filter((bar) => bar.startTime >= bootstrapFrom
+      && bar.startTime <= requestedTo
+      && this._barWithinVisibleHistoryEnd(bar, this.host.getIntervalMs(), maxVisibleBarEnd)).map(candleOnlyBar);
     if (openBars.length === 0) return;
     const applied = this.applyLiveBarSeed(openBars, {
       market: this.host.getMarket(),

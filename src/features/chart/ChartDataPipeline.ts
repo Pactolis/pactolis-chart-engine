@@ -327,6 +327,7 @@ export class ChartDataPipeline {
   }
 
   cancelHistoryLoad(): void { this.historyCoordinator.cancelHistoryLoad(); }
+  cancelPatchDay(): void { this.historyCoordinator.cancelPatchDay(); }
   loadHistory(opts: LoadHistoryOpts): Promise<void> { return this.historyCoordinator.loadHistory(opts); }
   cancelRecentFootprintCoverageRepair(): void { this.recentRepairCoordinator.cancel(); }
   repairRecentFootprintCoverage(from: number, to: number): Promise<RecentFootprintRepairOutcome> {

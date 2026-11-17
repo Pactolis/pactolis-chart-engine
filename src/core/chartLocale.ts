@@ -18,6 +18,25 @@ export interface ChartLocale {
   onLocaleChange(listener: () => void): () => void;
 }
 
+const VOLUME_PROFILE_FALLBACKS: Readonly<Record<string, { tr: string; en: string }>> = {
+  "indicator.volumeProfile.estimated": {
+    tr: "Tahmini (OHLCV)",
+    en: "Estimated (OHLCV)",
+  },
+  "indicator.volumeProfile.estimatedShort": {
+    tr: "Tahmini",
+    en: "Estimated",
+  },
+  "indicator.volumeProfile.mixed": {
+    tr: "Tahmini (Karma)",
+    en: "Estimated (Mixed)",
+  },
+  "indicator.volumeProfile.estimatedMetricUnsupported": {
+    tr: "Tahmini (OHLCV) modda yalnız Toplam Hacim desteklenir; seçili metrik için gerçek footprint verisi gerekir",
+    en: "Estimated (OHLCV) mode only supports Total Volume; selected metric requires exact footprint data",
+  },
+};
+
 let configured: ChartLocale | null = null;
 
 export function configureChartLocale(locale: ChartLocale): void {
@@ -36,4 +55,26 @@ export function t(key: ChartMessageKey, params?: Record<string, string | number>
 export function t(key: string, params?: Record<string, string | number>): string;
 export function t(key: string, params?: Record<string, string | number>): string {
   return chartLocale().translate(key, params);
+}
+
+function formatParams(template: string, params?: Record<string, string | number>): string {
+  if (!params) return template;
+  return template.replace(/\{(\w+)\}/g, (match, name: string) => (name in params ? String(params[name]) : match));
+}
+
+/**
+ * Translates via the host `ChartLocale`, falling back to built-in TR/EN labels when the
+ * host catalog has not yet registered a newer optional engine key (or echoes the raw key).
+ */
+export function tOr(key: string, params?: Record<string, string | number>): string {
+  const active = chartLocale();
+  const translated = active.translate(key, params);
+  if (translated && translated !== key && !translated.startsWith(`${key} `)) {
+    return translated;
+  }
+  const fallback = VOLUME_PROFILE_FALLBACKS[key];
+  if (!fallback) return translated;
+  const lang = (active.locale() || "").toLowerCase();
+  const text = lang === "tr" || lang.startsWith("tr-") || lang.startsWith("tr_") ? fallback.tr : fallback.en;
+  return formatParams(text, params);
 }

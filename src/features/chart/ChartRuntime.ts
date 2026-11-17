@@ -406,9 +406,11 @@ class ChartRuntimeImpl implements ChartRuntime, ChartInputHost {
       (ctx, activeView, activeSeries) => {
         const analysisCtx = this.analysisContextForChart();
         if (!analysisCtx.drawings) return;
+        const asOfTime = this.replayCoordinator?.getSnapshot()?.virtualTime;
         const drawingTime = {
           indexForTime: (time: number) => activeSeries.indexOfTime(time),
           timeForIndex: (index: number) => activeSeries.timeOfIndex(Math.round(index)),
+          asOfTime,
         };
         ctx.save();
         ctx.beginPath();
@@ -461,6 +463,7 @@ class ChartRuntimeImpl implements ChartRuntime, ChartInputHost {
         const drawingTime = {
           indexForTime: (time: number) => activeSeries.indexOfTime(time),
           timeForIndex: (index: number) => activeSeries.timeOfIndex(Math.round(index)),
+          asOfTime: this.replayCoordinator?.getSnapshot()?.virtualTime,
         };
         ctx.save();
         ctx.beginPath();
@@ -553,7 +556,7 @@ class ChartRuntimeImpl implements ChartRuntime, ChartInputHost {
       annotation: {
         render: (v, s, c, r, changes) => {
           this.overlay.setTpoMergeLeftSessionStarts(this.tpoMergeLeftSessionStarts);
-          this.overlay.renderAnnotations(v, s, c, r, this.renderCoordinator?.getAnnotationLayerOrder() ?? [], changes);
+          this.overlay.renderAnnotations(v, s, c, r, this.renderCoordinator?.getAnnotationLayerOrder() ?? [], changes, this.replayCoordinator?.getSnapshot()?.virtualTime);
         },
         requiresInteractionRedraw: () => this.indicatorController.requiresAnnotationInteractionRedraw(),
       },
@@ -630,6 +633,7 @@ class ChartRuntimeImpl implements ChartRuntime, ChartInputHost {
       autoFit: () => this._autoFit(),
       updateHook: () => this._updateHook(),
       loadHistory: () => this.historyController.loadHistory(),
+      onReplaySettled: () => this.historyController.flushDeferredDayRefreshes(),
     });
 
     this.syncController = new ChartSyncController({

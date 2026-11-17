@@ -1,3 +1,4 @@
+import { quantizeToStep } from "../priceStep.js";
 import type { FootprintBar, FootprintCell } from "../types.js";
 
 export type ProfileMetric =
@@ -8,11 +9,20 @@ export type ProfileMetric =
 
 export type ProfileSide = "total" | "buy" | "sell";
 
+export type ProfileSourceProvenance = "exact" | "estimated" | "mixed" | "none";
+
+const MAX_ESTIMATED_BINS_PER_BAR = 2_048;
+const BOUNDARY_SNAP_EPSILON = 1e-10;
+
 export interface OrderFlowProfileOptions {
   profileMetric?: ProfileMetric;
   profileSide?: ProfileSide;
   valueAreaPercent?: number;
   developing?: boolean;
+  /** Price bin step used for deterministic OHLCV distribution when `allowOhlcvEstimate` is true. */
+  priceStep?: number;
+  /** When true, an all-OHLCV window can fall back to OHLCV distribution (`volume`/`total` only). */
+  allowOhlcvEstimate?: boolean;
 }
 
 export interface OrderFlowProfileLevel {
@@ -56,6 +66,10 @@ export interface OrderFlowProfileResult {
   toTime: number | null;
   dataComplete: boolean;
   developing: DevelopingProfilePoint[];
+  provenance: ProfileSourceProvenance;
+  isEstimated: boolean;
+  exactBarCount: number;
+  estimatedBarCount: number;
 }
 
 interface ResolvedCounts {
@@ -69,6 +83,7 @@ export interface AccumulatedLevel {
   priceBin: number;
   buyVol: number;
   sellVol: number;
+  estimatedVol: number;
   totalCount: number;
   buyCount: number;
   sellCount: number;
@@ -91,6 +106,10 @@ interface ProfileSnapshot {
   vah: number | null;
   val: number | null;
   dataComplete: boolean;
+  provenance: ProfileSourceProvenance;
+  isEstimated: boolean;
+  exactBarCount: number;
+  estimatedBarCount: number;
 }
 
 interface ResolvedProfileOptions {
@@ -98,6 +117,8 @@ interface ResolvedProfileOptions {
   profileSide: ProfileSide;
   valueAreaPercent: number;
   developing: boolean;
+  priceStep: number | undefined;
+  allowOhlcvEstimate: boolean;
 }
 
 /**
@@ -112,27 +133,51 @@ export interface OrderFlowProfileAccumulator {
   developing: DevelopingProfilePoint[];
   fromTime: number | null;
   toTime: number | null;
+  exactBarCount: number;
+  estimatedBarCount: number;
+  hasUnsupportedEstimate: boolean;
 }
 
 function resolveProfileOptions(options: OrderFlowProfileOptions): ResolvedProfileOptions {
   const profileMetric = normalizeMetric(options.profileMetric);
   const requestedSide = normalizeSide(options.profileSide);
+  const priceStep = typeof options.priceStep === "number" && Number.isFinite(options.priceStep) && options.priceStep > 0
+    ? options.priceStep
+    : undefined;
   return {
     profileMetric,
     profileSide: profileMetric === "delta" ? "total" : requestedSide,
     valueAreaPercent: clamp(options.valueAreaPercent ?? 0.7, 0.01, 0.99),
     developing: options.developing === true,
+    priceStep,
+    allowOhlcvEstimate: options.allowOhlcvEstimate === true,
   };
 }
 
 export function createOrderFlowProfileAccumulator(): OrderFlowProfileAccumulator {
-  return { byPrice: new Map(), developing: [], fromTime: null, toTime: null };
+  return {
+    byPrice: new Map(),
+    developing: [],
+    fromTime: null,
+    toTime: null,
+    exactBarCount: 0,
+    estimatedBarCount: 0,
+    hasUnsupportedEstimate: false,
+  };
 }
 
 export function cloneOrderFlowProfileAccumulator(acc: OrderFlowProfileAccumulator): OrderFlowProfileAccumulator {
   const byPrice = new Map<number, AccumulatedLevel>();
   for (const [price, level] of acc.byPrice) byPrice.set(price, { ...level });
-  return { byPrice, developing: acc.developing.slice(), fromTime: acc.fromTime, toTime: acc.toTime };
+  return {
+    byPrice,
+    developing: acc.developing.slice(),
+    fromTime: acc.fromTime,
+    toTime: acc.toTime,
+    exactBarCount: acc.exactBarCount,
+    estimatedBarCount: acc.estimatedBarCount,
+    hasUnsupportedEstimate: acc.hasUnsupportedEstimate,
+  };
 }
 
 /** Feeds one bar; bars must arrive in ascending startTime order to match a full build. */
@@ -144,11 +189,53 @@ export function accumulateOrderFlowProfileBar(
   const resolved = resolveProfileOptions(options);
   acc.fromTime = acc.fromTime === null ? bar.startTime : Math.min(acc.fromTime, bar.startTime);
   acc.toTime = acc.toTime === null ? bar.startTime : Math.max(acc.toTime, bar.startTime);
-  for (const cell of bar.cells.values()) {
-    accumulateCell(acc.byPrice, cell);
+  if (bar.cells.size > 0) {
+    if (acc.exactBarCount === 0 && acc.estimatedBarCount > 0) {
+      // OHLCV is a window-level fallback. Once any exact footprint bar appears,
+      // preserve the historical exact behavior for the whole window: discard
+      // earlier estimates and leave every cell-less bar out of the profile.
+      acc.byPrice.clear();
+      acc.estimatedBarCount = 0;
+      acc.hasUnsupportedEstimate = false;
+      if (acc.developing.length > 0) {
+        const empty = buildSnapshot({
+          byPrice: new Map(),
+          exactBarCount: 0,
+          estimatedBarCount: 0,
+          hasUnsupportedEstimate: false,
+        }, resolved.profileMetric, resolved.profileSide, resolved.valueAreaPercent);
+        acc.developing = acc.developing.map(({ time }) => ({
+          time,
+          poc: empty.dataComplete ? empty.poc : null,
+          vah: empty.dataComplete ? empty.vah : null,
+          val: empty.dataComplete ? empty.val : null,
+          valid: empty.dataComplete,
+        }));
+      }
+    }
+    acc.exactBarCount += 1;
+    for (const cell of bar.cells.values()) {
+      accumulateCell(acc.byPrice, cell);
+    }
+  } else {
+    if (
+      acc.exactBarCount === 0
+      && resolved.allowOhlcvEstimate
+      && resolved.priceStep !== undefined
+      && isValidVolume(bar.volume)
+      && bar.volume > 0
+      && isValidPriceRange(bar.low, bar.high)
+    ) {
+      acc.estimatedBarCount += 1;
+      if (resolved.profileMetric === "volume" && resolved.profileSide === "total") {
+        accumulateEstimatedOhlcvBar(acc.byPrice, bar.low, bar.high, bar.volume, resolved.priceStep);
+      } else {
+        acc.hasUnsupportedEstimate = true;
+      }
+    }
   }
   if (resolved.developing) {
-    const snapshot = buildSnapshot(acc.byPrice, resolved.profileMetric, resolved.profileSide, resolved.valueAreaPercent);
+    const snapshot = buildSnapshot(acc, resolved.profileMetric, resolved.profileSide, resolved.valueAreaPercent);
     acc.developing.push({
       time: bar.startTime,
       poc: snapshot.dataComplete ? snapshot.poc : null,
@@ -164,7 +251,7 @@ export function finishOrderFlowProfile(
   options: OrderFlowProfileOptions = {},
 ): OrderFlowProfileResult {
   const resolved = resolveProfileOptions(options);
-  const snapshot = buildSnapshot(acc.byPrice, resolved.profileMetric, resolved.profileSide, resolved.valueAreaPercent);
+  const snapshot = buildSnapshot(acc, resolved.profileMetric, resolved.profileSide, resolved.valueAreaPercent);
   return {
     profileMetric: resolved.profileMetric,
     profileSide: resolved.profileSide,
@@ -185,16 +272,14 @@ export function calculateOrderFlowProfile(
   return finishOrderFlowProfile(acc, options);
 }
 
-function accumulateCell(
-  byPrice: Map<number, AccumulatedLevel>,
-  cell: FootprintCell,
-): void {
-  let level = byPrice.get(cell.priceBin);
+function getOrCreateLevel(byPrice: Map<number, AccumulatedLevel>, priceBin: number): AccumulatedLevel {
+  let level = byPrice.get(priceBin);
   if (!level) {
     level = {
-      priceBin: cell.priceBin,
+      priceBin,
       buyVol: 0,
       sellVol: 0,
+      estimatedVol: 0,
       totalCount: 0,
       buyCount: 0,
       sellCount: 0,
@@ -203,8 +288,80 @@ function accumulateCell(
       sellCountComplete: true,
       volumeComplete: true,
     };
-    byPrice.set(cell.priceBin, level);
+    byPrice.set(priceBin, level);
   }
+  return level;
+}
+
+function addEstimatedVolume(byPrice: Map<number, AccumulatedLevel>, priceBin: number, volume: number): void {
+  if (!(volume > 0) || !Number.isFinite(volume)) return;
+  const level = getOrCreateLevel(byPrice, priceBin);
+  level.estimatedVol += volume;
+  // OHLCV candles carry no trade counts; clear count completeness conservatively.
+  level.totalCountComplete = false;
+  level.buyCountComplete = false;
+  level.sellCountComplete = false;
+}
+
+/**
+ * Distributes a bar's OHLCV volume uniformly across `priceStep` bins by [low, high] overlap.
+ * Never fabricates taker buy/sell or trade-count splits; preserves total volume deterministically.
+ */
+function accumulateEstimatedOhlcvBar(
+  byPrice: Map<number, AccumulatedLevel>,
+  low: number,
+  high: number,
+  volume: number,
+  step: number,
+): void {
+  const range = high - low;
+  if (!(range > 0)) {
+    addEstimatedVolume(byPrice, quantizeToStep(low, step), volume);
+    return;
+  }
+
+  const uLow = low / step;
+  const uHigh = high / step;
+  const lowNearest = Math.round(uLow);
+  const lowTick = Math.abs(uLow - lowNearest) <= BOUNDARY_SNAP_EPSILON * Math.max(1, Math.abs(uLow))
+    ? lowNearest
+    : Math.floor(uLow);
+  const highNearest = Math.round(uHigh);
+  const highOnBoundary = Math.abs(uHigh - highNearest) <= BOUNDARY_SNAP_EPSILON * Math.max(1, Math.abs(uHigh));
+  const maxTick = highOnBoundary ? highNearest - 1 : Math.floor(uHigh);
+
+  if (maxTick <= lowTick) {
+    addEstimatedVolume(byPrice, quantizeToStep(lowTick * step, step), volume);
+    return;
+  }
+
+  const clampedLow = Math.max(uLow, lowTick);
+  const clampedHigh = Math.min(uHigh, maxTick + 1);
+  const effectiveSpan = clampedHigh - clampedLow;
+  if (!(effectiveSpan > 0)) {
+    addEstimatedVolume(byPrice, quantizeToStep(lowTick * step, step), volume);
+    return;
+  }
+
+  const spanTicks = maxTick - lowTick + 1;
+  const stride = spanTicks > MAX_ESTIMATED_BINS_PER_BAR
+    ? Math.ceil(spanTicks / MAX_ESTIMATED_BINS_PER_BAR)
+    : 1;
+
+  for (let tick = lowTick; tick <= maxTick; tick += stride) {
+    const groupEnd = Math.min(maxTick + 1, tick + stride);
+    const overlap = Math.min(clampedHigh, groupEnd) - Math.max(clampedLow, tick);
+    if (!(overlap > 0)) continue;
+    const share = volume * (overlap / effectiveSpan);
+    addEstimatedVolume(byPrice, quantizeToStep(tick * step, step), share);
+  }
+}
+
+function accumulateCell(
+  byPrice: Map<number, AccumulatedLevel>,
+  cell: FootprintCell,
+): void {
+  const level = getOrCreateLevel(byPrice, cell.priceBin);
 
   if (isValidVolume(cell.buyVol) && isValidVolume(cell.sellVol)) {
     level.buyVol += cell.buyVol;
@@ -277,33 +434,68 @@ function resolveCellCounts(cell: FootprintCell): ResolvedCounts {
   return { total, buy, sell, valid: true };
 }
 
+function resolveProvenance(exactBarCount: number, estimatedBarCount: number): ProfileSourceProvenance {
+  if (exactBarCount > 0 && estimatedBarCount > 0) return "mixed";
+  if (estimatedBarCount > 0) return "estimated";
+  if (exactBarCount > 0) return "exact";
+  return "none";
+}
+
 function buildSnapshot(
-  byPrice: ReadonlyMap<number, AccumulatedLevel>,
+  acc: Pick<OrderFlowProfileAccumulator, "byPrice" | "exactBarCount" | "estimatedBarCount" | "hasUnsupportedEstimate">,
   metric: ProfileMetric,
   side: ProfileSide,
   valueAreaPercent: number,
 ): ProfileSnapshot {
-  const levels = [...byPrice.values()]
+  const provenance = resolveProvenance(acc.exactBarCount, acc.estimatedBarCount);
+  const isEstimated = provenance === "estimated" || provenance === "mixed";
+
+  if (acc.hasUnsupportedEstimate || (isEstimated && (metric !== "volume" || side !== "total"))) {
+    return {
+      levels: [],
+      summaryValue: null,
+      totalBuyVolume: 0,
+      totalSellVolume: 0,
+      totalVolume: 0,
+      totalBuyCount: null,
+      totalSellCount: null,
+      totalTradeCount: null,
+      poc: null,
+      vah: null,
+      val: null,
+      dataComplete: false,
+      provenance,
+      isEstimated: true,
+      exactBarCount: acc.exactBarCount,
+      estimatedBarCount: acc.estimatedBarCount,
+    };
+  }
+
+  const levels = [...acc.byPrice.values()]
     .sort((a, b) => a.priceBin - b.priceBin)
-    .map((raw) => materializeLevel(raw, metric, side));
+    .map((raw) => materializeLevel(raw, metric, side, isEstimated));
 
   const totalBuyVolume = levels.reduce((sum, level) => sum + level.buyVol, 0);
   const totalSellVolume = levels.reduce((sum, level) => sum + level.sellVol, 0);
-  const totalVolume = totalBuyVolume + totalSellVolume;
-  const totalTradeCount = sumNullable(levels, "totalCount");
-  const totalBuyCount = sumNullable(levels, "buyCount");
-  const totalSellCount = sumNullable(levels, "sellCount");
+  const totalVolume = isEstimated
+    ? levels.reduce((sum, level) => sum + level.totalVol, 0)
+    : totalBuyVolume + totalSellVolume;
+  const totalTradeCount = isEstimated ? null : sumNullable(levels, "totalCount");
+  const totalBuyCount = isEstimated ? null : sumNullable(levels, "buyCount");
+  const totalSellCount = isEstimated ? null : sumNullable(levels, "sellCount");
   const dataComplete = levels.every((level) => level.complete);
   const summaryValue = dataComplete
-    ? calculateSummary(
-        metric,
-        side,
-        totalBuyVolume,
-        totalSellVolume,
-        totalTradeCount,
-        totalBuyCount,
-        totalSellCount,
-      )
+    ? isEstimated
+      ? totalVolume
+      : calculateSummary(
+          metric,
+          side,
+          totalBuyVolume,
+          totalSellVolume,
+          totalTradeCount,
+          totalBuyCount,
+          totalSellCount,
+        )
     : null;
 
   const supportsLevels = metric === "volume" || metric === "trade-count";
@@ -322,6 +514,10 @@ function buildSnapshot(
     totalTradeCount,
     ...staticLevels,
     dataComplete,
+    provenance,
+    isEstimated,
+    exactBarCount: acc.exactBarCount,
+    estimatedBarCount: acc.estimatedBarCount,
   };
 }
 
@@ -329,11 +525,12 @@ function materializeLevel(
   raw: AccumulatedLevel,
   metric: ProfileMetric,
   side: ProfileSide,
+  isEstimated: boolean,
 ): OrderFlowProfileLevel {
-  const totalVol = raw.buyVol + raw.sellVol;
-  const totalCount = raw.totalCountComplete ? raw.totalCount : null;
-  const buyCount = raw.buyCountComplete ? raw.buyCount : null;
-  const sellCount = raw.sellCountComplete ? raw.sellCount : null;
+  const totalVol = isEstimated ? raw.buyVol + raw.sellVol + raw.estimatedVol : raw.buyVol + raw.sellVol;
+  const totalCount = !isEstimated && raw.totalCountComplete ? raw.totalCount : null;
+  const buyCount = !isEstimated && raw.buyCountComplete ? raw.buyCount : null;
+  const sellCount = !isEstimated && raw.sellCountComplete ? raw.sellCount : null;
   const selectedCount = side === "buy" ? buyCount : side === "sell" ? sellCount : totalCount;
   const selectedVolume = side === "buy" ? raw.buyVol : side === "sell" ? raw.sellVol : totalVol;
 
@@ -341,6 +538,26 @@ function materializeLevel(
   let buyValue: number | null = null;
   let sellValue: number | null = null;
   let complete = raw.volumeComplete;
+
+  if (isEstimated) {
+    // Estimated and mixed windows expose total volume without fabricated buy/sell splits.
+    value = raw.volumeComplete && metric === "volume" && side === "total" ? totalVol : null;
+    complete = value !== null;
+    return {
+      priceBin: raw.priceBin,
+      buyVol: raw.buyVol,
+      sellVol: raw.sellVol,
+      totalVol,
+      buyCount: null,
+      sellCount: null,
+      totalCount: null,
+      value,
+      buyValue: null,
+      sellValue: null,
+      magnitude: value === null ? null : Math.max(0, value),
+      complete,
+    };
+  }
 
   switch (metric) {
     case "volume":
@@ -477,6 +694,16 @@ function isValidCount(value: unknown): value is number {
 
 function isValidVolume(value: unknown): value is number {
   return typeof value === "number" && Number.isFinite(value) && value >= 0;
+}
+
+function isValidPriceRange(low: unknown, high: unknown): boolean {
+  return (
+    typeof low === "number"
+    && typeof high === "number"
+    && Number.isFinite(low)
+    && Number.isFinite(high)
+    && low <= high
+  );
 }
 
 function clamp(value: number, min: number, max: number): number {
