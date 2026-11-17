@@ -393,7 +393,7 @@ export class ChartSession {
     const win = this.ownerDocument.defaultView;
     if (!win) return;
     incrementPerformanceCounter("chart.raf.scheduled");
-    this.rafId = win.requestAnimationFrame(() => {
+    const onFrame: FrameRequestCallback = () => {
       // Release the slot before any commit/render work: a reentrant notification inside a
       // commit, or a throwing commit, must never leave a finished RAF id behind that
       // coalesces away a future frame.
@@ -414,7 +414,10 @@ export class ChartSession {
       incrementPerformanceCounter("chart.raf.frames");
       this.renderDirtySurfaces();
       if (this.dirtySurfaces !== ChartSurfaceDirty.None) this.startRaf();
-    });
+    };
+    this.rafId = this.gpuSurface.scheduleFrame
+      ? this.gpuSurface.scheduleFrame(win, onFrame)
+      : win.requestAnimationFrame(onFrame);
   }
 
   private renderDirtySurfaces(): void {
@@ -548,7 +551,12 @@ export class ChartSession {
 
   private cancelRaf(): void {
     if (this.rafId !== null) {
-      this.ownerDocument.defaultView?.cancelAnimationFrame(this.rafId);
+      const win = this.ownerDocument.defaultView;
+      if (win && this.gpuSurface.cancelScheduledFrame) {
+        this.gpuSurface.cancelScheduledFrame(win, this.rafId);
+      } else {
+        win?.cancelAnimationFrame(this.rafId);
+      }
       this.rafId = null;
     }
   }

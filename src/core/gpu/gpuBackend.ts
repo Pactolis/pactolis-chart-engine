@@ -33,6 +33,9 @@ export interface GpuSurface {
   getGlContext?(): WebGL2RenderingContext | null;
   resize(bitmapWidth: number, bitmapHeight: number, dpr?: number): void;
   beginFrame(clear: RGBA): GpuFrame;
+  /** Optional device-shared frame scheduling used by WebGPU to batch chart submissions. */
+  scheduleFrame?(win: Window, callback: FrameRequestCallback): number;
+  cancelScheduledFrame?(win: Window, id: number): void;
   requestCapture(): Promise<RgbaFrame>;
   onLost(listener: (reason: GpuLossReason) => void): () => void;
   dispose(): void;

@@ -29,6 +29,7 @@ const METRIC_NAMES = [
   "chart.gpu.footprint.ms",
   "chart.surface.gpu.draw.ms",
   "chart.frame.render.ms",
+  "gpu.backend.webgpu.frame.submit.ms",
 ] as const;
 
 type BackendKind = "webgl2" | "webgpu";
@@ -823,6 +824,7 @@ test("4- and 8-chart WebGPU vs WebGL2 chart.gpu.flush.ms comparison across pan, 
     expect(webgpu.active).toBe("webgpu");
     expect(webgpu.panelBackends).toEqual(markets.map(() => "webgpu"));
     expect(webgpu.fallbacks).toEqual([]);
+    expect(webgpu.counters["gpu.backend.webgpu.frame.submits"] ?? 0).toBeGreaterThan(0);
     expect(webgpu.crosshairInteractionOnlyGpuFlushCount).toBe(0);
 
     const comparison = (["pan", "live", "crosshair-static-redraw"] as const).map((scenario) => {
@@ -832,12 +834,16 @@ test("4- and 8-chart WebGPU vs WebGL2 chart.gpu.flush.ms comparison across pan, 
       const gpuFootprint = webgpu.scenarios[scenario].combined["chart.gpu.footprint.ms"];
       const glDraw = webgl2.scenarios[scenario].combined["chart.surface.gpu.draw.ms"];
       const gpuDraw = webgpu.scenarios[scenario].combined["chart.surface.gpu.draw.ms"];
+      const gpuFrameSubmit = webgpu.scenarios[scenario].combined["gpu.backend.webgpu.frame.submit.ms"];
 
       for (const rep of webgl2.scenarios[scenario].repetitions) {
         expect(rep.metrics["chart.gpu.flush.ms"].count, `webgl2 ${chartCount} charts ${scenario} rep ${rep.repetition} count`).toBeGreaterThan(0);
       }
       for (const rep of webgpu.scenarios[scenario].repetitions) {
         expect(rep.metrics["chart.gpu.flush.ms"].count, `webgpu ${chartCount} charts ${scenario} rep ${rep.repetition} count`).toBeGreaterThan(0);
+        const sharedSubmits = rep.metrics["gpu.backend.webgpu.frame.submit.ms"].count;
+        expect(sharedSubmits, `webgpu ${chartCount} charts ${scenario} rep ${rep.repetition} shared submits`).toBeGreaterThan(0);
+        expect(sharedSubmits, `webgpu ${chartCount} charts ${scenario} rep ${rep.repetition} at most one submit per frame`).toBeLessThanOrEqual(rep.frames);
       }
 
       const round3 = (v: number) => Math.round(v * 1_000) / 1_000;
@@ -846,7 +852,7 @@ test("4- and 8-chart WebGPU vs WebGL2 chart.gpu.flush.ms comparison across pan, 
       return {
         scenario,
         webgl2: { flush: glFlush, footprint: glFootprint, surfaceGpuDraw: glDraw },
-        webgpu: { flush: gpuFlush, footprint: gpuFootprint, surfaceGpuDraw: gpuDraw },
+        webgpu: { flush: gpuFlush, footprint: gpuFootprint, surfaceGpuDraw: gpuDraw, sharedFrameSubmit: gpuFrameSubmit },
         flushMeanRatio,
         flushP95Ratio,
         within2xMeanBudget: flushMeanRatio !== null ? flushMeanRatio <= 2 : null,

@@ -8,6 +8,18 @@ import type {
 } from "../gpuBackend.js";
 import type { WebGpuDeviceHandle } from "./webgpuDevice.js";
 import { WebGpuQuadPipeline } from "./webgpuQuadPipeline.js";
+import { WebGpuFrameCoordinator } from "./webgpuFrameCoordinator.js";
+
+const coordinators = new WeakMap<WebGpuDeviceHandle, WebGpuFrameCoordinator>();
+
+function coordinatorFor(handle: WebGpuDeviceHandle): WebGpuFrameCoordinator {
+  let coordinator = coordinators.get(handle);
+  if (!coordinator) {
+    coordinator = new WebGpuFrameCoordinator(handle);
+    coordinators.set(handle, coordinator);
+  }
+  return coordinator;
+}
 
 export class WebGpuQuadSink implements QuadSink {
   data: Float32Array;
@@ -51,6 +63,7 @@ export class WebGpuSurface implements GpuSurface {
   private readonly ctx: any;
   private readonly pipeline: WebGpuQuadPipeline;
   private readonly quadSink = new WebGpuQuadSink();
+  private readonly frameCoordinator: WebGpuFrameCoordinator;
   private dpr = 1;
   private disposed = false;
   private lastRenderedTexture: any = null;
@@ -62,6 +75,7 @@ export class WebGpuSurface implements GpuSurface {
     private readonly handle: WebGpuDeviceHandle,
     pipeline?: WebGpuQuadPipeline,
   ) {
+    this.frameCoordinator = coordinatorFor(handle);
     this.ctx = canvas.getContext ? canvas.getContext("webgpu") : null;
     if (this.ctx && typeof this.ctx.configure === "function") {
       this.ctx.configure({
@@ -88,6 +102,14 @@ export class WebGpuSurface implements GpuSurface {
 
   getDeviceHandle(): WebGpuDeviceHandle {
     return this.handle;
+  }
+
+  scheduleFrame(win: Window, callback: FrameRequestCallback): number {
+    return this.frameCoordinator.schedule(win, callback);
+  }
+
+  cancelScheduledFrame(win: Window, id: number): void {
+    this.frameCoordinator.cancel(win, id);
   }
 
   resize(bitmapWidth: number, bitmapHeight: number, dpr = 1): void {
@@ -125,6 +147,19 @@ export class WebGpuSurface implements GpuSurface {
 
         const device = this.handle.device;
         if (!device || !currentTexture) return;
+
+        const renderFrame = {
+          texture: currentTexture,
+          pipeline: this.pipeline,
+          data: this.quadSink.data,
+          count,
+          width: w,
+          height: h,
+          clear,
+        };
+        const win = this.canvas.ownerDocument?.defaultView;
+        if (this.handle.isLost()) return;
+        if (win && this.frameCoordinator.recordPass(win, renderFrame)) return;
 
         const commandEncoder = device.createCommandEncoder({
           label: "WebGpuFrameCommandEncoder",
@@ -170,6 +205,9 @@ export class WebGpuSurface implements GpuSurface {
     if (!device || !texture) {
       throw new Error("WebGpuSurface: texture unavailable for capture");
     }
+
+    const win = this.canvas.ownerDocument?.defaultView;
+    if (win) await this.frameCoordinator.waitForCurrentSubmission(win);
 
     const bytesPerPixel = 4;
     const unpaddedBytesPerRow = width * bytesPerPixel;

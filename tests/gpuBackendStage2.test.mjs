@@ -69,6 +69,7 @@ function makeFakeGpuBuffer(size, usage) {
 function makeFakeWebGpuDevice(format = "rgba8unorm") {
   const buffers = [];
   const passes = [];
+  const encoders = [];
   const submittedCommands = [];
   const writtenBuffers = [];
   const uncapturedListeners = new Set();
@@ -126,7 +127,7 @@ function makeFakeWebGpuDevice(format = "rgba8unorm") {
     createCommandEncoder(desc) {
       const recordedDraws = [];
       const copies = [];
-      return {
+      const encoder = {
         label: desc.label,
         beginRenderPass(passDesc) {
           const pass = {
@@ -153,6 +154,8 @@ function makeFakeWebGpuDevice(format = "rgba8unorm") {
           return { recordedDraws, copies };
         },
       };
+      encoders.push(encoder);
+      return encoder;
     },
     queue: {
       writeBuffer(buffer, offset, data, byteOffset, byteLength) {
@@ -169,6 +172,7 @@ function makeFakeWebGpuDevice(format = "rgba8unorm") {
     device,
     buffers,
     passes,
+    encoders,
     submittedCommands,
     writtenBuffers,
   };
@@ -859,18 +863,81 @@ test("createGpuSurface and createGpuSurfaceAsync backend selection & fallback", 
   }
 });
 
-test("ChartSession automatically falls back to WebGl2 or Canvas2d when WebGPU device is lost", () => {
+test("shared WebGPU chart frames use one encoder and submit while isolating a failed chart", () => {
+  const { device, passes, encoders, submittedCommands } = makeFakeWebGpuDevice("rgba8unorm");
+  const win = {
+    devicePixelRatio: 1,
+    callbacks: new Map(),
+    nextId: 1,
+    requestAnimationFrame(callback) {
+      const id = this.nextId++;
+      this.callbacks.set(id, callback);
+      return id;
+    },
+    cancelAnimationFrame(id) { this.callbacks.delete(id); },
+  };
+  const ownerDocument = { defaultView: win };
+  const handle = {
+    adapter: {},
+    device,
+    format: "rgba8unorm",
+    limits: { maxBufferSize: 268435456, maxTextureDimension2D: 8192 },
+    isLost: () => false,
+    onLost: () => () => {},
+    dispose() {},
+  };
+  const surfaceForChart = () => {
+    const canvas = makeFakeCanvas({ webgpu: makeFakeWebGpuContext(device, "rgba8unorm") });
+    canvas.ownerDocument = ownerDocument;
+    return new WebGpuSurface(canvas, handle);
+  };
+  const failedChart = surfaceForChart();
+  const healthyChart = surfaceForChart();
+  const errors = [];
+  const originalConsoleError = console.error;
+  console.error = (...args) => errors.push(args);
+
+  try {
+    failedChart.scheduleFrame(win, () => {
+      throw new Error("chart A render failed");
+    });
+    healthyChart.scheduleFrame(win, () => {
+      const frame = healthyChart.beginFrame({ r: 0, g: 0, b: 0, a: 1 });
+      frame.quads.rect(10, 10, 20, 20, { r: 1, g: 0, b: 0, a: 1 });
+      frame.flushQuads(640, 360);
+    });
+
+    assert.equal(win.callbacks.size, 1, "charts targeting one owner window share one RAF callback");
+    const [callback] = win.callbacks.values();
+    win.callbacks.clear();
+    callback(16);
+  } finally {
+    console.error = originalConsoleError;
+    failedChart.dispose();
+    healthyChart.dispose();
+  }
+
+  assert.equal(errors.length, 1, "the failing chart is reported without aborting the shared frame");
+  assert.match(String(errors[0][0]), /continuing the shared device frame/);
+  assert.equal(encoders.length, 1, "both chart callbacks are encoded by one command encoder");
+  assert.equal(passes.length, 1, "the healthy chart records its render pass after the failure");
+  assert.equal(submittedCommands.length, 1, "the healthy chart is submitted once");
+  assert.equal(submittedCommands[0].recordedDraws.length, 1);
+});
+
+test("a single ChartSession still falls back to WebGL2 on WebGPU device loss", () => {
   resetGpuDiagnosticsForTest();
   const { device } = makeFakeWebGpuDevice("rgba8unorm");
   const ctx = makeFakeWebGpuContext(device, "rgba8unorm");
   const fakeGl = makeFakeGl();
   const fake2d = makeFake2dContext();
 
+  const canceledFrames = [];
   const win = {
     devicePixelRatio: 1,
     ResizeObserver: class { observe() {} disconnect() {} },
     requestAnimationFrame: () => 1,
-    cancelAnimationFrame: () => {},
+    cancelAnimationFrame: (id) => canceledFrames.push(id),
     matchMedia: () => ({ addEventListener() {}, removeEventListener() {} }),
   };
 
@@ -926,6 +993,8 @@ test("ChartSession automatically falls back to WebGl2 or Canvas2d when WebGPU de
   });
 
   assert.equal(session.getSurface().kind, "webgpu");
+  session.activate();
+  assert.equal(canceledFrames.length, 0);
 
   // Trigger device loss on the WebGPU surface
   assert.ok(triggerLostCallback);
@@ -934,6 +1003,7 @@ test("ChartSession automatically falls back to WebGl2 or Canvas2d when WebGPU de
   assert.equal(lostContextFired, true);
   // Session should have replaced the surface with WebGl2
   assert.equal(session.getSurface().kind, "webgl2");
+  assert.deepEqual(canceledFrames, [1], "device loss cancels this chart's coordinated frame before its one-chart fallback");
 
   const diag = getGpuDiagnostics();
   assert.ok(diag.fallbacks.some((f) => f.from === "webgpu" && f.to === "webgl2"));
