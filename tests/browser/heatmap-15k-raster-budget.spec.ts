@@ -1,6 +1,6 @@
 import { expect, test, type Page } from "@playwright/test";
 import { readFileSync } from "node:fs";
-import * as ts from "typescript";
+import ts from "typescript";
 import type { ChartCaptureReadiness } from "../../src/features/chart/captureReadiness.js";
 import type { View } from "../../src/core/engine/view.js";
 import type { FootprintSeries } from "../../src/core/model/footprint.js";
