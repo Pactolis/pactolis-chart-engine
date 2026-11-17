@@ -99,6 +99,83 @@ const RENDER_TELEMETRY_METRICS = [
   "chart.liveUpdate.toRenderEnd.ms",
 ] as const;
 
+type EnginePhaseMetricStats = {
+  count: number;
+  totalMs: number;
+  avgMs: number;
+  minMs: number;
+  maxMs: number;
+  p50Ms: number;
+  p95Ms: number;
+  p99Ms: number;
+};
+
+type EnginePhaseMetrics = Partial<Record<(typeof RENDER_TELEMETRY_METRICS)[number], EnginePhaseMetricStats>>;
+
+function summarizeMetricSamples(values: readonly number[]): EnginePhaseMetricStats {
+  const valid = values.filter((value) => Number.isFinite(value) && value >= 0).sort((a, b) => a - b);
+  if (valid.length === 0) {
+    return { count: 0, totalMs: 0, avgMs: 0, minMs: 0, maxMs: 0, p50Ms: 0, p95Ms: 0, p99Ms: 0 };
+  }
+  const round3 = (value: number) => Math.round(value * 1_000) / 1_000;
+  const total = valid.reduce((sum, value) => sum + value, 0);
+  const at = (q: number) => valid[Math.min(valid.length - 1, Math.max(0, Math.ceil(q * valid.length) - 1))];
+  return {
+    count: valid.length,
+    totalMs: round3(total),
+    avgMs: round3(total / valid.length),
+    minMs: round3(valid[0]),
+    maxMs: round3(valid[valid.length - 1]),
+    p50Ms: round3(at(0.5)),
+    p95Ms: round3(at(0.95)),
+    p99Ms: round3(at(0.99)),
+  };
+}
+
+function summarizePhaseTelemetrySamples(
+  rawPhaseSamples: Record<string, Record<string, number[]>>,
+  phaseKeys: readonly string[],
+): Record<string, EnginePhaseMetrics> {
+  return Object.fromEntries(
+    phaseKeys.map((phaseName) => {
+      const bucket = rawPhaseSamples[phaseName] ?? {};
+      const metrics: EnginePhaseMetrics = {};
+      for (const metricName of RENDER_TELEMETRY_METRICS) {
+        const samples = bucket[metricName];
+        if (samples && samples.length > 0) {
+          metrics[metricName] = summarizeMetricSamples(samples);
+        }
+      }
+      return [phaseName, metrics];
+    }),
+  );
+}
+
+function evaluateLiveBurstEngineTelemetryGate(phaseStats: Record<string, EnginePhaseMetrics>): string[] {
+  const failures: string[] = [];
+  for (const phaseName of ["load", "baseline", "burst", "recovery"] as const) {
+    const stat = phaseStats[phaseName]?.["chart.frame.render.ms"];
+    if (!stat || stat.count <= 0) {
+      failures.push(`${phaseName} chart.frame.render.ms count=${stat?.count ?? 0} (expected > 0)`);
+    }
+  }
+  for (const phaseName of ["baseline", "burst"] as const) {
+    const stat = phaseStats[phaseName]?.["chart.frame.render.ms"];
+    if (!stat || stat.count <= 0) continue;
+    if (stat.p95Ms > LIVE_BURST_ENGINE_RENDER_P95_BUDGET_MS) {
+      failures.push(
+        `${phaseName} chart.frame.render.ms p95Ms=${stat.p95Ms.toFixed(3)} ms > #89 budget ${LIVE_BURST_ENGINE_RENDER_P95_BUDGET_MS} ms`,
+      );
+    }
+    if (stat.avgMs > LIVE_BURST_ENGINE_RENDER_AVG_BUDGET_MS) {
+      failures.push(
+        `${phaseName} chart.frame.render.ms avgMs=${stat.avgMs.toFixed(3)} ms > #89 budget ${LIVE_BURST_ENGINE_RENDER_AVG_BUDGET_MS} ms`,
+      );
+    }
+  }
+  return failures;
+}
+
 type TelemetrySnapshot = {
   metrics?: Record<string, { count?: number; totalMs?: number; p50Ms?: number; p95Ms?: number; p99Ms?: number }>;
 };
@@ -163,6 +240,9 @@ const LOADED_L2_INTERACTION_FRAME_P95_MS = 120;
 const LOADED_L5_INTERACTION_FRAME_P95_MS = 200;
 const LIVE_BURST_FRAME_P95_BUDGET_MS = 250;
 const LIVE_BURST_LATENCY_P95_BUDGET_MS = 3_000;
+// #89 calibrated live/burst engine-telemetry gates (from 6 main/PR SwiftShader CI runs; catches +2 ms render regression):
+const LIVE_BURST_ENGINE_RENDER_P95_BUDGET_MS = 4.5;
+const LIVE_BURST_ENGINE_RENDER_AVG_BUDGET_MS = 3.5;
 // #50 endurance retained heap drift ceiling: <= 64 MiB/hour (~1.06 MiB/min).
 const ENDURANCE_MAX_HEAP_GROWTH_BYTES_PER_MINUTE = Math.round((64 * 1024 * 1024) / 60);
 
@@ -640,7 +720,11 @@ async function runBurst(page: Page, uniqueMarkets: string[], panelIds: string[],
       worker.onerror = (event) => reject(new Error(`burst worker failed: ${event.message}`));
       worker.onmessage = (event) => {
         const data = event.data;
-        if (data.kind === "phase") { state.telemetryPhases[data.phase] = state.telemetry.snapshotPerformanceTelemetry(); return; }
+        if (data.kind === "phase") {
+          state.telemetryPhases[data.phase] = state.telemetry.snapshotPerformanceTelemetry();
+          state.setTelemetryPhase(data.phase === 0 ? "baseline" : data.phase === 1 ? "burst" : "recovery");
+          return;
+        }
         if (data.kind === "done") { resolve(data); return; }
         emit(data.raw);
         if (data.kind !== "trades") return;
@@ -656,6 +740,7 @@ async function runBurst(page: Page, uniqueMarkets: string[], panelIds: string[],
     worker.terminate();
     // Let the last frames land before the frame hook is removed.
     await new Promise((resolve) => setTimeout(resolve, 1_000));
+    state.setTelemetryPhase("post");
     state.onFrame = null;
 
     const quantiles = (values: number[]) => {
@@ -1032,6 +1117,23 @@ async function runScenario(scenario: Scenario, page: Page, testInfo?: TestInfo) 
   } | null = null;
 
   try {
+    // Intercept Vite-served performanceTelemetry.ts in-test so every active census
+    // phase collects exact unclipped duration samples without modifying src/.
+    await page.route("**/src/core/performanceTelemetry.ts*", async (route) => {
+      const response = await route.fetch();
+      const body = await response.text();
+      const patched = body.replace(
+        /(function\s+recordPerformanceDuration\s*\(\s*([A-Za-z_$][\w$]*)\s*,\s*([A-Za-z_$][\w$]*)\s*\)\s*\{[\s\S]*?)(totals\.set\()/,
+        `$1globalThis.__censusRecordDuration?.($2, $3); $4`,
+      );
+      if (patched === body) {
+        throw new Error("Failed to instrument recordPerformanceDuration in /src/core/performanceTelemetry.ts");
+      }
+      const headers = { ...response.headers() };
+      delete headers["content-length"];
+      await route.fulfill({ status: response.status(), headers, body: patched });
+    });
+
     // A same-origin document that does not run the app: "/@vite/client" is
     // answered with the full app shell for a navigation, whose dockview
     // watermark covers the charts and would take every pointer event.
@@ -1043,11 +1145,21 @@ async function runScenario(scenario: Scenario, page: Page, testInfo?: TestInfo) 
     }).then((appAbsent) => expect(appAbsent).toBe(true));
 
     // Frame probe and owned state live on one window key; teardown reads it back.
-    await page.evaluate(async ({ markets, panelIds, columns, cellWidth, cellHeight, bars, indicatorCount, drawingCount, burst }) => {
+    await page.evaluate(async ({ markets, panelIds, columns, cellWidth, cellHeight, bars, indicatorCount, drawingCount, burst, renderTelemetryMetrics, collectPhaseTelemetry }) => {
       const telemetry = await import("/src/core/performanceTelemetry.ts");
       telemetry.configurePerformanceTelemetry({ enabled: true });
+      const phaseTelemetrySamples: Record<string, Record<string, number[]>> = {};
+      let telemetryPhase = "load";
+      const trackedMetrics = new Set<string>(renderTelemetryMetrics);
+      (globalThis as any).__censusRecordDuration = (name: string, durationMs: number) => {
+        if (!collectPhaseTelemetry || !trackedMetrics.has(name)) return;
+        const bucket = (phaseTelemetrySamples[telemetryPhase] ??= {});
+        (bucket[name] ??= []).push(durationMs);
+      };
       const state = {
         telemetry, telemetryPhases: {} as Record<number, unknown>,
+        phaseTelemetrySamples,
+        setTelemetryPhase(nextPhase: string) { telemetryPhase = nextPhase; },
         pageErrors: [] as string[],
         fetchHistoryCalls: 0,
         frames: [] as Array<{ at: number; interval: number }>,
@@ -1260,6 +1372,8 @@ async function runScenario(scenario: Scenario, page: Page, testInfo?: TestInfo) 
       markets: MARKETS, panelIds: PANEL_IDS, columns: scenario.columns, cellWidth, cellHeight,
       bars: BAR_COUNT, indicatorCount: scenario.indicators, drawingCount: scenario.drawings,
       burst: scenario.burst === true || scenario.endurance === true,
+      renderTelemetryMetrics: [...RENDER_TELEMETRY_METRICS],
+      collectPhaseTelemetry: !scenario.endurance,
     });
 
     // Wait for every market's own anchor request.
@@ -1340,11 +1454,13 @@ async function runScenario(scenario: Scenario, page: Page, testInfo?: TestInfo) 
       endurance = await runEndurance(page, UNIQUE_MARKETS, PANEL_IDS, MARKETS, ENDURANCE_MINUTES * 60_000);
     } else {
       // Idle phase: all charts loaded, no input, 2 s.
+      await page.evaluate(() => { (window as any).__multiMarketCensus.setTelemetryPhase("idle"); });
       idleStartedAt = await page.evaluate(() => performance.now());
       await page.waitForTimeout(2_000);
       idleEndedAt = await page.evaluate(() => performance.now());
 
       // Crosshair phase: a horizontal pointer sweep across each chart in turn.
+      await page.evaluate(() => { (window as any).__multiMarketCensus.setTelemetryPhase("crosshair"); });
       crosshairStartedAt = await page.evaluate(() => performance.now());
       for (let index = 0; index < MARKETS.length; index++) {
         const left = cellLeft(index);
@@ -1364,6 +1480,7 @@ async function runScenario(scenario: Scenario, page: Page, testInfo?: TestInfo) 
       const visibleRange = (panelId: string) => page.evaluate((id) => (
         (window as any).__multiMarketCensus.registry.getChartRuntime(id)?.getVisibleTimeRange() ?? null
       ), panelId);
+      await page.evaluate(() => { (window as any).__multiMarketCensus.setTelemetryPhase("pan"); });
       panStartedAt = await page.evaluate(() => performance.now());
       for (let index = 0; index < MARKETS.length; index++) {
         const left = cellLeft(index);
@@ -1386,43 +1503,59 @@ async function runScenario(scenario: Scenario, page: Page, testInfo?: TestInfo) 
       }
       await page.waitForTimeout(250);
       panEndedAt = await page.evaluate(() => performance.now());
+      await page.evaluate(() => { (window as any).__multiMarketCensus.setTelemetryPhase("post"); });
     }
 
     const probe = await page.evaluate(() => {
       const state = (window as any).__multiMarketCensus;
       state.sampling = false;
       state.observer?.disconnect();
+      const rawPhaseSamples = state.phaseTelemetrySamples as Record<string, Record<string, number[]>>;
+      state.phaseTelemetrySamples = {};
       return {
         frames: state.frames as Array<{ at: number; interval: number }>,
         longTasks: state.longTasks as Array<{ at: number; duration: number }>,
+        rawPhaseSamples,
         heap: state.readHeap(),
         peakHeapBytes: state.peakHeapBytes as number,
         gcExposed: typeof (window as any).gc === "function",
       };
     });
+    const phaseKeys = endurance
+      ? []
+      : live
+      ? (["load", "baseline", "burst", "recovery"] as const)
+      : (["load", "idle", "crosshair", "pan"] as const);
+    const phaseStats = summarizePhaseTelemetrySamples(probe.rawPhaseSamples, phaseKeys);
     const phase = (from: number, to: number) => frameSummary(
       probe.frames.filter((frame) => frame.at > from && frame.at <= to).map((frame) => frame.interval),
       probe.longTasks.filter((task) => task.at >= from && task.at < to).map((task) => task.duration),
     );
-    const phases: Record<string, ReturnType<typeof frameSummary>> = endurance
-      ? { load: phase(load.startedAt, load.endedAt) }
+    const phases: Record<string, ReturnType<typeof frameSummary> & { engineTelemetry: EnginePhaseMetrics | null }> = endurance
+      ? { load: { ...phase(load.startedAt, load.endedAt), engineTelemetry: null } }
       : live
       ? {
-        load: phase(load.startedAt, load.endedAt),
-        baseline: phase(live.phasesAt.baseline, live.phasesAt.burst),
-        burst: phase(live.phasesAt.burst, live.phasesAt.recovery),
-        recovery: phase(live.phasesAt.recovery, live.phasesAt.end),
+        load: { ...phase(load.startedAt, load.endedAt), engineTelemetry: phaseStats.load ?? null },
+        baseline: { ...phase(live.phasesAt.baseline, live.phasesAt.burst), engineTelemetry: phaseStats.baseline ?? null },
+        burst: { ...phase(live.phasesAt.burst, live.phasesAt.recovery), engineTelemetry: phaseStats.burst ?? null },
+        recovery: { ...phase(live.phasesAt.recovery, live.phasesAt.end), engineTelemetry: phaseStats.recovery ?? null },
       }
       : {
-        load: phase(load.startedAt, load.endedAt),
-        idle: phase(idleStartedAt, idleEndedAt),
-        crosshair: phase(crosshairStartedAt, crosshairEndedAt),
-        pan: phase(panStartedAt, panEndedAt),
+        load: { ...phase(load.startedAt, load.endedAt), engineTelemetry: phaseStats.load ?? null },
+        idle: { ...phase(idleStartedAt, idleEndedAt), engineTelemetry: phaseStats.idle ?? null },
+        crosshair: { ...phase(crosshairStartedAt, crosshairEndedAt), engineTelemetry: phaseStats.crosshair ?? null },
+        pan: { ...phase(panStartedAt, panEndedAt), engineTelemetry: phaseStats.pan ?? null },
       };
     if (!live && !endurance) {
       expect(phases.idle.frameMs?.samples ?? 0).toBeGreaterThan(30);
       expect(phases.crosshair.frameMs?.samples ?? 0).toBeGreaterThan(30);
       expect(phases.pan.frameMs?.samples ?? 0).toBeGreaterThan(30);
+      for (const activePhase of ["load", "crosshair", "pan"] as const) {
+        expect(
+          phaseStats[activePhase]?.["chart.frame.render.ms"]?.count ?? 0,
+          `${activePhase} chart.frame.render.ms count for profile ${scenario.id}`,
+        ).toBeGreaterThan(0);
+      }
       const interactionBudgetMs = scenario.frameGate
         ? MULTI_CHART_INTERACTION_FRAME_P95_MS
         : scenario.frameP95BudgetMs;
@@ -1597,6 +1730,10 @@ async function runScenario(scenario: Scenario, page: Page, testInfo?: TestInfo) 
         `burst phase frame p95 (#50 budget ${LIVE_BURST_FRAME_P95_BUDGET_MS} ms)`,
       ).toBeLessThanOrEqual(LIVE_BURST_FRAME_P95_BUDGET_MS + RAF_TIMESTAMP_TOLERANCE_MS);
       expect(
+        evaluateLiveBurstEngineTelemetryGate(phaseStats),
+        "live/burst #89 phase-isolated engine render telemetry gate",
+      ).toEqual([]);
+      expect(
         live.latency.burst.frameMs?.p95 ?? Number.POSITIVE_INFINITY,
         `burst live trade frameLatencyMs.p95 (#50 budget ${LIVE_BURST_LATENCY_P95_BUDGET_MS} ms)`,
       ).toBeLessThanOrEqual(LIVE_BURST_LATENCY_P95_BUDGET_MS);
@@ -1694,11 +1831,13 @@ async function runScenario(scenario: Scenario, page: Page, testInfo?: TestInfo) 
       allReadyMs: Math.round(load.endedAt - load.startedAt),
       phases,
       renderTelemetry: {
-        semantics: "cumulative boundary snapshots plus end-minus-start phase deltas; cumulative quantiles are never subtracted",
+        semantics: "cumulative boundary snapshots, end-minus-start phase deltas, plus phase-isolated unclipped engine duration stats (phaseStats)",
         boundaries: telemetryBoundaries.phases,
         final: telemetryBoundaries.final,
         phaseDeltas,
         phaseDeltasUnavailableReason: live ? null : "synchronized telemetry phase boundaries are currently captured by the live/burst worker only",
+        phaseStats: endurance ? null : phaseStats,
+        phaseStatsUnavailableReason: endurance ? "per-sample phase retention is disabled during endurance runs to preserve heap stability" : null,
       },
       runnerFixture: { project: testInfo?.project.name ?? null, node: process.version,
         playwright: testInfo?.config.version ?? null, chromium: page.context().browser()?.version() ?? null,
@@ -1790,6 +1929,7 @@ async function runScenario(scenario: Scenario, page: Page, testInfo?: TestInfo) 
           pageErrors: state.pageErrors,
           fetchHistoryCalls: state.fetchHistoryCalls,
         };
+        delete (globalThis as any).__censusRecordDuration;
         delete (window as any).__multiMarketCensus;
         return result;
       }, PANEL_IDS);
@@ -1971,6 +2111,53 @@ test("render telemetry phase deltas use cumulative count and totalMs differences
   expect(delta.metrics["chart.gpu.flush.ms"]).toMatchObject({ count: 2, totalMs: 5.25, quantiles: null });
   expect(delta.metrics["chart.frame.render.ms"].quantileUnavailableReason).toContain("cannot be differenced");
   expect(phaseTelemetryDelta(before, null).metrics["chart.frame.render.ms"]).toMatchObject({ count: null, totalMs: null });
+});
+
+test("phase-isolated engine telemetry summarizes unclipped quantiles beyond 2048 rolling cap (#89)", () => {
+  const samples = [
+    ...Array.from({ length: 2_048 }, () => 1.0),
+    ...Array.from({ length: 2_048 }, () => 4.0),
+  ];
+  const stats = summarizePhaseTelemetrySamples({
+    burst: { "chart.frame.render.ms": samples },
+  }, ["load", "burst"]);
+  expect(stats.load).toEqual({});
+  expect(stats.burst["chart.frame.render.ms"]).toEqual({
+    count: 4_096,
+    totalMs: 10_240,
+    avgMs: 2.5,
+    minMs: 1,
+    maxMs: 4,
+    p50Ms: 1,
+    p95Ms: 4,
+    p99Ms: 4,
+  });
+});
+
+test("live/burst engine telemetry gate passes CI baseline and catches +2 ms render regression even under 250 ms rAF budget (#89)", () => {
+  const baselineMetrics: Record<string, EnginePhaseMetrics> = {
+    load: { "chart.frame.render.ms": { count: 16, totalMs: 16, avgMs: 1.0, minMs: 0.4, maxMs: 2.1, p50Ms: 0.9, p95Ms: 1.8, p99Ms: 2.0 } },
+    baseline: { "chart.frame.render.ms": { count: 552, totalMs: 1271.7, avgMs: 2.304, minMs: 0.6, maxMs: 4.0, p50Ms: 2.1, p95Ms: 3.1, p99Ms: 3.8 } },
+    burst: { "chart.frame.render.ms": { count: 3360, totalMs: 6767.0, avgMs: 2.014, minMs: 0.5, maxMs: 15.6, p50Ms: 1.8, p95Ms: 3.2, p99Ms: 4.1 } },
+    recovery: { "chart.frame.render.ms": { count: 848, totalMs: 1723.1, avgMs: 2.032, minMs: 0.5, maxMs: 5.2, p50Ms: 1.8, p95Ms: 3.1, p99Ms: 3.9 } },
+  };
+  expect(evaluateLiveBurstEngineTelemetryGate(baselineMetrics)).toEqual([]);
+
+  // Simulate a slow-machine or artificial +2 ms render regression while rAF frame interval remains safely below 250 ms.
+  const simulatedHardwareRafP95Ms = 38.0;
+  expect(simulatedHardwareRafP95Ms).toBeLessThanOrEqual(LIVE_BURST_FRAME_P95_BUDGET_MS);
+  const regressedBurst: Record<string, EnginePhaseMetrics> = {
+    ...baselineMetrics,
+    burst: { "chart.frame.render.ms": { count: 3360, totalMs: 12432, avgMs: 3.7, minMs: 2.5, maxMs: 17.6, p50Ms: 3.5, p95Ms: 4.7, p99Ms: 6.1 } },
+  };
+  const burstFailures = evaluateLiveBurstEngineTelemetryGate(regressedBurst);
+  expect(burstFailures).toEqual([
+    "burst chart.frame.render.ms p95Ms=4.700 ms > #89 budget 4.5 ms",
+    "burst chart.frame.render.ms avgMs=3.700 ms > #89 budget 3.5 ms",
+  ]);
+
+  const missingPhase = evaluateLiveBurstEngineTelemetryGate({ ...baselineMetrics, recovery: {} });
+  expect(missingPhase).toEqual(["recovery chart.frame.render.ms count=0 (expected > 0)"]);
 });
 
 test("census heap trend accurately tracks slope and detects excessive drift (#50)", () => {

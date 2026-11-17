@@ -10,7 +10,7 @@ Varsayılan CI ortamında fiziksel GPU kullanılmaz. Playwright census Chromium'
 
 Canlı/burst profilinin telemetry faz sınırları worker'ın baseline, burst başlangıcı ve recovery başlangıcı mesajlarının işlendiği anlardır; `phaseDeltas` içindeki `count` ve `totalMs` bitiş snapshot'ı eksi başlangıç snapshot'ıdır. Snapshot p50/p95/p99 değerleri kümülatif olduğundan faz quantile'ı olarak çıkarılmaz; JSON'da `quantiles: null` ve gerekçesi yer alır. Baseline/burst/recovery için eşzamanlı sınır snapshot'ları olmayan diğer profillerde telemetry phase deltas unavailable olarak açıkça yazılır.
 
-Bu PR yalnız `CE(#89 Aşama 1)` kanıt kapsamıdır: mevcut RAF ve diğer eşikler/gates değişmez; SwiftShader canlı/burst kapısı motor telemetrisiyle ikame edilmez. Baseline tablosu ve Issue #89'un tamamı bu aşamayla onaylanmış sayılmaz; Issue açık kalır.
+Issue #89 ile census testi (`tests/browser/chart-multi-market-census.spec.ts`), `src/` kodunu değiştirmeden Playwright `page.route` üzerinden `/src/core/performanceTelemetry.ts` kaydını faz bazında sararak `2.048` örneklik kayan tampon kırpması olmadan **faz-izole ve kırpılmamış (`phaseStats`)** motor süresi dağılımlarını (`count`, `totalMs`, `avgMs`, `minMs`, `maxMs`, `p50Ms`, `p95Ms`, `p99Ms`) toplar ve her fazın (`load`, `idle`, `crosshair`, `pan`, `baseline`, `burst`, `recovery`) `engineTelemetry` alanına ile `summary.renderTelemetry.phaseStats` alanına yazar (`endurance` profillerinde heap kararlılığını korumak için örnek dizisi tutulmaz). Mevcut RAF ve gecikme kapıları (`LIVE_BURST_FRAME_P95_BUDGET_MS = 250 ms` vb.) aynen korunur; motor telemetrisi kapıları bunların yanında tamamlayıcı bir regresyon kapısı olarak çalışır (`Closes #89`).
 
 Yerel geliştirici makinelerinde veya GPU donanımına sahip runner'larda gerçek GPU hızlandırmasını devreye almak için `CHART_CENSUS_GPU_MODE=hardware` ortam değişkeni kullanılır:
 
@@ -55,6 +55,37 @@ Aşağıdaki ölçümler 1280x720 çözünürlükte, aynı fixture verileri ve s
 | **Live Trade `frameLatencyMs.p95`** | **1,840 ms** | 310 ms | 145 ms | `<= 3,000 ms` |
 | **Burst Recovery Time (`recoveredAfterMs`)** | **1,950 ms** | 320 ms | 110 ms | `<= 5,000 ms` (`BURST.recoveryTargetMs`) |
 | **Unframed Message Count** | **0** | 0 | 0 | `== 0` (Kayıpsız / Sıralı) |
+| **Engine Render (`chart.frame.render.ms`, #89)** | **~1.6–2.4 ms avg / ~2.5–3.2 ms p95** | — | — | `p95 <= 4.5 ms`, `avg <= 3.5 ms` (`baseline`/`burst`) |
+
+### 2.3 Motor Telemetrisi Faz İstatistikleri ve 6-Koşulu SwiftShader Kalibrasyonu (#89)
+
+`#73` Aşama 3 sonrası ardışık 6 CI SwiftShader koşusunun (`census-evidence`) canlı/`burst` ve statik ızgara telemetri dağılımları aşağıdadır:
+
+| CI Run ID | Commit | `baseline` count / avg | `burst` count / avg | `recovery` count / avg | `final` son 2.048 (`p50 / p95 / p99 / max`) | Alt Aşama (`burst avg` / `final p95`: `annotation.draw`, `gpu.draw`, `gpu.flush`) | `burst.frameMs` rAF p95 |
+|---|---|---|---|---|---|---|---|
+| `43945645807` | `e080705` (PR #172) | `664` / `1.805 ms` | `4,056` / `1.556 ms` | `1,024` / `1.665 ms` | `1.4 / 2.5 / 3.6 / 12.2 ms` | `1.349 / 2.2 ms`, `0.202 / 0.3 ms`, `0.014 / 0.1 ms` | `133.3 ms` |
+| `43950607667` | `92ea682` (PR #173) | `656` / `1.861 ms` | `3,968` / `1.671 ms` | `1,016` / `1.692 ms` | `1.4 / 2.7 / 3.7 / 17.7 ms` | `1.436 / 2.4 ms`, `0.228 / 0.4 ms`, `0.015 / 0.1 ms` | `133.4 ms` |
+| `43956090461` | `5c26cbd` (PR #174) | `648` / `1.868 ms` | `3,888` / `1.667 ms` | `992` / `1.689 ms` | `1.4 / 2.8 / 4.1 / 19.2 ms` | `1.437 / 2.4 ms`, `0.225 / 0.4 ms`, `0.016 / 0.1 ms` | `133.4 ms` |
+| `43964340730` | `8668d31` (`main` `5e87d84`) | `560` / `2.304 ms` | `3,376` / `1.981 ms` | `864` / `1.986 ms` | `1.8 / 3.1 / 4.2 / 13.4 ms` | `1.746 / 2.8 ms`, `0.231 / 0.3 ms`, `0.015 / 0.1 ms` | `150.1 ms` |
+| `43971461311` | `6944305` (PR #176) | `648` / `1.869 ms` | `3,952` / `1.665 ms` | `1,008` / `1.675 ms` | `1.5 / 2.7 / 4.1 / 14.5 ms` | `1.435 / 2.3 ms`, `0.225 / 0.3 ms`, `0.015 / 0.1 ms` | `133.4 ms` |
+| `43973606964` | `15b0af6` (PR #177) | `552` / `2.381 ms` | `3,360` / `2.014 ms` | `848` / `2.032 ms` | `1.8 / 3.2 / 4.1 / 15.6 ms` | `1.769 / 2.9 ms`, `0.239 / 0.4 ms`, `0.015 / 0.1 ms` | `150.1 ms` |
+
+- `43964340730` (`5e87d84`) üzerinde statik ızgaralar: `#377` `chart.frame.render.ms` avg `0.659 ms` (final `p50 0.7 ms` / `p95 1.1 ms`); `#392` `chart.frame.render.ms` avg `0.541 ms` (final `p50 0.5 ms` / `p95 1.0 ms`).
+- Motor maliyetinin ana bileşeni `chart.surface.annotation.draw.ms` (`1.349–1.769 ms` avg, `2.2–2.9 ms` p95), `gpu.draw` (`0.202–0.239 ms` avg) ve `gpu.flush` (`0.014–0.016 ms` avg) ikincildir.
+
+### 2.4 Telemetry Açık vs Kapalı rAF Etkisi (Aynı Runner / `5e87d84`)
+
+Aynı `origin/main` (`5e87d84`) üzerinde Telemetry açık (`43964340730`) ve Telemetry kapalı (`43976989991`, `telemetry_enabled: false`) CI ölçümlerinin karşılaştırması:
+
+| Senaryo / Faz | Telemetry Kapalı (`43976989991`) p50 / p95 | Telemetry Açık (`43964340730`) p50 / p95 | Fark (ON − OFF) |
+|---|---|---|---|
+| `#377` (`idle` / `crosshair` / `pan`) | `16.7 / 16.7`, `16.7 / 16.7`, `16.7 / 16.8` ms | `16.7 / 16.7`, `16.7 / 16.8`, `16.7 / 16.7` ms | `0.0..+0.1 ms` |
+| `#392` (`idle` / `crosshair` / `pan`) | `16.7 / 16.7`, `16.7 / 16.7`, `16.7 / 16.8` ms | `16.7 / 16.8`, `16.7 / 16.7`, `16.7 / 16.8` ms | `0.0..+0.1 ms` |
+| `burst` `baseline` (örnek) | `133.3 / 150.1 ms` (`88`) | `133.4 / 150.1 ms` (`75`) | `+0.1 / 0.0 ms` |
+| `burst` `burst` (örnek) | `133.4 / 150.1 ms` (`424`) | `133.4 / 150.1 ms` (`422`) | `0.0 / 0.0 ms` |
+| `burst` `recovery` (örnek) | `133.4 / 150.1 ms` (`108`) | `133.4 / 150.1 ms` (`107`) | `0.0 / 0.0 ms` |
+
+Sonuç: `configurePerformanceTelemetry({ enabled: true })` ölçüm yükü rAF dağılımında ihmal edilebilir düzeydedir (`Δ <= 0.1 ms`).
 
 ---
 
@@ -65,12 +96,14 @@ Aşağıdaki ölçümler 1280x720 çözünürlükte, aynı fixture verileri ve s
 2. **Canlı Akış Gecikmesi:** Live trade'ler geldiğinde UI ipliği ile rasterizer CPU kaynaklarını paylaşır. Donanım modunda trade-to-frame gecikmesi 150 ms altında kalırken SwiftShader ortamında p95 gecikme 1.8–2.2 saniyeye kadar uzayabilmektedir.
 3. **Bellek ve Heap Kayması (Endurance Drift):** Donanım GPU ve SwiftShader arasında JavaScript retained heap davranışı farksızdır; her iki modda da post-GC retained heap 1 GB tavanının (`HEAP_CEILING_BYTES`) altında kalmalı ve saatlik kayma `<= 64 MiB/saat` (~1.06 MiB/dakika - `ENDURANCE_MAX_HEAP_GROWTH_BYTES_PER_MINUTE`) sınırını aşmamalıdır.
 
-### 3.2 CI Regresyon Alarm Kapıları (#50)
+### 3.2 CI Regresyon Alarm Kapıları (#50 ve #89)
 GitHub Actions PR runner'larında SwiftShader varyansını tolere etmek ve sahte kırmızıları (flakiness) önlemek amacıyla kapılar **medyan SwiftShader süresi + en az %25–35 güvenlik payı (headroom)** ile kalibre edilmiştir:
 
 - **Boş Izgara Etkileşimi (#377 / #392):** `MULTI_CHART_INTERACTION_FRAME_P95_MS = 33.3 ms` (30 FPS tabanı)
 - **Yüklü Profil L2 (#50):** `LOADED_L2_INTERACTION_FRAME_P95_MS = 120 ms` (Gerçek GPU'da ~15–20 ms karşılığı)
 - **Yüklü Profil L5 (#50):** `LOADED_L5_INTERACTION_FRAME_P95_MS = 200 ms` (Gerçek GPU'da ~30–35 ms karşılığı)
 - **Canlı Akış Burst Frame Süresi (#50):** `LIVE_BURST_FRAME_P95_BUDGET_MS = 250 ms`
+- **Canlı/Burst Motor Render Süresi (#89):** `LIVE_BURST_ENGINE_RENDER_P95_BUDGET_MS = 4.5 ms` ve `LIVE_BURST_ENGINE_RENDER_AVG_BUDGET_MS = 3.5 ms` (`baseline` ve `burst` fazları için `chart.frame.render.ms`; `phaseStats` üzerinden 2.048-örnek kırpması olmadan ölçülür, 6-koşulu baz çizgisi `avg 1.56–2.38 ms`, `p95 ~2.5–3.2 ms` üzerine ~%40+ marj)
+- **Aktif Faz Motor Telemetrisi Kapsamı (#89):** Etkileşim (`load`, `crosshair`, `pan`) ve canlı/burst (`load`, `baseline`, `burst`, `recovery`) fazlarında `chart.frame.render.ms` `count > 0` zorunludur
 - **Canlı Akış Gecikme Tavanı (#50):** `LIVE_BURST_LATENCY_P95_BUDGET_MS = 3,000 ms`
 - **Endurance Retained Heap Eğimi (#50):** `ENDURANCE_MAX_HEAP_GROWTH_BYTES_PER_MINUTE = 1,118,481 B/dk` (64 MiB/saat)
