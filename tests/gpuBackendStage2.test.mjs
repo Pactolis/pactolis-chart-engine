@@ -631,8 +631,8 @@ test("WebGpuQuadPipeline skips unchanged resolution writes and updates after res
   assert.equal(writtenBuffers.length, 2, "steady frames never upload resolution");
   pipeline.dispose();
 });
-test("WebGpuSurface renders frame lifecycle and writes instance data via WebGpuQuadSink", () => {
-  const { device, passes, writtenBuffers, submittedCommands } = makeFakeWebGpuDevice("rgba8unorm");
+test("WebGpuSurface directly submits outside a coordinated RAF and writes instance data via WebGpuQuadSink", () => {
+  const { device, passes, encoders, writtenBuffers, submittedCommands } = makeFakeWebGpuDevice("rgba8unorm");
   const ctx = makeFakeWebGpuContext(device, "rgba8unorm");
   const canvas = makeFakeCanvas({ webgpu: ctx });
 
@@ -668,8 +668,9 @@ test("WebGpuSurface renders frame lifecycle and writes instance data via WebGpuQ
   frame.flushQuads(500, 250);
   frame.end();
 
+  assert.equal(encoders.length, 1, "a standalone surface owns one encoder when no ChartSession RAF is active");
+  assert.equal(submittedCommands.length, 1, "the standalone surface submits immediately");
   assert.ok(passes.length >= 1);
-  assert.ok(submittedCommands.length >= 1);
   assert.equal(passes[0].draws[0].instanceCount, 2);
 
   // Check uniform resolution was set to logical bounds (500x250)
