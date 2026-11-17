@@ -1,6 +1,6 @@
 import { expect, test } from "@playwright/test";
 import type { ChartPanelState } from "../../src/core/chartPanelState.js";
-import { buildBars, FROZEN_NOW, FUNCTIONAL_WEBGL_ARGS, installHistory, INTERVAL_MS, openHarness } from "./support/history.js";
+import { buildBars, FROZEN_NOW, FUNCTIONAL_WEBGL_ARGS, INTERVAL_MS, openHarness } from "./support/history.js";
 
 // #147 multi-panel flush & frame budget census across 1, 2, 4, and 8 active charts (2x4 grid).
 // Measures real mounted ChartDataPipeline + ChartSession WebGL2/2D runtimes under two burst
@@ -48,6 +48,7 @@ interface PhaseReport {
   flushPerFrameTotalMs: QuantileSummary;
   frameRender: QuantileSummary;
   renderPerFrameTotalMs: QuantileSummary;
+  rafJsWorkMs: QuantileSummary;
   frameWorkMs: QuantileSummary;
   rafIntervalMs: QuantileSummary;
   longTasksCount: number;
@@ -60,6 +61,7 @@ interface ChartCountReport {
   viewportPerChart: string;
   tradesSentTotal: number;
   tradesFlushed: number;
+  volumeDeltaActual: number;
   overflowCount: number;
   overflowDroppedCount: number;
   volumeDeltaExact: boolean;
@@ -108,11 +110,47 @@ test.describe.serial("#147 multi-chart live-trade flush & frame budget census", 
         await route.fulfill({ status: response.status(), headers, body: patched });
       });
 
-      await installHistory(page, { bars: buildBars(250) });
+      // Serve 250 bars anchored to the current aligned bucket with complete footprint metadata
+      // so background gap/coverage retries do not overwrite live burst bars mid-measurement.
+      const baseBars = buildBars(250);
+      const currentAlignedNow = Math.floor(Date.now() / INTERVAL_MS) * INTERVAL_MS;
+      const shiftMs = currentAlignedNow - FROZEN_NOW;
+      const liveAnchorBars = baseBars.map((bar) => ({
+        ...bar,
+        t: bar.t + shiftMs,
+        updatedAt: Date.now(),
+      }));
+      await page.route(/\/history(?:\?|$)/, (route) => {
+        const url = new URL(route.request().url());
+        const from = Number(url.searchParams.get("from"));
+        const to = Number(url.searchParams.get("to"));
+        const matched = Number.isFinite(from) && Number.isFinite(to)
+          ? liveAnchorBars.filter((bar) => bar.t >= from && bar.t <= to)
+          : liveAnchorBars;
+        return route.fulfill({
+          contentType: "application/json",
+          body: JSON.stringify({
+            ok: true,
+            data: { bars: matched },
+            meta: {
+              schemaVersion: 1,
+              generatedAt: Date.now(),
+              footprint: { available: true, allowed: true, priceStep: 10 },
+              footprintCoverage: {
+                status: "complete",
+                requestedFrom: Number.isFinite(from) ? from : liveAnchorBars[0].t,
+                requestedTo: Number.isFinite(to) ? to : liveAnchorBars.at(-1)!.t,
+                coveredFrom: liveAnchorBars[0].t,
+                coveredThrough: liveAnchorBars.at(-1)!.t + INTERVAL_MS,
+              },
+            },
+          }),
+        });
+      });
       await openHarness(page, "?fit=80");
 
       const report = await page.evaluate(
-        async ({ charts, columns, rows, markets, viewport, frozenNow, intervalMs }) => {
+        async ({ charts, columns, rows, markets, viewport }) => {
           const [harness, { createHarnessServices }, telemetry] = await Promise.all([
             import("/harness/chart.ts"),
             import("/harness/services.ts"),
@@ -131,6 +169,7 @@ test.describe.serial("#147 multi-chart live-trade flush & frame budget census", 
             flushPerFrameTotalMs: number[];
             frameRender: number[];
             renderPerFrameTotalMs: number[];
+            rafJsWorkMs: number[];
             frameWorkMs: number[];
             rafIntervalMs: number[];
             longTasks: number[];
@@ -140,6 +179,7 @@ test.describe.serial("#147 multi-chart live-trade flush & frame budget census", 
             flushPerFrameTotalMs: [],
             frameRender: [],
             renderPerFrameTotalMs: [],
+            rafJsWorkMs: [],
             frameWorkMs: [],
             rafIntervalMs: [],
             longTasks: [],
@@ -151,6 +191,7 @@ test.describe.serial("#147 multi-chart live-trade flush & frame budget census", 
 
           let activePhase: BucketName | null = null;
           let frameTurnStartMs = 0;
+          let frameJsWorkMs = 0;
           let frameFlushMs = 0;
           let frameFlushCount = 0;
           let frameRenderMs = 0;
@@ -161,13 +202,15 @@ test.describe.serial("#147 multi-chart live-trade flush & frame budget census", 
           mc.port1.onmessage = () => {
             endOfTurnScheduled = false;
             const now = performance.now();
-            if (activePhase !== null && frameTurnStartMs > 0) {
+            if (activePhase !== null && frameTurnStartMs > 0 && (frameFlushCount > 0 || frameRenderCount > 0)) {
               const bucket = buckets[activePhase];
+              bucket.rafJsWorkMs.push(frameJsWorkMs);
               bucket.frameWorkMs.push(Math.max(0, now - frameTurnStartMs));
               if (frameFlushCount > 0) bucket.flushPerFrameTotalMs.push(frameFlushMs);
               if (frameRenderCount > 0) bucket.renderPerFrameTotalMs.push(frameRenderMs);
             }
             frameTurnStartMs = 0;
+            frameJsWorkMs = 0;
             frameFlushMs = 0;
             frameFlushCount = 0;
             frameRenderMs = 0;
@@ -182,7 +225,12 @@ test.describe.serial("#147 multi-chart live-trade flush & frame budget census", 
                 endOfTurnScheduled = true;
                 mc.port2.postMessage(undefined);
               }
-              callback(ts);
+              const cbStartedAt = performance.now();
+              try {
+                callback(ts);
+              } finally {
+                frameJsWorkMs += Math.max(0, performance.now() - cbStartedAt);
+              }
             })) as typeof window.requestAnimationFrame;
 
           (globalThis as any).__multiChartPerfRecord = (name: string, durationMs: number) => {
@@ -229,6 +277,7 @@ test.describe.serial("#147 multi-chart live-trade flush & frame budget census", 
           const panelIds: string[] = [];
           const panelServices: ReturnType<typeof createHarnessServices>[] = [];
           const panelMarkets: string[] = [];
+          let settledCount = 0;
 
           const nextFrames = async (count = 2) => {
             for (let f = 0; f < count; f++) {
@@ -246,7 +295,18 @@ test.describe.serial("#147 multi-chart live-trade flush & frame budget census", 
               document.body.appendChild(root);
               roots.push(root);
 
-              const services = createHarnessServices({ priceStep: 10, priceStepResolved: true });
+              const baseSvc = createHarnessServices({ priceStep: 10, priceStepResolved: true });
+              let settledThisPanel = false;
+              const services = {
+                ...baseSvc,
+                notifyInteractiveHistorySettled(...args: Parameters<typeof baseSvc.notifyInteractiveHistorySettled>) {
+                  if (!settledThisPanel) {
+                    settledThisPanel = true;
+                    settledCount += 1;
+                  }
+                  return baseSvc.notifyInteractiveHistorySettled(...args);
+                },
+              };
               const initialState: ChartPanelState = {
                 type: "chart",
                 market,
@@ -268,10 +328,10 @@ test.describe.serial("#147 multi-chart live-trade flush & frame budget census", 
               panelMarkets.push(market);
             }
 
-            // Wait until every mounted chart finishes loading the 250-bar fixture.
+            // Wait until every mounted chart settles initial history (250 bars).
             const loadDeadline = performance.now() + 30_000;
             while (performance.now() < loadDeadline) {
-              const ready = panelIds.every((id) => {
+              const ready = settledCount >= charts && panelIds.every((id) => {
                 const rt = harness.getChartRuntime(id);
                 return rt && rt.pipeline.series.length >= 250;
               });
@@ -285,6 +345,10 @@ test.describe.serial("#147 multi-chart live-trade flush & frame budget census", 
               }
             }
             await nextFrames(6);
+
+            const tailStartTime = Math.max(
+              ...panelIds.map((id) => harness.getChartRuntime(id)!.pipeline.series.at(-1)!.startTime),
+            );
 
             const sumVolumes = () =>
               panelIds.reduce((sum, id) => {
@@ -309,7 +373,7 @@ test.describe.serial("#147 multi-chart live-trade flush & frame budget census", 
               let seq = panelSeqs[panelIdx];
               for (let k = 0; k < count; k++) {
                 // Keep all live burst trades strictly inside the active last 15m bar (< 900s).
-                const time = frozenNow + 100 + seq;
+                const time = tailStartTime + 100 + seq;
                 svc.pushTrade(market, {
                   id: `burst-${charts}-${panelIdx}-${seq}`,
                   time,
@@ -411,6 +475,7 @@ test.describe.serial("#147 multi-chart live-trade flush & frame budget census", 
               flushPerFrameTotalMs: summarize(raw.flushPerFrameTotalMs),
               frameRender: summarize(raw.frameRender),
               renderPerFrameTotalMs: summarize(raw.renderPerFrameTotalMs),
+              rafJsWorkMs: summarize(raw.rafJsWorkMs),
               frameWorkMs: summarize(raw.frameWorkMs),
               rafIntervalMs: summarize(raw.rafIntervalMs),
               longTasksCount: raw.longTasks.length,
@@ -422,20 +487,23 @@ test.describe.serial("#147 multi-chart live-trade flush & frame budget census", 
               flushPerFrameTotalMs: [...buckets.sustained.flushPerFrameTotalMs, ...buckets.backlog.flushPerFrameTotalMs],
               frameRender: [...buckets.sustained.frameRender, ...buckets.backlog.frameRender],
               renderPerFrameTotalMs: [...buckets.sustained.renderPerFrameTotalMs, ...buckets.backlog.renderPerFrameTotalMs],
+              rafJsWorkMs: [...buckets.sustained.rafJsWorkMs, ...buckets.backlog.rafJsWorkMs],
               frameWorkMs: [...buckets.sustained.frameWorkMs, ...buckets.backlog.frameWorkMs],
               rafIntervalMs: [...buckets.sustained.rafIntervalMs, ...buckets.backlog.rafIntervalMs],
               longTasks: [...buckets.sustained.longTasks, ...buckets.backlog.longTasks],
             };
 
+            const volumeDeltaActual = Math.round((finalVolumeTotal - initialVolumeTotal) * 1_000_000) / 1_000_000;
             const result: ChartCountReport = {
               charts,
               grid: `${columns}x${rows}`,
               viewportPerChart: `${cellWidth}x${cellHeight}`,
               tradesSentTotal: totalTradesSent,
               tradesFlushed,
+              volumeDeltaActual,
               overflowCount,
               overflowDroppedCount,
-              volumeDeltaExact: Math.abs((finalVolumeTotal - initialVolumeTotal) - totalTradesSent) < 1e-6,
+              volumeDeltaExact: Math.abs(volumeDeltaActual - totalTradesSent) < 1e-6,
               sustained: buildPhaseReport(buckets.sustained),
               backlog: buildPhaseReport(buckets.backlog),
               combined: buildPhaseReport(combinedBucket),
@@ -461,8 +529,6 @@ test.describe.serial("#147 multi-chart live-trade flush & frame budget census", 
           rows: scenario.rows,
           markets: [...FOOTPRINT_MARKETS],
           viewport: VIEWPORT,
-          frozenNow: FROZEN_NOW,
-          intervalMs: INTERVAL_MS,
         },
       );
 
