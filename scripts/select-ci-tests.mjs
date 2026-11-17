@@ -40,6 +40,7 @@ export const NO_BROWSER_IMPACT = [
   /^(LICENSE|NOTICE|\.gitignore)$/,
   /^\.github\/(dependabot\.yml|PULL_REQUEST_TEMPLATE\.md)$/,
   /^\.github\/workflows\/(census-load|chart-endurance|release)\.yml$/,
+  /^scripts\/gpu-heatmap-benchmark\.mjs$/,
   /^scripts\/(check-exports|check-default-import-graph|run-tests|endurance-span-validation)\.mjs$/,
 ];
 

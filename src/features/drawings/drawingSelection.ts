@@ -1,7 +1,7 @@
 /** Owns selection policy, reverse-index hit testing, per-chart hit context and selection handles. Depends on the state owner and notification boundary; it does not depend on gesture editing. State and facade call these hooks on the same instance. */
 import type { View } from "../../core/engine/view.js";
 import { uiColor, axisMajorLabelColor, drawingAnchorPrimaryFill, drawingAnchorOutline } from "../../core/ui/seriesPalette.js";
-import type { Drawing, DrawingContext, DrawingPoint } from "../../core/drawingTypes.js";
+import { drawingIsAvailableAsOf, type Drawing, type DrawingContext, type DrawingPoint } from "../../core/drawingTypes.js";
 import { hasThreeAnchors, isSinglePointTool, isTextEditableTool, lastOf, screenPoint } from "./drawingPrimitives.js";
 import { DRAWING_HANDLE_RADIUS_PX, TOUCH_DRAWING_HANDLE_RADIUS_PX, drawingHitTest, type DrawingHitContext } from "./drawingHitTest.js";
 import { DrawingState } from "./drawingState.js";
@@ -84,6 +84,7 @@ export class DrawingSelection extends DrawingState {
       if (
         drawing.visible &&
         drawing.market === this.currentMarket &&
+        drawingIsAvailableAsOf(drawing, context.time?.asOfTime) &&
         drawingHitTest(drawing, point, screen, context)
       ) {
         return drawing;
@@ -106,7 +107,7 @@ export class DrawingSelection extends DrawingState {
     const renderMarket = market ?? this.currentMarket;
     ctx.save();
     for (const drawing of this.drawings) {
-      if (!this.selectedIds.has(drawing.id) || !drawing.visible || drawing.points.length < 2) continue;
+      if (!this.selectedIds.has(drawing.id) || !drawing.visible || drawing.points.length < 2 || !drawingIsAvailableAsOf(drawing, time.asOfTime)) continue;
       if (drawing.market !== renderMarket) continue;
       const a = screenPoint(drawing.points[0], view, time);
       const b = screenPoint(drawing.points[1], view, time);

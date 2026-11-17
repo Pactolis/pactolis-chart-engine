@@ -125,6 +125,28 @@ function createReplayCoordinatorFor(bars, intervalMs = MIN, market = "BINANCE_FU
   return { coordinator: new ChartReplayCoordinator(host), series, reloads };
 }
 
+test("timeframe replay rebuild consumes source bars and clamps an old virtual time into range", () => {
+  const { coordinator, series } = createReplayCoordinatorFor(buildDataset(3, MIN, 4), MIN);
+  coordinator.start();
+  coordinator.seek(T0 + MIN);
+  assert.equal(coordinator.getSnapshot().virtualTime, T0 + MIN);
+
+  withFakeClock(() => {
+    coordinator.play();
+    coordinator.prepareForTimeframeChange();
+    const sourceBars = [100, 101, 102].map((index) => buildRichBar(index, 5 * MIN, 4));
+
+    coordinator.reconfigureAfterTimeframeChange(5 * MIN, sourceBars);
+
+    const snapshot = coordinator.getSnapshot();
+    assert.equal(snapshot.rangeStart, sourceBars[0].startTime);
+    assert.equal(snapshot.virtualTime, sourceBars[0].startTime);
+    assert.equal(snapshot.state, "playing", "a replay playing before refresh resumes after the timeframe rebuild");
+    assert.equal(series.length, 0, "no new-timeframe bar is complete at the clamped range start");
+    coordinator.exit({ reloadHistory: false });
+  });
+});
+
 test("replay start cancels history writes and settles deferred day refreshes after replacement history", async () => {
   const series = new FootprintSeries({ intervalMs: MIN, priceStep: 1 });
   series.loadBars([buildRichBar(0), buildRichBar(1)]);
@@ -855,6 +877,17 @@ test("benchmark: 1,000 and 100,000 bar replay seek p50/p95/p99, cloneFootprintBa
     coord100k.coordinator.seek(T0 + idx * MIN);
     coordSeek100kMs.push(performance.now() - t0);
     assert.equal(coord100k.series.length, Math.min(idx, MAX_SERIES_BARS));
+    const firstVisibleIndex = Math.max(0, idx - MAX_SERIES_BARS);
+    assert.equal(
+      coord100k.series.at(0)?.startTime,
+      T0 + firstVisibleIndex * MIN,
+      "a capped replay rebuild keeps the newest MAX_SERIES_BARS bars",
+    );
+    assert.equal(
+      coord100k.series.at(coord100k.series.length - 1)?.startTime,
+      T0 + (idx - 1) * MIN,
+      "a capped replay rebuild keeps the latest completed replay bar",
+    );
   }
   coord100k.coordinator.exit({ reloadHistory: false });
 

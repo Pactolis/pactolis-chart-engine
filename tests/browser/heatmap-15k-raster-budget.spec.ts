@@ -362,8 +362,11 @@ test("15,000-cell SwiftShader benchmark and CPU raster cache budget / GPU takeov
     const originalNow = motionOverlay.now;
     let motionClock = originalNow();
     motionOverlay.now = () => motionClock;
-    const panSamples: Record<string, { heatmapMs: ReturnType<typeof summarize>; directs: number; misses: number; hits: number; skips: number }> = {};
-    for (const [name, direct] of [["direct", true], ["adaptive", false]] as const) {
+    const panSampleValues: Record<string, { heatmapMs: number[]; directs: number; misses: number; hits: number; skips: number }> = {
+      direct: { heatmapMs: [], directs: 0, misses: 0, hits: 0, skips: 0 },
+      adaptive: { heatmapMs: [], directs: 0, misses: 0, hits: 0, skips: 0 },
+    };
+    const samplePanFrame = async (name: "direct" | "adaptive", direct: boolean) => {
       v.offsetX = calibratedOffsetX;
       r.orderbookHeatmap.setRasterCacheDisabledForTest(direct);
       r.orderbookHeatmap.releaseRasterCache();
@@ -371,27 +374,58 @@ test("15,000-cell SwiftShader benchmark and CPU raster cache budget / GPU takeov
       await r.session.captureCompositePng();
       await waitNextFrame();
       await waitNextFrame();
-      const samples: number[] = [];
-      let directs = 0;
-      let misses = 0;
-      let hits = 0;
-      let skips = 0;
-      for (let i = 0; i < 30; i++) {
-        motionClock += 16;
-        v.offsetX += 0.25;
-        const b = telemetry.snapshotPerformanceTelemetry();
-        r.invalidate();
-        await waitNextFrame();
-        const a = telemetry.snapshotPerformanceTelemetry();
-        const hm = metricDelta(b, a, "chart.cpu.heatmap.draw.ms");
-        if (hm.count > 0) samples.push(hm.totalMs / hm.count);
-        directs += counterDelta(b, a, "chart.cpu.heatmap.raster.direct");
-        misses += counterDelta(b, a, "chart.cpu.heatmap.raster.miss");
-        hits += counterDelta(b, a, "chart.cpu.heatmap.raster.hit");
-        skips += counterDelta(b, a, "chart.cpu.heatmap.raster.skip");
-      }
-      panSamples[name] = { heatmapMs: summarize(samples), directs, misses, hits, skips };
+      motionClock += 16;
+      v.offsetX += 0.25;
+      const b = telemetry.snapshotPerformanceTelemetry();
+      r.invalidate();
+      await waitNextFrame();
+      const a = telemetry.snapshotPerformanceTelemetry();
+      const hm = metricDelta(b, a, "chart.cpu.heatmap.draw.ms");
+      const sample = panSampleValues[name];
+      if (hm.count > 0) sample.heatmapMs.push(hm.totalMs / hm.count);
+      sample.directs += counterDelta(b, a, "chart.cpu.heatmap.raster.direct");
+      sample.misses += counterDelta(b, a, "chart.cpu.heatmap.raster.miss");
+      sample.hits += counterDelta(b, a, "chart.cpu.heatmap.raster.hit");
+      sample.skips += counterDelta(b, a, "chart.cpu.heatmap.raster.skip");
+    };
+    // Pair each direct/adaptive observation from the same baseline viewport and
+    // alternate which path runs first to balance time/order effects (AB, BA, ...).
+    for (let pair = 0; pair < 30; pair++) {
+      const order: readonly (readonly ["direct" | "adaptive", boolean])[] = pair % 2 === 0
+        ? [["direct", true], ["adaptive", false]]
+        : [["adaptive", false], ["direct", true]];
+      for (const [name, direct] of order) await samplePanFrame(name, direct);
     }
+    const trimmedMean = (values: number[], trimFraction = 0.1) => {
+      const sorted = [...values].sort((a, b) => a - b);
+      const trimCount = Math.floor(sorted.length * trimFraction);
+      const retained = sorted.slice(trimCount, sorted.length - trimCount);
+      return retained.reduce((total, value) => total + value, 0) / retained.length;
+    };
+    const pairedBlockRatios: number[] = [];
+    const pairedBlockCount = Math.floor(Math.min(
+      panSampleValues.direct.heatmapMs.length,
+      panSampleValues.adaptive.heatmapMs.length,
+    ) / 2);
+    for (let block = 0; block < pairedBlockCount; block++) {
+      const start = block * 2;
+      const directBlock = panSampleValues.direct.heatmapMs.slice(start, start + 2);
+      const adaptiveBlock = panSampleValues.adaptive.heatmapMs.slice(start, start + 2);
+      const directMean = directBlock.reduce((total, value) => total + value, 0) / directBlock.length;
+      const adaptiveMean = adaptiveBlock.reduce((total, value) => total + value, 0) / adaptiveBlock.length;
+      pairedBlockRatios.push(directMean > 0 ? adaptiveMean / directMean : Number.POSITIVE_INFINITY);
+    }
+    const panSamples = {
+      direct: { ...panSampleValues.direct, heatmapMs: summarize(panSampleValues.direct.heatmapMs) },
+      adaptive: { ...panSampleValues.adaptive, heatmapMs: summarize(panSampleValues.adaptive.heatmapMs) },
+      paired: {
+        samples: Math.min(panSampleValues.direct.heatmapMs.length, panSampleValues.adaptive.heatmapMs.length),
+        blocks: pairedBlockCount,
+        adaptiveToDirectTrimmedMeanRatio: trimmedMean(pairedBlockRatios),
+        trimFraction: 0.1,
+        blockOrder: "ABBA (direct, adaptive, adaptive, direct)",
+      },
+    };
     v.offsetX = calibratedOffsetX;
     r.orderbookHeatmap.setRasterCacheDisabledForTest(false);
     r.orderbookHeatmap.releaseRasterCache();
@@ -613,7 +647,8 @@ test("15,000-cell SwiftShader benchmark and CPU raster cache budget / GPU takeov
   expect(report.continuousPan.adaptive.directs).toBe(30);
   expect(report.continuousPan.adaptive.misses).toBe(0);
   expect(report.continuousPan.adaptive.hits).toBe(0);
-  expect(report.continuousPan.adaptive.heatmapMs.meanMs).toBeLessThanOrEqual(report.continuousPan.direct.heatmapMs.meanMs * 1.1);
+  expect(report.continuousPan.paired.samples).toBe(30);
+  expect(report.continuousPan.paired.adaptiveToDirectTrimmedMeanRatio).toBeLessThanOrEqual(1.1);
   expect(report.gpuCold.prepareMs.samples).toBe(6);
   expect(report.gpuCold.renderMs.samples).toBe(6);
   expect(report.gpuWarm.renderMs.samples).toBe(20);
