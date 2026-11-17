@@ -56,7 +56,8 @@ export function calculateOrderFlowRangeProfile(
   options: OrderFlowProfileOptions = {},
 ): OrderFlowRangeProfileResult {
   const selection = selectRangeBars(bars, from, to);
-  const incompleteFootprintCoverage = selection.totalBars > 0 && selection.coveredBars < selection.totalBars;
+  const { coveredBars, totalBars } = selection.meta;
+  const incompleteFootprintCoverage = totalBars > 0 && coveredBars < totalBars;
   const canEstimateWholeRange = incompleteFootprintCoverage
     && options.allowOhlcvEstimate === true
     && typeof options.priceStep === "number"
