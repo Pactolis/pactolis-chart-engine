@@ -7,7 +7,8 @@ export interface ChartRenderPass {
 }
 
 const STATIC_ANNOTATION = ChartChange.All & ~ChartChange.DataTail;
-export function annotationPass(id: string): ChartRenderPass {
+export function annotationPass(id: string, live = false): ChartRenderPass {
+  if (live) return { id, interests: ChartChange.All };
   return { id, interests: ["axis", "drawings", "strategy-levels", "naked-poc", "reference-levels", "closed-footprint-text"].includes(id)
     ? STATIC_ANNOTATION : ChartChange.All };
 }
@@ -36,8 +37,11 @@ export class AnnotationPassCache<T> {
 
   render(ctx: CanvasRenderingContext2D, pass: ChartRenderPass, key: string,
     changes: ChartChange, draw: (target: CanvasRenderingContext2D) => T, replay: (effects: T) => void): "hit" | "miss" | false {
-    if (changes === ChartChange.None || (pass.interests & ChartChange.DataTail) !== 0) return false;
     const retained = this.entries.get(pass.id);
+    if (changes === ChartChange.None || (pass.interests & ChartChange.DataTail) !== 0) {
+      if (retained) retained.valid = false;
+      return false;
+    }
     if (changes === ChartChange.DataTail && retained?.valid && retained.key === key) {
       replay(retained.effects);
       this.blit(ctx, retained.canvas);

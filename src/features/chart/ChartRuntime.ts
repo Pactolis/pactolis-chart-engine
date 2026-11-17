@@ -488,6 +488,7 @@ class ChartRuntimeImpl implements ChartRuntime, ChartInputHost {
       (ctx, activeView, activeSeries, activeCrosshair) =>
         this.orderbookHeatmap?.drawHover(ctx, activeView, activeSeries, activeCrosshair),
       () => this.displayOptions,
+      () => this.analysisContextForChart().drawings?.hasLiveSeriesDrawings?.(this.state.market) ?? false,
     );
 
     const view = this.view;

@@ -203,3 +203,8 @@ export interface DrawingContext {
   indexForTime(time: number): number;
   timeForIndex(index: number): number;
 }
+
+/** True for drawing tools whose geometry/output is recomputed from footprint series bars (including live tail updates). */
+export function isSeriesDependentDrawingType(type: DrawingType): boolean {
+  return type === "anchored-vwap" || type === "fixed-range-volume-profile";
+}

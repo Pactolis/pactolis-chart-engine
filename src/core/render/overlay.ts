@@ -202,6 +202,7 @@ export class Overlay {
       crosshair: Crosshair,
     ) => void,
     private readonly getDisplayOptions?: () => ResolvedChartDisplayOptions,
+    private readonly hasLiveSeriesDrawings?: () => boolean,
   ) {
     const self = this;
     this.hudDeps = {
@@ -401,12 +402,13 @@ export class Overlay {
           }
         }
       };
-      const key = layerId === "axis" ? JSON.stringify([this.lineLabels, this.timeMarkers, crosshair.touch]) : "";
+      const key = this.layerCacheKey(layerId, crosshair);
+      const livePass = layerId === "drawings" && (this.hasLiveSeriesDrawings?.() ?? false);
       const retained = this.paintRetainedAnnotationPass(layerId, key, changes, () => {
         const main = ctx;
         ctx = this.ctx;
         try { paint(); } finally { ctx = main; }
-      });
+      }, livePass);
       if (retained) incrementPerformanceCounter(`chart.annotation.pass.${metricLayer}.reuse`);
       if (layerId === "axis" && !mainSuppressed && !empty) {
         drawPriceMarkers(ctx, view, this.priceMarkers, series.config.priceStep, series.config.pricePrecision, this.displayOptions);
@@ -421,9 +423,35 @@ export class Overlay {
     ctx.restore();
   }
 
-  private paintRetainedAnnotationPass(id: string, key: string, changes: ChartChange, draw: () => void): boolean {
+  private layerCacheKey(layerId: string, crosshair: Crosshair): string {
+    switch (layerId) {
+      case "axis":
+        return JSON.stringify([this.lineLabels, this.timeMarkers, crosshair.touch]);
+      case "naked-poc":
+        return JSON.stringify(this.getNakedPocs?.() ?? null);
+      case "strategy-levels":
+        return JSON.stringify([
+          this.getPreviousWeekStrategySettings?.() ?? null,
+          this.getPreviousWeekStrategyLevels?.() ?? null,
+          this.getMondayRangeSettings?.() ?? null,
+          this.getMondayRangeLevels?.() ?? null,
+        ]);
+      case "reference-levels":
+        return JSON.stringify(this.getReferenceLevels?.() ?? null);
+      default:
+        return "";
+    }
+  }
+
+  private paintRetainedAnnotationPass(
+    id: string,
+    key: string,
+    changes: ChartChange,
+    draw: () => void,
+    live = false,
+  ): boolean {
     const main = this.ctx;
-    const handled = this.annotationPassCache.render(main, annotationPass(id), key, changes, (target) => {
+    const handled = this.annotationPassCache.render(main, annotationPass(id, live), key, changes, (target) => {
       const priceStart = this.priceMarkers.length;
       const timeStart = this.timeMarkers.length;
       const labelStart = this.lineLabels.length;
