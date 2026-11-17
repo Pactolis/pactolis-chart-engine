@@ -358,7 +358,7 @@ test("15,000-cell SwiftShader benchmark and CPU raster cache budget / GPU takeov
 
     // Same viewport-changing workload for direct and adaptive paths. The injected
     // clock makes every sampled frame active motion independently of CI wall time.
-    const baselineDraw = (await import(URL.createObjectURL(new Blob([baselineJs], { type: "text/javascript" })))).draw;
+    const baselineDraw = (await import(URL.createObjectURL(new Blob([baselineJs.replaceAll('"/src/', `"${location.origin}/src/`)], { type: "text/javascript" })))).draw;
     const motionOverlay = r.orderbookHeatmap as typeof r.orderbookHeatmap & { now: () => number; draw: typeof baselineDraw };
     const branchDraw = motionOverlay.draw;
     const originalNow = motionOverlay.now;
