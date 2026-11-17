@@ -451,7 +451,7 @@ export class HistoryLoadCoordinator {
           const replaceTo = Math.min(fastWindow.to, bootstrapFrom);
           if (replaceTo <= fastWindow.from) continue;
           const replaceableBars = fastBars.filter((bar) => bar.startTime < bootstrapFrom
-            && this._barWithinVisibleHistoryEnd(bar, intervalMs, opts.to, opts.maxVisibleBarEnd));
+            && this._barWithinVisibleHistoryEnd(bar, intervalMs, opts.maxVisibleBarEnd));
           if (!this._applyExplicitHistorySnapshot(
             fastWindow.from,
             replaceTo,
@@ -530,7 +530,7 @@ export class HistoryLoadCoordinator {
         if (this.host.isDisposed() || generation !== this.host.getGeneration() || controller.signal.aborted) return;
         if (receivedBars.length) {
           const replaceableBars = receivedBars.filter((bar) => bar.startTime < bootstrapFrom
-            && this._barWithinVisibleHistoryEnd(bar, intervalMs, opts.to, opts.maxVisibleBarEnd));
+            && this._barWithinVisibleHistoryEnd(bar, intervalMs, opts.maxVisibleBarEnd));
           if (replaceableBars.length) {
             const batchFrom = replaceableBars[0].startTime;
             const batchTo = bucketEnd(replaceableBars[replaceableBars.length - 1]!.startTime, intervalMs);
@@ -598,7 +598,7 @@ export class HistoryLoadCoordinator {
         this._seedOpenBucketFromHistory(receivedBars, bootstrapFrom, opts.to, opts.maxVisibleBarEnd);
         if (!receivedBars.length) continue;
         const replaceableBars = receivedBars.filter((bar) => bar.startTime < bootstrapFrom
-          && this._barWithinVisibleHistoryEnd(bar, intervalMs, opts.to, opts.maxVisibleBarEnd));
+          && this._barWithinVisibleHistoryEnd(bar, intervalMs, opts.maxVisibleBarEnd));
         if (!replaceableBars.length) continue;
         const batchFrom = replaceableBars[0].startTime;
         const batchTo = bucketEnd(replaceableBars[replaceableBars.length - 1]!.startTime, intervalMs);
@@ -635,11 +635,9 @@ export class HistoryLoadCoordinator {
   private _barWithinVisibleHistoryEnd(
     bar: FootprintBar,
     intervalMs: number,
-    requestedTo: number,
     maxVisibleBarEnd?: number,
   ): boolean {
-    return bar.startTime <= requestedTo
-      && (maxVisibleBarEnd === undefined || bar.startTime + intervalMs <= maxVisibleBarEnd);
+    return maxVisibleBarEnd === undefined || bar.startTime + intervalMs <= maxVisibleBarEnd;
   }
 
   private _seedOpenBucketFromHistory(
@@ -649,7 +647,8 @@ export class HistoryLoadCoordinator {
     maxVisibleBarEnd?: number,
   ): void {
     const openBars = bars.filter((bar) => bar.startTime >= bootstrapFrom
-      && this._barWithinVisibleHistoryEnd(bar, this.host.getIntervalMs(), requestedTo, maxVisibleBarEnd)).map(candleOnlyBar);
+      && bar.startTime <= requestedTo
+      && this._barWithinVisibleHistoryEnd(bar, this.host.getIntervalMs(), maxVisibleBarEnd)).map(candleOnlyBar);
     if (openBars.length === 0) return;
     const applied = this.applyLiveBarSeed(openBars, {
       market: this.host.getMarket(),
