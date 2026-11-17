@@ -925,6 +925,92 @@ test("shared WebGPU chart frames use one encoder and submit while isolating a fa
   assert.equal(submittedCommands[0].recordedDraws.length, 1);
 });
 
+test("device loss cancels every coordinated chart frame and falls each shared-device session back to WebGL2", () => {
+  const { device } = makeFakeWebGpuDevice("rgba8unorm");
+  const fakeGl = makeFakeGl();
+  const fake2d = makeFake2dContext();
+  const pendingFrames = new Map();
+  const canceledFrames = [];
+  let nextFrameId = 1;
+  const win = {
+    devicePixelRatio: 1,
+    ResizeObserver: class { observe() {} disconnect() {} },
+    requestAnimationFrame(callback) {
+      const id = nextFrameId++;
+      pendingFrames.set(id, callback);
+      return id;
+    },
+    cancelAnimationFrame(id) {
+      canceledFrames.push(id);
+      pendingFrames.delete(id);
+    },
+    matchMedia: () => ({ addEventListener() {}, removeEventListener() {} }),
+  };
+  const doc = {
+    defaultView: win,
+    createElement: () => makeFakeCanvas({ webgl2: fakeGl, "2d": fake2d }),
+  };
+  const handleListeners = new Set();
+  let lost = false;
+  const handle = {
+    adapter: {},
+    device,
+    format: "rgba8unorm",
+    limits: { maxBufferSize: 268435456, maxTextureDimension2D: 8192 },
+    isLost: () => lost,
+    onLost(callback) {
+      handleListeners.add(callback);
+      return () => handleListeners.delete(callback);
+    },
+    dispose() {},
+  };
+  const createSession = (index) => {
+    const canvas = makeFakeCanvas({ webgpu: makeFakeWebGpuContext(device, "rgba8unorm") });
+    canvas.dataset.chartSurface = "gpu-scene";
+    canvas.style.cssText = "position:absolute;";
+    const surface = new WebGpuSurface(canvas, handle);
+    const session = new ChartSession({
+      container: { ownerDocument: doc, getBoundingClientRect: () => ({ width: 640, height: 360 }) },
+      gpuCanvas: canvas,
+      gpuSurface: surface,
+      annotationCanvas: makeFakeCanvas(),
+      interactionCanvas: makeFakeCanvas(),
+      ownerDocument: doc,
+      annotationCtx2d: fake2d,
+      interactionCtx2d: fake2d,
+      renderer: { render() {}, visibleRange() { return [0, 10]; }, setSurface() {} },
+      annotation: { render() {} },
+      interaction: { render() {} },
+      view: {},
+      series: [],
+      crosshair: {},
+      onLostContext: () => { lostContexts++; },
+      onRestoreContext: () => {},
+      onBackendChanged: (backend) => backendChanges.push({ index, backend }),
+    });
+    return session;
+  };
+
+  let lostContexts = 0;
+  const backendChanges = [];
+  const sessions = [createSession(0), createSession(1)];
+  for (const session of sessions) session.activate();
+
+  assert.equal(pendingFrames.size, 1, "both sessions share one scheduled device frame");
+  assert.equal(handleListeners.size, 2);
+  lost = true;
+  for (const listener of [...handleListeners]) listener("device-lost");
+
+  assert.equal(lostContexts, 2);
+  assert.deepEqual(sessions.map((session) => session.getSurface().kind), ["webgl2", "webgl2"]);
+  assert.deepEqual(backendChanges, [{ index: 0, backend: "webgl2" }, { index: 1, backend: "webgl2" }]);
+  assert.equal(handleListeners.size, 0, "both lost surfaces unbind from the shared handle");
+  assert.deepEqual(canceledFrames, [1], "the single coordinated WebGPU RAF is canceled after both chart callbacks are removed");
+  assert.equal(pendingFrames.size, 2, "each fallback session schedules its own WebGL2 frame");
+
+  for (const session of sessions) session.destroy();
+});
+
 test("a single ChartSession still falls back to WebGL2 on WebGPU device loss", () => {
   resetGpuDiagnosticsForTest();
   const { device } = makeFakeWebGpuDevice("rgba8unorm");
