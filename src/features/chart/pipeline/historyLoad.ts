@@ -915,9 +915,8 @@ export class HistoryLoadCoordinator {
       if (dayToExclusive <= effectiveFrom) return;
     }
     if (!footprintEnabledAt(effectiveFrom) || !isFootprintSyncAllowed(market)) return;
-    let reqFrom = effectiveFrom;
-    while (reqFrom < dayToExclusive && (!this._fillRetryDue(reqFrom) || !this.hasUnsyncedBars(reqFrom, reqFrom + DAY_MS))) reqFrom += DAY_MS;
-    if (reqFrom >= dayToExclusive) return;
+    const reqFrom = this.firstUnsyncedFillDay(effectiveFrom, dayToExclusive);
+    if (reqFrom === null) return;
     const reqTo = Math.min(reqFrom + DAY_MS, dayToExclusive);
     const key = `${reqFrom}-${reqTo}`;
     if (this.fillCellsInFlightKey === key) return;
@@ -947,6 +946,20 @@ export class HistoryLoadCoordinator {
     return attemptedAt === undefined || Date.now() - attemptedAt >= FILL_RETRY_COOLDOWN_MS;
   }
 
+  private firstUnsyncedFillDay(from: number, toExclusive: number): number | null {
+    const bars = this.series.listReadonly();
+    let barIndex = lowerBoundByStartTime(bars, from);
+    for (let dayStart = from; dayStart < toExclusive; dayStart += DAY_MS) {
+      const retryDue = this._fillRetryDue(dayStart);
+      const dayEnd = dayStart + DAY_MS;
+      while (barIndex < bars.length && bars[barIndex].startTime < dayEnd) {
+        const bar = bars[barIndex++];
+        if (retryDue && bar.cells.size === 0 && (bar.volume > 0 || bar.count > 0)) return dayStart;
+      }
+    }
+    return null;
+  }
+
   private async _awaitRefreshIdle(signal: AbortSignal): Promise<void> {
     const deadline = Date.now() + FILL_REFRESH_TIMEOUT_MS;
     while (Date.now() < deadline) {
@@ -958,11 +971,9 @@ export class HistoryLoadCoordinator {
   }
 
   hasUnsyncedBars(from: number, to: number): boolean {
-    for (let i = this.series.length - 1; i >= 0; i--) {
-      const bar = this.series.at(i);
-      if (!bar) continue;
-      if (bar.startTime < from) break;
-      if (bar.startTime >= to) continue;
+    const bars = this.series.listReadonly();
+    for (let i = lowerBoundByStartTime(bars, from); i < bars.length && bars[i].startTime < to; i++) {
+      const bar = bars[i];
       if (bar.cells.size === 0 && (bar.volume > 0 || bar.count > 0)) return true;
     }
     return false;
