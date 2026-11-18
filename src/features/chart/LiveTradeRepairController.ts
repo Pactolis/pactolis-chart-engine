@@ -631,9 +631,10 @@ export class LiveTradeRepairController {
    * Retries continue either way (the ladder caps their pace at one a minute), but past the fast
    * ladder the chart reads as failed rather than "repairing" until a repair succeeds (#315).
    */
-  private reportRetrying(detail: string): void {
+  private reportRetrying(detail: string, degraded = false): void {
     if (!this.repairUnresolved()) {
       this.host.integrityReporter?.report("pending", detail);
+      if (degraded) this.host.setDataDegraded(true, detail.slice(0, 160));
       return;
     }
     const unresolved = `${LIVE_REPAIR_UNRESOLVED_DETAIL}: ${detail}`.slice(0, 160);
@@ -767,14 +768,9 @@ export class LiveTradeRepairController {
       if (meta?.degraded === true && !unsupportedFootprint) {
         stickyDegraded = true;
         sourceUnavailable ||= meta.footprint?.available === false;
-        degradedSnapshotUnusable = !sourceUnavailable && repairSnapshotReason(
+        degradedSnapshotUnusable ||= !sourceUnavailable && repairSnapshotReason(
           meta, market, from, repairTo, intervalMs, this.host.series.config.priceStep, this.lastAcceptedWatermark,
         )?.state === "pending";
-      } else {
-        // A clean metadata callback can supply a usable snapshot for this same request,
-        // but it cannot erase an earlier explicit degraded result. Keep that repair
-        // terminal while reserving retries for requests that ended on degraded metadata.
-        degradedSnapshotUnusable = false;
       }
     };
 
@@ -927,11 +923,11 @@ export class LiveTradeRepairController {
         ) ?? false;
         if (scheduled) {
           retryScheduled = true;
-          this.reportRetrying(`${detail.slice(0, 140)}; retrying`);
+          this.reportRetrying(`${detail.slice(0, 140)}; retrying`, stickyDegraded);
           return;
         }
         this.repairDeferred = true;
-        this.reportRetrying(detail.slice(0, 160));
+        this.reportRetrying(detail.slice(0, 160), stickyDegraded);
         return;
       }
       this.repairDeferred = false;
