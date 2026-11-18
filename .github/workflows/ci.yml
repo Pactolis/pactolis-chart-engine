@@ -70,6 +70,18 @@ jobs:
       - run: npm ci --no-audit --no-fund
       - run: npm run check:browser
       - run: npx --no-install playwright install --with-deps chromium
+      - if: github.event.pull_request.number == 200
+        name: Capture current main WebGPU frame baseline
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+        run: |
+          set -euo pipefail
+          git fetch --no-tags origin "$BASE_SHA"
+          git worktree add /tmp/chart-engine-main "$BASE_SHA"
+          cp tests/browser/webgpu-flush-cost.spec.ts /tmp/chart-engine-main/tests/browser/webgpu-flush-cost.spec.ts
+          npm --prefix /tmp/chart-engine-main ci --no-audit --no-fund
+          cd /tmp/chart-engine-main
+          CE_GPU_FRAME_BASELINE=main npm run test:browser -- --project=default tests/browser/webgpu-flush-cost.spec.ts
       - env:
           SPECS: ${{ needs.changes.outputs.browser_specs }}
         run: npm run test:browser -- --project=default $SPECS
