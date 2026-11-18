@@ -1564,6 +1564,44 @@ test("fillMissingCells checks a synchronized 5,000-bar 12h range in one series p
   pipeline.dispose();
 });
 
+test("fillMissingCells keeps the first eligible unsynchronized day in the middle or at the end", async (t) => {
+  const todayStart = Math.floor(Date.now() / FILL_DAY_MS) * FILL_DAY_MS;
+  const day1 = todayStart - 7 * FILL_DAY_MS;
+  const day2 = day1 + FILL_DAY_MS;
+  const day3 = day2 + FILL_DAY_MS;
+  const intervalMs = 12 * 60 * 60 * 1000;
+
+  for (const { cooledDay, expectedDay } of [
+    { cooledDay: null, expectedDay: day2 },
+    { cooledDay: day2, expectedDay: day3 },
+  ]) {
+    const requests = [];
+    let releaseRefresh;
+    const refreshGate = new Promise((resolve) => { releaseRefresh = resolve; });
+    useFakeChartDataSource(t, { startRefresh: (request) => { requests.push(request); return refreshGate; } });
+    const pipeline = new ChartDataPipeline({
+      market: "BINANCE_FUTURES:btcusdt",
+      intervalMs,
+      priceStep: 10,
+      services: makeServices(),
+    });
+    pipeline.series.loadBars([
+      historyBar(day1, { open: 1, high: 2, low: 1, close: 2, volume: 10, count: 1, cells: [wideCell(1)] }),
+      historyBar(day2, { open: 1, high: 2, low: 1, close: 2, volume: 10, count: 1 }),
+      historyBar(day3, { open: 1, high: 2, low: 1, close: 2, volume: 10, count: 1 }),
+    ]);
+    if (cooledDay !== null) pipeline.fillCellsAttempted.set(cooledDay, Date.now());
+
+    pipeline.fillMissingCells(day1, day3 + FILL_DAY_MS);
+
+    assert.equal(requests.length, 1);
+    assert.equal(requests[0].from, expectedDay,
+      `the first due unsynchronized day must stay ${new Date(expectedDay).toISOString()}`);
+    releaseRefresh();
+    pipeline.dispose();
+  }
+});
+
 test("fillMissingCells does not re-request the same day-range on repeated scroll ticks", async (t) => {
   let callCount = 0;
   const dayStart = recentFillDayStart();
