@@ -79,7 +79,7 @@ export const messages: Readonly<Record<string, string>> = {
   "indicator.volumeProfile.coverageLoading": "OFP loading… {percent}%",
   "indicator.volumeProfile.dataIncomplete": "Data incomplete",
   "indicator.volumeProfile.estimated": "Estimated (OHLCV)",
-  "indicator.volumeProfile.estimatedMetricUnsupported": "Estimated (OHLCV) mode only supports Total Volume; selected metric requires exact footprint data",
+  "indicator.volumeProfile.estimatedMetricUnsupported": "Unavailable: exact footprint data required",
   "indicator.volumeProfile.estimatedShort": "Estimated",
   "indicator.volumeProfile.incompleteData": "Incomplete trade-count data",
   "indicator.volumeProfile.metric.averageTradeSize": "Average Trade Size",

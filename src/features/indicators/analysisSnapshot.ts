@@ -1,4 +1,5 @@
 import { View } from "../../core/engine/view.js";
+import type { OrderFlowProfileResult } from "../../core/analysis/orderFlowProfile.js";
 import type { FootprintSeries } from "../../core/model/footprint.js";
 import type {
   AnalysisIndicatorSeries,
@@ -265,6 +266,27 @@ function prepareForAnalysis(
   }, () => prepare(context));
 }
 
+function orderFlowProfileAvailability(
+  prepared: IndicatorPreparedData | undefined,
+): NonNullable<AnalysisIndicatorSnapshot["profile"]> | undefined {
+  const rawResult = (prepared?.meta as Record<string, unknown> | undefined)?.result;
+  if (!rawResult || typeof rawResult !== "object") return undefined;
+  const result = rawResult as OrderFlowProfileResult;
+  if (result.availability === undefined && result.capabilities === undefined) return undefined;
+  return {
+    metric: result.profileMetric,
+    side: result.profileSide,
+    ...(result.availability ? { availability: result.availability } : {}),
+    ...(result.unavailableReason ? { unavailableReason: result.unavailableReason } : {}),
+    ...(result.capabilities ? {
+      capabilities: {
+        metrics: { ...result.capabilities.metrics },
+        sides: { ...result.capabilities.sides },
+      },
+    } : {}),
+  };
+}
+
 export function buildIndicatorAnalysisSnapshot(
   instance: IndicatorInstance,
   definition: IndicatorDefinition | undefined,
@@ -311,6 +333,7 @@ export function buildIndicatorAnalysisSnapshot(
   if (definition.analysisExport) {
     try {
       const exported = definition.analysisExport(context, prepared);
+      const profile = orderFlowProfileAvailability(prepared);
       return {
         ...base,
         status: exported.status ?? prepared?.status ?? "ok",
@@ -318,6 +341,7 @@ export function buildIndicatorAnalysisSnapshot(
         series: exported.series.map((item) => ({ ...item, samples: latestSamples(item.samples, sampleLimit) })),
         summary: exported.summary ?? finiteSummary(prepared?.meta),
         warnings: exported.warnings ?? [],
+        ...(profile ? { profile } : {}),
       };
     } catch (error) {
       return { ...base, status: "error", series: [], summary: {}, warnings: [error instanceof Error ? error.message : "Indicator analysis export failed"] };
@@ -332,11 +356,13 @@ export function buildIndicatorAnalysisSnapshot(
   if (!output.length && instance.type === "options-gex-wall") output = optionsGexSeries(prepared);
   const warnings = prepared?.message ? [prepared.message] : prepared?.error ? [prepared.error] : [];
   const status = prepared?.status ?? (output.length ? "ok" : "unsupported");
+  const profile = orderFlowProfileAvailability(prepared);
   return {
     ...base,
     status: status === "ok" && !output.length ? "unsupported" : status,
     series: output,
     summary: instance.type === "options-gex-wall" ? optionsGexSummary(prepared) : finiteSummary(prepared?.meta),
     warnings: status === "ok" && !output.length ? [...warnings, "Numeric output shape is not supported"] : warnings,
+    ...(profile ? { profile } : {}),
   };
 }
