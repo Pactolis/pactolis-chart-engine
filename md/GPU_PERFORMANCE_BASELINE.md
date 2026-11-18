@@ -108,20 +108,24 @@ GitHub Actions PR runner'larında SwiftShader varyansını tolere etmek ve sahte
 - **Canlı Akış Gecikme Tavanı (#50):** `LIVE_BURST_LATENCY_P95_BUDGET_MS = 3,000 ms`
 - **Endurance Retained Heap Eğimi (#50):** `ENDURANCE_MAX_HEAP_GROWTH_BYTES_PER_MINUTE = 1,118,481 B/dk` (64 MiB/saat)
 
-## 4. CE-3 Stage 4 — gerçek GPU heatmap ölçüm aracı (#74)
+## 4. Gerçek GPU heatmap ve WebGPU flush ölçüm aracı (#74, #88)
 
 Issue #74'ün başlangıç bulguları SwiftShader üzerinde ortalama frame süresini 15.000 hücrede CPU `11,5 ms` / GPU prototipi `4,4 ms`, 40.000 hücrede CPU `39,0 ms` / GPU prototipi `8,8 ms` olarak kaydeder. Bunlar gerçek GPU kararı değildir: Canvas2D yazılım rasterı SwiftShader'da farklı maliyet gösterir ve eski ölçüm p50/p95/p99 dağılımı değildir.
 
-Tek komutlu, açıkça opt-in Playwright koşusu:
+Tek komutlu, açıkça opt-in koşu #74 Stage 4 matrisini ve #88 WebGPU/WebGL2 flush senaryolarını aynı raporda çalıştırır:
 
 ```bash
 npm run benchmark:gpu -- --output-dir /tmp/chart-engine-gpu-benchmark
 ```
 
-Koşu Chromium'u `--use-gl=angle --use-angle=default --ignore-gpu-blocklist` ile başlatır; SwiftShader'ı zorlamaz. `CHROMIUM_PATH` ortam değişkeni sistem Chromium'unu seçebilir. WebGL2 `WEBGL_debug_renderer_info` sorgusu unmasked renderer/vendor ve başlatma argümanlarıyla JSON/Markdown çıktısına yazılır. SwiftShader, llvmpipe, softpipe ve yazılım renderer kimlikleri `hardwareValid: false` yapar; bu durumda `decision` daima `NOT_EVALUATED_HARDWARE_INVALID` olur. Render ölçümü raporda görünür, fakat hardware GO/NO-GO kararı üretmez.
+Koşu Chromium'u donanım WebGL/WebGPU bayraklarıyla başlatır; SwiftShader'ı zorlamaz. `CHROMIUM_PATH` ortam değişkeni sistem Chromium'unu seçebilir. JSON ve Markdown raporları varsayılan olarak `benchmark-results/gpu-benchmark` altına, `--output-dir` ile seçilen dizine yazılır. Rapor GPU/WebGL renderer kimliğini, WebGPU adapter bilgisini, Chromium sürümünü, işletim sistemini, başlatma bayraklarını ve mümkünse sürücü bilgisini içerir. Sürücü sorgusu desteklenmiyorsa `null` yazılır.
 
 Sabit matris 15.000 ve 40.000 görünür heatmap hücresi, 1 ve 8 chart, varsayılan olarak her chart için 30 frame örneğiyle CPU cold raster, CPU hot raster ve GPU heatmap koşularından oluşur. Frame dağılımı, örneklenen chart invalidation ölçümlerinin `chart.frame.render.ms` p50/p95/p99 değerlerini raporlar; GPU'nun ilk hazırlık karesi ayrı tutulur. `performance.memory` varsa before/after heap snapshot ve farkı yazılır. WebGL'in portatif VRAM sayacı olmadığı için GPU memory değeri ayrılmış heatmap texture'ları ve instance/quad buffer boyutlarından hesaplanan tahmindir; driver overhead ve diğer sahne kaynakları dahil değildir. CPU tarafında raster cache'in ayrılmış canvas byte sayısı kullanılır; GPU opt-in sonrasında tutuluyorsa GPU toplam retained tahminine de eklenir.
 
 Ölçümden önce sabitlenen karar kuralı bilinçli olarak muhafazakârdır: GPU p95, **15k ve 40k'nın ikisinde ve 1 ile 8 chart sayılarının ikisinde** CPU hot p95'in en fazla `%80`'i olmalı; ayrıca her iki iş yükünde 8-chart GPU tahmini toplam retained byte değeri 8-chart CPU hot değerini aşmamalıdır. Heap API yoksa veya fixture/path sahipliği doğrulanamazsa karar değerlendirilmez. Bu eşikler rapor görüldükten sonra değiştirilmeyecektir.
 
-CI tam performans koşusunu çalıştırmaz veya sonuçtan gate üretmez. `check:browser` browser helper'ı derler; `gpuHeatmapBenchmark.test.mjs` yalnızca `--list` matrisi ile `--dry-run` karar kuralını doğrular. Gerçek renderer koşusu geliştirici tarafından yukarıdaki tek komutla, tercihen donanım GPU'su bulunan yerel sistemde başlatılır.
+#88 fixture'ı `harness/webgpuFlushBenchmark.mjs` içinde tanımlıdır ve hem browser spec hem script planı bunu kullanır: 1600×900 görünümde 2×2 dört chart, chart başına 600 bar × 40 footprint hücresi, `fit=60`, market başına 200 trade/s, pan/live/crosshair ve iki tekrar. Her backend için `chart.gpu.flush.ms` n, mean, p50/p95/p99 değerleri ve `chart.gpu.footprint.ms` ile `chart.surface.gpu.draw.ms` istatistikleri raporlanır. Hardware mode önce gerçek `getContext("webgpu")` canvas configure/texture/submit yolunu dener; bu yol çalışmazsa ölçüm `presentation: "offscreen-substitute"` olarak işaretlenir.
+
+#88 kararı ölçümden önce sabitlenmiştir: gerçek donanımda pan, live ve crosshair senaryolarının **üçünde de** WebGPU `chart.gpu.flush.ms` ortalaması WebGL2'nin en fazla 2 katı olursa `GO`; herhangi birinde 2 katı aşarsa `NO-GO, P3 kalır`. NO-GO gerekçesi raporda WebGPU'nun opt-in olması, #200 tek-submit koordinatörünün ölçülüp reddedilmesi ve yaklaşık 0,1 ms/chart-frame mutlak fark olarak yer alır. Yazılım renderer, software/fallback WebGPU adapter veya adapter yokluğu `HARDWARE_INVALID` döndürür; GO/NO-GO üretilmez.
+
+CI tam performans koşusunu çalıştırmaz veya sonuçtan gate üretmez. `--list` ve `--dry-run` iki suite'in senaryolarını, ortak fixture parametrelerini ve karar kurallarını ölçüm başlatmadan gösterir. Node unit testleri GO, NO-GO ve hardware-invalid değerlendirmelerini sahte ölçümlerle doğrular. Gerçek renderer koşusu sahibi tarafından yukarıdaki tek komutla, donanım GPU'su bulunan sistemde çalıştırılır ve raporlar #74/#88 issue'larına eklenir.

@@ -1,32 +1,26 @@
 import { chromium, expect, test, type Browser, type BrowserContext, type Page } from "@playwright/test";
-import { FROZEN_NOW, FUNCTIONAL_WEBGL_ARGS } from "./support/history.js";
+import { writeFile } from "node:fs/promises";
+import { FUNCTIONAL_WEBGL_ARGS } from "./support/history.js";
+import {
+  buildDenseFootprintBars,
+  buildWebGpuFlushAssessment,
+  WEBGPU_FLUSH_DECISION_RULE,
+  WEBGPU_FLUSH_FIXTURE,
+  WEBGPU_FLUSH_METRICS,
+  WEBGPU_FLUSH_SCENARIOS,
+} from "../../harness/webgpuFlushBenchmark.mjs";
 
-const VIEWPORT = { width: 1600, height: 900 };
-const MARKETS = [
-  "BINANCE_FUTURES:btcusdt",
-  "BINANCE_FUTURES:ethusdt",
-  "BINANCE_FUTURES:solusdt",
-  "BINANCE_FUTURES:avaxusdt",
-] as const;
-const BAR_COUNT = 600;
-const CELLS_PER_BAR = 40;
-const PRICE_STEP = 10;
-const INTERVAL_MS = 60_000;
-const FIT_COLUMNS = 60;
-const LIVE_RATE_PER_SECOND_PER_MARKET = 200;
-const LIVE_FRAMES_PER_REPETITION = 30;
-const PAN_FRAMES_PER_REPETITION = 35;
-const CROSSHAIR_FRAMES_PER_REPETITION = 35;
-const REPETITIONS = 2;
-const METRIC_NAMES = [
-  "chart.gpu.flush.ms",
-  "chart.gpu.footprint.ms",
-  "chart.surface.gpu.draw.ms",
-  "chart.frame.render.ms",
-] as const;
+const { viewport: VIEWPORT, markets: MARKETS, barCount: BAR_COUNT, cellsPerBar: CELLS_PER_BAR,
+  priceStep: PRICE_STEP, intervalMs: INTERVAL_MS, fitColumns: FIT_COLUMNS,
+  liveRatePerSecondPerMarket: LIVE_RATE_PER_SECOND_PER_MARKET,
+  liveFramesPerRepetition: LIVE_FRAMES_PER_REPETITION,
+  panFramesPerRepetition: PAN_FRAMES_PER_REPETITION,
+  crosshairFramesPerRepetition: CROSSHAIR_FRAMES_PER_REPETITION,
+  repetitions: REPETITIONS, frozenNow: FROZEN_NOW } = WEBGPU_FLUSH_FIXTURE;
+const METRIC_NAMES = WEBGPU_FLUSH_METRICS;
 
 type BackendKind = "webgl2" | "webgpu";
-type ScenarioKind = "pan" | "live" | "crosshair";
+type ScenarioKind = (typeof WEBGPU_FLUSH_SCENARIOS)[number];
 type MetricName = (typeof METRIC_NAMES)[number];
 
 interface MetricStats {
@@ -68,7 +62,22 @@ interface BackendMeasurement {
   >;
 }
 
+const HARDWARE_MODE = process.env.CHART_GPU_BENCHMARK_MODE === "hardware";
+
 function launchArgsFor(kind: BackendKind, variant: "no-vulkan-compositor" | "vulkan-compositor" = "no-vulkan-compositor"): string[] {
+  if (HARDWARE_MODE) {
+    const base = [
+      "--use-gl=angle",
+      "--use-angle=default",
+      "--ignore-gpu-blocklist",
+      "--enable-webgl",
+      "--enable-unsafe-webgpu",
+      "--enable-precise-memory-info",
+    ];
+    return kind === "webgpu" && variant === "vulkan-compositor"
+      ? [...base, "--enable-features=Vulkan"]
+      : base;
+  }
   if (kind === "webgl2") {
     return [...FUNCTIONAL_WEBGL_ARGS];
   }
@@ -94,18 +103,18 @@ function summarize(values: readonly number[]): MetricStats {
   if (valid.length === 0) {
     return { count: 0, totalMs: 0, meanMs: 0, minMs: 0, maxMs: 0, p50Ms: 0, p95Ms: 0, p99Ms: 0 };
   }
-  const round3 = (value: number) => Math.round(value * 1_000) / 1_000;
+  const round6 = (value: number) => Math.round(value * 1_000_000) / 1_000_000;
   const total = valid.reduce((sum, value) => sum + value, 0);
   const at = (quantile: number) => valid[Math.min(valid.length - 1, Math.max(0, Math.ceil(quantile * valid.length) - 1))];
   return {
     count: valid.length,
-    totalMs: round3(total),
-    meanMs: round3(total / valid.length),
-    minMs: round3(valid[0]),
-    maxMs: round3(valid[valid.length - 1]),
-    p50Ms: round3(at(0.5)),
-    p95Ms: round3(at(0.95)),
-    p99Ms: round3(at(0.99)),
+    totalMs: round6(total),
+    meanMs: round6(total / valid.length),
+    minMs: round6(valid[0]),
+    maxMs: round6(valid[valid.length - 1]),
+    p50Ms: round6(at(0.5)),
+    p95Ms: round6(at(0.95)),
+    p99Ms: round6(at(0.99)),
   };
 }
 
@@ -122,45 +131,6 @@ function combineBuckets(buckets: Array<Record<string, number[]> | undefined>): R
       summarize(buckets.flatMap((bucket) => bucket?.[metric] ?? [])),
     ]),
   ) as Record<MetricName, MetricStats>;
-}
-
-function buildDenseFootprintBars(anchorTo: number) {
-  const bucketEnd = Math.floor(anchorTo / INTERVAL_MS) * INTERVAL_MS;
-  const firstTime = bucketEnd - BAR_COUNT * INTERVAL_MS;
-  const basePrice = 60_000;
-  return Array.from({ length: BAR_COUNT }, (_, barIndex) => {
-    const time = firstTime + barIndex * INTERVAL_MS;
-    const low = basePrice;
-    const high = basePrice + (CELLS_PER_BAR - 1) * PRICE_STEP;
-    const open = basePrice + (10 + (barIndex % 6)) * PRICE_STEP;
-    const close = basePrice + (28 - (barIndex % 6)) * PRICE_STEP;
-    let totalBuy = 0;
-    let totalSell = 0;
-    const cells: Array<[number, number, number, number, number]> = [];
-    for (let cellIndex = 0; cellIndex < CELLS_PER_BAR; cellIndex++) {
-      const priceBin = low + cellIndex * PRICE_STEP;
-      const buyVol = Number((1.2 + ((barIndex + cellIndex) % 7) * 0.45).toFixed(2));
-      const sellVol = Number((1.1 + ((barIndex * 3 + cellIndex) % 7) * 0.4).toFixed(2));
-      totalBuy += buyVol;
-      totalSell += sellVol;
-      cells.push([priceBin, buyVol, sellVol, 0, 0]);
-    }
-    return {
-      t: time,
-      o: open,
-      h: high,
-      l: low,
-      c: close,
-      v: Number((totalBuy + totalSell).toFixed(2)),
-      d: Number((totalBuy - totalSell).toFixed(2)),
-      n: CELLS_PER_BAR * 2,
-      cells,
-      lb: 0,
-      ls: 0,
-      completeness: "complete",
-      updatedAt: FROZEN_NOW,
-    };
-  });
 }
 
 async function installCommonRoutes(page: Page): Promise<void> {
@@ -219,10 +189,8 @@ async function installCommonRoutes(page: Page): Promise<void> {
 }
 
 async function installWebGpuOffscreenPresentInitScript(page: Page): Promise<void> {
-  // Same headless SwiftShader workaround as issue #88/#87: canvas presentation
-  // loses the device in software-only Chromium, so getContext("webgpu") returns a
-  // device-backed offscreen texture of the same dimensions while keeping all
-  // shaders, pipelines, uniform/instance writeBuffers, render passes and submits real.
+  // Used only when a real WebGPU canvas context cannot present. All shaders,
+  // pipelines, writes, render passes and submits still use the probed adapter.
   await page.addInitScript(() => {
     const origGetContext = HTMLCanvasElement.prototype.getContext;
     const proxyContexts = new WeakMap<HTMLCanvasElement, any>();
@@ -289,14 +257,28 @@ async function probeWebGpuCapability(baseURL: string, variant: "no-vulkan-compos
         new Promise<boolean>((resolve) => requestAnimationFrame(() => resolve(true))),
         new Promise<boolean>((resolve) => setTimeout(() => resolve(false), 3_000)),
       ]);
+      const webglCanvas = document.createElement("canvas");
+      const gl = webglCanvas.getContext("webgl2");
+      const debugInfo = gl?.getExtension("WEBGL_debug_renderer_info");
+      const webglInfo = gl
+        ? {
+            vendor: gl.getParameter(gl.VENDOR) as string,
+            renderer: gl.getParameter(gl.RENDERER) as string,
+            unmaskedVendor: debugInfo ? gl.getParameter(debugInfo.UNMASKED_VENDOR_WEBGL) as string : null,
+            unmaskedRenderer: debugInfo ? gl.getParameter(debugInfo.UNMASKED_RENDERER_WEBGL) as string : null,
+            debugExtensionAvailable: Boolean(debugInfo),
+          }
+        : null;
+      const webglIdentity = `${webglInfo?.unmaskedVendor ?? webglInfo?.vendor ?? ""} ${webglInfo?.unmaskedRenderer ?? webglInfo?.renderer ?? ""}`;
+      const softwareRenderer = /swiftshader|llvmpipe|softpipe|software raster|basic render|warp device/i.test(webglIdentity);
       const gpu = (navigator as any).gpu;
       if (!gpu) {
-        return { ok: false, rafWorking: rafCheck, reason: "navigator.gpu is undefined", adapterInfo: null };
+        return { ok: false, rafWorking: rafCheck, reason: "navigator.gpu is undefined", adapterInfo: null, webglInfo, softwareRenderer, canvasPresentation: { supported: false, error: "navigator.gpu is undefined" } };
       }
       try {
         const adapter = await gpu.requestAdapter();
         if (!adapter) {
-          return { ok: false, rafWorking: rafCheck, reason: "navigator.gpu.requestAdapter() returned null", adapterInfo: null };
+          return { ok: false, rafWorking: rafCheck, reason: "navigator.gpu.requestAdapter() returned null", adapterInfo: null, webglInfo, softwareRenderer, canvasPresentation: { supported: false, error: "adapter unavailable" } };
         }
         let adapterInfo: any = adapter.info ?? null;
         if (!adapterInfo && typeof adapter.requestAdapterInfo === "function") {
@@ -308,13 +290,35 @@ async function probeWebGpuCapability(baseURL: string, variant: "no-vulkan-compos
         }
         const device = await adapter.requestDevice();
         if (!device) {
-          return { ok: false, rafWorking: rafCheck, reason: "adapter.requestDevice() returned null", adapterInfo };
+          return { ok: false, rafWorking: rafCheck, reason: "adapter.requestDevice() returned null", adapterInfo, webglInfo, softwareRenderer, canvasPresentation: { supported: false, error: "device unavailable" } };
+        }
+        let canvasPresentation: { supported: boolean; error: string | null } = { supported: false, error: null };
+        try {
+          const canvas = document.createElement("canvas");
+          const context = canvas.getContext("webgpu") as any;
+          if (!context) throw new Error("canvas.getContext('webgpu') returned null");
+          context.configure({ device, format: gpu.getPreferredCanvasFormat(), usage: (globalThis as any).GPUTextureUsage?.RENDER_ATTACHMENT ?? 0x10 });
+          const texture = context.getCurrentTexture();
+          const encoder = device.createCommandEncoder();
+          const pass = encoder.beginRenderPass({
+            colorAttachments: [{ view: texture.createView(), clearValue: { r: 0, g: 0, b: 0, a: 1 }, loadOp: "clear", storeOp: "store" }],
+          });
+          pass.end();
+          device.queue.submit([encoder.finish()]);
+          await device.queue.onSubmittedWorkDone();
+          context.unconfigure?.();
+          canvasPresentation = { supported: true, error: null };
+        } catch (error) {
+          canvasPresentation = { supported: false, error: String(error) };
         }
         device.destroy?.();
         return {
           ok: rafCheck,
           rafWorking: rafCheck,
           reason: rafCheck ? null : "requestAnimationFrame stalled",
+          webglInfo,
+          softwareRenderer,
+          canvasPresentation,
           adapterInfo: adapterInfo
             ? {
                 vendor: adapterInfo.vendor ?? null,
@@ -325,10 +329,10 @@ async function probeWebGpuCapability(baseURL: string, variant: "no-vulkan-compos
             : { isFallbackAdapter: adapter.isFallbackAdapter ?? null },
         };
       } catch (error) {
-        return { ok: false, rafWorking: rafCheck, reason: String(error), adapterInfo: null };
+        return { ok: false, rafWorking: rafCheck, reason: String(error), adapterInfo: null, webglInfo, softwareRenderer, canvasPresentation: { supported: false, error: String(error) } };
       }
     });
-    return { variant, args, ...result };
+    return { variant, args, browserVersion: browser.version(), ...result };
   } finally {
     await browser.close();
   }
@@ -338,6 +342,7 @@ async function measureBackend(
   baseURL: string,
   backend: BackendKind,
   args: string[],
+  presentationMode: "real" | "offscreen-substitute" = "offscreen-substitute",
 ): Promise<BackendMeasurement> {
   const browser = await launchBackendBrowser(args);
   let context: BrowserContext | null = null;
@@ -345,7 +350,7 @@ async function measureBackend(
     context = await browser.newContext({ baseURL, viewport: VIEWPORT });
     const page = await context.newPage();
     await installCommonRoutes(page);
-    if (backend === "webgpu") {
+    if (backend === "webgpu" && presentationMode === "offscreen-substitute") {
       await installWebGpuOffscreenPresentInitScript(page);
     }
 
@@ -726,7 +731,7 @@ async function measureBackend(
 
     return {
       backend,
-      presentation: backend === "webgpu" ? "offscreen device texture (swapchain bypassed per #87/#88)" : "native canvas",
+      presentation: backend === "webgpu" ? presentationMode : "real",
       active: result.diag.active,
       requested: result.diag.requested,
       panelBackends: result.panelBackends,
@@ -747,23 +752,125 @@ async function measureBackend(
 test("four-chart WebGPU vs WebGL2 chart.gpu.flush.ms comparison across pan, live and crosshair", async ({ baseURL }, testInfo) => {
   test.setTimeout(240_000);
   const resolvedBaseURL = baseURL ?? testInfo.project.use.baseURL ?? "http://127.0.0.1:4173";
-
-  let webgpuProbe = await probeWebGpuCapability(resolvedBaseURL, "no-vulkan-compositor");
-  if (!webgpuProbe.ok) {
-    console.log("WEBGPU_PROBE_PRIMARY", JSON.stringify(webgpuProbe));
-    webgpuProbe = await probeWebGpuCapability(resolvedBaseURL, "vulkan-compositor");
+  const evidencePath = process.env.CHART_GPU_BENCHMARK_FLUSH_REPORT_PATH;
+  const primaryProbe = await probeWebGpuCapability(resolvedBaseURL, "no-vulkan-compositor");
+  let webgpuProbe = primaryProbe;
+  if (!primaryProbe.ok || (HARDWARE_MODE && !primaryProbe.canvasPresentation?.supported)) {
+    const fallbackProbe = await probeWebGpuCapability(resolvedBaseURL, "vulkan-compositor");
+    if (!primaryProbe.ok || fallbackProbe.canvasPresentation?.supported) webgpuProbe = fallbackProbe;
   }
   console.log("WEBGPU_PROBE_SELECTED", JSON.stringify(webgpuProbe));
+
+  const hardwareInvalidReasons: string[] = [];
+  if (!webgpuProbe.ok) hardwareInvalidReasons.push(`webgpu-adapter-unavailable:${webgpuProbe.reason ?? "unknown"}`);
+  if (!webgpuProbe.webglInfo?.debugExtensionAvailable
+    || !webgpuProbe.webglInfo?.unmaskedRenderer
+    || !webgpuProbe.webglInfo?.unmaskedVendor) {
+    hardwareInvalidReasons.push("webgl-renderer-identity-unavailable");
+  }
+  if (webgpuProbe.softwareRenderer || webgpuProbe.adapterInfo?.isFallbackAdapter === true) {
+    hardwareInvalidReasons.push("software-renderer");
+  }
+  const hardwareValid = HARDWARE_MODE && hardwareInvalidReasons.length === 0;
+  const presentationMode = HARDWARE_MODE && webgpuProbe.canvasPresentation?.supported
+    ? "real"
+    : "offscreen-substitute";
+
+  const environment = {
+    browserVersion: webgpuProbe.browserVersion ?? null,
+    operatingSystem: `${process.platform} ${process.arch}`,
+    nodeVersion: process.version,
+    launchArgs: webgpuProbe.args,
+    webglRenderer: webgpuProbe.webglInfo ?? null,
+    webgpuAdapter: webgpuProbe.adapterInfo ?? null,
+    canvasPresentationProbe: webgpuProbe.canvasPresentation ?? null,
+  };
+  const fixture = {
+    ...WEBGPU_FLUSH_FIXTURE,
+    charts: MARKETS.length,
+    layout: "2x2",
+    panelSize: "800x450",
+    viewport: `${VIEWPORT.width}x${VIEWPORT.height}`,
+    avgQuadsPerFlushWebgl2: null,
+  };
+
+  const writeEvidence = async (report: Record<string, unknown>) => {
+    console.log("WEBGPU_FLUSH_COMPARISON_EVIDENCE", JSON.stringify(report));
+    await testInfo.attach("webgpu-flush-comparison-evidence.json", {
+      body: JSON.stringify(report, null, 2),
+      contentType: "application/json",
+    });
+    if (evidencePath) await writeFile(evidencePath, `${JSON.stringify(report, null, 2)}\n`);
+  };
+
+  if (HARDWARE_MODE && !hardwareValid) {
+    const assessment = buildWebGpuFlushAssessment({ hardwareValid: false });
+    await writeEvidence({
+      schemaVersion: 1,
+      issue: "#88",
+      hardwareValid: false,
+      hardwareInvalidReasons,
+      decisionRule: WEBGPU_FLUSH_DECISION_RULE,
+      ...assessment,
+      presentation: presentationMode,
+      fixture,
+      environment,
+      webgpuProbe,
+      webgl2: null,
+      webgpu: null,
+    });
+    return;
+  }
 
   if (!webgpuProbe.ok) {
     test.skip(true, `BLOCKED: WebGPU adapter/device unavailable in headless runtime (${webgpuProbe.reason}; never counted green)`);
   }
 
-  const webgl2 = await measureBackend(resolvedBaseURL, "webgl2", launchArgsFor("webgl2"));
-  console.log("WEBGPU_BENCH_WEBGL2_DONE", JSON.stringify({ timingsMs: webgl2.timingsMs, avgQuadsPerFlush: webgl2.avgQuadsPerFlush }));
+  let webgl2: BackendMeasurement | null = null;
+  let webgpu: BackendMeasurement | null = null;
+  try {
+    webgl2 = await measureBackend(resolvedBaseURL, "webgl2", launchArgsFor("webgl2"), "real");
+    console.log("WEBGPU_BENCH_WEBGL2_DONE", JSON.stringify({ timingsMs: webgl2.timingsMs, avgQuadsPerFlush: webgl2.avgQuadsPerFlush }));
 
-  const webgpu = await measureBackend(resolvedBaseURL, "webgpu", webgpuProbe.args);
-  console.log("WEBGPU_BENCH_WEBGPU_DONE", JSON.stringify({ timingsMs: webgpu.timingsMs, active: webgpu.active, panelBackends: webgpu.panelBackends }));
+    webgpu = await measureBackend(resolvedBaseURL, "webgpu", webgpuProbe.args, presentationMode);
+    console.log("WEBGPU_BENCH_WEBGPU_DONE", JSON.stringify({ timingsMs: webgpu.timingsMs, active: webgpu.active, panelBackends: webgpu.panelBackends }));
+  } catch (error) {
+    const measurementError = error instanceof Error ? error.stack ?? error.message : String(error);
+    const assessment = buildWebGpuFlushAssessment({ hardwareValid, webgl2, webgpu, measurementError });
+    await writeEvidence({
+      schemaVersion: 1,
+      issue: "#88",
+      hardwareValid,
+      hardwareInvalidReasons,
+      decisionRule: WEBGPU_FLUSH_DECISION_RULE,
+      ...assessment,
+      presentation: presentationMode,
+      fixture,
+      environment,
+      webgpuProbe,
+      webgl2,
+      webgpu,
+    });
+    throw error;
+  }
+
+  const assessment = buildWebGpuFlushAssessment({ hardwareValid, webgl2, webgpu });
+  const report = {
+    schemaVersion: 1,
+    issue: "#88",
+    hardwareValid,
+    hardwareInvalidReasons,
+    decisionRule: WEBGPU_FLUSH_DECISION_RULE,
+    ...assessment,
+    presentation: presentationMode,
+    fixture: { ...fixture, avgQuadsPerFlushWebgl2: webgl2.avgQuadsPerFlush },
+    environment,
+    webgpuProbe,
+    webgl2,
+    webgpu,
+  };
+
+  await writeEvidence(report);
 
   expect(webgl2.active).toBe("webgl2");
   expect(webgl2.panelBackends).toEqual(["webgl2", "webgl2", "webgl2", "webgl2"]);
@@ -775,54 +882,12 @@ test("four-chart WebGPU vs WebGL2 chart.gpu.flush.ms comparison across pan, live
   expect(webgpu.fallbacks).toEqual([]);
   expect(webgpu.crosshairInteractionOnlyGpuFlushCount).toBe(0);
 
-  const comparison = (["pan", "live", "crosshair"] as const).map((scenario) => {
-    const glFlush = webgl2.scenarios[scenario].combined["chart.gpu.flush.ms"];
-    const gpuFlush = webgpu.scenarios[scenario].combined["chart.gpu.flush.ms"];
-    const glFootprint = webgl2.scenarios[scenario].combined["chart.gpu.footprint.ms"];
-    const gpuFootprint = webgpu.scenarios[scenario].combined["chart.gpu.footprint.ms"];
-    const glDraw = webgl2.scenarios[scenario].combined["chart.surface.gpu.draw.ms"];
-    const gpuDraw = webgpu.scenarios[scenario].combined["chart.surface.gpu.draw.ms"];
-
+  for (const scenario of WEBGPU_FLUSH_SCENARIOS) {
     for (const rep of webgl2.scenarios[scenario].repetitions) {
       expect(rep.metrics["chart.gpu.flush.ms"].count, `webgl2 ${scenario} rep ${rep.repetition} count`).toBeGreaterThan(0);
     }
     for (const rep of webgpu.scenarios[scenario].repetitions) {
       expect(rep.metrics["chart.gpu.flush.ms"].count, `webgpu ${scenario} rep ${rep.repetition} count`).toBeGreaterThan(0);
     }
-
-    const round3 = (v: number) => Math.round(v * 1_000) / 1_000;
-    const flushMeanRatio = glFlush.meanMs > 0 ? round3(gpuFlush.meanMs / glFlush.meanMs) : null;
-    return {
-      scenario,
-      webgl2: { flush: glFlush, footprint: glFootprint, surfaceGpuDraw: glDraw },
-      webgpu: { flush: gpuFlush, footprint: gpuFootprint, surfaceGpuDraw: gpuDraw },
-      flushMeanRatio,
-      within2xBudget: flushMeanRatio !== null ? flushMeanRatio <= 2 : null,
-    };
-  });
-
-  const report = {
-    fixture: {
-      charts: MARKETS.length,
-      layout: "2x2",
-      panelSize: "800x450",
-      viewport: `${VIEWPORT.width}x${VIEWPORT.height}`,
-      barsPerChart: BAR_COUNT,
-      cellsPerBar: CELLS_PER_BAR,
-      fitColumns: FIT_COLUMNS,
-      liveRatePerMarketPerSecond: LIVE_RATE_PER_SECOND_PER_MARKET,
-      repetitions: REPETITIONS,
-      avgQuadsPerFlushWebgl2: webgl2.avgQuadsPerFlush,
-    },
-    webgpuProbe,
-    webgl2,
-    webgpu,
-    comparison,
-  };
-
-  console.log("WEBGPU_FLUSH_COMPARISON_EVIDENCE", JSON.stringify(report));
-  await testInfo.attach("webgpu-flush-comparison-evidence.json", {
-    body: JSON.stringify(report, null, 2),
-    contentType: "application/json",
-  });
+  }
 });

@@ -14,7 +14,7 @@ function run(...args) {
 
 test("GPU heatmap benchmark list is the complete fixed workload matrix", () => {
   const lines = run("--list").split("\n");
-  assert.equal(lines.length, 12);
+  assert.equal(lines.length, 15);
   for (const cells of ["15000", "40000"]) {
     for (const charts of ["1", "8"]) {
       for (const phase of ["cpu-cold", "cpu-hot", "gpu"]) {
@@ -22,14 +22,23 @@ test("GPU heatmap benchmark list is the complete fixed workload matrix", () => {
       }
     }
   }
+  for (const scenario of ["pan", "live", "crosshair"]) {
+    assert.ok(lines.some((line) => line.startsWith(`#88 ${scenario} | 4 charts (1600x900) | 600 bars × 40 cells | WebGL2 + WebGPU | mean ratio ≤ 2`)));
+  }
 });
 
 test("GPU heatmap benchmark dry run pins the pre-measurement decision rule", () => {
   const plan = JSON.parse(run("--dry-run"));
   assert.equal(plan.measurementEnabled, false);
-  assert.equal(plan.scenarioCount, 12);
-  assert.equal(plan.decisionRule.requiredP95Ratio, 0.8);
-  assert.match(plan.decisionRule.memoryRule, /8-chart GPU estimated retained bytes must not exceed 8-chart CPU-hot/);
+  assert.equal(plan.scenarioCount, 15);
+  assert.equal(plan.suites.issue74.scenarioCount, 12);
+  assert.equal(plan.suites.issue74.decisionRule.requiredP95Ratio, 0.8);
+  assert.match(plan.suites.issue74.decisionRule.memoryRule, /8-chart GPU estimated retained bytes must not exceed 8-chart CPU-hot/);
+  assert.equal(plan.suites.issue88.scenarioCount, 3);
+  assert.equal(plan.suites.issue88.fixture.barCount, 600);
+  assert.equal(plan.suites.issue88.fixture.cellsPerBar, 40);
+  assert.deepEqual(plan.suites.issue88.decisionRule.scenarios, ["pan", "live", "crosshair"]);
+  assert.equal(plan.suites.issue88.decisionRule.maximumRatio, 2);
   assert.ok(plan.launchArgs.includes("--use-angle=default"));
   assert.ok(!plan.launchArgs.includes("--use-angle=swiftshader-webgl"));
 });
