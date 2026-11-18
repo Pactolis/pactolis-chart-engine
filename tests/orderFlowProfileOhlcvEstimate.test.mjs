@@ -371,8 +371,12 @@ test("estimated profiles expose unavailable exact-only choices and fail closed",
     assert.equal(result.provenance, "estimated");
     assert.equal(result.availability, "unavailable");
     assert.equal(result.unavailableReason, "exact-footprint-required");
-    assert.equal(result.capabilities.metrics[profileMetric], false);
-    if (profileMetric === "volume") assert.equal(result.capabilities.sides[profileSide], false);
+    if (profileMetric === "volume") {
+      assert.equal(result.capabilities.metrics.volume, true);
+      assert.equal(result.capabilities.sides[profileSide], false);
+    } else {
+      assert.equal(result.capabilities.metrics[profileMetric], false);
+    }
     assert.deepEqual(result.levels, []);
     assert.equal(result.summaryValue, null);
     assert.deepEqual([result.poc, result.vah, result.val], [null, null, null]);
