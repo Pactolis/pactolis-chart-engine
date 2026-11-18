@@ -1531,6 +1531,39 @@ test("fillMissingCells does not request a range with no unsynced bars", async (t
   pipeline.dispose();
 });
 
+test("fillMissingCells checks a synchronized 5,000-bar 12h range in one series pass", (t) => {
+  const source = useFakeChartDataSource(t);
+  const svc = makeServices();
+  const intervalMs = 12 * 60 * 60 * 1000;
+  const todayStart = Math.floor(Date.now() / FILL_DAY_MS) * FILL_DAY_MS;
+  const start = todayStart - 2_500 * FILL_DAY_MS;
+  const bars = Array.from({ length: 5_000 }, (_, index) => historyBar(start + index * intervalMs, {
+    open: 1, high: 2, low: 1, close: 2, volume: 10, count: 1,
+    cells: [wideCell(1)],
+  }));
+  const pipeline = new ChartDataPipeline({
+    market: "BINANCE_FUTURES:btcusdt",
+    intervalMs,
+    priceStep: 10,
+    services: svc,
+  });
+  pipeline.series.loadBars(bars);
+
+  let atCalls = 0;
+  const originalAt = pipeline.series.at.bind(pipeline.series);
+  pipeline.series.at = (index) => {
+    atCalls++;
+    return originalAt(index);
+  };
+
+  pipeline.fillMissingCells(start, todayStart);
+
+  const days = (todayStart - start) / FILL_DAY_MS;
+  assert.ok(atCalls <= bars.length + days, `expected at most bars + days series.at calls, got ${atCalls}`);
+  assert.equal(source.queriesOf("startRefresh").length, 0, "fully synchronized days do not request a fill");
+  pipeline.dispose();
+});
+
 test("fillMissingCells does not re-request the same day-range on repeated scroll ticks", async (t) => {
   let callCount = 0;
   const dayStart = recentFillDayStart();
