@@ -1,5 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
+import { ChartCaptureCoordinator } from "../dist/features/chart/ChartCaptureCoordinator.js";
+import { configureChartHost } from "../dist/features/chart/chartHost.js";
 
 import {
   ChartCaptureError,
@@ -137,6 +139,60 @@ test("ChartCaptureCoordinator wraps native capture with pre/post state token val
   assert.match(coordinatorSource, /await this\.host\.session\.captureCompositePng\(\)/);
   assert.match(coordinatorSource, /captureStateMatches\(token, post\)/);
   assert.match(coordinatorSource, /STATE_SUPERSEDED/);
+});
+
+test("redundant analysis paints do not emit readiness or supersede native capture", async () => {
+  configureChartHost({ setDataDegraded() {} });
+  const market = "BINANCE_FUTURES:btcusdt";
+  let analysisRevision = 7;
+  let resolveFrame;
+  const coordinator = new ChartCaptureCoordinator({
+    pipeline: { series: { config: { priceStep: 1 } } },
+    session: {
+      captureCompositePng: () => new Promise((resolve) => { resolveFrame = resolve; }),
+    },
+    svc: {
+      getAnalysisRevisionSnapshot(target) {
+        return {
+          market: target,
+          revision: analysisRevision,
+          canonical: {
+            status: "complete",
+            market: target,
+            runKey: `${target}|1`,
+            generation: 1,
+            revision: analysisRevision,
+            failedPeriods: [],
+          },
+        };
+      },
+    },
+    isDisposed: () => false,
+    getMarket: () => market,
+    getTimeframe: () => "1m",
+  }, market, "1m");
+  const readiness = [];
+  const unsubscribe = coordinator.subscribe((snapshot) => readiness.push(snapshot));
+  const historyGeneration = coordinator.beginHistoryLoad(market, "1m");
+  coordinator.settleHistoryLoad(historyGeneration, market, "1m", true);
+  assert.equal(coordinator.getReadiness().ready, true);
+
+  const beforePaints = readiness.length;
+  const capture = coordinator.captureNativePng();
+  for (let index = 0; index < 100; index++) coordinator.noteAnalysisPaint(market, analysisRevision);
+  assert.equal(readiness.length, beforePaints, "same market and revision add no readiness notifications");
+  resolveFrame({ blob: new Blob([new Uint8Array([1, 2, 3])], { type: "image/png" }), bytes: 3 });
+  await assert.doesNotReject(capture);
+
+  analysisRevision++;
+  coordinator.noteAnalysisPaint(market, analysisRevision);
+  const afterRevisionChange = readiness.length;
+  assert.equal(afterRevisionChange, beforePaints + 1);
+  for (let index = 0; index < 100; index++) coordinator.noteAnalysisPaint(market, analysisRevision);
+  assert.equal(readiness.length, afterRevisionChange, "the changed revision emits once");
+
+  unsubscribe();
+  coordinator.dispose();
 });
 
 test("production WebGL2 contexts explicitly disable preserveDrawingBuffer", async () => {

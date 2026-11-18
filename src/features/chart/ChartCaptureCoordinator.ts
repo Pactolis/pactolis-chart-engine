@@ -95,8 +95,11 @@ export class ChartCaptureCoordinator {
 
   noteAnalysisPaint(market: string, revision: number): void {
     if (market !== this.host.getMarket()) return;
+    const marketChanged = this.renderedAnalysisMarket !== market;
+    const nextRevision = marketChanged ? revision : Math.max(this.renderedAnalysisRevision, revision);
+    if (!marketChanged && nextRevision === this.renderedAnalysisRevision) return;
     this.renderedAnalysisMarket = market;
-    this.renderedAnalysisRevision = Math.max(this.renderedAnalysisRevision, revision);
+    this.renderedAnalysisRevision = nextRevision;
     this.emit();
   }
 

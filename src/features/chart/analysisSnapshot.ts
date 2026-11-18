@@ -265,6 +265,19 @@ function sizeOf(value: unknown): number {
   return new TextEncoder().encode(JSON.stringify(value)).byteLength;
 }
 
+// Conservative upper bound: ten numeric fields (at most 24 JSON bytes each), keys, and separators.
+const ESTIMATED_FOOTPRINT_BYTES_PER_CELL = 402;
+
+function snapshotFootprintArrayByteLength(cells: readonly AnalysisFootprintCellSnapshot[]): number {
+  // Footprint snapshots contain only numeric values and ASCII property names, so string length is byte length.
+  return JSON.stringify(cells)?.length ?? 2;
+}
+
+function footprintPropertyByteLength(candle: object, footprintBytes: number): number {
+  // "footprint": is 12 ASCII bytes; JSON adds one comma if the candle has another key.
+  return footprintBytes + 12 + (Object.keys(candle).length > 1 ? 1 : 0);
+}
+
 function shrinkProfileBins(snapshot: ChartAnalysisSnapshot, minimum: number, factor: number): boolean {
   let changed = false;
   for (const drawing of snapshot.drawings) {
@@ -299,11 +312,15 @@ function shrinkProfileBins(snapshot: ChartAnalysisSnapshot, minimum: number, fac
   return changed;
 }
 
-function dropOldestFootprintDetail(snapshot: ChartAnalysisSnapshot): boolean {
-  const candle = snapshot.candles.find((item) => item.footprint?.length);
-  if (!candle?.footprint?.length) return false;
-  delete candle.footprint;
-  return true;
+function dropOldestFootprintDetails(snapshot: ChartAnalysisSnapshot, bytesNeeded: number): boolean {
+  let bytesRemoved = 0;
+  for (const candle of snapshot.candles) {
+    if (!candle.footprint?.length) continue;
+    bytesRemoved += footprintPropertyByteLength(candle, snapshotFootprintArrayByteLength(candle.footprint));
+    delete candle.footprint;
+    if (bytesRemoved >= bytesNeeded) break;
+  }
+  return bytesRemoved > 0;
 }
 
 function shrinkDrawingSeries(snapshot: ChartAnalysisSnapshot, minimum: number, factor: number): boolean {
@@ -345,10 +362,16 @@ function shrinkObjects(snapshot: ChartAnalysisSnapshot, minimum: number, factor:
 export function fitAnalysisSnapshotToBytes(snapshot: ChartAnalysisSnapshot, maxBytes: number): void {
   let bytes = sizeOf(snapshot);
   if (bytes <= maxBytes) return;
-  snapshot.warnings.push(`Analysis input exceeded ${maxBytes} bytes; oldest rich detail was reduced first`);
+  const richDetailWarning = `Analysis input exceeded ${maxBytes} bytes; oldest rich detail was reduced first`;
+  let warningBytes = 0;
+  if (!snapshot.warnings.includes(richDetailWarning)) {
+    warningBytes = JSON.stringify(richDetailWarning).length + (snapshot.warnings.length > 0 ? 1 : 0);
+    snapshot.warnings.push(richDetailWarning);
+    bytes += warningBytes;
+  }
 
   while (bytes > maxBytes && shrinkProfileBins(snapshot, 48, 0.75)) bytes = sizeOf(snapshot);
-  while (bytes > maxBytes && dropOldestFootprintDetail(snapshot)) bytes = sizeOf(snapshot);
+  if (bytes > maxBytes && dropOldestFootprintDetails(snapshot, bytes - maxBytes)) bytes = sizeOf(snapshot);
   while (bytes > maxBytes && shrinkDrawingSeries(snapshot, 32, 0.75)) bytes = sizeOf(snapshot);
   while (bytes > maxBytes && shrinkIndicatorSamples(snapshot, 64, 0.75)) bytes = sizeOf(snapshot);
 
@@ -486,13 +509,17 @@ export function buildChartAnalysisSnapshot(args: {
 
   const warnings: string[] = [];
   let detailedFootprintBars = 0;
+  const footprintCandidates: { bar: FootprintBar; candleIndex: number }[] = [];
   const candles = selectedBars.map((bar, index) => {
     const barsFromEnd = selectedBars.length - index;
     const footprintMeasured = bar.cells.size > 0;
     const includeOrderFlowSummary = footprintMeasured && barsFromEnd <= AI_ANALYSIS_POLICY.orderFlowSummaryBars;
     const includeDeltaBySize = barsFromEnd <= AI_ANALYSIS_POLICY.deltaBySizeBars;
     const includeFootprint = footprintMeasured && barsFromEnd <= AI_ANALYSIS_POLICY.fullFootprintBars;
-    if (includeFootprint) detailedFootprintBars++;
+    if (includeFootprint) {
+      detailedFootprintBars++;
+      footprintCandidates.push({ bar, candleIndex: index });
+    }
     return {
       time: bar.startTime,
       endTime: bucketEnd(bar.startTime, args.intervalMs),
@@ -506,7 +533,6 @@ export function buildChartAnalysisSnapshot(args: {
       ...(includeDeltaBySize && Array.isArray(bar.deltaBySize) && bar.deltaBySize.every(Number.isFinite) ? { deltaBySize: [...bar.deltaBySize] } : {}),
       ...(includeOrderFlowSummary && typeof bar.liquidationBuyVol === "number" && Number.isFinite(bar.liquidationBuyVol) ? { liquidationBuyVolume: bar.liquidationBuyVol } : {}),
       ...(includeOrderFlowSummary && typeof bar.liquidationSellVol === "number" && Number.isFinite(bar.liquidationSellVol) ? { liquidationSellVolume: bar.liquidationSellVol } : {}),
-      ...(includeFootprint ? { footprint: fullFootprintCells(bar) } : {}),
     };
   });
   const measuredFootprintBars = selectedBars.filter((bar) => bar.cells.size > 0).length;
@@ -549,6 +575,70 @@ export function buildChartAnalysisSnapshot(args: {
     ...(args.tpoProfiles?.length ? { tpoProfiles: args.tpoProfiles.map((profile) => ({ ...profile, sessionStarts: [...profile.sessionStarts] })) } : {}),
     warnings,
   };
-  fitAnalysisSnapshotToBytes(snapshot, args.options?.maxBytes ?? AI_ANALYSIS_POLICY.snapshotTargetBytes);
+  const maxBytes = args.options?.maxBytes ?? AI_ANALYSIS_POLICY.snapshotTargetBytes;
+  const hasShrinkableProfileBins = snapshot.drawings.some((drawing) => (drawing.profile?.bins.length ?? 0) > 48);
+  if (footprintCandidates.length > 0 && !hasShrinkableProfileBins) {
+    const baseBytes = sizeOf(snapshot);
+    const candidates = footprintCandidates.map(({ bar, candleIndex }) => ({
+      bar,
+      candle: snapshot.candles[candleIndex],
+      estimatedBytes: bar.cells.size * ESTIMATED_FOOTPRINT_BYTES_PER_CELL + 15,
+    }));
+    const estimatedTotal = candidates.reduce((sum, candidate) => sum + candidate.estimatedBytes, 0);
+    let firstKept = 0;
+    if (baseBytes + estimatedTotal > maxBytes) {
+      let estimatedBytes = 0;
+      firstKept = candidates.length;
+      for (let index = candidates.length - 1; index >= 0; index--) {
+        if (estimatedBytes + candidates[index].estimatedBytes > maxBytes - baseBytes) break;
+        estimatedBytes += candidates[index].estimatedBytes;
+        firstKept = index;
+      }
+    }
+
+    let exactDetailBytes = 0;
+    const attach = (index: number): number => {
+      const candidate = candidates[index];
+      const cells = fullFootprintCells(candidate.bar);
+      candidate.candle.footprint = cells;
+      return footprintPropertyByteLength(candidate.candle, JSON.stringify(cells)?.length ?? 2);
+    };
+    const costs = new Array<number>(candidates.length).fill(0);
+    for (let index = firstKept; index < candidates.length; index++) {
+      costs[index] = attach(index);
+      exactDetailBytes += costs[index];
+    }
+
+    let exceedsLimit = baseBytes + exactDetailBytes > maxBytes;
+    while (!exceedsLimit && firstKept > 0) {
+      const index = firstKept - 1;
+      const cost = attach(index);
+      if (baseBytes + exactDetailBytes + cost > maxBytes) {
+        delete candidates[index].candle.footprint;
+        exceedsLimit = true;
+        break;
+      }
+      costs[index] = cost;
+      exactDetailBytes += cost;
+      firstKept = index;
+    }
+
+    if (exceedsLimit) {
+      const richDetailWarning = `Analysis input exceeded ${maxBytes} bytes; oldest rich detail was reduced first`;
+      const warningBytes = JSON.stringify(richDetailWarning).length + (snapshot.warnings.length > 0 ? 1 : 0);
+      snapshot.warnings.push(richDetailWarning);
+      exactDetailBytes += warningBytes;
+      while (baseBytes + exactDetailBytes > maxBytes && firstKept < candidates.length) {
+        delete candidates[firstKept].candle.footprint;
+        exactDetailBytes -= costs[firstKept];
+        firstKept++;
+      }
+    }
+  } else {
+    for (const { bar, candleIndex } of footprintCandidates) {
+      snapshot.candles[candleIndex].footprint = fullFootprintCells(bar);
+    }
+  }
+  fitAnalysisSnapshotToBytes(snapshot, maxBytes);
   return snapshot;
 }
