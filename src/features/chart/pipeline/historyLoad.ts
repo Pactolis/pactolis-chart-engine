@@ -76,6 +76,29 @@ export function candleSnapshotOwnsBucket(
     && end - 1 <= coverage.closedThrough!;
 }
 
+function candleSnapshotOwnsRange(
+  coverage: CandleCoverage | null | undefined,
+  market: string,
+  from: number,
+  toExclusive: number,
+  interval: number,
+): boolean {
+  if (!coverage || !(toExclusive > from)) return false;
+  const lastBucketEnd = bucketEnd(bucketStart(toExclusive - 1, interval), interval);
+  return coverage.schemaVersion === 1
+    && coverage.source === "binance-klines"
+    && coverage.instrument === market
+    && coverage.ownership === "snapshot"
+    && coverage.status === "verified"
+    && Number.isFinite(coverage.requestedFrom)
+    && coverage.requestedFrom <= from
+    && Number.isFinite(coverage.requestedTo)
+    && coverage.requestedTo >= toExclusive - 1
+    && Number.isFinite(coverage.snapshotAt)
+    && Number.isFinite(coverage.closedThrough)
+    && coverage.closedThrough! >= lastBucketEnd - 1;
+}
+
 export function samePriceStructure(previous: readonly FootprintBar[], next: readonly FootprintBar[]): boolean {
   if (previous.length !== next.length) return false;
   for (let i = 0; i < previous.length; i++) {
@@ -431,8 +454,10 @@ export class HistoryLoadCoordinator {
     // Direct-candle markets have no footprint to fetch: Phase 1's candles are the whole load.
     const candlesOnly = chartDataSource().isDirectCandleMarket(market);
     this.activeHistoryCandlesOnly = candlesOnly;
+    let fastPhaseComplete = false;
+    let fastPhaseCoverageComplete = true;
+    let fastPhaseOldestBarStart: number | null = null;
     if (opts.twoPhase) {
-      let fastPhaseComplete = false;
       let fastPhaseError: unknown;
       try {
         let emittedFast = false;
@@ -444,14 +469,29 @@ export class HistoryLoadCoordinator {
         });
         for (const fastWindow of fastWindows) {
           this._resetExplicitHistoryWatermark(generation);
-          const fastBars = await chartDataSource().fetchHistory(fastWindow);
+          let fastWindowMeta: EnvelopeMeta | undefined;
+          const fastBars = await chartDataSource().fetchHistory({
+            ...fastWindow,
+            onMeta: (meta) => {
+              fastWindowMeta = meta;
+              fastWindow.onMeta?.(meta);
+            },
+          });
           if (this.host.isDisposed() || generation !== this.host.getGeneration() || controller.signal.aborted) return;
           opts.onHistoryBars?.(fastBars.filter((bar) => bar.startTime <= opts.to));
           this._seedOpenBucketFromHistory(fastBars, bootstrapFrom, opts.to, opts.maxVisibleBarEnd);
           const replaceTo = Math.min(fastWindow.to, bootstrapFrom);
           if (replaceTo <= fastWindow.from) continue;
+          if (!candleSnapshotOwnsRange(fastWindowMeta?.candleCoverage, market, fastWindow.from, replaceTo, intervalMs)) {
+            fastPhaseCoverageComplete = false;
+          }
           const replaceableBars = fastBars.filter((bar) => bar.startTime < bootstrapFrom
             && this._barWithinVisibleHistoryEnd(bar, intervalMs, opts.maxVisibleBarEnd));
+          for (const bar of replaceableBars) {
+            if (fastPhaseOldestBarStart === null || bar.startTime < fastPhaseOldestBarStart) {
+              fastPhaseOldestBarStart = bar.startTime;
+            }
+          }
           if (!this._applyExplicitHistorySnapshot(
             fastWindow.from,
             replaceTo,
@@ -483,7 +523,12 @@ export class HistoryLoadCoordinator {
     }
     if (opts.twoPhase) {
       const phase2Base: HistoryQuery = {
-        markets: [market], from: opts.from, to: opts.to, interval: intervalMs,
+        markets: [market],
+        from: fastPhaseComplete && fastPhaseCoverageComplete && this.activeHistoryCandleSourceGap === null && fastPhaseOldestBarStart !== null
+          ? Math.max(opts.from, fastPhaseOldestBarStart)
+          : opts.from,
+        to: opts.to,
+        interval: intervalMs,
         priceStep: this.series.config.priceStep, reference: market,
         rebuild: false, preferCache: opts.preferCache ?? true, candleCoverage: "required", signal, traceId, consumeBatchRecords: 8,
       };
