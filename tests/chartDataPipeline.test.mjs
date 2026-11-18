@@ -1292,6 +1292,86 @@ test("twoPhase: phase-1 fetch error does not block phase-2 from delivering full 
 
 // ── twoPhase chunked cell loading, newest-first (HANDOFF-0288 GÖREV 2) ───────
 
+test("twoPhase clips phase 2 only after complete verified candle coverage and preserves cells", async (t) => {
+  const market = "BINANCE_FUTURES:btcusdt";
+  const weekMs = 7 * 86_400_000;
+  const firstBar = Date.UTC(2019, 8, 9);
+  const barCount = 360;
+  const targetCells = 41_595;
+  const footprintStart = Date.UTC(2020, 0, 1);
+  const eligibleStarts = Array.from({ length: barCount }, (_, index) => firstBar + index * weekMs)
+    .filter((start) => start >= footprintStart);
+  const cellsPerBar = Math.floor(targetCells / eligibleStarts.length);
+  const extraCells = targetCells % eligibleStarts.length;
+  let eligibleIndex = 0;
+  const bars = Array.from({ length: barCount }, (_, index) => {
+    const startTime = firstBar + index * weekMs;
+    const hasFootprint = startTime >= footprintStart;
+    const cellCount = hasFootprint ? cellsPerBar + (eligibleIndex++ < extraCells ? 1 : 0) : 0;
+    return historyBar(startTime, {
+      open: 1, high: 2, low: 1, close: 2,
+      volume: cellCount ? 2 * cellCount : 10,
+      count: cellCount || 1,
+      cells: Array.from({ length: cellCount }, (_, cellIndex) => wideCell(cellIndex + 1)),
+    });
+  });
+  const to = firstBar + barCount * weekMs - 1;
+  let coverageStatus = "verified";
+  const requests = [];
+  useFakeChartDataSource(t, {
+    history: (query) => {
+      const fast = query.includeFootprint === false;
+      requests.push({ fast, from: query.from, to: query.to });
+      const selected = bars.filter((bar) => bar.startTime >= query.from && bar.startTime <= query.to);
+      const returned = selected.map((bar) => ({
+        ...bar,
+        cells: fast ? new Map() : new Map(bar.cells),
+      }));
+      return {
+        bars: returned,
+        meta: {
+          schemaVersion: 1,
+          generatedAt: Date.now(),
+          candleCoverage: {
+            schemaVersion: 1,
+            source: "binance-klines",
+            instrument: market,
+            ownership: coverageStatus === "verified" ? "snapshot" : null,
+            status: coverageStatus,
+            requestedFrom: query.from,
+            requestedTo: query.to,
+            snapshotAt: coverageStatus === "verified" ? query.to + weekMs : null,
+            closedThrough: coverageStatus === "verified" ? query.to : null,
+            reasonCode: coverageStatus === "error" ? "source_unavailable" : null,
+          },
+        },
+      };
+    },
+  });
+
+  for (const status of ["verified", "unknown", "error"]) {
+    coverageStatus = status;
+    requests.length = 0;
+    const pipeline = new ChartDataPipeline({
+      market,
+      intervalMs: weekMs,
+      priceStep: 1,
+      services: makeServices(),
+    });
+    await pipeline.loadHistory({ from: 0, to, twoPhase: true });
+
+    const phase2Froms = requests.filter((request) => !request.fast).map((request) => request.from);
+    assert.ok(phase2Froms.length > 0);
+    assert.equal(Math.min(...phase2Froms), status === "verified" ? firstBar : 0,
+      `${status} phase 1 must ${status === "verified" ? "clip to its oldest returned bar" : "retain the original phase-2 range"}`);
+    assert.equal(pipeline.series.length, barCount, `${status} phase 1 keeps the same candle count`);
+    assert.equal(pipeline.series.listReadonly().reduce((sum, bar) => sum + bar.cells.size, 0), targetCells,
+      `${status} phase 1 keeps the same 41,595 footprint cells`);
+    assert.equal(pipeline.activeHistoryCandleSourceGap !== null, status === "error");
+    pipeline.dispose();
+  }
+});
+
 test("twoPhase: phase-2 partitions exact 25/26/425/1001 bucket ranges", async (t) => {
   const interval = 60_000;
 
