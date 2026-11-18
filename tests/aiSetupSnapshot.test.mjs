@@ -1,7 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { FootprintSeries } from "../dist/core/model/footprint.js";
-import { buildChartAnalysisSnapshot } from "../dist/features/chart/analysisSnapshot.js";
+import { buildChartAnalysisSnapshot, fitAnalysisSnapshotToBytes } from "../dist/features/chart/analysisSnapshot.js";
 
 function bar(startTime, close, cells = new Map()) {
   return { startTime, open: close - 1, high: close + 1, low: close - 2, close, volume: 10, delta: 0, count: 0, cells, hasRef: true };
@@ -142,6 +142,122 @@ test("provider snapshot retains exact viewport metadata under the configured byt
   assert.ok(bytes <= maxBytes, `${bytes} exceeds ${maxBytes}`);
   assert.ok(snapshot.warnings.some((warning) => warning.includes("oldest rich detail") || warning.includes("byte limit")));
   assert.deepEqual(snapshot.viewport, { timeFrom: 0, timeTo: 6_000_000, priceLow: 90, priceHigh: 210 });
+});
+
+test("large footprint byte fitting uses at most three full encodes and keeps the legacy detail bars", () => {
+  const makeSnapshot = () => ({
+    schemaVersion: 1,
+    panelId: "p",
+    market: "BTCUSDT",
+    timeframe: "3M",
+    intervalMs: 60_000,
+    selectionGeneration: 1,
+    capturedAt: 1,
+    lastClosedBarEnd: 24,
+    historyStatus: "ready",
+    automaticAnalysisStatus: "complete",
+    candles: Array.from({ length: 24 }, (_, candleIndex) => ({
+      time: candleIndex,
+      endTime: candleIndex + 1,
+      open: 100,
+      high: 101,
+      low: 99,
+      close: 100,
+      volume: 10,
+      footprint: Array.from({ length: 5_000 }, (_, cellIndex) => ({
+        price: cellIndex,
+        buyVolume: 1,
+        sellVolume: 0.5,
+        totalVolume: 1.5,
+        delta: 0.5,
+        tradeCount: 2,
+        buyTradeCount: 1,
+        sellTradeCount: 1,
+      })),
+    })),
+    levels: [],
+    drawings: [],
+    indicators: [],
+    warnings: [],
+  });
+  const byteSize = (snapshot) => new TextEncoder().encode(JSON.stringify(snapshot)).byteLength;
+  const legacy = makeSnapshot();
+  const maxBytes = Math.floor(byteSize(legacy) / 4);
+  legacy.warnings.push(`Analysis input exceeded ${maxBytes} bytes; oldest rich detail was reduced first`);
+  while (byteSize(legacy) > maxBytes) {
+    const oldest = legacy.candles.find((candle) => candle.footprint?.length);
+    assert.ok(oldest, "the test cap leaves room for the base candle context");
+    delete oldest.footprint;
+  }
+  const expectedTimes = legacy.candles.filter((candle) => candle.footprint?.length).map((candle) => candle.time);
+
+  const snapshot = makeSnapshot();
+  const originalEncode = TextEncoder.prototype.encode;
+  let fullEncodes = 0;
+  TextEncoder.prototype.encode = function (value) {
+    fullEncodes++;
+    return originalEncode.call(this, value);
+  };
+  try {
+    fitAnalysisSnapshotToBytes(snapshot, maxBytes);
+  } finally {
+    TextEncoder.prototype.encode = originalEncode;
+  }
+
+  assert.ok(fullEncodes <= 3, `expected at most three full encodes, got ${fullEncodes}`);
+  assert.ok(byteSize(snapshot) <= maxBytes, "the final snapshot must respect its byte limit");
+  assert.deepEqual(snapshot.candles.filter((candle) => candle.footprint?.length).map((candle) => candle.time), expectedTimes);
+});
+
+test("snapshot builder prefilters oversized footprint cells before materializing old candle detail", () => {
+  const base = Date.UTC(2024, 0, 1);
+  const series = new FootprintSeries({ intervalMs: 60_000, priceStep: 1 });
+  series.loadBars(Array.from({ length: 24 }, (_, index) => bar(base + index * 60_000, 100 + index, new Map(
+    Array.from({ length: 5_000 }, (_, cellIndex) => [cellIndex + 1, {
+      priceBin: cellIndex + 1,
+      buyVol: 1,
+      sellVol: 0.5,
+      count: 2,
+      buyCount: 1,
+      sellCount: 1,
+    }]),
+  ))));
+  const options = { now: base + 25 * 60_000, maxBytes: Number.POSITIVE_INFINITY };
+  const full = buildChartAnalysisSnapshot({
+    panelId: "p", market: "BTCUSDT", timeframe: "3M", intervalMs: 60_000, selectionGeneration: 1,
+    series, analysis: analysis("BTCUSDT"), analysisRevision: revision, indicators: [], options,
+  });
+  const byteSize = (snapshot) => new TextEncoder().encode(JSON.stringify(snapshot)).byteLength;
+  const maxBytes = Math.floor(byteSize(full) / 4);
+  const legacy = structuredClone(full);
+  legacy.warnings.push(`Analysis input exceeded ${maxBytes} bytes; oldest rich detail was reduced first`);
+  while (byteSize(legacy) > maxBytes) {
+    const oldest = legacy.candles.find((candle) => candle.footprint?.length);
+    assert.ok(oldest);
+    delete oldest.footprint;
+  }
+  const expectedTimes = legacy.candles.filter((candle) => candle.footprint?.length).map((candle) => candle.time);
+
+  let fullEncodes = 0;
+  const originalEncode = TextEncoder.prototype.encode;
+  TextEncoder.prototype.encode = function (value) {
+    fullEncodes++;
+    return originalEncode.call(this, value);
+  };
+  let snapshot;
+  try {
+    snapshot = buildChartAnalysisSnapshot({
+      panelId: "p", market: "BTCUSDT", timeframe: "3M", intervalMs: 60_000, selectionGeneration: 1,
+      series, analysis: analysis("BTCUSDT"), analysisRevision: revision, indicators: [],
+      options: { ...options, maxBytes },
+    });
+  } finally {
+    TextEncoder.prototype.encode = originalEncode;
+  }
+
+  assert.ok(fullEncodes <= 3, `expected at most three full encodes, got ${fullEncodes}`);
+  assert.ok(byteSize(snapshot) <= maxBytes);
+  assert.deepEqual(snapshot.candles.filter((candle) => candle.footprint?.length).map((candle) => candle.time), expectedTimes);
 });
 
 test("analysis snapshot exposes partial TPO coverage and omits a label for complete sessions", () => {
