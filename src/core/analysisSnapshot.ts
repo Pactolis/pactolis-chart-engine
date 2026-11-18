@@ -79,6 +79,9 @@ export interface AnalysisOrderFlowProfileLevelSnapshot {
 export interface AnalysisOrderFlowProfileSnapshot {
   metric: string;
   side: string;
+  /** Present only for estimated profiles; localized for the active chart locale. */
+  sourceLabel?: string;
+  provenance?: "exact" | "estimated" | "mixed" | "none";
   valueAreaPercent: number;
   requestedFrom: number;
   requestedTo: number;

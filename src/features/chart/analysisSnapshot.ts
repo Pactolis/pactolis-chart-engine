@@ -1,5 +1,6 @@
 import { calculateAnchoredVwap } from "../../core/analysis/anchoredVwap.js";
 import { calculateOrderFlowRangeProfile } from "../../core/analysis/rangeProfile.js";
+import { tOr } from "../../core/chartLocale.js";
 import type { AnalysisContext } from "../../core/analysisContext.js";
 import type { AnalysisRevisionSnapshot } from "../../core/analysisRevision.js";
 import type {
@@ -205,8 +206,12 @@ function drawingSnapshot(drawing: Drawing, series: FootprintSeries): AnalysisDra
       profileSide: settings.profileSide,
       valueAreaPercent: settings.valueAreaPercent ?? 0.7,
       developing: false,
+      priceStep: series.config.priceStep,
+      allowOhlcvEstimate: true,
     });
     const hasData = result.levels.length > 0;
+    const estimatedLabel = result.isEstimated ? tOr("indicator.volumeProfile.estimated") : undefined;
+    const hasIncompleteCoverage = !result.complete || !result.dataComplete;
     return {
       ...base,
       status: base.status === "ok" && !hasData ? "no-data" : base.status,
@@ -214,6 +219,7 @@ function drawingSnapshot(drawing: Drawing, series: FootprintSeries): AnalysisDra
       profile: {
         metric: result.profileMetric,
         side: result.profileSide,
+        ...(estimatedLabel ? { provenance: result.provenance, sourceLabel: estimatedLabel } : {}),
         valueAreaPercent: settings.valueAreaPercent ?? 0.7,
         requestedFrom: result.requestedFrom,
         requestedTo: result.requestedTo,
@@ -227,7 +233,12 @@ function drawingSnapshot(drawing: Drawing, series: FootprintSeries): AnalysisDra
         ...(typeof result.totalTradeCount === "number" && Number.isFinite(result.totalTradeCount) ? { totalTradeCount: result.totalTradeCount } : {}),
         bins: profileBins(result.levels),
       },
-      ...(!result.complete || !result.dataComplete ? { warnings: [`Fixed range profile coverage ${(result.coverage * 100).toFixed(1)}%; footprint data may be incomplete`] } : {}),
+      ...(estimatedLabel || hasIncompleteCoverage ? {
+        warnings: [
+          ...(estimatedLabel ? [estimatedLabel] : []),
+          ...(hasIncompleteCoverage ? [`Fixed range profile coverage ${(result.coverage * 100).toFixed(1)}%; footprint data may be incomplete`] : []),
+        ],
+      } : {}),
     };
   }
   return base;
