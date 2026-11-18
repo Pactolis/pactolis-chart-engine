@@ -4,16 +4,14 @@ import { neighbourBin, quantizeToStep } from "../../priceStep.js";
 import { settings, type ChartViewConfig } from "../../settings.js";
 import type { VolumeProfileSettings } from "../../analysis/volumeProfile.js";
 import {
-  aggregateTpoBrackets,
-  buildTpoBracketSpans,
-  calculateTpoProfile,
+  buildTpoProfileGroups,
   effectiveTpoBracketMs,
-  mergeTpoSessionSpans,
   tpoBracketLabel,
-  tpoSessionPartial,
   tpoSessionRange,
   type TpoBracketBar,
+  type TpoProfileGroup,
 } from "../../analysis/tpoProfile.js";
+import { tOr } from "../../chartLocale.js";
 import { tpoPalette } from "../../ui/seriesPalette.js";
 
 export interface TpoProfileHit {
@@ -36,7 +34,7 @@ export interface TpoCacheGroup {
   lastIdx: number;
   firstSpanIndex: number;
   partial: boolean;
-  result: ReturnType<typeof calculateTpoProfile>;
+  result: TpoProfileGroup["result"];
 }
 
 export interface TpoCacheState {
@@ -105,26 +103,21 @@ export function drawTpo(host: TpoRenderHost, view: View, series: FootprintSeries
   const key = [vaPercent, step, series.revision, chartCfg.tpoProfilePeriod, chartCfg.tpoBracketSize,
     bracketMs, sessionFrom, sessionTo, ...[...host.tpoMergeLeftSessionStarts].sort((a, b) => a - b)].join("|");
   if (host.tpoCache?.key !== key) {
-    const brackets = aggregateTpoBrackets(all, sessionFrom, sessionTo, bracketMs);
-    const spans = buildTpoBracketSpans(brackets, chartCfg.tpoProfilePeriod);
-    const groupsMeta = mergeTpoSessionSpans(spans, host.tpoMergeLeftSessionStarts);
+    const profiles = buildTpoProfileGroups(
+      all,
+      sessionFrom,
+      sessionTo,
+      chartCfg.tpoProfilePeriod,
+      bracketMs,
+      series.config.intervalMs,
+      step,
+      vaPercent,
+      host.tpoMergeLeftSessionStarts,
+    );
     host.tpoCache = {
       key,
-      brackets,
-      groups: groupsMeta.map((g) => ({
-        sessionStarts: [...g.sessionStarts],
-        firstBracketIndex: g.firstBracketIndex,
-        lastBracketIndex: g.lastBracketIndex,
-        firstIdx: g.firstIdx,
-        lastIdx: g.lastIdx,
-        firstSpanIndex: g.firstSpanIndex,
-        partial: tpoSessionPartial(all, g.firstIdx, g.lastIdx, chartCfg.tpoProfilePeriod, series.config.intervalMs),
-        result: calculateTpoProfile(
-          brackets.slice(g.firstBracketIndex, g.lastBracketIndex + 1).map((bracket) => bracket.bar),
-          step,
-          vaPercent
-        ),
-      })),
+      brackets: profiles.brackets,
+      groups: profiles.groups,
     };
   }
 
@@ -252,7 +245,7 @@ export function drawTpo(host: TpoRenderHost, view: View, series: FootprintSeries
       ctx.fillStyle = tpoPalette.leaderVa;
       ctx.font = "9px ui-monospace, Menlo, monospace";
       ctx.textAlign = "left";
-      ctx.fillText("partial", Math.max(left + 3, view.area.left + 3), view.area.top + 12);
+      ctx.fillText(tOr("analysis.tpo.partial"), Math.max(left + 3, view.area.left + 3), view.area.top + 12);
       ctx.restore();
     }
     // Level leaders + labels (both modes): solid white POC, dashed VA.

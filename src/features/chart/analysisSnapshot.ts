@@ -10,6 +10,7 @@ import type {
   AnalysisLevelSnapshot,
   AnalysisOrderFlowProfileLevelSnapshot,
   AnalysisSnapshotOptions,
+  AnalysisTpoProfileSnapshot,
   ChartAnalysisSnapshot,
 } from "../../core/analysisSnapshot.js";
 import { AI_ANALYSIS_POLICY } from "../../core/analysisSnapshotPolicy.js";
@@ -420,6 +421,7 @@ export function buildChartAnalysisSnapshot(args: {
   analysis: AnalysisContext;
   analysisRevision: AnalysisRevisionSnapshot;
   indicators: AnalysisIndicatorSnapshot[];
+  tpoProfiles?: AnalysisTpoProfileSnapshot[];
   options?: AnalysisSnapshotOptions;
 }): ChartAnalysisSnapshot {
   const now = args.options?.now ?? Date.now();
@@ -528,6 +530,7 @@ export function buildChartAnalysisSnapshot(args: {
     levels,
     drawings,
     indicators,
+    ...(args.tpoProfiles?.length ? { tpoProfiles: args.tpoProfiles.map((profile) => ({ ...profile, sessionStarts: [...profile.sessionStarts] })) } : {}),
     warnings,
   };
   fitAnalysisSnapshotToBytes(snapshot, args.options?.maxBytes ?? AI_ANALYSIS_POLICY.snapshotTargetBytes);
