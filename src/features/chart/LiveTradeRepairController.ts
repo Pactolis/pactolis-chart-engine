@@ -923,11 +923,11 @@ export class LiveTradeRepairController {
         ) ?? false;
         if (scheduled) {
           retryScheduled = true;
-          this.reportRetrying(`${detail.slice(0, 140)}; retrying`, stickyDegraded);
+          this.reportRetrying(`${detail.slice(0, 140)}; retrying`, stickyDegraded && !sourceUnavailable);
           return;
         }
         this.repairDeferred = true;
-        this.reportRetrying(detail.slice(0, 160), stickyDegraded);
+        this.reportRetrying(detail.slice(0, 160), stickyDegraded && !sourceUnavailable);
         return;
       }
       this.repairDeferred = false;
