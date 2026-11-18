@@ -767,11 +767,14 @@ export class LiveTradeRepairController {
       if (meta?.degraded === true && !unsupportedFootprint) {
         stickyDegraded = true;
         sourceUnavailable ||= meta.footprint?.available === false;
-      }
-      if (stickyDegraded && !sourceUnavailable) {
-        degradedSnapshotUnusable ||= repairSnapshotReason(
+        degradedSnapshotUnusable = !sourceUnavailable && repairSnapshotReason(
           meta, market, from, repairTo, intervalMs, this.host.series.config.priceStep, this.lastAcceptedWatermark,
         )?.state === "pending";
+      } else {
+        // A clean metadata callback can supply a usable snapshot for this same request,
+        // but it cannot erase an earlier explicit degraded result. Keep that repair
+        // terminal while reserving retries for requests that ended on degraded metadata.
+        degradedSnapshotUnusable = false;
       }
     };
 
