@@ -383,11 +383,25 @@ function drawRangeProfile(
     drawConfiguredRangeLevel(ctx, view, time, drawing, settings, "val", result.val, result.developing.map((point) => ({ time: point.time, price: point.val, valid: point.valid })), left, right, "VAL", "dVAL", uiColor.info);
   }
   const estimatedLabelY = view.area.top + 14;
+  let disclosureLines = 0;
   if (result.isEstimated) {
     ctx.fillStyle = uiColor.warn;
     ctx.font = "10px ui-monospace, monospace";
     ctx.textAlign = "left";
     ctx.fillText(tOr("indicator.volumeProfile.estimated"), left + 4, estimatedLabelY);
+    disclosureLines += 1;
+  }
+  if (result.availability === "unavailable") {
+    ctx.fillStyle = uiColor.warn;
+    ctx.font = "10px ui-monospace, monospace";
+    ctx.textAlign = "left";
+    ctx.fillText(
+      tOr("indicator.volumeProfile.estimatedMetricUnsupported"),
+      left + 4,
+      estimatedLabelY + disclosureLines * 12,
+      Math.max(0, right - left - 8),
+    );
+    disclosureLines += 1;
   }
   if (!result.complete || !result.dataComplete) {
     ctx.fillStyle = uiColor.warn;
@@ -399,7 +413,8 @@ function drawRangeProfile(
         ? t("indicator.volumeProfile.coverageLoading", { percent })
         : t("indicator.volumeProfile.coverageIncomplete", { percent }),
       left + 4,
-      estimatedLabelY + (result.isEstimated ? 12 : 0)
+      estimatedLabelY + disclosureLines * 12,
+      Math.max(0, right - left - 8),
     );
   }
   ctx.restore();

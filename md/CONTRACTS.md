@@ -62,9 +62,15 @@ Kaynak: [rangeProfile.ts](../src/core/analysis/rangeProfile.ts),
   metric, yön ve seviyeler değiştirilmeden kullanılır. En az bir seçili barın hücresi yoksa tüm aralık
   OHLCV fallback'iyle yeniden hesaplanır: hesaplayıcıya verilen kopyalarda bütün `cells` map'leri
   boşaltılır. Böylece partial exact hücrelerle tahmini hacim aynı histogramda hiçbir zaman karışmaz.
-- OHLCV fallback yalnız `volume` / `total` için anlamlıdır. Delta, buy/sell, trade count ve average
-  trade size gibi exact-only ayarlar açıkça desteklenmez ve boş profil verir. Estimator yalnız seçili
-  aralığın zaten chart serisinde bulunan mumlarını okur; history isteği, backfill veya abonelik açmaz.
+- OHLCV fallback yalnız `volume` / `total` için kullanılabilir. Delta, buy/sell, trade count ve average
+  trade size seçimleri `availability: "unavailable"` ve `unavailableReason: "exact-footprint-required"`
+  döndürür; tahmini hacim bu metriklere aktarılmaz. Tahmini kaynakta `capabilities.metrics` ve
+  `capabilities.sides`, kullanılabilen `volume` / `total` seçimi dışındaki ayarları false bildirir.
+  `volume` / `total` tahmini sonucu `availability: "available"` taşır. Bu alanlar hem Order Flow
+  Profile indikatör snapshot'ında (`profile`) hem Fixed Range çizim snapshot'ında (`profile`) bulunur;
+  kullanıcıya gösterilen unavailable nedeni aktif chart locale'inde yerelleştirilir. Exact kaynakta
+  yeni availability/capability alanları eklenmez. Estimator yalnız seçili aralığın zaten chart
+  serisinde bulunan mumlarını okur; history isteği, backfill veya abonelik açmaz.
 - Sonuçtaki `provenance` / `isEstimated`, profildeki kaynak türünü gösterir. `coverage` exact footprint
   kapsamını, `dataComplete` ise hesaplanan metriğin geçerliliğini anlatır; estimate'in exact veri
   olduğunu belirtmez. Çizim etiketi ile Fixed Range analysis snapshot/tooltip, `Estimated (OHLCV)` /

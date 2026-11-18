@@ -36,8 +36,8 @@ const CHART_LOCALE_FALLBACKS: Readonly<Record<string, { tr: string; en: string }
     en: "Estimated (Mixed)",
   },
   "indicator.volumeProfile.estimatedMetricUnsupported": {
-    tr: "Tahmini (OHLCV) modda yalnız Toplam Hacim desteklenir; seçili metrik için gerçek footprint verisi gerekir",
-    en: "Estimated (OHLCV) mode only supports Total Volume; selected metric requires exact footprint data",
+    tr: "Kullanılamıyor: gerçek footprint verisi gerekir",
+    en: "Unavailable: exact footprint data required",
   },
 };
 
