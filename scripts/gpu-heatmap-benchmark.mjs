@@ -1,15 +1,21 @@
 #!/usr/bin/env node
 import { chromium } from "@playwright/test";
 import { createServer } from "vite";
-import { mkdir, writeFile } from "node:fs/promises";
+import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { existsSync } from "node:fs";
 import { cpus, hostname, platform, release, arch } from "node:os";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import { execFileSync } from "node:child_process";
+import { execFileSync, spawnSync } from "node:child_process";
+import {
+  buildWebGpuFlushAssessment,
+  WEBGPU_FLUSH_DECISION_RULE,
+  WEBGPU_FLUSH_FIXTURE,
+  WEBGPU_FLUSH_SCENARIOS,
+} from "../harness/webgpuFlushBenchmark.mjs";
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..");
-const DEFAULT_OUTPUT_DIR = resolve(ROOT, "benchmark-results/gpu-heatmap-stage4");
+const DEFAULT_OUTPUT_DIR = resolve(ROOT, "benchmark-results/gpu-benchmark");
 const DEFAULT_SAMPLES = 30;
 const BARS = 250;
 const BASE_PRICE = 50_000;
@@ -39,14 +45,19 @@ function usage() {
   console.log(`Usage: npm run benchmark:gpu -- [options]
 
 Options:
-  --output-dir PATH  Write JSON and Markdown reports here (default: benchmark-results/gpu-heatmap-stage4)
+  --output-dir PATH  Write one combined JSON and Markdown report here (default: benchmark-results/gpu-benchmark)
   --samples N        Hot/cold frame samples per chart for each scenario (default: ${DEFAULT_SAMPLES})
-  --list             List the fixed 15k/40k × 1/8 chart × CPU/GPU matrix and exit
-  --dry-run          Validate and print the benchmark plan without launching Chromium
+  --list             List the #74 matrix and #88 WebGPU flush scenarios, then exit
+  --dry-run          Validate both suites and print their fixtures/rules without launching Chromium
   --help             Show this help
 
-Set CHROMIUM_PATH to use a specific Chromium executable. The harness does not
-force SwiftShader; a software renderer is reported as hardware-invalid.`);
+Owner hardware command:
+  npm run benchmark:gpu -- --output-dir /tmp/chart-engine-gpu-benchmark
+
+The command runs the #74 heatmap matrix and #88 WebGPU vs WebGL2 flush suite,
+then writes one JSON and one Markdown report. Set CHROMIUM_PATH to select Chromium.
+The harness does not force SwiftShader; a software renderer or missing WebGPU
+adapter is reported as hardware-invalid and cannot produce a hardware decision.`);
 }
 
 function parseArgs(argv) {
@@ -82,19 +93,35 @@ function scenarios(samples) {
   }))));
 }
 
+function flushScenarios() {
+  return WEBGPU_FLUSH_SCENARIOS.map((scenario) => ({
+    suite: "#88 WebGPU vs WebGL2 flush",
+    scenario,
+    backends: ["webgl2", "webgpu"],
+    metrics: ["chart.gpu.flush.ms", "chart.gpu.footprint.ms", "chart.surface.gpu.draw.ms"],
+    decisionRule: WEBGPU_FLUSH_DECISION_RULE,
+  }));
+}
+
 function printPlan(samples, listOnly) {
   const matrix = scenarios(samples);
+  const flush = flushScenarios();
   if (listOnly) {
     for (const item of matrix) {
       console.log(`${item.cellCount} cells | ${item.chartCount} chart(s) | ${item.phase} | ${item.samples} samples/chart`);
     }
+    for (const item of flush) {
+      console.log(`#88 ${item.scenario} | ${WEBGPU_FLUSH_FIXTURE.markets.length} charts (${WEBGPU_FLUSH_FIXTURE.viewport.width}x${WEBGPU_FLUSH_FIXTURE.viewport.height}) | ${WEBGPU_FLUSH_FIXTURE.barCount} bars × ${WEBGPU_FLUSH_FIXTURE.cellsPerBar} cells | WebGL2 + WebGPU | mean ratio ≤ ${item.decisionRule.maximumRatio}`);
+    }
     return;
   }
   console.log(JSON.stringify({
-    scenarioCount: matrix.length,
-    scenarios: matrix,
+    scenarioCount: matrix.length + flush.length,
+    suites: {
+      issue74: { scenarioCount: matrix.length, scenarios: matrix, decisionRule: DECISION_RULE },
+      issue88: { scenarioCount: flush.length, scenarios: flush, fixture: WEBGPU_FLUSH_FIXTURE, decisionRule: WEBGPU_FLUSH_DECISION_RULE },
+    },
     launchArgs: LAUNCH_ARGS,
-    decisionRule: DECISION_RULE,
     measurementEnabled: false,
   }, null, 2));
 }
@@ -178,31 +205,123 @@ function gitValue(args) {
   }
 }
 
+function commandText(command, args, timeout = 3_000) {
+  try {
+    return execFileSync(command, args, {
+      cwd: ROOT,
+      encoding: "utf8",
+      timeout,
+      stdio: ["ignore", "pipe", "ignore"],
+      maxBuffer: 256 * 1024,
+    }).trim();
+  } catch {
+    return null;
+  }
+}
+
+function collectDriverInfo() {
+  const nvidia = commandText("nvidia-smi", ["--query-gpu=name,driver_version", "--format=csv,noheader"]);
+  if (nvidia) return { source: "nvidia-smi", detail: nvidia.split("\n").slice(0, 8) };
+
+  if (platform() === "linux") {
+    const vulkan = commandText("vulkaninfo", ["--summary"]);
+    if (vulkan) {
+      const driverLines = vulkan.split("\n").map((line) => line.trim()).filter((line) => /driver(Name|Info|Version)/i.test(line));
+      if (driverLines.length) return { source: "vulkaninfo --summary", detail: driverLines.slice(0, 12) };
+    }
+    const gl = commandText("glxinfo", ["-B"]);
+    if (gl) {
+      const driverLines = gl.split("\n").map((line) => line.trim()).filter((line) => /OpenGL vendor|OpenGL renderer|OpenGL version/i.test(line));
+      if (driverLines.length) return { source: "glxinfo -B", detail: driverLines.slice(0, 12) };
+    }
+  } else if (platform() === "darwin") {
+    const display = commandText("system_profiler", ["SPDisplaysDataType"]);
+    if (display) {
+      const driverLines = display.split("\n").map((line) => line.trim()).filter((line) => /Chipset Model|Metal Support/i.test(line));
+      if (driverLines.length) return { source: "system_profiler SPDisplaysDataType", detail: driverLines.slice(0, 12) };
+    }
+  } else if (platform() === "win32") {
+    const display = commandText("powershell", ["-NoProfile", "-Command", "Get-CimInstance Win32_VideoController | Select-Object Name,DriverVersion | ConvertTo-Json -Compress"]);
+    if (display) return { source: "Win32_VideoController", detail: display };
+  }
+  return { source: null, detail: null };
+}
+
+function flushMarkdownRows(flushReport) {
+  const rows = [];
+  for (const scenario of WEBGPU_FLUSH_SCENARIOS) {
+    for (const backendName of ["webgl2", "webgpu"]) {
+      const backend = flushReport?.[backendName];
+      const combined = backend?.scenarios?.[scenario]?.combined ?? {};
+      for (const metricName of ["chart.gpu.flush.ms", "chart.gpu.footprint.ms", "chart.surface.gpu.draw.ms"]) {
+        const stats = combined[metricName];
+        rows.push(`| ${scenario} | ${backendName} | \`${metricName}\` | ${stats?.count ?? 0} | ${formatNumber(stats?.meanMs)} | ${formatNumber(stats?.p50Ms)} | ${formatNumber(stats?.p95Ms)} | ${formatNumber(stats?.p99Ms)} |`);
+      }
+    }
+  }
+  return rows.join("\n");
+}
+
+function flushRatioRows(flushReport) {
+  return (flushReport?.comparisons ?? []).map((comparison) =>
+    `| ${comparison.scenario} | ${formatNumber(comparison.webgl2?.flush?.meanMs)} | ${formatNumber(comparison.webgpu?.flush?.meanMs)} | ${Number.isFinite(comparison.rawFlushMeanRatio) ? comparison.rawFlushMeanRatio.toFixed(6) : "—"} | ${comparison.within2xBudget === null ? "n/a" : comparison.within2xBudget ? "yes" : "no"} |`,
+  ).join("\n");
+}
+
 function makeMarkdown(report) {
   const probe = report.rendererProbe;
   const renderer = probe?.unmaskedRenderer ?? probe?.renderer ?? "unavailable";
   const vendor = probe?.unmaskedVendor ?? probe?.vendor ?? "unavailable";
-  return `# Stage 4 GPU heatmap benchmark\n\n`
-    + `- Issue: #74 (Stage 4)\n`
+  const flushReport = report.webgpuFlush;
+  const flushProbe = flushReport?.webgpuProbe;
+  const flushRenderer = flushProbe?.webglInfo?.unmaskedRenderer ?? "unavailable";
+  const flushVendor = flushProbe?.webglInfo?.unmaskedVendor ?? "unavailable";
+  const adapter = flushProbe?.adapterInfo ?? null;
+  const decisions = report.decisionByIssue ?? { issue74: report.decision, issue88: flushReport?.decision ?? "NOT_EVALUATED" };
+  return `# Combined GPU benchmark report\n\n`
+    + `- Issues: #74 (Stage 4) and #88\n`
     + `- Run: ${report.runId}\n`
-    + `- Decision: **${report.decision}**\n`
-    + `- Hardware valid: **${report.hardwareValid}**${probe?.invalidReason ? ` (${probe.invalidReason})` : ""}\n`
-    + `- Renderer: ${vendor} / ${renderer}\n`
+    + `- #74 decision: **${decisions.issue74}**\n`
+    + `- #88 decision: **${decisions.issue88}**${flushReport?.decision === "NO_GO" ? " — NO-GO, P3 kalır" : ""}\n`
+    + `- Overall hardware valid: **${report.hardwareValid}**\n`
+    + `- #74 renderer: ${vendor} / ${renderer}\n`
+    + `- #88 renderer: ${flushVendor} / ${flushRenderer}\n`
+    + `- WebGPU adapter: ${adapter ? JSON.stringify(adapter) : "unavailable"}\n`
+    + `- WebGPU canvas presentation: **${flushReport?.presentation ?? "unavailable"}**\n`
+    + `- Driver probe: ${report.driverInfo?.source ?? "unavailable"}; ${JSON.stringify(report.driverInfo?.detail ?? null)}\n`
+    + `- Host OS: ${report.host?.platform ?? "unknown"} ${report.host?.release ?? ""} (${report.host?.architecture ?? "unknown"})\n`
     + `- Chromium: ${report.browser?.version ?? "unknown"}\n`
     + `- Launch args: \`${(report.browser?.requestedLaunchArgs ?? []).join(" ")}\`\n\n`
-    + `## Fixed decision rule\n\n`
+    + `- #88 Chromium: ${flushReport?.environment?.browserVersion ?? "unknown"}\n`
+    + `- #88 launch args: \`${(flushReport?.environment?.launchArgs ?? []).join(" ")}\`\n\n`
+    + `## #74 fixed decision rule\n\n`
     + `- ${DECISION_RULE.frameRule}\n`
     + `- ${DECISION_RULE.memoryRule}\n`
     + `- ${DECISION_RULE.hardwareRule}\n`
     + `- A software renderer, including SwiftShader, is hardware-invalid and never yields GO/NO-GO.\n\n`
-    + `## Results\n\n`
+    + `## #74 results\n\n`
     + `| Cells | Charts | Path | Frames | p50 ms | p95 ms | p99 ms | JS heap Δ | Estimated retained | Path ownership |\n`
     + `| ---: | ---: | --- | ---: | ---: | ---: | ---: | ---: | ---: | --- |\n`
     + `${percentileRows(report)}\n\n`
+    + `## #88 fixed decision rule\n\n`
+    + `- ${WEBGPU_FLUSH_DECISION_RULE.rule}\n`
+    + `- ${WEBGPU_FLUSH_DECISION_RULE.hardwareRule}\n`
+    + `- NO-GO means WebGPU remains opt-in and P3; the #200 single-submit coordinator was measured and rejected, and the absolute difference is about 0.1 ms per chart frame.\n`
+    + `- Presentation mode is **${flushReport?.presentation ?? "unavailable"}**; the offscreen substitute is used only when real canvas presentation does not work.\n\n`
+    + `## #88 measurements\n\n`
+    + `| Scenario | Backend | Metric | n | mean ms | p50 ms | p95 ms | p99 ms |\n`
+    + `| --- | --- | --- | ---: | ---: | ---: | ---: | ---: |\n`
+    + `${flushMarkdownRows(flushReport)}\n\n`
+    + `## #88 fixed-rule ratios\n\n`
+    + `| Scenario | WebGL2 flush mean ms | WebGPU flush mean ms | WebGPU/WebGL2 ratio | ≤ 2x |\n`
+    + `| --- | ---: | ---: | ---: | --- |\n`
+    + `${flushRatioRows(flushReport)}\n\n`
+    + `#88 decision rationale: ${flushReport?.rationale ?? "measurement unavailable"}\n\n`
     + `## Limitations\n\n`
     + `- GPU memory is a known-resource allocation estimate for the heatmap textures and instance/quad buffers; estimated retained bytes also include any CPU raster cache still held after GPU opt-in. WebGL does not expose a portable dedicated-VRAM counter; driver overhead and allocations outside the heatmap are excluded.\n`
     + `- JavaScript heap data is taken from Chromium \`performance.memory\`; unavailable values are null and prevent a decision.\n`
-    + `- GPU frame time includes the engine's CPU prepare path and WebGL submission; it is not a GPU timer query.\n`;
+    + `- GPU frame time includes the engine's CPU prepare path and WebGL submission; it is not a GPU timer query.\n`
+    + `- Driver metadata is best effort and null when the host does not expose a supported probe command.\n`;
 }
 
 function evaluateDecision(report) {
@@ -235,6 +354,67 @@ function evaluateDecision(report) {
   return performancePass && memoryPass ? "GO" : "NO_GO";
 }
 
+async function runFlushSuite({ outputDir, runId, executablePath }) {
+  const evidencePath = resolve(outputDir, `.gpu-flush-${runId}.json`);
+  const cliPath = resolve(ROOT, "node_modules/@playwright/test/cli.js");
+  await rm(evidencePath, { force: true });
+  const child = spawnSync(process.execPath, [
+    cliPath,
+    "test",
+    "tests/browser/webgpu-flush-cost.spec.ts",
+    "--project=default",
+    "--workers=1",
+  ], {
+    cwd: ROOT,
+    env: {
+      ...process.env,
+      CHART_GPU_BENCHMARK_MODE: "hardware",
+      CHART_GPU_BENCHMARK_FLUSH_REPORT_PATH: evidencePath,
+      ...(executablePath ? { CHROMIUM_PATH: executablePath } : {}),
+    },
+    stdio: "inherit",
+    timeout: 300_000,
+  });
+
+  let flushReport = null;
+  try {
+    flushReport = JSON.parse(await readFile(evidencePath, "utf8"));
+  } catch {
+    // A startup failure can happen before the Playwright spec gets a chance to write evidence.
+  } finally {
+    await rm(evidencePath, { force: true });
+  }
+
+  const childFailure = child.error?.message
+    ?? (child.status === 0 ? null : `Playwright flush suite exited with status ${child.status ?? "unknown"}`);
+  if (!flushReport) {
+    return {
+      schemaVersion: 1,
+      issue: "#88",
+      hardwareValid: false,
+      decisionRule: WEBGPU_FLUSH_DECISION_RULE,
+      decision: "NOT_EVALUATED_INCOMPLETE",
+      display: "incomplete",
+      rationale: childFailure ?? "Playwright completed without writing flush evidence.",
+      browser: { executablePath },
+      playwrightExitCode: child.status ?? null,
+    };
+  }
+
+  const assessment = buildWebGpuFlushAssessment({
+    hardwareValid: flushReport.hardwareValid,
+    webgl2: flushReport.webgl2,
+    webgpu: flushReport.webgpu,
+    measurementError: childFailure ?? flushReport.measurementError ?? null,
+  });
+  return {
+    ...flushReport,
+    ...assessment,
+    playwrightExitCode: child.status ?? null,
+    playwrightError: childFailure,
+  };
+}
+
 async function main() {
   let options;
   try {
@@ -265,10 +445,11 @@ async function main() {
   const results = [];
   const report = {
     schemaVersion: 1,
-    issue: "#74 (Stage 4)",
+    issue: "#74 (Stage 4) + #88 (WebGPU flush)",
     runId: new Date().toISOString().replace(/[:.]/g, "-"),
     createdAt: new Date().toISOString(),
     hardwareValid: false,
+    stage4HardwareValid: false,
     decision: "NOT_EVALUATED",
     decisionRule: DECISION_RULE,
     browser: {},
@@ -287,6 +468,7 @@ async function main() {
       branch: gitValue(["branch", "--show-current"]),
     },
     rendererProbe: null,
+    driverInfo: null,
     results,
   };
 
@@ -392,13 +574,32 @@ async function main() {
   }
 
   await mkdir(options.outputDir, { recursive: true });
-  const fileStem = `gpu-heatmap-${report.runId}`;
+  report.stage4HardwareValid = report.hardwareValid;
+  report.driverInfo = collectDriverInfo();
+  report.webgpuFlush = await runFlushSuite({
+    outputDir: options.outputDir,
+    runId: report.runId,
+    executablePath: report.browser.executablePath,
+  });
+  report.webgpuFlush.environment = {
+    ...report.webgpuFlush.environment,
+    host: report.host,
+    driverInfo: report.driverInfo,
+  };
+  report.decisionByIssue = {
+    issue74: report.decision,
+    issue88: report.webgpuFlush.decision,
+  };
+  report.hardwareValid = report.stage4HardwareValid && report.webgpuFlush.hardwareValid;
+
+  const fileStem = `gpu-benchmark-${report.runId}`;
   const jsonPath = resolve(options.outputDir, `${fileStem}.json`);
   const markdownPath = resolve(options.outputDir, `${fileStem}.md`);
   await writeFile(jsonPath, `${JSON.stringify(report, null, 2)}\n`);
   await writeFile(markdownPath, makeMarkdown(report));
   console.log(`hardwareValid=${report.hardwareValid}`);
-  console.log(`decision=${report.decision}`);
+  console.log(`issue74Decision=${report.decisionByIssue.issue74}`);
+  console.log(`issue88Decision=${report.decisionByIssue.issue88}`);
   console.log(`json=${jsonPath}`);
   console.log(`markdown=${markdownPath}`);
 }
