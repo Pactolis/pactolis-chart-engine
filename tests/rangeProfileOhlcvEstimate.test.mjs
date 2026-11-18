@@ -137,6 +137,9 @@ test("range profile estimates OHLCV-only windows but keeps partial footprint ran
   ];
   const noFootprint = calculateOrderFlowRangeProfile(bars, BASE_TIME, BASE_TIME + 2 * MINUTE, options);
   assert.equal(noFootprint.provenance, "estimated");
+  assert.equal(noFootprint.availability, "available");
+  assert.equal(noFootprint.capabilities.metrics.volume, true);
+  assert.equal(noFootprint.capabilities.sides.total, true);
   assert.equal(noFootprint.isEstimated, true);
   assert.equal(noFootprint.exactBarCount, 0);
   assert.equal(noFootprint.estimatedBarCount, 3);
@@ -282,12 +285,14 @@ test("fixed-range label follows chartLocale, and footprint arrival invalidates t
   }
 });
 
-test("Fixed Range analysis snapshot exposes a localized estimated tooltip label and preserves exact mode", () => {
+test("Fixed Range drawing and analysis snapshot disclose estimated availability in both locales", () => {
   const previousLocale = (() => {
     try { return chartLocale(); } catch { return null; }
   })();
   const noFootprint = [ohlcvBar(0, 100, 101, 10), ohlcvBar(1, 100, 102, 30), ohlcvBar(2, 101, 102, 20)];
   const estimatedHarness = makeDrawingHarness(noFootprint);
+  const unavailableHarness = makeDrawingHarness(noFootprint);
+  unavailableHarness.drawing.profileMetric = "delta";
   const exactHarness = makeDrawingHarness([exactBar(0, 100, 8, 2), exactBar(1, 101, 20, 10), exactBar(2, 102, 7, 3)]);
   try {
     configureLocale("en-US");
@@ -295,7 +300,18 @@ test("Fixed Range analysis snapshot exposes a localized estimated tooltip label 
     const enProfile = enDrawing.profile;
     assert.equal(enProfile.provenance, "estimated");
     assert.equal(enProfile.sourceLabel, "Estimated (OHLCV)");
+    assert.equal(enProfile.availability, "available");
+    assert.equal(enProfile.capabilities.metrics.delta, false);
     assert.ok(enDrawing.warnings.includes("Estimated (OHLCV)"));
+
+    unavailableHarness.draw();
+    const enUnavailable = profileSnapshot(unavailableHarness.series, unavailableHarness.drawing).drawings[0];
+    assert.equal(enUnavailable.status, "unsupported");
+    assert.equal(enUnavailable.profile.availability, "unavailable");
+    assert.equal(enUnavailable.profile.unavailableReason, "exact-footprint-required");
+    assert.equal(enUnavailable.profile.capabilities.metrics.delta, false);
+    assert.ok(enUnavailable.warnings.some((warning) => warning.startsWith("Unavailable: exact footprint")));
+    assert.ok(unavailableHarness.texts.some((text) => text.startsWith("Unavailable: exact footprint")));
 
     configureLocale("tr-TR");
     const trDrawing = profileSnapshot(estimatedHarness.series, estimatedHarness.drawing).drawings[0];
@@ -304,10 +320,19 @@ test("Fixed Range analysis snapshot exposes a localized estimated tooltip label 
     assert.equal(trProfile.sourceLabel, "Tahmini (OHLCV)");
     assert.ok(trDrawing.warnings.includes("Tahmini (OHLCV)"));
 
+    unavailableHarness.texts.length = 0;
+    unavailableHarness.draw();
+    const trUnavailable = profileSnapshot(unavailableHarness.series, unavailableHarness.drawing).drawings[0];
+    assert.equal(trUnavailable.status, "unsupported");
+    assert.ok(trUnavailable.warnings.some((warning) => warning.startsWith("Kullanılamıyor: gerçek footprint")));
+    assert.ok(unavailableHarness.texts.some((text) => text.startsWith("Kullanılamıyor: gerçek footprint")));
+
     const exactProfile = profileSnapshot(exactHarness.series, exactHarness.drawing).drawings[0].profile;
     assert.equal(exactProfile.poc, 101);
     assert.equal(exactProfile.sourceLabel, undefined);
     assert.equal(exactProfile.provenance, undefined);
+    assert.equal(exactProfile.availability, undefined);
+    assert.equal(exactProfile.capabilities, undefined);
   } finally {
     if (previousLocale) configureChartLocale(previousLocale);
   }

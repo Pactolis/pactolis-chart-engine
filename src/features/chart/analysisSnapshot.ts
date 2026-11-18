@@ -10,6 +10,7 @@ import type {
   AnalysisLevelSnapshot,
   AnalysisOrderFlowProfileLevelSnapshot,
   AnalysisSnapshotOptions,
+  AnalysisTpoProfileSnapshot,
   ChartAnalysisSnapshot,
 } from "../../core/analysisSnapshot.js";
 import { AI_ANALYSIS_POLICY } from "../../core/analysisSnapshotPolicy.js";
@@ -211,14 +212,29 @@ function drawingSnapshot(drawing: Drawing, series: FootprintSeries): AnalysisDra
     });
     const hasData = result.levels.length > 0;
     const estimatedLabel = result.isEstimated ? tOr("indicator.volumeProfile.estimated") : undefined;
+    const unavailableLabel = result.availability === "unavailable"
+      ? tOr("indicator.volumeProfile.estimatedMetricUnsupported")
+      : undefined;
     const hasIncompleteCoverage = !result.complete || !result.dataComplete;
     return {
       ...base,
-      status: base.status === "ok" && !hasData ? "no-data" : base.status,
+      status: base.status === "ok" && result.availability === "unavailable"
+        ? "unsupported"
+        : base.status === "ok" && !hasData
+          ? "no-data"
+          : base.status,
       numericallySupported: true,
       profile: {
         metric: result.profileMetric,
         side: result.profileSide,
+        ...(result.availability ? { availability: result.availability } : {}),
+        ...(result.unavailableReason ? { unavailableReason: result.unavailableReason } : {}),
+        ...(result.capabilities ? {
+          capabilities: {
+            metrics: { ...result.capabilities.metrics },
+            sides: { ...result.capabilities.sides },
+          },
+        } : {}),
         ...(estimatedLabel ? { provenance: result.provenance, sourceLabel: estimatedLabel } : {}),
         valueAreaPercent: settings.valueAreaPercent ?? 0.7,
         requestedFrom: result.requestedFrom,
@@ -233,9 +249,10 @@ function drawingSnapshot(drawing: Drawing, series: FootprintSeries): AnalysisDra
         ...(typeof result.totalTradeCount === "number" && Number.isFinite(result.totalTradeCount) ? { totalTradeCount: result.totalTradeCount } : {}),
         bins: profileBins(result.levels),
       },
-      ...(estimatedLabel || hasIncompleteCoverage ? {
+      ...(estimatedLabel || unavailableLabel || hasIncompleteCoverage ? {
         warnings: [
           ...(estimatedLabel ? [estimatedLabel] : []),
+          ...(unavailableLabel ? [unavailableLabel] : []),
           ...(hasIncompleteCoverage ? [`Fixed range profile coverage ${(result.coverage * 100).toFixed(1)}%; footprint data may be incomplete`] : []),
         ],
       } : {}),
@@ -420,6 +437,7 @@ export function buildChartAnalysisSnapshot(args: {
   analysis: AnalysisContext;
   analysisRevision: AnalysisRevisionSnapshot;
   indicators: AnalysisIndicatorSnapshot[];
+  tpoProfiles?: AnalysisTpoProfileSnapshot[];
   options?: AnalysisSnapshotOptions;
 }): ChartAnalysisSnapshot {
   const now = args.options?.now ?? Date.now();
@@ -528,6 +546,7 @@ export function buildChartAnalysisSnapshot(args: {
     levels,
     drawings,
     indicators,
+    ...(args.tpoProfiles?.length ? { tpoProfiles: args.tpoProfiles.map((profile) => ({ ...profile, sessionStarts: [...profile.sessionStarts] })) } : {}),
     warnings,
   };
   fitAnalysisSnapshotToBytes(snapshot, args.options?.maxBytes ?? AI_ANALYSIS_POLICY.snapshotTargetBytes);

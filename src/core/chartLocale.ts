@@ -18,7 +18,11 @@ export interface ChartLocale {
   onLocaleChange(listener: () => void): () => void;
 }
 
-const VOLUME_PROFILE_FALLBACKS: Readonly<Record<string, { tr: string; en: string }>> = {
+const CHART_LOCALE_FALLBACKS: Readonly<Record<string, { tr: string; en: string }>> = {
+  "analysis.tpo.partial": {
+    tr: "Kısmi",
+    en: "Partial",
+  },
   "indicator.volumeProfile.estimated": {
     tr: "Tahmini (OHLCV)",
     en: "Estimated (OHLCV)",
@@ -32,8 +36,8 @@ const VOLUME_PROFILE_FALLBACKS: Readonly<Record<string, { tr: string; en: string
     en: "Estimated (Mixed)",
   },
   "indicator.volumeProfile.estimatedMetricUnsupported": {
-    tr: "Tahmini (OHLCV) modda yalnız Toplam Hacim desteklenir; seçili metrik için gerçek footprint verisi gerekir",
-    en: "Estimated (OHLCV) mode only supports Total Volume; selected metric requires exact footprint data",
+    tr: "Kullanılamıyor: gerçek footprint verisi gerekir",
+    en: "Unavailable: exact footprint data required",
   },
 };
 
@@ -72,7 +76,7 @@ export function tOr(key: string, params?: Record<string, string | number>): stri
   if (translated && translated !== key && !translated.startsWith(`${key} `)) {
     return translated;
   }
-  const fallback = VOLUME_PROFILE_FALLBACKS[key];
+  const fallback = CHART_LOCALE_FALLBACKS[key];
   if (!fallback) return translated;
   const lang = (active.locale() || "").toLowerCase();
   const text = lang === "tr" || lang.startsWith("tr-") || lang.startsWith("tr_") ? fallback.tr : fallback.en;

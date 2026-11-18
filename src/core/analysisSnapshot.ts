@@ -1,4 +1,9 @@
 import type { CanonicalAnalysisStatus } from "./analysisRevision.js";
+import type {
+  OrderFlowProfileCapabilities,
+  ProfileAvailability,
+  ProfileUnavailableReason,
+} from "./analysis/orderFlowProfile.js";
 
 export type AnalysisDataStatus = "ok" | "loading" | "no-data" | "error" | "hidden" | "unsupported";
 export type AnalysisScope = "closed-bars" | "visible-range" | "source-period" | "drawing";
@@ -79,6 +84,10 @@ export interface AnalysisOrderFlowProfileLevelSnapshot {
 export interface AnalysisOrderFlowProfileSnapshot {
   metric: string;
   side: string;
+  availability?: ProfileAvailability;
+  unavailableReason?: ProfileUnavailableReason;
+  /** Estimated-source options supported by the current source coverage. */
+  capabilities?: OrderFlowProfileCapabilities;
   /** Present only for estimated profiles; localized for the active chart locale. */
   sourceLabel?: string;
   provenance?: "exact" | "estimated" | "mixed" | "none";
@@ -94,6 +103,16 @@ export interface AnalysisOrderFlowProfileSnapshot {
   totalVolume: number;
   totalTradeCount?: number;
   bins: AnalysisOrderFlowProfileLevelSnapshot[];
+}
+
+export interface AnalysisTpoProfileSnapshot {
+  sessionStarts: number[];
+  status: "complete" | "partial";
+  /** Localized coverage disclosure; present only for incomplete loaded history. */
+  label?: string;
+  poc: number | null;
+  vah: number | null;
+  val: number | null;
 }
 
 export interface AnalysisDrawingSnapshot {
@@ -139,6 +158,10 @@ export interface AnalysisIndicatorSnapshot {
   series: AnalysisIndicatorSeries[];
   summary: Record<string, number | string | boolean | null>;
   warnings: string[];
+  profile?: Pick<
+    AnalysisOrderFlowProfileSnapshot,
+    "metric" | "side" | "availability" | "unavailableReason" | "capabilities"
+  >;
 }
 
 export interface AnalysisOrderBookLevelSnapshot {
@@ -195,6 +218,7 @@ export interface ChartAnalysisSnapshot {
   levels: AnalysisLevelSnapshot[];
   drawings: AnalysisDrawingSnapshot[];
   indicators: AnalysisIndicatorSnapshot[];
+  tpoProfiles?: AnalysisTpoProfileSnapshot[];
   orderBook?: AnalysisOrderBookSnapshot;
   warnings: string[];
 }

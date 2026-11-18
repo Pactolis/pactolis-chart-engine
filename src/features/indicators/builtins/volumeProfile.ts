@@ -109,8 +109,8 @@ function buildVolumeProfilePrepared(
   selectedBars: number,
 ): VolumeProfilePreparedData {
   const result = profile;
-  if (result.isEstimated && (result.profileMetric !== "volume" || result.profileSide !== "total")) {
-    return emptyPrepared("no-data", tOr("indicator.volumeProfile.estimatedMetricUnsupported"), result);
+  if (result.availability === "unavailable") {
+    return emptyPrepared("unsupported", tOr("indicator.volumeProfile.estimatedMetricUnsupported"), result);
   }
   const maxMagnitude = result.levels.reduce((max, level) => Math.max(max, level.magnitude ?? 0), 0);
   const validLevels = result.levels.filter((level) => level.value !== null);
@@ -448,7 +448,7 @@ function drawProfilePane(ctx: IndicatorDrawContext<VolumeProfileIndicatorSetting
 }
 
 function emptyPrepared(
-  status: "hidden" | "no-data",
+  status: "hidden" | "no-data" | "unsupported",
   message: string,
   result: OrderFlowProfileResult = calculateOrderFlowProfile([]),
 ): VolumeProfilePreparedData {

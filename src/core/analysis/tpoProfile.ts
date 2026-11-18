@@ -63,6 +63,19 @@ export interface TpoMergedSessionGroup {
   lastSpanIndex: number;
 }
 
+export interface TpoProfileGroup extends TpoMergedSessionGroup {
+  /** Whether the loaded bars fail to cover every interval in this profile group. */
+  partial: boolean;
+  result: TpoProfileResult;
+}
+
+export interface TpoProfileGroupSet {
+  from: number;
+  to: number;
+  brackets: TpoBracketBar[];
+  groups: TpoProfileGroup[];
+}
+
 /** Defensive cap on bins per bar to avoid blow-up on degenerate ranges. */
 const MAX_BINS_PER_BAR = 10_000;
 
@@ -253,6 +266,33 @@ export function mergeTpoSessionSpans(
     });
   });
   return groups;
+}
+
+/** Build the exact profile groups shared by the chart renderer and analysis snapshots. */
+export function buildTpoProfileGroups(
+  bars: readonly FootprintBar[],
+  from: number,
+  to: number,
+  period: TpoProfilePeriod,
+  bracketMs: number,
+  intervalMs: number,
+  priceStep: number,
+  valueAreaPercent = 0.7,
+  mergeLeftSessionStarts: ReadonlySet<number> = new Set(),
+): TpoProfileGroupSet {
+  const [sessionFrom, sessionTo] = tpoSessionRange(bars, from, to, period, mergeLeftSessionStarts);
+  const brackets = aggregateTpoBrackets(bars, sessionFrom, sessionTo, bracketMs);
+  const spans = buildTpoBracketSpans(brackets, period);
+  const groups = mergeTpoSessionSpans(spans, mergeLeftSessionStarts).map((group) => ({
+    ...group,
+    partial: tpoSessionPartial(bars, group.firstIdx, group.lastIdx, period, intervalMs),
+    result: calculateTpoProfile(
+      brackets.slice(group.firstBracketIndex, group.lastBracketIndex + 1).map((bracket) => bracket.bar),
+      priceStep,
+      valueAreaPercent,
+    ),
+  }));
+  return { from: sessionFrom, to: sessionTo, brackets, groups };
 }
 
 export function calculateTpoProfile(
