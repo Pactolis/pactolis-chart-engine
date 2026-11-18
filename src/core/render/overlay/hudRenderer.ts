@@ -85,6 +85,7 @@ export function drawHud(
   const displayOptions = deps.displayOptions;
   const locale = displayOptions.numberLocale;
   const labels = displayOptions.labels;
+  const partialMarker = bar.completeness === "partial" ? "≈" : "";
   const volTxt = deps.showNotional ? fmtNotional(quoteVolumeForBar(bar), locale) : fmtVol(bar.volume, locale);
   const deltaTxt = deps.showNotional
     ? fmtNotional(Math.abs(bar.delta) * bar.close, locale)
@@ -99,15 +100,15 @@ export function drawHud(
   ctx.textBaseline = "top";
   ctx.fillStyle = uiColor.textHeading;
   const hudText = `O ${fmtFixed(bar.open, pd, locale)} H ${fmtFixed(bar.high, pd, locale)} L ${fmtFixed(bar.low, pd, locale)} `
-    + `C ${fmtFixed(bar.close, pd, locale)} ${labels.volume} ${unit}${volTxt} Δ ${bar.delta >= 0 ? "+" : "-"}${unit}${deltaTxt} `
-    + `${labels.trades} ${bar.count} ${labels.range} ${fmtFixed(rangePct, 2, locale)}% ${labels.change} ${changePct >= 0 ? "+" : ""}${fmtFixed(changePct, 2, locale)}%`;
+    + `C ${fmtFixed(bar.close, pd, locale)} ${labels.volume} ${partialMarker}${unit}${volTxt} Δ ${partialMarker}${bar.delta >= 0 ? "+" : "-"}${unit}${deltaTxt} `
+    + `${labels.trades} ${partialMarker}${bar.count} ${labels.range} ${fmtFixed(rangePct, 2, locale)}% ${labels.change} ${changePct >= 0 ? "+" : ""}${fmtFixed(changePct, 2, locale)}%`;
   deps.onHudText?.(hudText);
 
-  const prefix = `${hovered ? "◆ " : ""}O ${fmtFixed(bar.open, pd, locale)}  H ${fmtFixed(bar.high, pd, locale)}  L ${fmtFixed(bar.low, pd, locale)}  C ${fmtFixed(bar.close, pd, locale)}  ${labels.volume} ${unit}${volTxt}`;
+  const prefix = `${hovered ? "◆ " : ""}O ${fmtFixed(bar.open, pd, locale)}  H ${fmtFixed(bar.high, pd, locale)}  L ${fmtFixed(bar.low, pd, locale)}  C ${fmtFixed(bar.close, pd, locale)}  ${labels.volume} ${partialMarker}${unit}${volTxt}`;
   const prefixWidth = ctx.measureText(prefix + "   ").width;
-  const deltaPart = `Δ ${bar.delta >= 0 ? "+" : "-"}${unit}${deltaTxt}`;
+  const deltaPart = `Δ ${partialMarker}${bar.delta >= 0 ? "+" : "-"}${unit}${deltaTxt}`;
   const deltaWidth = ctx.measureText(deltaPart + "   ").width;
-  const tradesPart = `${labels.trades} ${fmtFixed(bar.count, 0, locale, true)}`;
+  const tradesPart = `${labels.trades} ${partialMarker}${fmtFixed(bar.count, 0, locale, true)}`;
   const tradesWidth = ctx.measureText(tradesPart + "   ").width;
 
   const rangePart = `${labels.range} ${fmtFixed(rangePct, 2, locale)}%`;

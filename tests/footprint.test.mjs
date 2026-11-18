@@ -47,6 +47,19 @@ test("weights directional counts by raw fills represented by an aggregate trade"
   assert.equal(bar.count, 6);
 });
 
+test("repair fallback can replay a buffered trade once and remember its ID for the live queue", () => {
+  const series = new FootprintSeries({ intervalMs: 60_000, priceStep: 10, referenceMarket: "BINANCE_FUTURES:btcusdt" });
+  const trade = { time: ACTIVE_TIME + 1, price: 101, qty: 2, isBuy: true, id: "42", market: "BINANCE_FUTURES:btcusdt" };
+  series.addTrades([trade], { dedupe: false, remember: true });
+  series.addTrades([trade]);
+
+  const bar = series.at(0);
+  assert.equal(bar.count, 1);
+  assert.equal(bar.volume, 2);
+  assert.equal(bar.cells.get(100)?.count, 1);
+  assert.equal(bar.cells.get(100)?.buyVol, 2);
+});
+
 test("replaceRange bulk history merge avoids per-bar ordered insertion", () => {
   const intervalMs = 60_000;
   const series = new FootprintSeries({ intervalMs, priceStep: 1 });

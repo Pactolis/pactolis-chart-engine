@@ -229,9 +229,131 @@ test("explicit degradation sticks and cannot be cleared by a later clean metadat
   });
   h.reconnect(1); h.emit(trade(101)); pending.resolve([bar(BASE, 999)]); await tick(5);
   assert.equal(h.pipeline.series.listReadonly().some((b) => b.volume === 999), false);
-  assert.equal(h.reporterEvents.at(-1)?.state, "error");
+  assert.equal(h.reporterEvents.at(-1)?.state, "pending", "degraded source data stays on the retry path");
   assert.equal(h.degraded.at(-1)?.value, true);
   h.pipeline.dispose();
+});
+
+test("degraded repair retains history cells and overlays buffered trades as a partial open bar", async (t) => {
+  useFakeChartDataSource(t);
+  const retries = [];
+  const h = harness((q) => {
+    q.onMeta?.({ ...repairMeta(q, { degraded: true, omitRepair: true }), footprint: { allowed: true, available: true } });
+    return [bar(BASE, 100)];
+  });
+  h.pipeline.setRecentCoverageRetryScheduler((attempt, callback, reason) => retries.push({ attempt, callback, reason }));
+  try {
+    h.reconnect(1, BASE + 1);
+    h.emit(trade(101, BASE + 2, 3));
+    await tick(6);
+
+    const open = h.pipeline.series.get(BASE);
+    assert.equal(open?.completeness, "partial", "without a proven watermark the fallback stays visibly partial");
+    assert.equal(open?.volume, 103);
+    assert.equal(open?.count, 101);
+    assert.equal(open?.cells.get(10_000)?.buyVol, 103);
+    assert.equal(open?.cells.get(10_000)?.count, 101);
+    assert.equal(retries.length, 1);
+    assert.equal(retries[0].attempt, 0);
+    assert.equal(retries[0].reason, "snapshot_pending");
+  } finally {
+    h.pipeline.setRecentCoverageRetryScheduler(null);
+    h.pipeline.dispose();
+  }
+});
+
+test("unavailable repair data does not enter the degraded-history fallback", async (t) => {
+  useFakeChartDataSource(t);
+  const retries = [];
+  const h = harness((q) => {
+    q.onMeta?.({ ...repairMeta(q, { degraded: true, omitRepair: true }), footprint: { allowed: true, available: false } });
+    return [bar(BASE, 999)];
+  });
+  h.pipeline.setRecentCoverageRetryScheduler((attempt, callback, reason) => retries.push({ attempt, callback, reason }));
+  try {
+    h.reconnect(1, BASE + 1);
+    h.emit(trade(101, BASE + 2));
+    await tick(6);
+
+    assert.notEqual(h.pipeline.series.get(BASE)?.volume, 999);
+    assert.equal(retries.length, 1);
+    assert.equal(retries[0].reason, "transport");
+  } finally {
+    h.pipeline.setRecentCoverageRetryScheduler(null);
+    h.pipeline.dispose();
+  }
+});
+
+test("a clean retry reconciles a degraded fallback and adds the buffered tail once", async (t) => {
+  useFakeChartDataSource(t);
+  const retries = [];
+  let calls = 0;
+  const h = harness((q) => {
+    calls++;
+    if (calls === 1) {
+      q.onMeta?.({ ...repairMeta(q, { degraded: true, omitRepair: true }), footprint: { allowed: true, available: true } });
+    } else {
+      q.onMeta?.(repairMeta(q));
+    }
+    return [bar(BASE, 100)];
+  });
+  h.pipeline.setRecentCoverageRetryScheduler((attempt, callback, reason) => retries.push({ attempt, callback, reason }));
+  try {
+    h.reconnect(1, BASE + 1);
+    h.emit(trade(101, BASE + 2, 3));
+    await tick(6);
+    assert.equal(h.pipeline.series.get(BASE)?.completeness, "partial");
+    assert.equal(retries.length, 1);
+
+    assert.equal(retries[0].callback(), true);
+    await tick(8);
+
+    const open = h.pipeline.series.get(BASE);
+    assert.equal(h.pipeline.liveBootstrapReconciled, true);
+    assert.equal(h.pipeline.series.isRepairOwned(BASE), true);
+    assert.equal(open?.completeness, "complete");
+    assert.equal(open?.volume, 103);
+    assert.equal(open?.count, 101);
+    assert.equal(open?.cells.get(10_000)?.buyVol, 103);
+    assert.equal(open?.cells.get(10_000)?.count, 101);
+    assert.equal(calls, 2);
+    assert.equal(h.reporterEvents.at(-1)?.state, "healthy");
+  } finally {
+    h.pipeline.setRecentCoverageRetryScheduler(null);
+    h.pipeline.dispose();
+  }
+});
+
+test("persistent degraded repair schedules one bounded retry at a time", async (t) => {
+  useFakeChartDataSource(t);
+  const retries = [];
+  let calls = 0;
+  const h = harness((q) => {
+    calls++;
+    q.onMeta?.({ ...repairMeta(q, { degraded: true, omitRepair: true }), footprint: { allowed: true, available: true } });
+    return [bar(BASE, 10)];
+  });
+  h.pipeline.setRecentCoverageRetryScheduler((attempt, callback, reason) => retries.push({ attempt, callback, reason }));
+  try {
+    h.reconnect(1, BASE + 1);
+    h.emit(trade(101, BASE + 2));
+    await tick(5);
+    assert.equal(calls, 1);
+    assert.equal(retries.length, 1);
+
+    for (let attempt = 0; attempt < 4; attempt++) {
+      const retry = retries.at(-1);
+      assert.equal(retry.attempt, attempt);
+      assert.equal(retry.reason, "snapshot_pending");
+      assert.equal(retry.callback(), true);
+      await tick(5);
+      assert.equal(calls, attempt + 2);
+      assert.equal(retries.length, attempt + 2);
+    }
+  } finally {
+    h.pipeline.setRecentCoverageRetryScheduler(null);
+    h.pipeline.dispose();
+  }
 });
 
 test("repair buffer overflow starts a bounded resync and fences the late snapshot", async (t) => {

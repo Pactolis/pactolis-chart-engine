@@ -187,6 +187,9 @@ test("HUD callback preserves the full legacy default text and formats localized 
     labels: { trades: "İşlem", range: "Aralık", change: "Değişim", volume: "Hacim", price: "Fiyat" },
     numberLocale: "tr-TR",
   }), "O 100,0 H 110,0 L 90,0 C 105,0 Hacim $15,8k Δ +$3,1k İşlem 10 Aralık 22,22% Değişim +5,00%");
+
+  bar.completeness = "partial";
+  assert.equal(captureHud(), "O 100.0 H 110.0 L 90.0 C 105.0 Vol ≈$15.8k Δ ≈+$3.1k Trades ≈10 Range 22.22% Chg +5.00%");
 });
 
 test("volume defaults use canonical theme colors", async () => {
