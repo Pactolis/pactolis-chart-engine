@@ -9,6 +9,7 @@ import {
   tpoBracketLabel,
   tpoSessionRange,
   type TpoBracketBar,
+  type TpoProfileGroup,
 } from "../../analysis/tpoProfile.js";
 import { tOr } from "../../chartLocale.js";
 import { tpoPalette } from "../../ui/seriesPalette.js";
@@ -33,7 +34,7 @@ export interface TpoCacheGroup {
   lastIdx: number;
   firstSpanIndex: number;
   partial: boolean;
-  result: ReturnType<typeof calculateTpoProfile>;
+  result: TpoProfileGroup["result"];
 }
 
 export interface TpoCacheState {
