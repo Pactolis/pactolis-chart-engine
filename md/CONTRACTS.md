@@ -77,6 +77,15 @@ Kaynak: [rangeProfile.ts](../src/core/analysis/rangeProfile.ts),
   `Tahmini (OHLCV)` kaynağını aktif chart locale'iyle görünür kılar; tamamen exact sonuçların snapshot
   alanları değişmez.
 
+## TPO history coverage
+
+Daily, weekly and monthly TPO groups use all bars already loaded for the selected session, even
+when the viewport shows only part of it. A missing session boundary or an internal interval gap
+marks the group `partial`; the overlay and `ChartAnalysisSnapshot.tpoProfiles` expose a localized
+coverage label. Complete groups retain their existing counts and levels. Replay only calculates
+from its completed-bar prefix at virtual time `t`, so its result matches live calculation over the
+same prefix. TPO rendering and snapshot creation do not request more history or start backfill.
+
 ## GPU loss counters
 
 `gpu.device.lost` counts each lost shared WebGPU device once. `chart.gpu.contextLost`

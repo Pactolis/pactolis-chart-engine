@@ -105,6 +105,16 @@ export interface AnalysisOrderFlowProfileSnapshot {
   bins: AnalysisOrderFlowProfileLevelSnapshot[];
 }
 
+export interface AnalysisTpoProfileSnapshot {
+  sessionStarts: number[];
+  status: "complete" | "partial";
+  /** Localized coverage disclosure; present only for incomplete loaded history. */
+  label?: string;
+  poc: number | null;
+  vah: number | null;
+  val: number | null;
+}
+
 export interface AnalysisDrawingSnapshot {
   id: string;
   type: string;
@@ -208,6 +218,7 @@ export interface ChartAnalysisSnapshot {
   levels: AnalysisLevelSnapshot[];
   drawings: AnalysisDrawingSnapshot[];
   indicators: AnalysisIndicatorSnapshot[];
+  tpoProfiles?: AnalysisTpoProfileSnapshot[];
   orderBook?: AnalysisOrderBookSnapshot;
   warnings: string[];
 }

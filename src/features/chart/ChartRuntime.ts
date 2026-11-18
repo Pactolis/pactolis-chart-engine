@@ -67,6 +67,8 @@ import { ChartHeatmapGpuCoordinator, type HeatmapGpuRenderFrame } from "./ChartH
 import { ChartLevelContextController } from "./ChartLevelContextController.js";
 import { buildChartAnalysisSnapshot, countClosedBars } from "./analysisSnapshot.js";
 import { decideLiveSameBarAutoFit, type LiveAutoFitSnapshot } from "./liveAutoFit.js";
+import { buildTpoProfileGroups, effectiveTpoBracketMs } from "../../core/analysis/tpoProfile.js";
+import { tOr } from "../../core/chartLocale.js";
 import { OrderbookHeatmapOverlay, type LiveHeatmapTailEvent } from "../orderbook/heatmapOverlay.js";
 import type { HeatmapGpuCellFrame } from "./heatmap/gpu/heatmapGpuRenderer.js";
 import type { FootprintSeries } from "../../core/model/footprint.js";
@@ -228,6 +230,7 @@ class ChartRuntimeImpl implements ChartRuntime, ChartInputHost {
     readonly canonicalStatus: string;
     readonly drawingsSignature: string;
     readonly indicatorsSignature: string;
+    readonly tpoSignature: string;
     readonly timeRangeFrom: number | undefined;
     readonly timeRangeTo: number | undefined;
     readonly priceRangeLow: number | undefined;
@@ -832,6 +835,17 @@ class ChartRuntimeImpl implements ChartRuntime, ChartInputHost {
 
     const analysisCtx = this.analysisContextForChart();
     const analysisRevision = this.svc.getAnalysisRevisionSnapshot(this.state.market);
+    const tpoSnapshot = this.state.chartType === "tpo" ? {
+      period: this.state.tpoProfilePeriod ?? settings.tpoProfilePeriod,
+      bracketSize: this.state.tpoBracketSize ?? settings.tpoBracketSize,
+      priceStep: series.config.priceStep,
+      valueAreaPercent: analysisCtx.profileSettings.valueAreaPercent,
+      partialLabel: tOr("analysis.tpo.partial"),
+      mergeLeftSessionStarts: [...this.tpoMergeLeftSessionStarts].sort((a, b) => a - b),
+    } : null;
+    const tpoSignature = tpoSnapshot
+      ? [tpoSnapshot.period, tpoSnapshot.bracketSize, tpoSnapshot.priceStep, tpoSnapshot.valueAreaPercent, tpoSnapshot.partialLabel, ...tpoSnapshot.mergeLeftSessionStarts].join(":")
+      : "";
 
     const excludedIdsKey = options.excludedSourceIds ? Array.from(options.excludedSourceIds).sort().join(",") : "";
     const optionsSignature = `${options.maxCandles ?? ""}:${options.maxLevelsAndDrawings ?? ""}:${options.maxIndicatorSamples ?? ""}:${options.maxBytes ?? ""}:${options.includeHiddenSources ?? false}:${excludedIdsKey}`;
@@ -865,6 +879,7 @@ class ChartRuntimeImpl implements ChartRuntime, ChartInputHost {
       && cached.optionsSignature === optionsSignature
       && cached.drawingsSignature === drawingsSignature
       && cached.indicatorsSignature === indicatorsSignature
+      && cached.tpoSignature === tpoSignature
     ) {
       return {
         ...cached.snapshot,
@@ -873,6 +888,7 @@ class ChartRuntimeImpl implements ChartRuntime, ChartInputHost {
         levels: cached.snapshot.levels.slice(),
         drawings: cached.snapshot.drawings.slice(),
         indicators: cached.snapshot.indicators.slice(),
+        ...(cached.snapshot.tpoProfiles ? { tpoProfiles: cached.snapshot.tpoProfiles.map((profile) => ({ ...profile, sessionStarts: [...profile.sessionStarts] })) } : {}),
         warnings: cached.snapshot.warnings.slice(),
       };
     }
@@ -886,6 +902,26 @@ class ChartRuntimeImpl implements ChartRuntime, ChartInputHost {
       if (toIndex > fromIndex) analysisRange = [fromIndex, toIndex];
     }
     const visibleSampleCount = Math.max(1, analysisRange[1] - analysisRange[0]);
+    const tpoProfiles = tpoSnapshot
+      ? buildTpoProfileGroups(
+        series.listReadonly(),
+        analysisRange[0],
+        analysisRange[1],
+        tpoSnapshot.period,
+        effectiveTpoBracketMs(tpoSnapshot.bracketSize, this.pipeline.intervalMs),
+        this.pipeline.intervalMs,
+        tpoSnapshot.priceStep,
+        tpoSnapshot.valueAreaPercent,
+        new Set(tpoSnapshot.mergeLeftSessionStarts),
+      ).groups.map((group) => ({
+        sessionStarts: [...group.sessionStarts],
+        status: group.partial ? "partial" as const : "complete" as const,
+        ...(group.partial ? { label: tpoSnapshot.partialLabel } : {}),
+        poc: group.result.poc,
+        vah: group.result.vah,
+        val: group.result.val,
+      }))
+      : undefined;
     const indicators = this.indicatorController.getAnalysisSnapshots(
       series,
       analysisRange,
@@ -901,6 +937,7 @@ class ChartRuntimeImpl implements ChartRuntime, ChartInputHost {
       analysis: analysisCtx,
       analysisRevision,
       indicators,
+      ...(tpoProfiles ? { tpoProfiles } : {}),
       options: {
         ...options,
         now,
@@ -922,6 +959,7 @@ class ChartRuntimeImpl implements ChartRuntime, ChartInputHost {
       canonicalStatus: analysisRevision.canonical.status,
       drawingsSignature,
       indicatorsSignature,
+      tpoSignature,
       timeRangeFrom: runtimeTimeRange?.from,
       timeRangeTo: runtimeTimeRange?.to,
       priceRangeLow: runtimePriceRange?.low,

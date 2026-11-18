@@ -143,3 +143,21 @@ test("provider snapshot retains exact viewport metadata under the configured byt
   assert.ok(snapshot.warnings.some((warning) => warning.includes("oldest rich detail") || warning.includes("byte limit")));
   assert.deepEqual(snapshot.viewport, { timeFrom: 0, timeTo: 6_000_000, priceLow: 90, priceHigh: 210 });
 });
+
+test("analysis snapshot exposes partial TPO coverage and omits a label for complete sessions", () => {
+  const series = new FootprintSeries({ intervalMs: 60_000, priceStep: 1 });
+  series.loadBars([bar(0, 100), bar(60_000, 101)]);
+  const snapshot = buildChartAnalysisSnapshot({
+    panelId: "p", market: "BTCUSDT", timeframe: "1m", intervalMs: 60_000, selectionGeneration: 1,
+    series, analysis: analysis("BTCUSDT"), analysisRevision: revision, indicators: [],
+    tpoProfiles: [
+      { sessionStarts: [0], status: "partial", label: "Kısmi", poc: 100, vah: 101, val: 100 },
+      { sessionStarts: [86_400_000], status: "complete", poc: 101, vah: 102, val: 100 },
+    ],
+    options: { now: 120_000 },
+  });
+  assert.deepEqual(snapshot.tpoProfiles, [
+    { sessionStarts: [0], status: "partial", label: "Kısmi", poc: 100, vah: 101, val: 100 },
+    { sessionStarts: [86_400_000], status: "complete", poc: 101, vah: 102, val: 100 },
+  ]);
+});
