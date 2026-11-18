@@ -79,6 +79,8 @@ export interface AddTradesProgress {
 
 export interface AddTradesOptions {
   dedupe?: boolean;
+  /** Remember trade identities even when a repair replay intentionally bypasses deduplication. */
+  remember?: boolean;
   progressEvery?: number;
   onProgress?: (progress: AddTradesProgress) => void;
 }
@@ -695,16 +697,22 @@ export class FootprintSeries {
     this.nextRecentTradesPruneAt = now + Math.max(10_000, Math.floor(retentionMs / 4));
   }
 
-  private addTradeInternal(trade: AggTrade, dedupe: boolean, includeCandle: boolean, includeFootprint: boolean): void {
+  private addTradeInternal(
+    trade: AggTrade,
+    dedupe: boolean,
+    includeCandle: boolean,
+    includeFootprint: boolean,
+    remember = dedupe,
+  ): void {
     validateTrade(trade);
     const start = bucketStart(trade.time, this.cfg.intervalMs);
     // A trade with a plain numeric ID is remembered by that number, anything else by its fingerprint.
-    const plainId = dedupe ? plainTradeId(trade.id) : -1;
+    const plainId = dedupe || remember ? plainTradeId(trade.id) : -1;
     const ids = plainId >= 0 ? this.recentTradeIds.idsFor(trade.market ?? "") : null;
     const row = ids === null ? undefined : ids.rows.get(plainId);
-    const fingerprint = dedupe && ids === null ? tradeFingerprint(trade) : "";
-    const identified = dedupe && Boolean(trade.id);
-    if (dedupe) {
+    const fingerprint = (dedupe || remember) && ids === null ? tradeFingerprint(trade) : "";
+    const identified = (dedupe || remember) && Boolean(trade.id);
+    if (dedupe || remember) {
       // First delivery wins; a repeat with a different payload is still rejected below
       // but counted so the owner can stop reporting the data as healthy.
       if (ids !== null) {
@@ -718,29 +726,38 @@ export class FootprintSeries {
     if (remainder === 0) return;
     includeCandle = (remainder & REMAINDER_CANDLE) !== 0;
     includeFootprint = (remainder & REMAINDER_FOOTPRINT) !== 0;
-    if (dedupe) {
+    if (dedupe || remember) {
       if (ids !== null) {
-        if (row !== undefined) return;
-        if (ids.monotonic && trade.liquidation !== true) {
+        if (row !== undefined) {
+          if (dedupe) return;
+        } else if (ids.monotonic && trade.liquidation !== true) {
           const floor = this.prunedTradeIdFloor.get(ids.market);
-          if (floor !== undefined && plainId <= floor) return;
+          if (floor !== undefined && plainId <= floor) {
+            if (dedupe) return;
+          } else {
+            this.recentTradeIds.add(ids, plainId, trade);
+          }
+        } else {
+          this.recentTradeIds.add(ids, plainId, trade);
         }
-        this.recentTradeIds.add(ids, plainId, trade);
       } else {
-        if (this.recentTrades.has(fingerprint)) return;
-        const market = trade.market ?? "";
-        const id = identified && trade.liquidation !== true && MONOTONIC_TRADE_ID_MARKET.test(market)
-          ? exactTradeId(trade.id)
-          : null;
-        if (id !== null) {
-          const floor = this.prunedTradeIdFloor.get(market);
-          if (floor !== undefined && id <= floor) return;
+        if (this.recentTrades.has(fingerprint)) {
+          if (dedupe) return;
+        } else {
+          const market = trade.market ?? "";
+          const id = identified && trade.liquidation !== true && MONOTONIC_TRADE_ID_MARKET.test(market)
+            ? exactTradeId(trade.id)
+            : null;
+          if (id !== null) {
+            const floor = this.prunedTradeIdFloor.get(market);
+            if (floor !== undefined && id <= floor && dedupe) return;
+          }
+          this.recentTrades.set(fingerprint, !identified
+            ? { time: trade.time }
+            : id === null
+              ? { time: trade.time, price: trade.price, qty: trade.qty, tradeCount: trade.tradeCount ?? 1, flags: payloadFlags(trade) }
+              : { time: trade.time, price: trade.price, qty: trade.qty, tradeCount: trade.tradeCount ?? 1, flags: payloadFlags(trade), market, id });
         }
-        this.recentTrades.set(fingerprint, !identified
-          ? { time: trade.time }
-          : id === null
-            ? { time: trade.time, price: trade.price, qty: trade.qty, tradeCount: trade.tradeCount ?? 1, flags: payloadFlags(trade) }
-            : { time: trade.time, price: trade.price, qty: trade.qty, tradeCount: trade.tradeCount ?? 1, flags: payloadFlags(trade), market, id });
       }
       if (this.recentTrades.size + this.recentTradeIds.size > 50_000 && trade.time >= this.nextRecentTradesPruneAt) {
         this.pruneRecentTrades(trade.time);
@@ -906,10 +923,11 @@ export class FootprintSeries {
 
   addTrades(trades: AggTrade[], options: AddTradesOptions = {}): void {
     const dedupe = options.dedupe !== false;
+    const remember = options.remember ?? dedupe;
     const progressEvery = Math.max(0, Math.floor(options.progressEvery ?? 0));
     const startedAt = Date.now();
     for (let i = 0; i < trades.length; i++) {
-      this.addTradeInternal(trades[i], dedupe, true, true);
+      this.addTradeInternal(trades[i], dedupe, true, true, remember);
       const done = i + 1;
       if (progressEvery > 0 && (done % progressEvery === 0 || done === trades.length)) {
         options.onProgress?.({

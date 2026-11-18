@@ -1,5 +1,5 @@
 import type { AggTrade, FootprintBar, FootprintCell } from "../../core/types.js";
-import type { ChartDataSnapshot } from "../../core/dataUpdateEvent.js";
+import { snapshotFromSeries, type ChartDataSnapshot } from "../../core/dataUpdateEvent.js";
 import { identifiedPayload, type FootprintSeries } from "../../core/model/footprint.js";
 import type { EnvelopeMeta, TradeIdRepairSnapshot } from "../../core/envelope.js";
 import { bucketEnd, bucketStart } from "../../core/time.js";
@@ -641,6 +641,56 @@ export class LiveTradeRepairController {
     this.host.setDataDegraded(true, unresolved);
   }
 
+  private applyDegradedHistoryFallback(
+    bars: readonly FootprintBar[],
+    meta: HistoryMeta,
+    session: TradeStreamSession,
+    generation: number,
+    controller: AbortController,
+    ownership: number,
+  ): void {
+    const intervalMs = this.host.getIntervalMs();
+    const start = bucketStart(session.boundaryAt, intervalMs);
+    const historyBar = bars.find((bar) => bar.startTime === start);
+    if (!historyBar) {
+      this.host.trace?.("repair.snapshot.fallback_missing", { start, returnedBars: bars.length });
+      return;
+    }
+
+    const watermark = decimalId(meta?.repairSnapshot?.watermark);
+    const seen = new Set<string>();
+    const buffered = this.reconcileBuffer.filter((trade) => {
+      if (trade.market !== undefined && trade.market !== this.host.getMarket()) return false;
+      if (bucketStart(trade.time, intervalMs) !== start) return false;
+      const id = decimalId(trade.id);
+      if (watermark !== null && id !== null ? id <= watermark : trade.time < session.boundaryAt) return false;
+      const identity = id?.toString() ?? identifiedPayload(trade);
+      if (seen.has(identity)) return false;
+      seen.add(identity);
+      return true;
+    });
+    const fallback = cloneRepairBar(historyBar);
+    fallback.completeness = "partial";
+    fallback.sources = fallback.sources?.includes("history") ? fallback.sources : [...(fallback.sources ?? []), "history"];
+
+    const stillOwned = (): boolean => ownership === this.repairOwnership && this.repairController === controller
+      && !this.host.isDisposed() && generation === this.host.getGeneration() && !controller.signal.aborted;
+    this.host.onBeforeHistoryPatch();
+    if (!stillOwned()) return;
+    const previous = snapshotFromSeries(this.host.series);
+    this.host.series.replaceRange(start, bucketEnd(start, intervalMs), [
+      preserveLiquidations(fallback, this.host.series.get(start)),
+    ]);
+    this.host.series.releaseRepairBarriers([start]);
+    if (buffered.length) {
+      this.host.series.addTrades(buffered.map((trade) => ({ ...trade, source: "live" })), { dedupe: false, remember: true });
+    }
+    const applied = this.host.series.get(start);
+    if (applied) applied.completeness = "partial";
+    this.host.trace?.("repair.snapshot.fallback", { start, bufferedTrades: buffered.length, watermark: watermark?.toString() ?? null });
+    this.host.emitHistoryPatch(previous);
+  }
+
   private hasLiveEvidence(session: TradeStreamSession): boolean {
     if (this.host.getLastAppliedTradeTime() >= session.boundaryAt) return true;
     const market = this.host.getMarket();
@@ -766,6 +816,7 @@ export class LiveTradeRepairController {
             retryReason: "transport",
           } satisfies RepairRejection;
         }
+        this.applyDegradedHistoryFallback(bars, latestMeta, session, generation, controller, ownership);
         throw { state: "error", detail: "Trade-id repair snapshot degraded" } satisfies RepairRejection;
       }
       const reason = repairSnapshotReason(
@@ -846,7 +897,8 @@ export class LiveTradeRepairController {
       const state = rejection?.state ?? "error";
       const detail = rejection?.detail ?? (error instanceof Error ? error.message : "Trade stream history repair failed");
       this.host.trace?.("repair.snapshot.rejected", { state, detail, bufferedTrades: this.reconcileBuffer.length });
-      const retryable = !this.reconcileOverflow && (rejection?.state === "pending" || rejection === null);
+      const retryable = !this.reconcileOverflow && (rejection?.state === "pending" || rejection === null
+        || (stickyDegraded && !sourceUnavailable));
       if (retryable) {
         this.repairRetryCount++;
         this.repairFailingSince ??= Date.now();
