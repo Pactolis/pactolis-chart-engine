@@ -755,6 +755,7 @@ export class LiveTradeRepairController {
     this.host.series.beginRepairBarrier(bucketStarts(from, toExclusive, intervalMs));
     let latestMeta: HistoryMeta;
     let stickyDegraded = false;
+    let degradedSnapshotUnusable = false;
     let sourceUnavailable = false;
     let unsupportedFootprint = false;
     const onMeta = (meta: HistoryMeta): void => {
@@ -766,6 +767,11 @@ export class LiveTradeRepairController {
       if (meta?.degraded === true && !unsupportedFootprint) {
         stickyDegraded = true;
         sourceUnavailable ||= meta.footprint?.available === false;
+      }
+      if (stickyDegraded && !sourceUnavailable) {
+        degradedSnapshotUnusable ||= repairSnapshotReason(
+          meta, market, from, repairTo, intervalMs, this.host.series.config.priceStep, this.lastAcceptedWatermark,
+        )?.state === "pending";
       }
     };
 
@@ -786,7 +792,7 @@ export class LiveTradeRepairController {
         });
 
     let retryScheduled = false;
-    void fetchPromise.then(async (bars) => {
+    void Promise.resolve(fetchPromise).then(async (bars) => {
       if (ownership !== this.repairOwnership || this.repairController !== controller) return;
       if (this.reconcileOverflow) throw { state: "error", detail: "Trade stream repair buffer overflow" } satisfies RepairRejection;
       if (this.host.isDisposed() || generation !== this.host.getGeneration() || controller.signal.aborted) return;
@@ -898,7 +904,7 @@ export class LiveTradeRepairController {
       const detail = rejection?.detail ?? (error instanceof Error ? error.message : "Trade stream history repair failed");
       this.host.trace?.("repair.snapshot.rejected", { state, detail, bufferedTrades: this.reconcileBuffer.length });
       const retryable = !this.reconcileOverflow && (rejection?.state === "pending" || rejection === null
-        || (stickyDegraded && !sourceUnavailable));
+        || (degradedSnapshotUnusable && !sourceUnavailable));
       if (retryable) {
         this.repairRetryCount++;
         this.repairFailingSince ??= Date.now();
