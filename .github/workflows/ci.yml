@@ -28,9 +28,6 @@ jobs:
           node-version: ${{ matrix.node }}
       - run: npm ci --no-audit --no-fund
       - run: npm run check
-      - if: matrix.node == 24
-        name: Capture profile accuracy benchmark
-        run: npm run bench:profile-accuracy
       - run: npm test
       - run: npm run check:exports
       - run: npm run check:default-import-graph
