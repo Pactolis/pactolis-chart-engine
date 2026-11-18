@@ -198,6 +198,11 @@ test("Order Flow Profile renders Estimated OHLCV profile on non-footprint market
       drawnTexts.length = 0;
       drawProfile();
       const enDrawingTexts = [...drawnTexts];
+      profileDrawing.profileMetric = "delta";
+      drawnTexts.length = 0;
+      drawProfile();
+      const enUnavailableDrawingTexts = [...drawnTexts];
+      profileDrawing.profileMetric = "volume";
       const enTexts = [...enIndicatorTexts, ...enDrawingTexts];
       const requestsAfterProfileDrawing = historyResourceCount();
 
@@ -209,7 +214,7 @@ test("Order Flow Profile renders Estimated OHLCV profile on non-footprint market
         maxIndicatorSamples: 1,
       });
 
-      // Switch to TR locale fallback check for the overlay badge & delta fail-closed.
+      // Switch to TR locale fallback check for the estimated badge and unavailable delta reason.
       const trTexts: string[] = [];
       const prevLocale = chartLocale();
       configureChartLocale({
@@ -220,6 +225,7 @@ test("Order Flow Profile renders Estimated OHLCV profile on non-footprint market
       });
       let snapDeltaTr: any;
       let trDrawingTexts: string[] = [];
+      let trUnavailableDrawingTexts: string[] = [];
       try {
         drawnTexts.length = 0;
         rt.invalidate();
@@ -229,6 +235,12 @@ test("Order Flow Profile renders Estimated OHLCV profile on non-footprint market
         drawProfile();
         trDrawingTexts = [...drawnTexts];
         trTexts.push(...trIndicatorTexts, ...trDrawingTexts);
+        profileDrawing.profileMetric = "delta";
+        drawnTexts.length = 0;
+        drawProfile();
+        trUnavailableDrawingTexts = [...drawnTexts];
+        trTexts.push(...trUnavailableDrawingTexts);
+        profileDrawing.profileMetric = "volume";
 
         handle.updateState({
           ...rt.getState(),
@@ -253,11 +265,13 @@ test("Order Flow Profile renders Estimated OHLCV profile on non-footprint market
       return {
         enTexts,
         enDrawingTexts,
+        enUnavailableDrawingTexts,
         profileDrawingRequestsBefore: requestsBeforeProfileDrawing,
         profileDrawingRequestsAfter: requestsAfterProfileDrawing,
         snapTotalInd: snapTotal.indicators[0],
         trTexts,
         trDrawingTexts,
+        trUnavailableDrawingTexts,
         snapDeltaTrInd: snapDeltaTr.indicators[0],
       };
     };
@@ -283,6 +297,8 @@ test("Order Flow Profile renders Estimated OHLCV profile on non-footprint market
   // OHLCV-only market produces deterministic estimated total volume profile with explicit EN/TR labels
   // and fails closed when switched to delta.
   expect(evidence.ohlcv.snapTotalInd.status).toBe("ok");
+  expect(evidence.ohlcv.snapTotalInd.profile.availability).toBe("available");
+  expect(evidence.ohlcv.snapTotalInd.profile.capabilities.metrics.delta).toBe(false);
   expect(evidence.ohlcv.snapTotalInd.series.find((s: any) => s.key === "poc")?.samples[0]?.value).toBe(100);
   expect(evidence.ohlcv.snapTotalInd.warnings.some((w: string) => /Estimated/.test(w))).toBe(true);
   expect(evidence.ohlcv.enTexts.some((t: string) => t.includes("Estimated"))).toBe(true);
@@ -290,8 +306,13 @@ test("Order Flow Profile renders Estimated OHLCV profile on non-footprint market
   expect(evidence.ohlcv.enDrawingTexts.some((t: string) => t.includes("Estimated (OHLCV)"))).toBe(true);
   expect(evidence.ohlcv.trDrawingTexts.some((t: string) => t.includes("Tahmini (OHLCV)"))).toBe(true);
   expect(evidence.ohlcv.profileDrawingRequestsAfter).toBe(evidence.ohlcv.profileDrawingRequestsBefore);
-  expect(evidence.ohlcv.snapDeltaTrInd.status).toBe("no-data");
-  expect(evidence.ohlcv.snapDeltaTrInd.warnings.some((w: string) => tHas(w, "Tahmini"))).toBe(true);
+  expect(evidence.ohlcv.snapDeltaTrInd.status).toBe("unsupported");
+  expect(evidence.ohlcv.snapDeltaTrInd.profile.availability).toBe("unavailable");
+  expect(evidence.ohlcv.snapDeltaTrInd.profile.unavailableReason).toBe("exact-footprint-required");
+  expect(evidence.ohlcv.snapDeltaTrInd.profile.capabilities.metrics.delta).toBe(false);
+  expect(evidence.ohlcv.snapDeltaTrInd.warnings.some((w: string) => tHas(w, "Kullanılamıyor"))).toBe(true);
+  expect(evidence.ohlcv.enUnavailableDrawingTexts.some((t: string) => t.startsWith("Unavailable: exact footprint"))).toBe(true);
+  expect(evidence.ohlcv.trUnavailableDrawingTexts.some((t: string) => t.startsWith("Kullanılamıyor: gerçek footprint"))).toBe(true);
 });
 
 function tHas(value: string, needle: string): boolean {

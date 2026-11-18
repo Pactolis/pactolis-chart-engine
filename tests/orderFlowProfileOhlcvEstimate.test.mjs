@@ -238,6 +238,11 @@ test("OHLCV-only estimator distributes volume deterministically and conserves to
     { priceStep: 1, allowOhlcvEstimate: true, developing: true },
   );
   assert.equal(uniform.provenance, "estimated");
+  assert.equal(uniform.availability, "available");
+  assert.deepEqual(uniform.capabilities, {
+    metrics: { volume: true, delta: false, "trade-count": false, "average-trade-size": false },
+    sides: { total: true, buy: false, sell: false },
+  });
   assert.equal(uniform.isEstimated, true);
   assert.equal(uniform.exactBarCount, 0);
   assert.equal(uniform.estimatedBarCount, 1);
@@ -336,7 +341,7 @@ test("OHLCV-only estimator distributes volume deterministically and conserves to
   ]);
 });
 
-test("fail-closed on unsupported metrics/sides in all-OHLCV estimated windows", () => {
+test("estimated profiles expose unavailable exact-only choices and fail closed", () => {
   const ohlcvOnly = [ohlcvBar(T0, 100, 103, 100, 102, 30)];
 
   const unsupportedCombos = [
@@ -364,25 +369,32 @@ test("fail-closed on unsupported metrics/sides in all-OHLCV estimated windows", 
     assert.equal(result.dataComplete, false, `${label} ${profileMetric}/${profileSide}`);
     assert.equal(result.isEstimated, true);
     assert.equal(result.provenance, "estimated");
+    assert.equal(result.availability, "unavailable");
+    assert.equal(result.unavailableReason, "exact-footprint-required");
+    assert.equal(result.capabilities.metrics[profileMetric], false);
+    if (profileMetric === "volume") assert.equal(result.capabilities.sides[profileSide], false);
     assert.deepEqual(result.levels, []);
     assert.equal(result.summaryValue, null);
     assert.deepEqual([result.poc, result.vah, result.val], [null, null, null]);
 
-    for (const [tag, expectedWord] of [["en-US", "Estimated"], ["tr-TR", "Tahmini"]]) {
+    for (const [tag, sourceWord, reasonWord] of [
+      ["en-US", "Estimated", "Unavailable"],
+      ["tr-TR", "Tahmini", "Kullanılamıyor"],
+    ]) {
       withLocale(tag, () => {
         const { drawCtx, fillTexts } = makeIndicatorCtx(series, [0, bars.length], { profileMetric, profileSide });
         const prepared = volumeProfileIndicatorDefinition.prepareData(drawCtx);
-        assert.equal(prepared.status, "no-data", `${label} ${tag} ${profileMetric}/${profileSide} fail-closed`);
-        assert.ok(prepared.message?.includes(expectedWord), `${tag} unsupported message mentions ${expectedWord}: ${prepared.message}`);
+        assert.equal(prepared.status, "unsupported", `${label} ${tag} ${profileMetric}/${profileSide} fail-closed`);
+        assert.ok(prepared.message?.includes(reasonWord), `${tag} unavailable reason mentions ${reasonWord}: ${prepared.message}`);
 
         const header = volumeProfileIndicatorDefinition.getHeaderLabel({ settings: drawCtx.settings, prepared });
-        assert.ok(header.includes(expectedWord), `${tag} header still mentions ${expectedWord}: ${header}`);
+        assert.ok(header.includes(sourceWord), `${tag} header still mentions ${sourceWord}: ${header}`);
 
         volumeProfileIndicatorDefinition.drawPriceOverlay(drawCtx, prepared);
-        assert.ok(fillTexts.some((entry) => entry.text.includes(expectedWord)), `${tag} price-overlay draws fail-closed ${expectedWord} notice`);
+        assert.ok(fillTexts.some((entry) => entry.text.includes(reasonWord)), `${tag} price-overlay draws unavailable reason`);
         fillTexts.length = 0;
         volumeProfileIndicatorDefinition.drawSubPane(drawCtx, prepared);
-        assert.ok(fillTexts.some((entry) => entry.text.includes(expectedWord)), `${tag} pane badge shows ${expectedWord}`);
+        assert.ok(fillTexts.some((entry) => entry.text.includes(reasonWord)), `${tag} pane badge shows unavailable reason`);
       });
     }
   }

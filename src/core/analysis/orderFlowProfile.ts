@@ -10,6 +10,23 @@ export type ProfileMetric =
 export type ProfileSide = "total" | "buy" | "sell";
 
 export type ProfileSourceProvenance = "exact" | "estimated" | "mixed" | "none";
+export type ProfileAvailability = "available" | "unavailable";
+export type ProfileUnavailableReason = "exact-footprint-required";
+
+export interface OrderFlowProfileCapabilities {
+  metrics: Readonly<Record<ProfileMetric, boolean>>;
+  sides: Readonly<Record<ProfileSide, boolean>>;
+}
+
+const ESTIMATED_PROFILE_CAPABILITIES: OrderFlowProfileCapabilities = Object.freeze({
+  metrics: Object.freeze({
+    volume: true,
+    delta: false,
+    "trade-count": false,
+    "average-trade-size": false,
+  }),
+  sides: Object.freeze({ total: true, buy: false, sell: false }),
+});
 
 const MAX_ESTIMATED_BINS_PER_BAR = 2_048;
 const BOUNDARY_SNAP_EPSILON = 1e-10;
@@ -70,6 +87,12 @@ export interface OrderFlowProfileResult {
   isEstimated: boolean;
   exactBarCount: number;
   estimatedBarCount: number;
+  /** Present when source coverage is estimated and declares this selection's availability. */
+  availability?: ProfileAvailability;
+  /** Stable reason code for an estimated selection that needs exact footprint data. */
+  unavailableReason?: ProfileUnavailableReason;
+  /** Choices that the host can disable while the selected profile source is estimated. */
+  capabilities?: OrderFlowProfileCapabilities;
 }
 
 interface ResolvedCounts {
@@ -110,6 +133,9 @@ interface ProfileSnapshot {
   isEstimated: boolean;
   exactBarCount: number;
   estimatedBarCount: number;
+  availability?: ProfileAvailability;
+  unavailableReason?: ProfileUnavailableReason;
+  capabilities?: OrderFlowProfileCapabilities;
 }
 
 interface ResolvedProfileOptions {
@@ -468,6 +494,9 @@ function buildSnapshot(
       isEstimated: true,
       exactBarCount: acc.exactBarCount,
       estimatedBarCount: acc.estimatedBarCount,
+      availability: "unavailable",
+      unavailableReason: "exact-footprint-required",
+      capabilities: ESTIMATED_PROFILE_CAPABILITIES,
     };
   }
 
@@ -518,6 +547,10 @@ function buildSnapshot(
     isEstimated,
     exactBarCount: acc.exactBarCount,
     estimatedBarCount: acc.estimatedBarCount,
+    ...(isEstimated ? {
+      availability: "available" as const,
+      capabilities: ESTIMATED_PROFILE_CAPABILITIES,
+    } : {}),
   };
 }
 
