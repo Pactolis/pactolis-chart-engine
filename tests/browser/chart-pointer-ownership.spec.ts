@@ -64,7 +64,7 @@ test("a second pointer neither takes over nor ends the pointer gesture in progre
       notifyCrosshair: () => undefined,
       autoFit: () => undefined,
       emitVisibleRange: () => undefined,
-      scaleIndicatorPane: (paneId: string) => { log.push(`scale ${paneId}`); return true; },
+      scaleIndicatorPane: (paneId: string, _factor: number, persist = true) => { log.push(`scale ${paneId}:${persist}`); return true; },
     };
 
     const controller = new ChartInputController(canvas, { x: 0, y: 0, visible: false }, host as never);
@@ -81,7 +81,7 @@ test("a second pointer neither takes over nor ends the pointer gesture in progre
     const pan = [...log];
     log.length = 0;
 
-    // Dragging an indicator pane's axis scales that pane.
+    // Dragging an indicator pane's axis scales in-memory during move and commits once on release.
     dispatch("pointerdown", 3, 250, 100);
     dispatch("pointermove", 3, 250, 130);
     dispatch("pointerup", 3, 250, 130);
@@ -93,7 +93,7 @@ test("a second pointer neither takes over nor ends the pointer gesture in progre
   });
 
   expect(probe.pan).toEqual(["begin", "drag 20", "end"]);
-  expect(probe.indicator).toEqual(["scale rsi"]);
+  expect(probe.indicator).toEqual(["scale rsi:false", "scale rsi:true"]);
 });
 
 test("a price-axis drag interrupted by a wheel step is not read as a click on release", async ({ page }) => {

@@ -38,14 +38,28 @@ test("interactionCanvas syncs aria-label across state/lifecycle flows and shows 
 
   const hook = page.locator('[data-testid="chart-hook"]');
   await expect(hook).toHaveCount(1);
+  await expect(hook).toHaveAttribute("aria-hidden", "true");
   await expect(hook).toHaveAttribute("data-history-loading", "false", { timeout: 30_000 });
   await expect(hook).toHaveAttribute("data-series-len", "60", { timeout: 30_000 });
 
+  const gpuCanvas = page.locator('canvas[data-chart-surface="gpu-scene"]');
+  const annotationCanvas = page.locator('canvas[data-chart-surface="annotation"]');
+  await expect(gpuCanvas).toHaveCount(1);
+  await expect(gpuCanvas).toHaveAttribute("aria-hidden", "true");
+  await expect(annotationCanvas).toHaveCount(1);
+  await expect(annotationCanvas).toHaveAttribute("aria-hidden", "true");
+
   const canvas = page.locator('canvas.chart-interaction-canvas[data-chart-surface="interaction"]');
   await expect(canvas).toHaveCount(1);
+  expect(await canvas.getAttribute("aria-hidden")).toBeNull();
   await expect(canvas).toHaveAttribute("role", "application");
   await expect(canvas).toHaveAttribute("tabindex", "0");
   await expect(canvas).toHaveAttribute("aria-label", "BINANCE_FUTURES:btcusdt 15m");
+  const { expectedKeyShortcuts } = await page.evaluate(async () => {
+    const { CHART_CANVAS_ARIA_KEYSHORTCUTS } = await import("/src/features/chart/chartCanvasAccessibility.ts");
+    return { expectedKeyShortcuts: CHART_CANVAS_ARIA_KEYSHORTCUTS };
+  });
+  await expect(canvas).toHaveAttribute("aria-keyshortcuts", expectedKeyShortcuts);
 
   const box = await canvas.boundingBox();
   expect(box).not.toBeNull();
@@ -181,4 +195,123 @@ test("interactionCanvas syncs aria-label across state/lifecycle flows and shows 
   expect(lifecycleCounts.stylesDuringTwoCharts).toBe(1);
   expect(lifecycleCounts.stylesAfterFirstDispose).toBe(1);
   expect(lifecycleCounts.stylesAfterAllDisposed).toBe(0);
+});
+
+test("replaceSurface preserves aria-hidden on replacement gpuCanvas and all aria-keyshortcuts trigger active handlers", async ({ page }) => {
+  await installHistory(page, { bars: buildBars(40) });
+  await openHarness(page, "?chart=BINANCE_FUTURES:btcusdt&timeframe=15m");
+
+  await expect(page.locator('[data-testid="chart-hook"]')).toHaveAttribute("data-history-loading", "false", { timeout: 30_000 });
+
+  const replaceResult = await page.evaluate(async () => {
+    const harness = await import("/harness/chart.ts") as unknown as {
+      listChartRuntimes(): Array<{ session: { replaceSurface(s: unknown): void; getSurface(): { canvas: HTMLCanvasElement } } }>;
+    };
+    const { Canvas2dSurface } = await import("/src/core/gpu/canvas2d/canvas2dSurface.ts");
+    const runtime = harness.listChartRuntimes()[0];
+    const replacementCanvas = document.createElement("canvas");
+    runtime.session.replaceSurface(new Canvas2dSurface(replacementCanvas));
+    const currentGpu = document.querySelector('canvas[data-chart-surface="gpu-scene"]');
+    const currentInteraction = document.querySelector('canvas[data-chart-surface="interaction"]');
+    return {
+      sameCanvas: currentGpu === replacementCanvas,
+      gpuAriaHidden: currentGpu?.getAttribute("aria-hidden"),
+      interactionAriaHidden: currentInteraction?.getAttribute("aria-hidden"),
+    };
+  });
+  expect(replaceResult.sameCanvas).toBe(true);
+  expect(replaceResult.gpuAriaHidden).toBe("true");
+  expect(replaceResult.interactionAriaHidden).toBeNull();
+
+  // Behavioral verification that ChartInputController handles shortcuts listed in CHART_CANVAS_ARIA_KEYSHORTCUTS.
+  const shortcutProbe = await page.evaluate(async () => {
+    const { ChartInputController } = await import("/src/features/chart/ChartInputController.ts");
+    const { configureInteractionCanvasAttributes, CHART_CANVAS_ARIA_KEYSHORTCUTS } = await import("/src/features/chart/chartCanvasAccessibility.ts");
+
+    const canvas = document.createElement("canvas");
+    configureInteractionCanvasAttributes(canvas, { market: "BINANCE_FUTURES:btcusdt", timeframe: "15m" });
+    document.body.appendChild(canvas);
+
+    const actions: string[] = [];
+    let activeTool: string | null = "trend";
+    const drawings = {
+      get activeTool() { return activeTool; },
+      setMarket: () => undefined,
+      hasDraft: () => false,
+      isPointerDragActive: () => false,
+      listCurrent: () => [{ id: "d1", visible: true }],
+      deleteSelected: () => actions.push("deleteSelected"),
+      selectMany: (ids: string[]) => actions.push(`selectMany:${ids.join(",")}`),
+      duplicateSelected: () => actions.push("duplicateSelected"),
+      copySelected: () => actions.push("copySelected"),
+      pasteClipboard: () => actions.push("pasteClipboard"),
+      undo: () => actions.push("undo"),
+      redo: () => actions.push("redo"),
+      setTool: (tool: string | null) => { activeTool = tool; actions.push(`setTool:${tool}`); },
+    };
+    const host = {
+      svc: {
+        getAnalysisContext: () => ({ drawings }),
+        getKeyboardTargetChartId: () => "a11y-shortcuts",
+      },
+      view: {
+        area: { left: 0, top: 0, width: 400, height: 300 },
+        priceAxisW: 50,
+        subPanesH: 0,
+        chartLayoutOptions: { timeAxisHeight: 28 },
+      },
+      overlay: {
+        getIndicatorAxisPaneAt: () => null,
+        getIndicatorPaneAt: () => null,
+      },
+      session: { invalidate: () => undefined },
+      panelId: "a11y-shortcuts",
+      state: { market: "BINANCE_FUTURES:btcusdt", timeframe: "15m" },
+      resetTimeScale: () => actions.push("resetTimeScale"),
+    };
+    canvas.addEventListener("charthelp", () => actions.push("help"));
+    canvas.addEventListener("chartcontextmenu", () => actions.push("contextmenu"));
+    const controller = new ChartInputController(canvas, { x: 0, y: 0, visible: false }, host as never);
+    canvas.focus();
+
+    const press = (init: KeyboardEventInit) =>
+      canvas.dispatchEvent(new KeyboardEvent("keydown", { bubbles: true, cancelable: true, ...init }));
+
+    press({ key: "?" });
+    press({ key: "ContextMenu" });
+    press({ key: "F10", shiftKey: true });
+    press({ key: "Delete" });
+    press({ key: "Backspace" });
+    press({ key: "a", ctrlKey: true });
+    press({ key: "d", metaKey: true });
+    press({ key: "c", ctrlKey: true });
+    press({ key: "v", metaKey: true });
+    press({ key: "z", ctrlKey: true });
+    press({ key: "y", ctrlKey: true });
+    press({ key: "z", metaKey: true, shiftKey: true });
+    press({ key: "Escape" });
+    press({ key: "x" });
+
+    controller.dispose();
+    canvas.remove();
+    return { attr: canvas.getAttribute("aria-keyshortcuts"), expected: CHART_CANVAS_ARIA_KEYSHORTCUTS, actions };
+  });
+
+  expect(shortcutProbe.attr).toBe(shortcutProbe.expected);
+  expect(shortcutProbe.actions).toEqual([
+    "help",
+    "contextmenu",
+    "contextmenu",
+    "deleteSelected",
+    "deleteSelected",
+    "selectMany:d1",
+    "duplicateSelected",
+    "copySelected",
+    "pasteClipboard",
+    "undo",
+    "redo",
+    "redo",
+    "setTool:null",
+    "resetTimeScale",
+  ]);
 });

@@ -196,6 +196,7 @@ class ChartRuntimeImpl implements ChartRuntime, ChartInputHost {
   private disposeDebugGlobals: (() => void) | null = null;
   private focusStyleDocument: Document | null = null;
   private releaseFocusStyle: () => void = () => undefined;
+  private initialPlacementRafId: number | null = null;
   private disposed = false;
   /** Aborted on dispose so background waits started for this chart end with it. */
   private readonly disposal = new AbortController();
@@ -724,13 +725,20 @@ class ChartRuntimeImpl implements ChartRuntime, ChartInputHost {
     this._beginNpocRequest(this.state.market);
 
     if (series.length > 0) {
-      requestAnimationFrame(() => {
-        if (this.disposed || series.length === 0) return;
-        if (view.area.width <= 1 || view.area.height <= 1) return;
-        this.timeViewport.placeLatestAfterDataReset(series.length);
-        this._autoFit();
-        this.session.invalidate(ChartChange.Viewport);
-      });
+      const win = panelRoot.ownerDocument.defaultView;
+      const scheduleRaf = win?.requestAnimationFrame
+        ? (cb: FrameRequestCallback) => win.requestAnimationFrame(cb)
+        : (typeof requestAnimationFrame === "function" ? requestAnimationFrame : null);
+      if (scheduleRaf) {
+        this.initialPlacementRafId = scheduleRaf(() => {
+          this.initialPlacementRafId = null;
+          if (this.disposed || series.length === 0) return;
+          if (view.area.width <= 1 || view.area.height <= 1) return;
+          this.timeViewport.placeLatestAfterDataReset(series.length);
+          this._autoFit();
+          this.session.invalidate(ChartChange.Viewport);
+        });
+      }
     }
   }
 
@@ -1138,8 +1146,8 @@ class ChartRuntimeImpl implements ChartRuntime, ChartInputHost {
     this.session.invalidate(ChartChange.Viewport);
     return mode;
   }
-  scaleIndicatorPane(paneId: string, factorMultiplier: number): boolean {
-    return this.indicatorController.scalePane(paneId, factorMultiplier);
+  scaleIndicatorPane(paneId: string, factorMultiplier: number, persist?: boolean): boolean {
+    return this.indicatorController.scalePane(paneId, factorMultiplier, persist);
   }
   resetIndicatorPaneScale(paneId: string): boolean { return this.indicatorController.resetPaneScale(paneId); }
   toggleIndicatorPaneAutoScale(paneId: string): boolean { return this.indicatorController.togglePaneAutoScale(paneId); }
@@ -1398,6 +1406,12 @@ class ChartRuntimeImpl implements ChartRuntime, ChartInputHost {
     this.magnetController.clearMagnetSnap();
     if (this.disposed) return;
     this.disposed = true;
+    if (this.initialPlacementRafId !== null) {
+      const win = this.panelRoot.ownerDocument.defaultView;
+      if (win?.cancelAnimationFrame) win.cancelAnimationFrame(this.initialPlacementRafId);
+      else if (typeof cancelAnimationFrame === "function") cancelAnimationFrame(this.initialPlacementRafId);
+      this.initialPlacementRafId = null;
+    }
     this.disposal.abort();
     this.disposeDebugGlobals?.();
     this.disposeDebugGlobals = null;
@@ -1856,6 +1870,7 @@ class ChartRuntimeImpl implements ChartRuntime, ChartInputHost {
 function createChartTestHook(doc: Document, panelId: string): HTMLElement {
   const hook = doc.createElement("div");
   hook.setAttribute("data-testid", "chart-hook");
+  hook.setAttribute("aria-hidden", "true");
   hook.setAttribute("data-panel-id", panelId);
   hook.setAttribute("data-hud", "");
   hook.setAttribute("data-series-len", "0");
@@ -1935,7 +1950,9 @@ async function buildChartRuntime(
   const annotationCanvas = doc.createElement("canvas");
   const interactionCanvas = doc.createElement("canvas");
   gpuCanvas.dataset.chartSurface = "gpu-scene";
+  gpuCanvas.setAttribute("aria-hidden", "true");
   annotationCanvas.dataset.chartSurface = "annotation";
+  annotationCanvas.setAttribute("aria-hidden", "true");
   configureInteractionCanvasAttributes(interactionCanvas, initialState);
   gpuCanvas.style.cssText = "position:absolute;inset:0;z-index:1;width:100%;height:100%;pointer-events:none;";
   annotationCanvas.style.cssText = "position:absolute;inset:0;z-index:2;width:100%;height:100%;pointer-events:none;";

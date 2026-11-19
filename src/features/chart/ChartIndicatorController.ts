@@ -238,7 +238,9 @@ export class ChartIndicatorController {
     return prepared;
   }
 
-  scalePane(paneId: string, factorMultiplier: number): boolean { return this.manager.scalePane(paneId, factorMultiplier); }
+  scalePane(paneId: string, factorMultiplier: number, persist?: boolean): boolean {
+    return this.manager.scalePane(paneId, factorMultiplier, persist);
+  }
   resetPaneScale(paneId: string): boolean { return this.manager.resetPaneScale(paneId); }
   togglePaneAutoScale(paneId: string): boolean { return this.manager.togglePaneAutoScale(paneId); }
   totalPaneHeight(availableHeight: number): number { return this.manager.totalPaneHeight(availableHeight); }

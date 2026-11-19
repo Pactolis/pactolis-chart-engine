@@ -4,11 +4,14 @@ import { readFileSync } from "node:fs";
 import { uiColor } from "../dist/core/ui/seriesPalette.js";
 import {
   acquireInteractionCanvasFocusStyle,
+  CHART_CANVAS_ARIA_KEYSHORTCUTS,
+  CHART_CANVAS_SHORTCUTS,
   CHART_INTERACTION_CANVAS_CLASS,
   CHART_INTERACTION_CANVAS_STYLE_ID,
   CHART_INTERACTION_FOCUS_STYLE,
   configureInteractionCanvasAttributes,
   formatChartCanvasAriaLabel,
+  matchesChartCanvasShortcut,
   syncInteractionCanvasAriaLabel,
 } from "../dist/features/chart/chartCanvasAccessibility.js";
 import { ChartSyncController } from "../dist/features/chart/ChartSyncController.js";
@@ -88,7 +91,39 @@ test("interactionCanvas accessibility configures initial attributes and skips re
   assert.equal(canvas.classList.contains(CHART_INTERACTION_CANVAS_CLASS), true);
   assert.equal(canvas.tabIndex, 0);
   assert.equal(canvas.getAttribute("role"), "application");
-  assert.equal(canvas.getAttribute("aria-keyshortcuts"), "? ContextMenu Shift+F10");
+  assert.equal(canvas.getAttribute("aria-keyshortcuts"), CHART_CANVAS_ARIA_KEYSHORTCUTS);
+  const tokens = CHART_CANVAS_ARIA_KEYSHORTCUTS.split(" ");
+  assert.equal(new Set(tokens).size, tokens.length, "aria-keyshortcuts must not contain duplicates");
+  for (const expected of [
+    "?",
+    "ContextMenu",
+    "Shift+F10",
+    "Delete",
+    "Backspace",
+    "Control+A",
+    "Meta+A",
+    "Control+D",
+    "Meta+D",
+    "Control+C",
+    "Meta+C",
+    "Control+V",
+    "Meta+V",
+    "Control+Z",
+    "Meta+Z",
+    "Control+Y",
+    "Meta+Y",
+    "Control+Shift+Z",
+    "Meta+Shift+Z",
+    "Escape",
+    "X",
+  ]) {
+    assert.ok(tokens.includes(expected), `missing expected aria-keyshortcuts token: ${expected}`);
+  }
+  assert.ok(CHART_CANVAS_SHORTCUTS.length >= 11);
+  assert.equal(matchesChartCanvasShortcut("drawing-redo", { key: "Z", ctrlKey: true, shiftKey: true }), true);
+  assert.equal(matchesChartCanvasShortcut("drawing-undo", { key: "Z", ctrlKey: true, shiftKey: true }), false);
+  assert.equal(matchesChartCanvasShortcut("reset-time-scale", { key: "x" }), true);
+  assert.equal(matchesChartCanvasShortcut("reset-time-scale", { key: "x", ctrlKey: true }), false);
   assert.equal(canvas.getAttribute("aria-label"), "BINANCE_FUTURES:btcusdt 15m");
   assert.equal(formatChartCanvasAriaLabel("BINANCE_FUTURES:ethusdt", "1h"), "BINANCE_FUTURES:ethusdt 1h");
 
