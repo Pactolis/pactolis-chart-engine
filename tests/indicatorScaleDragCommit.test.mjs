@@ -569,7 +569,6 @@ test("mounted ChartRuntime defers chartHost.indicatorsChanged and onStateChange 
     removeEventListener(type, fn) { docListeners.get(type)?.delete(fn); },
   };
   doc.head = makeNode("head");
-  doc.head.ownerDocument = doc;
   const win = {
     devicePixelRatio: 1,
     location: { search: "?gpu=canvas2d" },
