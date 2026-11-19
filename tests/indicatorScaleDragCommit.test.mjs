@@ -590,7 +590,10 @@ test("mounted ChartRuntime defers chartHost.indicatorsChanged and onStateChange 
   const panelRoot = makeNode("div");
   const drawings = new DrawingManager(() => {});
   const services = {
-    subscribeToTrades: () => () => {},
+    subscribeToTrades: (_market, cb) => {
+      cb({ time: 1_700_000_000_000, price: 100, qty: 2, isBuyerMaker: false, id: "t-1" });
+      return () => {};
+    },
     fetchPriceStep: async () => 10,
     fetchPriceStepResult: async () => ({ step: 10, resolved: true }),
     fetchPricePrecision: async () => 1,
@@ -654,8 +657,8 @@ test("mounted ChartRuntime defers chartHost.indicatorsChanged and onStateChange 
     assert.equal(surface.status, "ready");
     assert.ok(registeredRuntime);
 
-    // Flush the first RAF so Annotation draws and populates overlay.indicatorAxisRects.
-    while (rafQueue.size > 0) {
+    // Flush initial RAFs so Annotation draws and populates overlay.indicatorAxisRects.
+    for (let step = 0; step < 10 && rafQueue.size > 0; step++) {
       const [id, cb] = rafQueue.entries().next().value;
       rafQueue.delete(id);
       cb(0);
