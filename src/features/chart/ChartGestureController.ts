@@ -45,6 +45,8 @@ export interface IndicatorScaleGesture {
   startX: number;
   startY: number;
   lastY: number;
+  /** True once at least one non-zero vertical drag step updated the pane scale. */
+  scaled?: boolean;
 }
 
 /**

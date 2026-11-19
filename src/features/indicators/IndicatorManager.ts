@@ -448,11 +448,18 @@ export class IndicatorManager {
     return this.maximizedPane !== null && this.maximizedPane !== "chart";
   }
 
-  scalePane(id: string, factorMultiplier: number): boolean {
+  scalePane(id: string, factorMultiplier: number, persist = true): boolean {
     const instance = this.instances.find((item) => item.id === id && isSeparatePane(item));
     if (!instance) return false;
     const factor = Math.max(0.05, Math.min(20, (Number(instance.settings.paneScaleFactor) || 1) * factorMultiplier));
-    this.updateSettings(id, { ...instance.settings, paneScaleAuto: false, paneScaleFactor: factor });
+    const nextSettings = { ...instance.settings, paneScaleAuto: false, paneScaleFactor: factor };
+    if (!persist) {
+      this.instances = this.instances.map((item) => item.id === id ? { ...item, settings: nextSettings } : item);
+      this.renderRevision++;
+      this.onInvalidate(ChartChange.Style);
+      return true;
+    }
+    this.updateSettings(id, nextSettings);
     return true;
   }
 

@@ -222,6 +222,10 @@ export class ChartSession {
     this.lifecycle.start();
     this.setupContextLossHandling();
     this.setupResizeObserver();
+    this.lifecycle.add(() => {
+      this.disposeDprWatcher?.();
+      this.disposeDprWatcher = null;
+    });
     this.setupDprWatcher();
     void this.gl;
   }
@@ -288,6 +292,7 @@ export class ChartSession {
     const nextCanvas = nextSurface.canvas;
 
     nextCanvas.dataset.chartSurface = "gpu-scene";
+    nextCanvas.setAttribute?.("aria-hidden", "true");
     if (prevCanvas.style && prevCanvas.style.cssText) {
       nextCanvas.style.cssText = prevCanvas.style.cssText;
     }
@@ -752,9 +757,7 @@ export class ChartSession {
       if (this.active) this.requestContainerResize();
     };
     update();
-    const dispose = () => mql?.removeEventListener("change", update);
-    this.disposeDprWatcher = dispose;
-    this.lifecycle.add(dispose);
+    this.disposeDprWatcher = () => mql?.removeEventListener("change", update);
   }
 
   private setupContextLossHandling(): void {

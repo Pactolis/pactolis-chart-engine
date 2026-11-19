@@ -25,7 +25,8 @@ import type { TimeScaleViewportController } from "../controllers/timeScaleViewpo
 import type { ChartPanelState } from "../../core/chartPanelState.js";
 import { isDrawingMagnetTransientActive, setDrawingMagnetTransient } from "./drawingInteractionState.js";
 import { executeChartAction, type ChartCommandServices, type ChartCommandTarget } from "./chartCommands.js";
-import { ChartGestureController, type ChartPanGesture } from "./ChartGestureController.js";
+import { ChartGestureController, type ChartPanGesture, type IndicatorScaleGesture } from "./ChartGestureController.js";
+import { matchesChartCanvasShortcut } from "./chartCanvasAccessibility.js";
 import { requestChartPanelMaximize } from "./chartPanelFocus.js";
 import {
   LONG_PRESS_MS,
@@ -138,7 +139,8 @@ export interface ChartInputHost extends ChartCommandTarget {
 
   setPriceAutoScaleFromControl(autoScale: boolean): void;
   togglePriceScaleModeFromControl(): ChartPanelState["scaleMode"];
-  scaleIndicatorPane(paneId: string, factorMultiplier: number): boolean;
+  scaleIndicatorPane(paneId: string, factorMultiplier: number, persist?: boolean): boolean;
+  isDisposed?(): boolean;
 
   autoFit(): void;
   emitVisibleRange(): void;
@@ -177,6 +179,7 @@ function attachChartInput(canvas: HTMLCanvasElement, crosshair: Crosshair, host:
   let keyboardContextMenu = false;
   let transientMagnetActive = false;
   const transientMagnetSource = {};
+  let controllerDisposed = false;
 
   const nowMs = (): number => ownerWindow?.performance?.now() ?? Date.now();
 
@@ -349,6 +352,17 @@ function attachChartInput(canvas: HTMLCanvasElement, crosshair: Crosshair, host:
     gestures.pan = null;
     if (!keepCapture) gestures.releasePointer(pointerId ?? capturedPointerId);
     canvas.style.cursor = "default";
+  };
+
+  /** Ends an active indicator pane axis drag, releasing pointer capture before committing once. */
+  const finishIndicatorScaleGesture = (pointerId?: number): IndicatorScaleGesture | null => {
+    const drag = gestures.clearIndicatorScale(pointerId);
+    if (!drag) return null;
+    canvas.style.cursor = "default";
+    if (drag.scaled && !controllerDisposed && !host.isDisposed?.()) {
+      host.scaleIndicatorPane(drag.paneId, 1, true);
+    }
+    return drag;
   };
 
   /** One pointer drives a gesture at a time; a second finger must not take over or end it. */
@@ -649,8 +663,12 @@ function attachChartInput(canvas: HTMLCanvasElement, crosshair: Crosshair, host:
       if (gestures.indicatorScale.pointerId !== e.pointerId) return;
       const dy = e.clientY - gestures.indicatorScale.lastY;
       gestures.indicatorScale.lastY = e.clientY;
-      host.scaleIndicatorPane(gestures.indicatorScale.paneId, Math.exp(dy * 0.01));
-      session.invalidate(ChartChange.Viewport);
+      if (dy !== 0) {
+        if (host.scaleIndicatorPane(gestures.indicatorScale.paneId, Math.exp(dy * 0.01), false)) {
+          gestures.indicatorScale.scaled = true;
+        }
+        session.invalidate(ChartChange.Viewport);
+      }
       return;
     }
     if (!gestures.pan || gestures.pan.pointerId !== e.pointerId) return;
@@ -699,11 +717,10 @@ function attachChartInput(canvas: HTMLCanvasElement, crosshair: Crosshair, host:
     }
     if (gestures.indicatorScale) {
       if (gestures.indicatorScale.pointerId !== e.pointerId) return;
-      const drag = gestures.indicatorScale;
-      gestures.indicatorScale = null;
-      gestures.releasePointer(e.pointerId);
-      canvas.style.cursor = "default";
-      const wasDragging = movedBeyondSlop(e.clientX - drag.startX, e.clientY - drag.startY, clickSlopPx(e));
+      const drag = finishIndicatorScaleGesture(e.pointerId);
+      const wasDragging = drag
+        ? movedBeyondSlop(e.clientX - drag.startX, e.clientY - drag.startY, clickSlopPx(e))
+        : false;
       if (!wasDragging) {
         const rect = canvas.getBoundingClientRect();
         const control = host.overlay.getIndicatorScaleControlAt(e.clientX - rect.left, e.clientY - rect.top);
@@ -767,7 +784,7 @@ function attachChartInput(canvas: HTMLCanvasElement, crosshair: Crosshair, host:
   const onPointerCancel = (e: PointerEvent) => {
     clearTransientMagnet();
     dropTouchPointer(e);
-    if (gestures.indicatorScale?.pointerId === e.pointerId) gestures.indicatorScale = null;
+    finishIndicatorScaleGesture(e.pointerId);
     cancelDrawingPointer(e.pointerId);
     endActiveGesture(e.pointerId);
     crosshair.visible = false;
@@ -777,7 +794,7 @@ function attachChartInput(canvas: HTMLCanvasElement, crosshair: Crosshair, host:
   const onLostPointerCapture = (e: PointerEvent) => {
     clearTransientMagnet();
     dropTouchPointer(e);
-    if (gestures.indicatorScale?.pointerId === e.pointerId) gestures.indicatorScale = null;
+    finishIndicatorScaleGesture(e.pointerId);
     cancelDrawingPointer(e.pointerId);
     endActiveGesture(e.pointerId);
   };
@@ -845,7 +862,7 @@ function attachChartInput(canvas: HTMLCanvasElement, crosshair: Crosshair, host:
 
   const onContextMenuKeyDown = (e: KeyboardEvent): void => {
     if (e.defaultPrevented || e.target !== canvas) return;
-    if (!(e.key === "ContextMenu" || (e.shiftKey && e.key === "F10"))) return;
+    if (!matchesChartCanvasShortcut("context-menu", e)) return;
     e.preventDefault();
     const rect = canvas.getBoundingClientRect();
     const MouseEventCtor = canvas.ownerDocument.defaultView?.MouseEvent ?? MouseEvent;
@@ -874,7 +891,7 @@ function attachChartInput(canvas: HTMLCanvasElement, crosshair: Crosshair, host:
     const target = e.target;
     if (target instanceof HTMLElement
       && (target.isContentEditable || /^(INPUT|TEXTAREA|SELECT)$/.test(target.tagName))) return;
-    if (!(e.key === "?" || (e.shiftKey && e.key === "/"))) return;
+    if (!matchesChartCanvasShortcut("help", e)) return;
     e.preventDefault();
     const HelpEvent = canvas.ownerDocument.defaultView?.CustomEvent ?? CustomEvent;
     canvas.dispatchEvent(new HelpEvent("charthelp", {
@@ -912,57 +929,57 @@ function attachChartInput(canvas: HTMLCanvasElement, crosshair: Crosshair, host:
       && (target.isContentEditable || /^(INPUT|TEXTAREA|SELECT)$/.test(target.tagName))) return;
     if (!ownsWindowShortcut(e)) return;
     const drawings = host.svc.getAnalysisContext().drawings;
-    if (e.key === "Delete" || e.key === "Backspace") {
+    if (matchesChartCanvasShortcut("drawing-delete", e)) {
       drawings.deleteSelected();
       session.invalidate();
       e.preventDefault();
       return;
     }
-    if ((e.ctrlKey || e.metaKey) && !e.shiftKey && e.key.toLowerCase() === "a") {
+    if (matchesChartCanvasShortcut("drawing-select-all", e)) {
       drawings.selectMany(drawings.listCurrent().filter((drawing) => drawing.visible).map((drawing) => drawing.id));
       session.invalidate();
       e.preventDefault();
       return;
     }
-    if ((e.ctrlKey || e.metaKey) && !e.shiftKey && e.key.toLowerCase() === "d") {
+    if (matchesChartCanvasShortcut("drawing-duplicate", e)) {
       drawings.duplicateSelected();
       session.invalidate();
       e.preventDefault();
       return;
     }
-    if ((e.ctrlKey || e.metaKey) && !e.shiftKey && e.key.toLowerCase() === "c") {
+    if (matchesChartCanvasShortcut("drawing-copy", e)) {
       drawings.copySelected();
       e.preventDefault();
       return;
     }
-    if ((e.ctrlKey || e.metaKey) && !e.shiftKey && e.key.toLowerCase() === "v") {
+    if (matchesChartCanvasShortcut("drawing-paste", e)) {
       drawings.pasteClipboard();
       session.invalidate();
       e.preventDefault();
       return;
     }
-    if ((e.ctrlKey || e.metaKey) && !e.shiftKey && e.key.toLowerCase() === "z") {
+    if (matchesChartCanvasShortcut("drawing-undo", e)) {
       drawings.undo();
       session.invalidate();
       e.preventDefault();
       return;
     }
-    if ((e.ctrlKey || e.metaKey) && (e.key.toLowerCase() === "y" || (e.shiftKey && e.key.toLowerCase() === "z"))) {
+    if (matchesChartCanvasShortcut("drawing-redo", e)) {
       drawings.redo();
       session.invalidate();
       e.preventDefault();
       return;
     }
-    if (e.key === "Escape" && drawings.activeTool !== null) {
+    if (matchesChartCanvasShortcut("escape", e) && drawings.activeTool !== null) {
       drawings.setTool(null);
       session.invalidate();
       e.preventDefault();
     }
-    if (e.key === "Escape" && !e.defaultPrevented && requestChartPanelMaximize(canvas, "query").maximized) {
+    if (matchesChartCanvasShortcut("escape", e) && !e.defaultPrevented && requestChartPanelMaximize(canvas, "query").maximized) {
       requestChartPanelMaximize(canvas, "exit");
       e.preventDefault();
     }
-    if (e.key.toLowerCase() === "x" && !e.ctrlKey && !e.metaKey && !e.altKey) {
+    if (matchesChartCanvasShortcut("reset-time-scale", e)) {
       host.resetTimeScale();
       session.invalidate(ChartChange.Viewport);
       e.preventDefault();
@@ -1084,6 +1101,7 @@ function attachChartInput(canvas: HTMLCanvasElement, crosshair: Crosshair, host:
   ownerWindow?.document.addEventListener("visibilitychange", onVisibilityChange);
 
   return () => {
+    controllerDisposed = true;
     clearTransientMagnet();
     cancelLongPress();
     if (gestures.inspect) crosshair.visible = false;
@@ -1098,6 +1116,7 @@ function attachChartInput(canvas: HTMLCanvasElement, crosshair: Crosshair, host:
       gestures.releasePointer(pointerId);
     }
     endActiveGesture();
+    finishIndicatorScaleGesture();
     canvas.removeEventListener("wheel", onWheel);
     canvas.removeEventListener("pointermove", onPointerMoveMain);
     canvas.removeEventListener("pointerleave", onPointerLeave);

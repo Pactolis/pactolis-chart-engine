@@ -42,6 +42,112 @@ export function syncInteractionCanvasAriaLabel(
   return nextLabel;
 }
 
+export interface ChartKeyboardEventLike {
+  readonly key: string;
+  readonly ctrlKey?: boolean;
+  readonly metaKey?: boolean;
+  readonly shiftKey?: boolean;
+  readonly altKey?: boolean;
+}
+
+export type ChartCanvasShortcutAction =
+  | "help"
+  | "context-menu"
+  | "drawing-delete"
+  | "drawing-select-all"
+  | "drawing-duplicate"
+  | "drawing-copy"
+  | "drawing-paste"
+  | "drawing-undo"
+  | "drawing-redo"
+  | "escape"
+  | "reset-time-scale";
+
+export interface ChartCanvasShortcutDescriptor {
+  readonly action: ChartCanvasShortcutAction;
+  readonly ariaShortcuts: readonly string[];
+  matches(event: ChartKeyboardEventLike): boolean;
+}
+
+const hasCommandModifier = (e: ChartKeyboardEventLike): boolean => Boolean(e.ctrlKey || e.metaKey);
+
+/**
+ * Single canonical shortcut table shared by `aria-keyshortcuts` on the
+ * interactive canvas and `ChartInputController`'s key handlers.
+ */
+export const CHART_CANVAS_SHORTCUTS: readonly ChartCanvasShortcutDescriptor[] = [
+  {
+    action: "help",
+    ariaShortcuts: ["?"],
+    matches: (e) => e.key === "?" || (Boolean(e.shiftKey) && e.key === "/"),
+  },
+  {
+    action: "context-menu",
+    ariaShortcuts: ["ContextMenu", "Shift+F10"],
+    matches: (e) => e.key === "ContextMenu" || (Boolean(e.shiftKey) && e.key === "F10"),
+  },
+  {
+    action: "drawing-delete",
+    ariaShortcuts: ["Delete", "Backspace"],
+    matches: (e) => e.key === "Delete" || e.key === "Backspace",
+  },
+  {
+    action: "drawing-select-all",
+    ariaShortcuts: ["Control+A", "Meta+A"],
+    matches: (e) => hasCommandModifier(e) && !e.shiftKey && e.key.toLowerCase() === "a",
+  },
+  {
+    action: "drawing-duplicate",
+    ariaShortcuts: ["Control+D", "Meta+D"],
+    matches: (e) => hasCommandModifier(e) && !e.shiftKey && e.key.toLowerCase() === "d",
+  },
+  {
+    action: "drawing-copy",
+    ariaShortcuts: ["Control+C", "Meta+C"],
+    matches: (e) => hasCommandModifier(e) && !e.shiftKey && e.key.toLowerCase() === "c",
+  },
+  {
+    action: "drawing-paste",
+    ariaShortcuts: ["Control+V", "Meta+V"],
+    matches: (e) => hasCommandModifier(e) && !e.shiftKey && e.key.toLowerCase() === "v",
+  },
+  {
+    action: "drawing-undo",
+    ariaShortcuts: ["Control+Z", "Meta+Z"],
+    matches: (e) => hasCommandModifier(e) && !e.shiftKey && e.key.toLowerCase() === "z",
+  },
+  {
+    action: "drawing-redo",
+    ariaShortcuts: ["Control+Y", "Meta+Y", "Control+Shift+Z", "Meta+Shift+Z"],
+    matches: (e) => hasCommandModifier(e) && (e.key.toLowerCase() === "y" || (Boolean(e.shiftKey) && e.key.toLowerCase() === "z")),
+  },
+  {
+    action: "escape",
+    ariaShortcuts: ["Escape"],
+    matches: (e) => e.key === "Escape",
+  },
+  {
+    action: "reset-time-scale",
+    ariaShortcuts: ["X"],
+    matches: (e) => e.key.toLowerCase() === "x" && !e.ctrlKey && !e.metaKey && !e.altKey,
+  },
+];
+
+const SHORTCUT_BY_ACTION = new Map<ChartCanvasShortcutAction, ChartCanvasShortcutDescriptor>(
+  CHART_CANVAS_SHORTCUTS.map((descriptor) => [descriptor.action, descriptor]),
+);
+
+export const CHART_CANVAS_ARIA_KEYSHORTCUTS = CHART_CANVAS_SHORTCUTS
+  .flatMap((descriptor) => descriptor.ariaShortcuts)
+  .join(" ");
+
+export function matchesChartCanvasShortcut(
+  action: ChartCanvasShortcutAction,
+  event: ChartKeyboardEventLike,
+): boolean {
+  return SHORTCUT_BY_ACTION.get(action)?.matches(event) ?? false;
+}
+
 /** Apply accessibility attributes, class membership, and initial `aria-label` to `canvas`. */
 export function configureInteractionCanvasAttributes(
   canvas: HTMLCanvasElement,
@@ -55,7 +161,7 @@ export function configureInteractionCanvasAttributes(
   }
   canvas.tabIndex = 0;
   canvas.setAttribute("role", "application");
-  canvas.setAttribute("aria-keyshortcuts", "? ContextMenu Shift+F10");
+  canvas.setAttribute("aria-keyshortcuts", CHART_CANVAS_ARIA_KEYSHORTCUTS);
   syncInteractionCanvasAriaLabel(canvas, state);
 }
 
