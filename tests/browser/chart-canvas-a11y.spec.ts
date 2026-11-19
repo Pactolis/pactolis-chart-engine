@@ -229,6 +229,7 @@ test("replaceSurface preserves aria-hidden on replacement gpuCanvas and all aria
     const { configureInteractionCanvasAttributes, CHART_CANVAS_ARIA_KEYSHORTCUTS } = await import("/src/features/chart/chartCanvasAccessibility.ts");
 
     const canvas = document.createElement("canvas");
+    canvas.style.cssText = "position:fixed;left:0;top:0;width:400px;height:300px;";
     configureInteractionCanvasAttributes(canvas, { market: "BINANCE_FUTURES:btcusdt", timeframe: "15m" });
     document.body.appendChild(canvas);
 
@@ -239,6 +240,8 @@ test("replaceSurface preserves aria-hidden on replacement gpuCanvas and all aria
       setMarket: () => undefined,
       hasDraft: () => false,
       isPointerDragActive: () => false,
+      hitTestAt: () => null,
+      getSelectedIds: () => [],
       listCurrent: () => [{ id: "d1", visible: true }],
       deleteSelected: () => actions.push("deleteSelected"),
       selectMany: (ids: string[]) => actions.push(`selectMany:${ids.join(",")}`),
@@ -263,10 +266,14 @@ test("replaceSurface preserves aria-hidden on replacement gpuCanvas and all aria
       overlay: {
         getIndicatorAxisPaneAt: () => null,
         getIndicatorPaneAt: () => null,
+        getTpoProfileAt: () => null,
       },
       session: { invalidate: () => undefined },
       panelId: "a11y-shortcuts",
       state: { market: "BINANCE_FUTURES:btcusdt", timeframe: "15m" },
+      screenToDrawingPoint: () => ({ time: 0, price: 0 }),
+      hasIndicatorPanes: () => false,
+      isChartPaneMaximized: () => false,
       resetTimeScale: () => actions.push("resetTimeScale"),
     };
     canvas.addEventListener("charthelp", () => actions.push("help"));
