@@ -1,7 +1,7 @@
 /** History window loading, explicit reconcile barrier, day patching, cell refill, and live OHLC seed coordinator. */
 import type { FootprintSeries } from "../../../core/model/footprint.js";
 import { WEEK_MS, bucketEnd, bucketStart } from "../../../core/time.js";
-import { footprintEnabledAt } from "../../../core/footprintPolicy.js";
+import { FOOTPRINT_START_TIME, footprintEnabledAt } from "../../../core/footprintPolicy.js";
 import { isFootprintSyncAllowed, recordFootprintSupport } from "../../../core/syncAllowlist.js";
 import type { AggTrade, FootprintBar } from "../../../core/types.js";
 import type { CandleCoverage, EnvelopeMeta } from "../../../core/envelope.js";
@@ -85,13 +85,14 @@ function candleSnapshotOwnsRange(
 ): boolean {
   if (!coverage || !(toExclusive > from)) return false;
   const lastBucketEnd = bucketEnd(bucketStart(toExclusive - 1, interval), interval);
+  const effectiveFrom = Math.max(from, FOOTPRINT_START_TIME);
   return coverage.schemaVersion === 1
     && coverage.source === "binance-klines"
     && coverage.instrument === market
     && coverage.ownership === "snapshot"
     && coverage.status === "verified"
     && Number.isFinite(coverage.requestedFrom)
-    && coverage.requestedFrom <= from
+    && coverage.requestedFrom <= effectiveFrom
     && Number.isFinite(coverage.requestedTo)
     && coverage.requestedTo >= toExclusive - 1
     && Number.isFinite(coverage.snapshotAt)
@@ -522,11 +523,12 @@ export class HistoryLoadCoordinator {
       }
     }
     if (opts.twoPhase) {
+      const phase2Floor = opts.to >= FOOTPRINT_START_TIME ? Math.max(opts.from, FOOTPRINT_START_TIME) : opts.from;
       const phase2Base: HistoryQuery = {
         markets: [market],
         from: fastPhaseComplete && fastPhaseCoverageComplete && this.activeHistoryCandleSourceGap === null && fastPhaseOldestBarStart !== null
-          ? Math.max(opts.from, fastPhaseOldestBarStart)
-          : opts.from,
+          ? Math.max(phase2Floor, fastPhaseOldestBarStart)
+          : phase2Floor,
         to: opts.to,
         interval: intervalMs,
         priceStep: this.series.config.priceStep, reference: market,

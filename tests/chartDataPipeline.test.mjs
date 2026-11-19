@@ -1362,8 +1362,8 @@ test("twoPhase clips phase 2 only after complete verified candle coverage and pr
 
     const phase2Froms = requests.filter((request) => !request.fast).map((request) => request.from);
     assert.ok(phase2Froms.length > 0);
-    assert.equal(Math.min(...phase2Froms), status === "verified" ? firstBar : 0,
-      `${status} phase 1 must ${status === "verified" ? "clip to its oldest returned bar" : "retain the original phase-2 range"}`);
+    assert.equal(Math.min(...phase2Froms), footprintStart,
+      `${status} phase 1 clamps phase-2 floor to FOOTPRINT_START_TIME when requested range includes footprint era`);
     assert.equal(pipeline.series.length, barCount, `${status} phase 1 keeps the same candle count`);
     assert.equal(pipeline.series.listReadonly().reduce((sum, bar) => sum + bar.cells.size, 0), targetCells,
       `${status} phase 1 keeps the same 41,595 footprint cells`);
@@ -2588,5 +2588,198 @@ test("a failed day patch does not stop later day patches", async () => {
   await assert.rejects(pipeline.patchDay(PIPELINE_T0), /bad bar/);
   await pipeline.patchDay(PIPELINE_T0 + day);
   assert.deepEqual(ran, [PIPELINE_T0, PIPELINE_T0 + day]);
+  pipeline.dispose();
+});
+
+test("twoPhase accepts backend requestedFrom clamped to FOOTPRINT_START_TIME across 1W, 1M, and 1d intervals", async (t) => {
+  const market = "BINANCE_FUTURES:btcusdt";
+  const DAY_MS = 86_400_000;
+  const WEEK_MS = 7 * DAY_MS;
+  const MONTH_TOKEN_MS = 30 * DAY_MS;
+  const FOOTPRINT_START_TIME = Date.UTC(2020, 0, 1);
+  assert.equal(FOOTPRINT_START_TIME, 1_577_836_800_000);
+
+  const scenarios = [
+    {
+      label: "1W pre-2020",
+      intervalMs: WEEK_MS,
+      starts: Array.from({ length: 50 }, (_, i) => Date.UTC(2019, 8, 9) + i * WEEK_MS),
+      to: Date.UTC(2019, 8, 9) + 50 * WEEK_MS - 1,
+      expectPhase2MinFrom: FOOTPRINT_START_TIME,
+    },
+    {
+      label: "1W 2020+",
+      intervalMs: WEEK_MS,
+      starts: Array.from({ length: 40 }, (_, i) => Date.UTC(2020, 0, 6) + i * WEEK_MS),
+      to: Date.UTC(2020, 0, 6) + 40 * WEEK_MS - 1,
+      expectPhase2MinFrom: Date.UTC(2020, 0, 6),
+    },
+    {
+      label: "1M pre-2020",
+      intervalMs: MONTH_TOKEN_MS,
+      starts: Array.from({ length: 40 }, (_, i) => Date.UTC(2019, 8 + i, 1)),
+      to: Date.UTC(2019, 8 + 40, 1) - 1,
+      expectPhase2MinFrom: FOOTPRINT_START_TIME,
+    },
+    {
+      label: "1M 2020+",
+      intervalMs: MONTH_TOKEN_MS,
+      starts: Array.from({ length: 40 }, (_, i) => Date.UTC(2020, 1 + i, 1)),
+      to: Date.UTC(2020, 1 + 40, 1) - 1,
+      expectPhase2MinFrom: Date.UTC(2020, 1, 1),
+    },
+    {
+      label: "1d pre-2020",
+      intervalMs: DAY_MS,
+      starts: Array.from({ length: 180 }, (_, i) => Date.UTC(2019, 8, 9) + i * DAY_MS),
+      to: Date.UTC(2019, 8, 9) + 180 * DAY_MS - 1,
+      expectPhase2MinFrom: FOOTPRINT_START_TIME,
+    },
+    {
+      label: "1d 2020+",
+      intervalMs: DAY_MS,
+      starts: Array.from({ length: 180 }, (_, i) => Date.UTC(2020, 0, 6) + i * DAY_MS),
+      to: Date.UTC(2020, 0, 6) + 180 * DAY_MS - 1,
+      expectPhase2MinFrom: Date.UTC(2020, 0, 6),
+    },
+  ];
+
+  let active = null;
+  useFakeChartDataSource(t, {
+    history: (query) => {
+      const fast = query.includeFootprint === false;
+      active.requests.push({ fast, from: query.from, to: query.to });
+      const selected = active.bars.filter((bar) => bar.startTime >= query.from && bar.startTime <= query.to);
+      return {
+        bars: selected.map((bar) => ({
+          ...bar,
+          cells: fast ? new Map() : new Map(bar.cells),
+        })),
+        meta: {
+          schemaVersion: 1,
+          generatedAt: active.to + active.intervalMs,
+          candleCoverage: {
+            schemaVersion: 1,
+            source: "binance-klines",
+            instrument: market,
+            ownership: "snapshot",
+            status: "verified",
+            requestedFrom: Math.max(query.from, FOOTPRINT_START_TIME),
+            requestedTo: query.to,
+            snapshotAt: active.to + active.intervalMs,
+            closedThrough: query.to,
+            reasonCode: null,
+          },
+        },
+      };
+    },
+  });
+
+  for (const sc of scenarios) {
+    const bars = sc.starts.map((startTime) => {
+      const hasFootprint = startTime >= FOOTPRINT_START_TIME;
+      return historyBar(startTime, {
+        open: 100, high: 102, low: 99, close: 101,
+        volume: hasFootprint ? 4 : 10,
+        count: hasFootprint ? 2 : 1,
+        cells: hasFootprint ? [wideCell(100), wideCell(101)] : [],
+      });
+    });
+    const expectedCells = sc.starts.filter((startTime) => startTime >= FOOTPRINT_START_TIME).length * 2;
+    active = { bars, to: sc.to, intervalMs: sc.intervalMs, requests: [] };
+
+    const pipeline = new ChartDataPipeline({
+      market,
+      intervalMs: sc.intervalMs,
+      priceStep: 1,
+      services: makeServices({ priceStep: 1 }),
+    });
+    await pipeline.loadHistory({ from: 0, to: sc.to, twoPhase: true });
+
+    const phase2Froms = active.requests.filter((request) => !request.fast).map((request) => request.from);
+    assert.ok(phase2Froms.length > 0, `${sc.label}: expects at least one phase-2 request`);
+    assert.equal(
+      Math.min(...phase2Froms),
+      sc.expectPhase2MinFrom,
+      `${sc.label}: min phase-2 from matches expected floor`,
+    );
+    assert.ok(
+      phase2Froms.every((from) => from >= sc.expectPhase2MinFrom),
+      `${sc.label}: no phase-2 window starts earlier than expected floor`,
+    );
+    assert.equal(pipeline.series.length, bars.length, `${sc.label}: preserves full candle count`);
+    assert.equal(
+      pipeline.series.listReadonly().reduce((sum, bar) => sum + bar.cells.size, 0),
+      expectedCells,
+      `${sc.label}: preserves all footprint cells`,
+    );
+    pipeline.dispose();
+  }
+});
+
+test("twoPhase clamps phase-2 floor to FOOTPRINT_START_TIME when phase-1 fails", async (t) => {
+  const market = "BINANCE_FUTURES:btcusdt";
+  const DAY_MS = 86_400_000;
+  const FOOTPRINT_START_TIME = Date.UTC(2020, 0, 1);
+  const firstBar = Date.UTC(2020, 1, 1);
+  const barCount = 40;
+  const to = firstBar + barCount * DAY_MS - 1;
+  const bars = Array.from({ length: barCount }, (_, i) =>
+    historyBar(firstBar + i * DAY_MS, {
+      open: 100, high: 102, low: 99, close: 101,
+      volume: 4, count: 2,
+      cells: [wideCell(100), wideCell(101)],
+    }),
+  );
+
+  let phase1Attempts = 0;
+  const phase2Froms = [];
+  useFakeChartDataSource(t, {
+    history: (query) => {
+      if (query.includeFootprint === false) {
+        phase1Attempts++;
+        throw new Error("phase-1 failed");
+      }
+      phase2Froms.push(query.from);
+      const selected = bars.filter((bar) => bar.startTime >= query.from && bar.startTime <= query.to);
+      return {
+        bars: selected.map((bar) => ({ ...bar, cells: new Map(bar.cells) })),
+        meta: {
+          schemaVersion: 1,
+          generatedAt: to + DAY_MS,
+          candleCoverage: {
+            schemaVersion: 1,
+            source: "binance-klines",
+            instrument: market,
+            ownership: "snapshot",
+            status: "verified",
+            requestedFrom: Math.max(query.from, FOOTPRINT_START_TIME),
+            requestedTo: query.to,
+            snapshotAt: to + DAY_MS,
+            closedThrough: query.to,
+            reasonCode: null,
+          },
+        },
+      };
+    },
+  });
+
+  const pipeline = new ChartDataPipeline({
+    market,
+    intervalMs: DAY_MS,
+    priceStep: 1,
+    services: makeServices({ priceStep: 1 }),
+  });
+  await pipeline.loadHistory({ from: 0, to, twoPhase: true });
+
+  assert.ok(phase1Attempts >= 1, "phase-1 should have been attempted");
+  assert.ok(phase2Froms.length > 0, "phase-2 must still run after phase-1 failure");
+  assert.equal(Math.min(...phase2Froms), FOOTPRINT_START_TIME, "phase-2 floor must clamp to FOOTPRINT_START_TIME (1577836800000)");
+  assert.equal(pipeline.series.length, barCount, "all candles remain present after phase-2 recovery");
+  assert.equal(
+    pipeline.series.listReadonly().reduce((sum, bar) => sum + bar.cells.size, 0),
+    barCount * 2,
+    "all footprint cells remain intact after phase-2 recovery",
+  );
   pipeline.dispose();
 });
