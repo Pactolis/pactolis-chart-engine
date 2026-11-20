@@ -4,13 +4,11 @@ import { neighbourBin, quantizeToStep } from "../../priceStep.js";
 import { settings, type ChartViewConfig } from "../../settings.js";
 import type { VolumeProfileSettings } from "../../analysis/volumeProfile.js";
 import {
-  buildTpoProfileGroups,
-  effectiveTpoBracketMs,
   tpoBracketLabel,
-  tpoSessionRange,
   type TpoBracketBar,
   type TpoProfileGroup,
 } from "../../analysis/tpoProfile.js";
+import { updateTpoProfileCache } from "./tpoProfileCache.js";
 import { tOr } from "../../chartLocale.js";
 import { tpoPalette } from "../../ui/seriesPalette.js";
 
@@ -95,31 +93,8 @@ export function drawTpo(host: TpoRenderHost, view: View, series: FootprintSeries
   if (chartCfg.chartType !== "tpo" || from >= to) return;
   const cfg = host.getProfileSettings?.();
   const vaPercent = cfg?.valueAreaPercent ?? 0.7;
-  const all = series.listReadonly();
   const step = series.config.priceStep;
-
-  const bracketMs = effectiveTpoBracketMs(chartCfg.tpoBracketSize, series.config.intervalMs);
-  const [sessionFrom, sessionTo] = tpoSessionRange(all, from, to, chartCfg.tpoProfilePeriod, host.tpoMergeLeftSessionStarts);
-  const key = [vaPercent, step, series.revision, chartCfg.tpoProfilePeriod, chartCfg.tpoBracketSize,
-    bracketMs, sessionFrom, sessionTo, ...[...host.tpoMergeLeftSessionStarts].sort((a, b) => a - b)].join("|");
-  if (host.tpoCache?.key !== key) {
-    const profiles = buildTpoProfileGroups(
-      all,
-      sessionFrom,
-      sessionTo,
-      chartCfg.tpoProfilePeriod,
-      bracketMs,
-      series.config.intervalMs,
-      step,
-      vaPercent,
-      host.tpoMergeLeftSessionStarts,
-    );
-    host.tpoCache = {
-      key,
-      brackets: profiles.brackets,
-      groups: profiles.groups,
-    };
-  }
+  host.tpoCache = updateTpoProfileCache(host.tpoCache, series, [from, to], chartCfg, vaPercent, host.tpoMergeLeftSessionStarts);
 
   const brackets = host.tpoCache.brackets;
   const ctx = host.ctx;
