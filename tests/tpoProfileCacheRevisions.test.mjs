@@ -174,3 +174,23 @@ test("replacement, repair, prepend and TPO settings retain full oracle parity", 
   series.loadBars(bars);
   refresh(differentStep, [0, series.length], 0.8);
 });
+
+test("equivalent history replacements revalidate the references used by the next tail update", () => {
+  const { series, refresh } = fixture();
+  const before = refresh(null);
+  const first = series.at(0);
+  const replacement = series.listReadonly().slice(0, 48).map((bar) => ({
+    ...bar, sources: [...bar.sources],
+  }));
+  series.replaceRange(START, START + DAY, replacement);
+  assert.notStrictEqual(series.at(0), first);
+  const revalidated = measure(() => refresh(before));
+  assert.equal(revalidated.skipped, 0);
+  assert.equal(revalidated.computed, 0);
+  assert.strictEqual(revalidated.state.groups[0].result, before.groups[0].result);
+
+  series.addTrade(trade(series.at(series.length - 1)));
+  const updated = measure(() => refresh(revalidated.state));
+  assert.equal(updated.skipped, 4);
+  assert.equal(updated.computed, 1);
+});

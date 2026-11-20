@@ -158,6 +158,9 @@ export function updateTpoProfileCache(
         result: recompute ? calculateTpoProfile(brackets.map(({ bar }) => bar), priceStep, vaPercent) : cached.result,
       };
       if (startedAt !== null && recompute) computedGroups++;
+    } else if (structureChanged) {
+      // A history refresh can replace equal bars. Keep the validated references for the next tick.
+      entry = { ...entry, sourceBars: bars.slice(firstIdx, lastIdx + 1) };
     }
     groups.set(id, entry);
     const firstBracketIndex = state.brackets.length;
