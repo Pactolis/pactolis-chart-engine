@@ -3,6 +3,7 @@ import { spawnSync } from "node:child_process";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
 import { dirname, resolve } from "node:path";
+import { makeMarkdown } from "../scripts/gpu-heatmap-benchmark.mjs";
 
 const script = resolve(dirname(fileURLToPath(import.meta.url)), "../scripts/gpu-heatmap-benchmark.mjs");
 
@@ -41,4 +42,48 @@ test("GPU heatmap benchmark dry run pins the pre-measurement decision rule", () 
   assert.equal(plan.suites.issue88.decisionRule.maximumRatio, 2);
   assert.ok(plan.launchArgs.includes("--use-angle=default"));
   assert.ok(!plan.launchArgs.includes("--use-angle=swiftshader-webgl"));
+});
+
+test("GPU benchmark Markdown identifies the WebGPU adapter and its hardware-invalid reason separately from WebGL2", () => {
+  const markdown = makeMarkdown({
+    runId: "software-webgpu",
+    hardwareValid: false,
+    decision: "GO",
+    results: [],
+    webgpuFlush: {
+      decision: "NOT_EVALUATED_HARDWARE_INVALID",
+      hardwareInvalidReasons: ["webgpu-software-adapter"],
+      environment: {
+        webglRenderer: { unmaskedVendor: "AMD", unmaskedRenderer: "Radeon" },
+        webgpuAdapter: { vendor: "google", architecture: "swiftshader", description: "", isFallbackAdapter: false },
+        webgpuVariant: "vulkan-compositor",
+        webgpuLaunchArgs: ["--use-angle=vulkan", "--disable-vulkan-surface"],
+      },
+    },
+  });
+  assert.ok(markdown.includes("#88 decision: **NOT_EVALUATED_HARDWARE_INVALID**"));
+  assert.ok(markdown.includes("#88 WebGL2 renderer: AMD / Radeon"));
+  assert.ok(markdown.includes("#88 WebGPU adapter: google / swiftshader / unknown (fallback: false)"));
+  assert.ok(markdown.includes("#88 WebGPU variant: vulkan-compositor"));
+  assert.ok(markdown.includes("#88 WebGPU launch args: `--use-angle=vulkan --disable-vulkan-surface`"));
+  assert.ok(markdown.includes("#88 hardware invalid reasons: webgpu-software-adapter"));
+});
+
+test("GPU benchmark Markdown renders old report fields and uses unknown for missing metadata", () => {
+  const markdown = makeMarkdown({
+    runId: "legacy",
+    hardwareValid: false,
+    decision: "GO",
+    results: [],
+    webgpuFlush: {
+      decision: "HARDWARE_INVALID",
+      environment: { launchArgs: ["--use-angle=default"] },
+      webgpuProbe: { webglInfo: { unmaskedVendor: "AMD", unmaskedRenderer: "Radeon" } },
+    },
+  });
+  assert.ok(markdown.includes("#88 WebGL2 renderer: AMD / Radeon"));
+  assert.ok(markdown.includes("#88 WebGPU adapter: unknown / unknown / unknown (fallback: unknown)"));
+  assert.ok(markdown.includes("#88 WebGPU variant: unknown"));
+  assert.ok(markdown.includes("#88 WebGPU launch args: `--use-angle=default`"));
+  assert.ok(markdown.includes("#88 hardware invalid reasons: unknown"));
 });

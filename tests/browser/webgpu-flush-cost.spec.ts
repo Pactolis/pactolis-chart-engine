@@ -4,10 +4,15 @@ import { FUNCTIONAL_WEBGL_ARGS } from "./support/history.js";
 import {
   buildDenseFootprintBars,
   buildWebGpuFlushAssessment,
+  classifyWebGpuAdapter,
+  selectWebGpuProbe,
+  shouldTryWebGpuVulkan,
   WEBGPU_FLUSH_DECISION_RULE,
   WEBGPU_FLUSH_FIXTURE,
   WEBGPU_FLUSH_METRICS,
   WEBGPU_FLUSH_SCENARIOS,
+  webGpuFlushHardwareInvalidReasons,
+  webGpuFlushLaunchArgs,
 } from "../../harness/webgpuFlushBenchmark.mjs";
 
 const { viewport: VIEWPORT, markets: MARKETS, barCount: BAR_COUNT, cellsPerBar: CELLS_PER_BAR,
@@ -20,8 +25,10 @@ const { viewport: VIEWPORT, markets: MARKETS, barCount: BAR_COUNT, cellsPerBar: 
 const METRIC_NAMES = WEBGPU_FLUSH_METRICS;
 
 type BackendKind = "webgl2" | "webgpu";
+type WebGpuVariant = "no-vulkan-compositor" | "vulkan-compositor";
 type ScenarioKind = (typeof WEBGPU_FLUSH_SCENARIOS)[number];
 type MetricName = (typeof METRIC_NAMES)[number];
+type WebGpuAdapterIdentity = Awaited<ReturnType<typeof import("../../harness/webgpuFlushBenchmark.mjs").readWebGpuAdapterIdentity>>;
 
 interface MetricStats {
   count: number;
@@ -48,7 +55,7 @@ interface BackendMeasurement {
   requested: string;
   panelBackends: string[];
   fallbacks: unknown[];
-  adapter: unknown;
+  adapter: WebGpuAdapterIdentity;
   counters: Record<string, number>;
   avgQuadsPerFlush: number | null;
   crosshairInteractionOnlyGpuFlushCount: number;
@@ -64,30 +71,10 @@ interface BackendMeasurement {
 
 const HARDWARE_MODE = process.env.CHART_GPU_BENCHMARK_MODE === "hardware";
 
-function launchArgsFor(kind: BackendKind, variant: "no-vulkan-compositor" | "vulkan-compositor" = "no-vulkan-compositor"): string[] {
-  if (HARDWARE_MODE) {
-    const base = [
-      "--use-gl=angle",
-      "--use-angle=default",
-      "--ignore-gpu-blocklist",
-      "--enable-webgl",
-      "--enable-unsafe-webgpu",
-      "--enable-precise-memory-info",
-    ];
-    return kind === "webgpu" && variant === "vulkan-compositor"
-      ? [...base, "--enable-features=Vulkan"]
-      : base;
-  }
-  if (kind === "webgl2") {
-    return [...FUNCTIONAL_WEBGL_ARGS];
-  }
-  const base = [
-    ...FUNCTIONAL_WEBGL_ARGS,
-    "--enable-unsafe-webgpu",
-    "--use-vulkan=swiftshader",
-    "--disable-vulkan-surface",
-  ];
-  return variant === "vulkan-compositor" ? [...base, "--enable-features=Vulkan"] : base;
+function launchArgsFor(kind: BackendKind, variant: WebGpuVariant = "no-vulkan-compositor"): string[] {
+  return webGpuFlushLaunchArgs({
+    kind, variant, hardwareMode: HARDWARE_MODE, platform: process.platform, functionalWebglArgs: FUNCTIONAL_WEBGL_ARGS,
+  });
 }
 
 async function launchBackendBrowser(args: string[]): Promise<Browser> {
@@ -244,10 +231,11 @@ async function installWebGpuOffscreenPresentInitScript(page: Page): Promise<void
   });
 }
 
-async function probeWebGpuCapability(baseURL: string, variant: "no-vulkan-compositor" | "vulkan-compositor") {
+async function probeWebGpuCapability(baseURL: string, variant: WebGpuVariant) {
   const args = launchArgsFor("webgpu", variant);
-  const browser = await launchBackendBrowser(args);
+  let browser: Browser | undefined;
   try {
+    browser = await launchBackendBrowser(args);
     const context = await browser.newContext({ baseURL, viewport: VIEWPORT });
     const page = await context.newPage();
     await installCommonRoutes(page);
@@ -280,14 +268,8 @@ async function probeWebGpuCapability(baseURL: string, variant: "no-vulkan-compos
         if (!adapter) {
           return { ok: false, rafWorking: rafCheck, reason: "navigator.gpu.requestAdapter() returned null", adapterInfo: null, webglInfo, softwareRenderer, canvasPresentation: { supported: false, error: "adapter unavailable" } };
         }
-        let adapterInfo: any = adapter.info ?? null;
-        if (!adapterInfo && typeof adapter.requestAdapterInfo === "function") {
-          try {
-            adapterInfo = await adapter.requestAdapterInfo();
-          } catch {
-            adapterInfo = null;
-          }
-        }
+        const { readWebGpuAdapterIdentity } = await import("/harness/webgpuFlushBenchmark.mjs");
+        const adapterInfo = await readWebGpuAdapterIdentity(adapter);
         const device = await adapter.requestDevice();
         if (!device) {
           return { ok: false, rafWorking: rafCheck, reason: "adapter.requestDevice() returned null", adapterInfo, webglInfo, softwareRenderer, canvasPresentation: { supported: false, error: "device unavailable" } };
@@ -319,22 +301,24 @@ async function probeWebGpuCapability(baseURL: string, variant: "no-vulkan-compos
           webglInfo,
           softwareRenderer,
           canvasPresentation,
-          adapterInfo: adapterInfo
-            ? {
-                vendor: adapterInfo.vendor ?? null,
-                architecture: adapterInfo.architecture ?? null,
-                description: adapterInfo.description ?? null,
-                isFallbackAdapter: adapter.isFallbackAdapter ?? null,
-              }
-            : { isFallbackAdapter: adapter.isFallbackAdapter ?? null },
+          adapterInfo,
         };
       } catch (error) {
         return { ok: false, rafWorking: rafCheck, reason: String(error), adapterInfo: null, webglInfo, softwareRenderer, canvasPresentation: { supported: false, error: String(error) } };
       }
     });
-    return { variant, args, browserVersion: browser.version(), ...result };
+    return { variant, args, browserVersion: browser.version(), ...result, webgpuSoftware: classifyWebGpuAdapter(result.adapterInfo) };
+  } catch (error) {
+    if (!HARDWARE_MODE) throw error;
+    const reason = String(error);
+    return {
+      variant, args, browserVersion: browser?.version() ?? null,
+      ok: false, rafWorking: false, reason, adapterInfo: null, webglInfo: null, softwareRenderer: false,
+      canvasPresentation: { supported: false, error: reason },
+      webgpuSoftware: classifyWebGpuAdapter(null),
+    };
   } finally {
-    await browser.close();
+    await browser?.close();
   }
 }
 
@@ -392,6 +376,7 @@ async function measureBackend(
           { normalizeMondayRangeSettings },
           { DrawingManager },
           webgpuDeviceModule,
+          { readWebGpuAdapterIdentity },
         ] = await Promise.all([
           import("/harness/chart.ts"),
           import("/src/core/performanceTelemetry.ts"),
@@ -402,6 +387,7 @@ async function measureBackend(
           import("/src/core/analysis/mondayRange.ts"),
           import("/src/features/drawings/drawingManager.ts"),
           import("/src/core/gpu/webgpu/webgpuDevice.ts"),
+          import("/harness/webgpuFlushBenchmark.mjs"),
         ]);
 
         const nextRaf = () =>
@@ -515,9 +501,11 @@ async function measureBackend(
           return hook?.getAttribute("data-gpu-backend") ?? "missing";
         });
 
+        let measuredWebGpuAdapter: any = null;
         const syncBackendWork = async () => {
           if (backend === "webgpu") {
             const handle = await webgpuDeviceModule.requestWebGpuDevice();
+            measuredWebGpuAdapter = handle?.adapter ?? measuredWebGpuAdapter;
             await handle?.device?.queue?.onSubmittedWorkDone?.();
           } else {
             for (const runtime of runtimes()) {
@@ -660,6 +648,7 @@ async function measureBackend(
 
         const telemetrySnap = telemetry.snapshotPerformanceTelemetry();
         const diag = diagnostics.getGpuDiagnostics();
+        const adapter = await readWebGpuAdapterIdentity(measuredWebGpuAdapter);
         telemetry.configurePerformanceTelemetry({ enabled: wasEnabled });
 
         for (const handle of handles) handle.dispose();
@@ -668,6 +657,7 @@ async function measureBackend(
 
         return {
           diag,
+          adapter,
           panelBackends,
           counters: telemetrySnap.counters,
           crosshairInteractionOnlyGpuFlushCount,
@@ -736,7 +726,7 @@ async function measureBackend(
       requested: result.diag.requested,
       panelBackends: result.panelBackends,
       fallbacks: result.diag.fallbacks,
-      adapter: result.diag.adapter ?? null,
+      adapter: result.adapter,
       counters: result.counters,
       avgQuadsPerFlush,
       crosshairInteractionOnlyGpuFlushCount: result.crosshairInteractionOnlyGpuFlushCount,
@@ -755,23 +745,16 @@ test("four-chart WebGPU vs WebGL2 chart.gpu.flush.ms comparison across pan, live
   const evidencePath = process.env.CHART_GPU_BENCHMARK_FLUSH_REPORT_PATH;
   const primaryProbe = await probeWebGpuCapability(resolvedBaseURL, "no-vulkan-compositor");
   let webgpuProbe = primaryProbe;
-  if (!primaryProbe.ok || (HARDWARE_MODE && !primaryProbe.canvasPresentation?.supported)) {
+  if (shouldTryWebGpuVulkan(primaryProbe, HARDWARE_MODE)) {
     const fallbackProbe = await probeWebGpuCapability(resolvedBaseURL, "vulkan-compositor");
-    if (!primaryProbe.ok || fallbackProbe.canvasPresentation?.supported) webgpuProbe = fallbackProbe;
+    webgpuProbe = selectWebGpuProbe(primaryProbe, fallbackProbe, HARDWARE_MODE);
   }
   console.log("WEBGPU_PROBE_SELECTED", JSON.stringify(webgpuProbe));
 
-  const hardwareInvalidReasons: string[] = [];
-  if (!webgpuProbe.ok) hardwareInvalidReasons.push(`webgpu-adapter-unavailable:${webgpuProbe.reason ?? "unknown"}`);
-  if (!webgpuProbe.webglInfo?.debugExtensionAvailable
-    || !webgpuProbe.webglInfo?.unmaskedRenderer
-    || !webgpuProbe.webglInfo?.unmaskedVendor) {
-    hardwareInvalidReasons.push("webgl-renderer-identity-unavailable");
-  }
-  if (webgpuProbe.softwareRenderer || webgpuProbe.adapterInfo?.isFallbackAdapter === true) {
-    hardwareInvalidReasons.push("software-renderer");
-  }
-  const hardwareValid = HARDWARE_MODE && hardwareInvalidReasons.length === 0;
+  // The primary hardware launch uses the same flags as the WebGL2 measurement browser.
+  const webglProbe = HARDWARE_MODE ? primaryProbe : webgpuProbe;
+  const hardwareInvalidReasons = webGpuFlushHardwareInvalidReasons(webgpuProbe, webglProbe);
+  let hardwareValid = HARDWARE_MODE && hardwareInvalidReasons.length === 0;
   const presentationMode = HARDWARE_MODE && webgpuProbe.canvasPresentation?.supported
     ? "real"
     : "offscreen-substitute";
@@ -781,8 +764,10 @@ test("four-chart WebGPU vs WebGL2 chart.gpu.flush.ms comparison across pan, live
     operatingSystem: `${process.platform} ${process.arch}`,
     nodeVersion: process.version,
     launchArgs: webgpuProbe.args,
-    webglRenderer: webgpuProbe.webglInfo ?? null,
+    webglRenderer: webglProbe.webglInfo ?? null,
     webgpuAdapter: webgpuProbe.adapterInfo ?? null,
+    webgpuVariant: webgpuProbe.variant,
+    webgpuLaunchArgs: webgpuProbe.args,
     canvasPresentationProbe: webgpuProbe.canvasPresentation ?? null,
   };
   const fixture = {
@@ -854,6 +839,12 @@ test("four-chart WebGPU vs WebGL2 chart.gpu.flush.ms comparison across pan, live
     throw error;
   }
 
+  environment.webgpuAdapter = webgpu.adapter;
+  const measuredAdapterReason = classifyWebGpuAdapter(webgpu.adapter).reason;
+  if (measuredAdapterReason) {
+    if (!hardwareInvalidReasons.includes(measuredAdapterReason)) hardwareInvalidReasons.push(measuredAdapterReason);
+    hardwareValid = false;
+  }
   const assessment = buildWebGpuFlushAssessment({ hardwareValid, webgl2, webgpu });
   const report = {
     schemaVersion: 1,

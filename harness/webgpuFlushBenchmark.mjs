@@ -38,6 +38,111 @@ export const WEBGPU_FLUSH_DECISION_RULE = Object.freeze({
   hardwareRule: "A software renderer or unavailable WebGPU adapter is hardware-invalid and produces no GO/NO-GO decision.",
 });
 
+export async function readWebGpuAdapterIdentity(adapter) {
+  if (!adapter) return null;
+  const info = adapter.info;
+  let identity = info;
+  if (!identity && typeof adapter.requestAdapterInfo === "function") {
+    try {
+      identity = await adapter.requestAdapterInfo();
+    } catch {
+      identity = null;
+    }
+  }
+  return {
+    vendor: identity?.vendor ?? null,
+    architecture: identity?.architecture ?? null,
+    description: identity?.description ?? null,
+    isFallbackAdapter: info?.isFallbackAdapter ?? adapter.isFallbackAdapter ?? null,
+  };
+}
+
+export function classifyWebGpuAdapter(adapterInfo) {
+  if (adapterInfo?.isFallbackAdapter === true) {
+    return { software: true, reason: "webgpu-fallback-adapter" };
+  }
+  const identity = [adapterInfo?.vendor, adapterInfo?.architecture, adapterInfo?.description]
+    .filter((value) => typeof value === "string" && value.trim());
+  if (identity.some((value) => /swiftshader|llvmpipe|lavapipe|softpipe|warp|microsoft basic render/i.test(value))) {
+    return { software: true, reason: "webgpu-software-adapter" };
+  }
+  return { software: false, reason: identity.length === 0 ? "webgpu-adapter-identity-unavailable" : null };
+}
+
+export function webGpuFlushLaunchArgs({ kind, variant, hardwareMode, platform, functionalWebglArgs }) {
+  const vulkan = kind === "webgpu" && variant === "vulkan-compositor";
+  if (hardwareMode) {
+    const linuxVulkan = vulkan && platform === "linux";
+    const args = [
+      "--use-gl=angle",
+      linuxVulkan ? "--use-angle=vulkan" : "--use-angle=default",
+      "--ignore-gpu-blocklist",
+      "--enable-webgl",
+      "--enable-unsafe-webgpu",
+      "--enable-precise-memory-info",
+    ];
+    if (vulkan) args.push("--enable-features=Vulkan");
+    if (linuxVulkan) args.push("--disable-vulkan-surface");
+    return args;
+  }
+  const args = [...functionalWebglArgs];
+  if (kind === "webgpu") {
+    args.push("--enable-unsafe-webgpu", "--use-vulkan=swiftshader", "--disable-vulkan-surface");
+  }
+  if (vulkan) args.push("--enable-features=Vulkan");
+  return args;
+}
+
+export function shouldTryWebGpuVulkan(primary, hardwareMode) {
+  return !primary.ok || (hardwareMode && (!primary.canvasPresentation.supported || primary.webgpuSoftware.reason !== null));
+}
+
+export function selectWebGpuProbe(primary, fallback, hardwareMode) {
+  if (!hardwareMode) return primary.ok ? primary : fallback;
+  if (!fallback.ok) return primary;
+  if (!primary.ok) return fallback;
+  if (fallback.webgpuSoftware.reason === null
+    && (primary.webgpuSoftware.reason !== null || fallback.canvasPresentation.supported)) {
+    return fallback;
+  }
+  return primary;
+}
+
+export function webGpuFlushHardwareInvalidReasons(webgpuProbe, webglProbe) {
+  const reasons = [];
+  if (!webgpuProbe.ok) reasons.push(`webgpu-adapter-unavailable:${webgpuProbe.reason ?? "unknown"}`);
+  if (!webglProbe.webglInfo?.debugExtensionAvailable
+    || !webglProbe.webglInfo.unmaskedRenderer
+    || !webglProbe.webglInfo.unmaskedVendor) {
+    reasons.push("webgl-renderer-identity-unavailable");
+  }
+  if (webglProbe.softwareRenderer) reasons.push("software-renderer");
+  if (webgpuProbe.webgpuSoftware.reason) reasons.push(webgpuProbe.webgpuSoftware.reason);
+  return reasons;
+}
+
+export function formatWebGpuFlushMetadata(flushReport, decision) {
+  const environment = flushReport?.environment;
+  const probe = flushReport?.webgpuProbe;
+  const renderer = environment?.webglRenderer === undefined ? probe?.webglInfo : environment.webglRenderer;
+  const adapter = environment?.webgpuAdapter === undefined
+    ? probe?.adapterInfo ?? flushReport?.webgpu?.adapter
+    : environment.webgpuAdapter;
+  const args = environment?.webgpuLaunchArgs ?? probe?.args ?? environment?.launchArgs;
+  const variant = environment?.webgpuVariant ?? probe?.variant ?? "unknown";
+  const lines = [
+    `- #88 WebGL2 renderer: ${renderer?.unmaskedVendor || renderer?.vendor || "unknown"} / ${renderer?.unmaskedRenderer || renderer?.renderer || "unknown"}`,
+    `- #88 WebGPU adapter: ${adapter?.vendor || "unknown"} / ${adapter?.architecture || "unknown"} / ${adapter?.description || "unknown"} (fallback: ${adapter?.isFallbackAdapter ?? "unknown"})`,
+    `- #88 WebGPU variant: ${variant}`,
+    `- #88 WebGPU launch args: \`${args?.join(" ") || "unknown"}\``,
+  ];
+  if (decision === "NOT_EVALUATED_HARDWARE_INVALID" || decision === "HARDWARE_INVALID") {
+    const reasons = flushReport?.hardwareInvalidReasons ?? [];
+    lines.push(`- #88 hardware invalid reasons: ${reasons.join(", ") || "unknown"}`);
+  }
+  return lines.join("\n");
+}
+
 export function buildDenseFootprintBars(anchorTo) {
   const { barCount, cellsPerBar, priceStep, intervalMs, frozenNow } = WEBGPU_FLUSH_FIXTURE;
   const bucketEnd = Math.floor(anchorTo / intervalMs) * intervalMs;
@@ -108,7 +213,7 @@ export function buildWebGpuFlushAssessment({ hardwareValid, webgl2, webgpu, meas
 
   if (!hardwareValid) {
     return {
-      decision: "HARDWARE_INVALID",
+      decision: "NOT_EVALUATED_HARDWARE_INVALID",
       display: "hardware-invalid",
       rationale: "A software renderer or unavailable WebGPU adapter prevents a hardware decision.",
       comparisons,

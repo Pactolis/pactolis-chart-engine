@@ -5,10 +5,11 @@ import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { existsSync } from "node:fs";
 import { cpus, hostname, platform, release, arch } from "node:os";
 import { dirname, resolve } from "node:path";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import { execFileSync, spawnSync } from "node:child_process";
 import {
   buildWebGpuFlushAssessment,
+  formatWebGpuFlushMetadata,
   WEBGPU_FLUSH_DECISION_RULE,
   WEBGPU_FLUSH_FIXTURE,
   WEBGPU_FLUSH_SCENARIOS,
@@ -268,15 +269,11 @@ function flushRatioRows(flushReport) {
   ).join("\n");
 }
 
-function makeMarkdown(report) {
+export function makeMarkdown(report) {
   const probe = report.rendererProbe;
   const renderer = probe?.unmaskedRenderer ?? probe?.renderer ?? "unavailable";
   const vendor = probe?.unmaskedVendor ?? probe?.vendor ?? "unavailable";
   const flushReport = report.webgpuFlush;
-  const flushProbe = flushReport?.webgpuProbe;
-  const flushRenderer = flushProbe?.webglInfo?.unmaskedRenderer ?? "unavailable";
-  const flushVendor = flushProbe?.webglInfo?.unmaskedVendor ?? "unavailable";
-  const adapter = flushProbe?.adapterInfo ?? null;
   const decisions = report.decisionByIssue ?? { issue74: report.decision, issue88: flushReport?.decision ?? "NOT_EVALUATED" };
   return `# Combined GPU benchmark report\n\n`
     + `- Issues: #74 (Stage 4) and #88\n`
@@ -285,15 +282,13 @@ function makeMarkdown(report) {
     + `- #88 decision: **${decisions.issue88}**${flushReport?.decision === "NO_GO" ? " — NO-GO, P3 kalır" : ""}\n`
     + `- Overall hardware valid: **${report.hardwareValid}**\n`
     + `- #74 renderer: ${vendor} / ${renderer}\n`
-    + `- #88 renderer: ${flushVendor} / ${flushRenderer}\n`
-    + `- WebGPU adapter: ${adapter ? JSON.stringify(adapter) : "unavailable"}\n`
+    + `${formatWebGpuFlushMetadata(flushReport, decisions.issue88)}\n`
     + `- WebGPU canvas presentation: **${flushReport?.presentation ?? "unavailable"}**\n`
     + `- Driver probe: ${report.driverInfo?.source ?? "unavailable"}; ${JSON.stringify(report.driverInfo?.detail ?? null)}\n`
     + `- Host OS: ${report.host?.platform ?? "unknown"} ${report.host?.release ?? ""} (${report.host?.architecture ?? "unknown"})\n`
     + `- Chromium: ${report.browser?.version ?? "unknown"}\n`
     + `- Launch args: \`${(report.browser?.requestedLaunchArgs ?? []).join(" ")}\`\n\n`
-    + `- #88 Chromium: ${flushReport?.environment?.browserVersion ?? "unknown"}\n`
-    + `- #88 launch args: \`${(flushReport?.environment?.launchArgs ?? []).join(" ")}\`\n\n`
+    + `- #88 Chromium: ${flushReport?.environment?.browserVersion ?? "unknown"}\n\n`
     + `## #74 fixed decision rule\n\n`
     + `- ${DECISION_RULE.frameRule}\n`
     + `- ${DECISION_RULE.memoryRule}\n`
@@ -604,7 +599,9 @@ async function main() {
   console.log(`markdown=${markdownPath}`);
 }
 
-main().catch((error) => {
-  console.error(error instanceof Error ? error.stack ?? error.message : String(error));
-  process.exitCode = 1;
-});
+if (process.argv[1] !== undefined && pathToFileURL(resolve(process.argv[1])).href === import.meta.url) {
+  main().catch((error) => {
+    console.error(error instanceof Error ? error.stack ?? error.message : String(error));
+    process.exitCode = 1;
+  });
+}
