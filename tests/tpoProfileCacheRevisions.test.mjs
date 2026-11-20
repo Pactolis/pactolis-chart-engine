@@ -194,3 +194,124 @@ test("equivalent history replacements revalidate the references used by the next
   assert.equal(updated.skipped, 4);
   assert.equal(updated.computed, 1);
 });
+
+test("tail fast path skips closed scans, preserves brackets/results on close within range and no-op revision bumps", () => {
+  const { series, refresh } = fixture();
+  const initial = refresh(null);
+  const tail = series.at(series.length - 1);
+
+  // Close moves inside existing [low, high]: refreshes last bracket without recomputing calculateTpoProfile.
+  series.addTrade({
+    id: "inside-range-close",
+    time: tail.startTime + 500,
+    receivedAt: tail.startTime + 600,
+    price: tail.low + 10,
+    qty: 1.5,
+    isBuy: false,
+    liquidation: false,
+    source: "live",
+  });
+  const bracketOnly = measure(() => refresh(initial));
+  assert.equal(bracketOnly.skipped, 4);
+  assert.equal(bracketOnly.computed, 0);
+  for (let i = 0; i < initial.brackets.length - 1; i++) {
+    assert.strictEqual(bracketOnly.state.brackets[i], initial.brackets[i]);
+  }
+  assert.notStrictEqual(bracketOnly.state.brackets.at(-1), initial.brackets.at(-1));
+  assert.equal(bracketOnly.state.brackets.at(-1).bar.close, tail.low + 10);
+  for (let i = 0; i < initial.groups.length; i++) {
+    assert.strictEqual(bracketOnly.state.groups[i].result, initial.groups[i].result);
+  }
+  assert.notStrictEqual(bracketOnly.state.groups.at(-1), initial.groups.at(-1));
+  // Immutability of prior snapshot.
+  assert.notEqual(initial.brackets.at(-1).bar.close, tail.low + 10);
+
+  // Revision bump without bar field edits hits tailChanges === "none".
+  series.setPricePrecision(4);
+  const noOp = measure(() => refresh(bracketOnly.state));
+  assert.equal(noOp.skipped, 4);
+  assert.equal(noOp.computed, 0);
+  assert.strictEqual(noOp.state.brackets, bracketOnly.state.brackets);
+  assert.strictEqual(noOp.state.groups, bracketOnly.state.groups);
+
+  // High/low expansion on tail recomputes only the active group and preserves all closed references.
+  series.addTrade({
+    id: "expand-high",
+    time: tail.startTime + 700,
+    receivedAt: tail.startTime + 800,
+    price: tail.high + 20,
+    qty: 1,
+    isBuy: true,
+    liquidation: false,
+    source: "live",
+  });
+  const expanded = measure(() => refresh(noOp.state));
+  assert.equal(expanded.skipped, 4);
+  assert.equal(expanded.computed, 1);
+  for (let i = 0; i < 4; i++) assert.strictEqual(expanded.state.groups[i].result, initial.groups[i].result);
+  assert.notStrictEqual(expanded.state.groups.at(-1).result, noOp.state.groups.at(-1).result);
+  for (let i = 0; i < expanded.state.brackets.length - 1; i++) {
+    assert.strictEqual(expanded.state.brackets[i], bracketOnly.state.brackets[i]);
+  }
+});
+
+test("tail fast path handles multi-bar brackets, new session boundaries, merged groups, off-tail pan and backward replay", () => {
+  const { series, config, mergeLeft, refresh } = fixture();
+  config.tpoBracketSize = "1h";
+  const initial = refresh(null);
+  const tail = series.at(series.length - 1);
+
+  // Live trade on aggregated 1h bracket whose lastCachedBracket merges multiple 30m bars (append to make even bracket length).
+  const nextSameSession = makeBar(tail.startTime + INTERVAL, series.length);
+  series.upsertBar(nextSameSession);
+  const afterSameSessionAppend = measure(() => refresh(initial));
+  assert.equal(afterSameSessionAppend.skipped, 0);
+  assert.equal(afterSameSessionAppend.computed, 1);
+
+  // Subsequent live trade on that multi-bar 1h bracket re-enters tail fast path.
+  series.addTrade(trade(series.at(series.length - 1)));
+  const multiBarTailTick = measure(() => refresh(afterSameSessionAppend.state));
+  assert.equal(multiBarTailTick.skipped, 4);
+  assert.equal(multiBarTailTick.computed, 1);
+  for (let i = 0; i < multiBarTailTick.state.brackets.length - 1; i++) {
+    assert.strictEqual(multiBarTailTick.state.brackets[i], afterSameSessionAppend.state.brackets[i]);
+  }
+
+  // Cross UTC day boundary -> new active session, then tail fast path skips 5 closed groups.
+  config.tpoBracketSize = "30m";
+  const baseTail = refresh(multiBarTailTick.state);
+  series.upsertBar(makeBar(START + 5 * DAY, 240));
+  const newDay = measure(() => refresh(baseTail));
+  assert.equal(newDay.skipped, 0);
+  assert.equal(newDay.state.groups.length, 6);
+  series.addTrade(trade(series.at(series.length - 1)));
+  const newDayTick = measure(() => refresh(newDay.state));
+  assert.equal(newDayTick.skipped, 5);
+  assert.equal(newDayTick.computed, 1);
+
+  // Merged last group + live tick, then undo.
+  mergeLeft.add(START + 5 * DAY);
+  const merged = refresh(newDayTick.state);
+  series.addTrade({ ...trade(series.at(series.length - 1)), id: "merged-tail", price: series.at(series.length - 1).high + 30 });
+  const mergedTick = measure(() => refresh(merged));
+  assert.equal(mergedTick.skipped, 4);
+  assert.equal(mergedTick.computed, 1);
+  mergeLeft.clear();
+  const unmerged = refresh(mergedTick.state);
+  assert.equal(unmerged.groups.length, 6);
+
+  // Panning away from tail does not misuse tail fast path.
+  const panned = refresh(unmerged, [0, 120]);
+  series.addTrade({ ...trade(series.at(series.length - 1)), id: "offscreen-tail", price: series.at(series.length - 1).high + 40 });
+  const pannedAfterTick = refresh(panned, [0, 120]);
+  assert.strictEqual(pannedAfterTick.groups.at(-1).result, panned.groups.at(-1).result);
+
+  // Backward replay truncation retains exact oracle parity.
+  const full = [...series.listReadonly()];
+  series.loadBars(full.slice(0, 110));
+  const rewound = refresh(unmerged, [0, 110]);
+  series.addTrade(trade(series.at(series.length - 1)));
+  const rewoundTick = measure(() => refresh(rewound, [0, 110]));
+  assert.equal(rewoundTick.skipped, 2);
+  assert.equal(rewoundTick.computed, 1);
+});

@@ -28,13 +28,28 @@ interface CachedGroup {
   result: TpoProfileGroup["result"];
 }
 
+interface Step1Collector {
+  onCacheEarlyHit?: () => void;
+  onCacheMeasure?: (sample: { a1Ms: number; a2Ms: number; a3Ms: number; a4Ms: number; totalMs: number }) => void;
+}
+
 // Store only the previous render's visible groups without changing the exposed cache shape.
 const groupCaches = new WeakMap<TpoCacheState, {
   series: FootprintSeries;
   structureRevision: number;
   nonTailRevision: number;
   settingsKey: string;
+  bars: readonly FootprintBar[];
+  barsLength: number;
+  tailStartTime: number | undefined;
+  first: number;
+  end: number;
+  floorFrom: number;
+  ceilTo: number;
+  mergeKey: string;
   groups: Map<string, CachedGroup>;
+  groupEntries: CachedGroup[];
+  groupIds: string[];
 }>();
 
 function bracketSessionSpans(
@@ -82,7 +97,8 @@ function sameBracketMetadata(saved: BarInput, bar: FootprintBar, checkShape: boo
 }
 
 function groupChanges(
-  cached: CachedGroup | undefined, bars: readonly FootprintBar[], first: number, last: number, structureChanged: boolean,
+  cached: CachedGroup | undefined, bars: readonly FootprintBar[], first: number, last: number,
+  structureChanged: boolean, ignoreOpenCloseForProfile: boolean,
 ): "profile" | "brackets" | "none" {
   if (cached?.firstIdx !== first || cached.inputs.length !== last - first + 1) return "profile";
   let sameMetadata = true;
@@ -90,9 +106,16 @@ function groupChanges(
     const bar = bars[index];
     const localIndex = index - first;
     const saved = cached.inputs[localIndex];
-    if (saved.startTime !== bar.startTime || !Object.is(saved.open, bar.open) || !Object.is(saved.high, bar.high)
-      || !Object.is(saved.low, bar.low) || !Object.is(saved.close, bar.close)) return "profile";
-    if (sameMetadata && !sameBracketMetadata(saved, bar, structureChanged || cached.sourceBars[localIndex] !== bar)) {
+    if (
+      saved.startTime !== bar.startTime
+      || !Object.is(saved.high, bar.high)
+      || !Object.is(saved.low, bar.low)
+      || (!ignoreOpenCloseForProfile && (!Object.is(saved.open, bar.open) || !Object.is(saved.close, bar.close)))
+    ) return "profile";
+    if (sameMetadata && (
+      (ignoreOpenCloseForProfile && (!Object.is(saved.open, bar.open) || !Object.is(saved.close, bar.close)))
+      || !sameBracketMetadata(saved, bar, structureChanged || cached.sourceBars[localIndex] !== bar)
+    )) {
       sameMetadata = false;
     }
   }
@@ -114,35 +137,260 @@ export function updateTpoProfileCache(
   { tpoProfilePeriod: period, tpoBracketSize: bracketSize }: Pick<ChartViewConfig, "tpoProfilePeriod" | "tpoBracketSize">,
   vaPercent: number, mergeLeft: ReadonlySet<number>,
 ): TpoCacheState {
+  const globalBag = globalThis as Record<string, unknown>;
+  const benchMode = globalBag.__tpoBenchMode as "main" | "pr" | undefined;
+  const useFastPath = benchMode !== "main";
+  const step1 = !useFastPath ? (globalBag.__tpoStep1 as Step1Collector | undefined) : undefined;
+
+  const tTotalStart = step1 ? performance.now() : 0;
+  const tA1Start = step1 ? performance.now() : 0;
+
   const bars = series.listReadonly();
   const { intervalMs, priceStep } = series.config;
   const bracketMs = effectiveTpoBracketMs(bracketSize, intervalMs);
-  const [first, end] = tpoSessionRange(bars, from, to, period, mergeLeft);
-  const settingsKey = [vaPercent, priceStep, period, bracketSize, bracketMs, intervalMs].join("|");
   const { structureRevision, nonTailRevision } = series;
-  const key = [settingsKey, series.revision, structureRevision, first, end, ...[...mergeLeft].sort((a, b) => a - b)].join("|");
+  const settingsKey = `${vaPercent}|${priceStep}|${period}|${bracketSize}|${bracketMs}|${intervalMs}`;
+  const mergeKey = !useFastPath
+    ? [...mergeLeft].sort((a, b) => a - b).join("|")
+    : mergeLeft.size === 0 ? ""
+    : mergeLeft.size === 1 ? String(mergeLeft.values().next().value)
+    : [...mergeLeft].sort((a, b) => a - b).join("|");
+  const floorFrom = Math.floor(from);
+  const ceilTo = Math.ceil(to);
+  const lastBarIdx = bars.length - 1;
+  const tailStartTime = lastBarIdx >= 0 ? bars[lastBarIdx]?.startTime : undefined;
+
   const prior = previous ? groupCaches.get(previous) : undefined;
   const reusable = prior?.series === series && prior.settingsKey === settingsKey ? prior.groups : undefined;
-  if (reusable && previous?.key === key) return previous;
   const structureChanged = prior?.structureRevision !== structureRevision;
   // Historical trades and OHLC reassertions can mutate a bar without replacing it.
   const closedBarsUnchanged = !structureChanged && typeof nonTailRevision === "number"
     && prior?.nonTailRevision === nonTailRevision;
 
+  const sameSessionBounds = useFastPath
+    && closedBarsUnchanged
+    && prior !== undefined
+    && prior.series === series
+    && prior.bars === bars
+    && prior.barsLength === bars.length
+    && prior.tailStartTime === tailStartTime
+    && prior.settingsKey === settingsKey
+    && prior.mergeKey === mergeKey
+    && prior.floorFrom === floorFrom
+    && prior.ceilTo === ceilTo;
+  const cachedBounds = sameSessionBounds ? prior : undefined;
+
+  const [first, end] = cachedBounds
+    ? [cachedBounds.first, cachedBounds.end]
+    : tpoSessionRange(bars, from, to, period, mergeLeft);
+  const key = mergeKey
+    ? `${settingsKey}|${series.revision}|${structureRevision}|${first}|${end}|${mergeKey}`
+    : `${settingsKey}|${series.revision}|${structureRevision}|${first}|${end}`;
+  if (reusable && previous?.key === key) {
+    step1?.onCacheEarlyHit?.();
+    return previous;
+  }
+
+  let a1Ms = step1 ? performance.now() - tA1Start : 0;
+  let a2Ms = 0;
+  let a3Ms = 0;
+  let a4Ms = 0;
+
   const startedAt = isPerformanceTelemetryEnabled() ? performance.now() : null;
   let computedGroups = 0;
   let skippedGroups = 0;
+
+  if (
+    cachedBounds
+    && first === cachedBounds.first
+    && end === cachedBounds.end
+    && bars.length > 0
+    && previous !== null
+    && previous.groups.length > 0
+    && previous.groups.length === cachedBounds.groupEntries.length
+    && previous.groups.length === cachedBounds.groupIds.length
+    && previous.groups[previous.groups.length - 1].lastIdx === lastBarIdx
+  ) {
+    const prevGroups = previous.groups;
+    const closedCount = prevGroups.length - 1;
+    let fastOk = true;
+    for (let gi = 0; gi < closedCount; gi++) {
+      const g = prevGroups[gi];
+      const entry = cachedBounds.groupEntries[gi];
+      const len = g.lastIdx - g.firstIdx + 1;
+      if (
+        g.lastIdx >= lastBarIdx
+        || len <= 0
+        || entry.firstIdx !== g.firstIdx
+        || entry.sourceBars.length !== len
+        || entry.sourceBars[0] !== bars[g.firstIdx]
+        || entry.sourceBars[len - 1] !== bars[g.lastIdx]
+      ) {
+        fastOk = false;
+        break;
+      }
+    }
+    const lastPrevGroup = prevGroups[closedCount];
+    const cachedTail = cachedBounds.groupEntries[closedCount];
+    const tailLen = lastBarIdx - lastPrevGroup.firstIdx + 1;
+    const lastCachedBracket = cachedTail.brackets[cachedTail.brackets.length - 1];
+    if (
+      fastOk
+      && (
+        tailLen <= 0
+        || cachedTail.firstIdx !== lastPrevGroup.firstIdx
+        || cachedTail.sourceBars.length !== tailLen
+        || cachedTail.inputs.length !== tailLen
+        || cachedTail.brackets.length === 0
+        || cachedTail.sourceBars[0] !== bars[lastPrevGroup.firstIdx]
+        || cachedTail.sourceBars[tailLen - 1] !== bars[lastBarIdx]
+        || !lastCachedBracket
+        || lastCachedBracket.firstIdx < cachedTail.firstIdx
+        || lastCachedBracket.lastIdx !== lastBarIdx
+        || lastPrevGroup.lastBracketIndex !== previous.brackets.length - 1
+      )
+    ) {
+      fastOk = false;
+    }
+
+    if (fastOk) {
+      if (startedAt !== null) skippedGroups += closedCount;
+      const localIndex = tailLen - 1;
+      const tailBar = bars[lastBarIdx];
+      const savedTail = cachedTail.inputs[localIndex];
+      let tailChanges: "profile" | "brackets" | "none" = "none";
+      if (savedTail.startTime !== tailBar.startTime || !Object.is(savedTail.high, tailBar.high) || !Object.is(savedTail.low, tailBar.low)) {
+        tailChanges = "profile";
+      } else if (
+        !Object.is(savedTail.open, tailBar.open)
+        || !Object.is(savedTail.close, tailBar.close)
+        || !sameBracketMetadata(savedTail, tailBar, false)
+      ) {
+        tailChanges = "brackets";
+      }
+
+      if (tailChanges === "none") {
+        const state: TpoCacheState = { key, brackets: previous.brackets, groups: previous.groups };
+        groupCaches.set(state, {
+          series,
+          structureRevision,
+          nonTailRevision,
+          settingsKey,
+          bars,
+          barsLength: bars.length,
+          tailStartTime,
+          first,
+          end,
+          floorFrom,
+          ceilTo,
+          mergeKey,
+          groups: cachedBounds.groups,
+          groupEntries: cachedBounds.groupEntries,
+          groupIds: cachedBounds.groupIds,
+        });
+        if (startedAt !== null) {
+          incrementPerformanceCounter("chart.tpo.compute.groups", computedGroups);
+          incrementPerformanceCounter("chart.tpo.cache.skippedGroups", skippedGroups);
+          recordPerformanceDuration("chart.tpo.compute.ms", performance.now() - startedAt);
+        }
+        return state;
+      }
+
+      const tailBrackets = aggregateTpoBrackets(bars, lastCachedBracket.firstIdx, lastBarIdx + 1, bracketMs);
+      const brackets = cachedTail.brackets.length === 1
+        ? tailBrackets
+        : [...cachedTail.brackets.slice(0, -1), ...tailBrackets];
+      const inputs = cachedTail.inputs.slice();
+      const { cells: _cells, ...tailInput } = tailBar;
+      if (tailInput.sources) tailInput.sources = [...tailInput.sources];
+      inputs[localIndex] = tailInput;
+      const recompute = tailChanges === "profile";
+      const result = recompute
+        ? calculateTpoProfile(brackets.map(({ bar }) => bar), priceStep, vaPercent)
+        : cachedTail.result;
+      if (startedAt !== null && recompute) computedGroups++;
+
+      const tailEntry: CachedGroup = {
+        firstIdx: cachedTail.firstIdx,
+        brackets,
+        sourceBars: cachedTail.sourceBars,
+        inputs,
+        partial: cachedTail.partial,
+        result,
+      };
+      const nextBrackets = tailBrackets.length === 1
+        ? (() => {
+            const copied = previous.brackets.slice();
+            copied[copied.length - 1] = tailBrackets[0];
+            return copied;
+          })()
+        : [
+            ...previous.brackets.slice(0, previous.brackets.length - 1),
+            ...tailBrackets,
+          ];
+      const nextGroups = prevGroups.slice();
+      nextGroups[closedCount] = {
+        ...lastPrevGroup,
+        firstBracketIndex: lastPrevGroup.firstBracketIndex,
+        lastBracketIndex: nextBrackets.length - 1,
+        partial: tailEntry.partial,
+        result: tailEntry.result,
+      };
+      const nextEntries = cachedBounds.groupEntries.slice();
+      nextEntries[closedCount] = tailEntry;
+      const nextMap = new Map(cachedBounds.groups);
+      nextMap.set(cachedBounds.groupIds[closedCount], tailEntry);
+      const state: TpoCacheState = { key, brackets: nextBrackets, groups: nextGroups };
+      groupCaches.set(state, {
+        series,
+        structureRevision,
+        nonTailRevision,
+        settingsKey,
+        bars,
+        barsLength: bars.length,
+        tailStartTime,
+        first,
+        end,
+        floorFrom,
+        ceilTo,
+        mergeKey,
+        groups: nextMap,
+        groupEntries: nextEntries,
+        groupIds: cachedBounds.groupIds,
+      });
+      if (startedAt !== null) {
+        incrementPerformanceCounter("chart.tpo.compute.groups", computedGroups);
+        incrementPerformanceCounter("chart.tpo.cache.skippedGroups", skippedGroups);
+        recordPerformanceDuration("chart.tpo.compute.ms", performance.now() - startedAt);
+      }
+      return state;
+    }
+  }
+
+  const tSpansStart = step1 ? performance.now() : 0;
   const spans = bracketSessionSpans(bars, first, end, tpoProfilePeriodMs(period), bracketMs);
+  const mergedSpans = mergeTpoSessionSpans(spans, mergeLeft);
+  if (step1) a1Ms += performance.now() - tSpansStart;
+
   const groups = new Map<string, CachedGroup>();
+  const groupEntries: CachedGroup[] = [];
+  const groupIds: string[] = [];
   const state: TpoCacheState = { key, brackets: [], groups: [] };
-  for (const group of mergeTpoSessionSpans(spans, mergeLeft)) {
+  for (const group of mergedSpans) {
     const { firstIdx, lastIdx, sessionStarts } = group;
     const id = sessionStarts.join("|");
     const cached = reusable?.get(id);
-    const skip = closedBarsUnchanged && lastIdx < bars.length - 1
+    let skip = false;
+    if (
+      closedBarsUnchanged && lastIdx < lastBarIdx
       && cached?.firstIdx === firstIdx && cached.sourceBars.length === lastIdx - firstIdx + 1
-      && cached.sourceBars.every((bar, index) => bar === bars[firstIdx + index]);
-    const changes = skip ? "none" : groupChanges(cached, bars, firstIdx, lastIdx, structureChanged);
+    ) {
+      const tA2 = step1 ? performance.now() : 0;
+      skip = cached.sourceBars.every((bar, index) => bar === bars[firstIdx + index]);
+      if (step1) a2Ms += performance.now() - tA2;
+    }
+    const tA4 = step1 && !skip ? performance.now() : 0;
+    const changes = skip ? "none" : groupChanges(cached, bars, firstIdx, lastIdx, structureChanged, useFastPath);
     if (startedAt !== null && skip) skippedGroups++;
     let entry = cached;
     if (!entry || changes !== "none") {
@@ -162,7 +410,12 @@ export function updateTpoProfileCache(
       // A history refresh can replace equal bars. Keep the validated references for the next tick.
       entry = { ...entry, sourceBars: bars.slice(firstIdx, lastIdx + 1) };
     }
+    if (step1 && !skip) a4Ms += performance.now() - tA4;
+
+    const tA3 = step1 ? performance.now() : 0;
     groups.set(id, entry);
+    groupEntries.push(entry);
+    groupIds.push(id);
     const firstBracketIndex = state.brackets.length;
     for (const bracket of entry.brackets) state.brackets.push(bracket);
     state.groups.push({
@@ -172,8 +425,34 @@ export function updateTpoProfileCache(
       partial: entry.partial,
       result: entry.result,
     });
+    if (step1) a3Ms += performance.now() - tA3;
   }
-  groupCaches.set(state, { series, structureRevision, nonTailRevision, settingsKey, groups });
+  groupCaches.set(state, {
+    series,
+    structureRevision,
+    nonTailRevision,
+    settingsKey,
+    bars,
+    barsLength: bars.length,
+    tailStartTime,
+    first,
+    end,
+    floorFrom,
+    ceilTo,
+    mergeKey,
+    groups,
+    groupEntries,
+    groupIds,
+  });
+  if (step1) {
+    step1.onCacheMeasure?.({
+      a1Ms,
+      a2Ms,
+      a3Ms,
+      a4Ms,
+      totalMs: performance.now() - tTotalStart,
+    });
+  }
   if (startedAt !== null) {
     incrementPerformanceCounter("chart.tpo.compute.groups", computedGroups);
     incrementPerformanceCounter("chart.tpo.cache.skippedGroups", skippedGroups);
