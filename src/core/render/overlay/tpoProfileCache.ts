@@ -32,6 +32,7 @@ interface CachedGroup {
 const groupCaches = new WeakMap<TpoCacheState, {
   series: FootprintSeries;
   structureRevision: number;
+  nonTailRevision: number;
   settingsKey: string;
   groups: Map<string, CachedGroup>;
 }>();
@@ -118,15 +119,19 @@ export function updateTpoProfileCache(
   const bracketMs = effectiveTpoBracketMs(bracketSize, intervalMs);
   const [first, end] = tpoSessionRange(bars, from, to, period, mergeLeft);
   const settingsKey = [vaPercent, priceStep, period, bracketSize, bracketMs, intervalMs].join("|");
-  const structureRevision = series.structureRevision;
+  const { structureRevision, nonTailRevision } = series;
   const key = [settingsKey, series.revision, structureRevision, first, end, ...[...mergeLeft].sort((a, b) => a - b)].join("|");
   const prior = previous ? groupCaches.get(previous) : undefined;
   const reusable = prior?.series === series && prior.settingsKey === settingsKey ? prior.groups : undefined;
   if (reusable && previous?.key === key) return previous;
   const structureChanged = prior?.structureRevision !== structureRevision;
+  // Historical trades and OHLC reassertions can mutate a bar without replacing it.
+  const closedBarsUnchanged = !structureChanged && typeof nonTailRevision === "number"
+    && prior?.nonTailRevision === nonTailRevision;
 
   const startedAt = isPerformanceTelemetryEnabled() ? performance.now() : null;
   let computedGroups = 0;
+  let skippedGroups = 0;
   const spans = bracketSessionSpans(bars, first, end, tpoProfilePeriodMs(period), bracketMs);
   const groups = new Map<string, CachedGroup>();
   const state: TpoCacheState = { key, brackets: [], groups: [] };
@@ -134,7 +139,11 @@ export function updateTpoProfileCache(
     const { firstIdx, lastIdx, sessionStarts } = group;
     const id = sessionStarts.join("|");
     const cached = reusable?.get(id);
-    const changes = groupChanges(cached, bars, firstIdx, lastIdx, structureChanged);
+    const skip = closedBarsUnchanged && lastIdx < bars.length - 1
+      && cached?.firstIdx === firstIdx && cached.sourceBars.length === lastIdx - firstIdx + 1
+      && cached.sourceBars.every((bar, index) => bar === bars[firstIdx + index]);
+    const changes = skip ? "none" : groupChanges(cached, bars, firstIdx, lastIdx, structureChanged);
+    if (startedAt !== null && skip) skippedGroups++;
     let entry = cached;
     if (!entry || changes !== "none") {
       const brackets = aggregateTpoBrackets(bars, firstIdx, lastIdx + 1, bracketMs);
@@ -161,9 +170,10 @@ export function updateTpoProfileCache(
       result: entry.result,
     });
   }
-  groupCaches.set(state, { series, structureRevision, settingsKey, groups });
+  groupCaches.set(state, { series, structureRevision, nonTailRevision, settingsKey, groups });
   if (startedAt !== null) {
     incrementPerformanceCounter("chart.tpo.compute.groups", computedGroups);
+    incrementPerformanceCounter("chart.tpo.cache.skippedGroups", skippedGroups);
     recordPerformanceDuration("chart.tpo.compute.ms", performance.now() - startedAt);
   }
   return state;
