@@ -70,6 +70,8 @@ import { decideLiveSameBarAutoFit, type LiveAutoFitSnapshot } from "./liveAutoFi
 import { buildTpoProfileGroups, effectiveTpoBracketMs } from "../../core/analysis/tpoProfile.js";
 import { tOr } from "../../core/chartLocale.js";
 import { OrderbookHeatmapOverlay, type LiveHeatmapTailEvent } from "../orderbook/heatmapOverlay.js";
+import { orderbookHeatmapSettingsSource } from "../orderbook/heatmapSettingsSource.js";
+import { isOrderbookHeatmapMarket } from "../../core/orderbookHeatmap/settings.js";
 import type { HeatmapGpuCellFrame } from "./heatmap/gpu/heatmapGpuRenderer.js";
 import type { FootprintSeries } from "../../core/model/footprint.js";
 import { abortableDelay } from "./abortableDelay.js";
@@ -489,9 +491,12 @@ class ChartRuntimeImpl implements ChartRuntime, ChartInputHost {
         // mismatch (or legacy mode) keeps the annotation path authoritative.
         if (this.heatmapGpuSuppressedAnnotation(activeView, activeSeries, range)) {
           this.orderbookHeatmap?.releaseRasterCache();
-          return;
+          return false;
         }
-        this.orderbookHeatmap?.draw(ctx, activeView, activeSeries, range);
+        if (!this.orderbookHeatmap) return false;
+        this.orderbookHeatmap.draw(ctx, activeView, activeSeries, range);
+        return this.state.chartType !== "tpo" || (isOrderbookHeatmapMarket(this.state.market)
+          && orderbookHeatmapSettingsSource().settingsFor(this.state.market).mode !== "off");
       },
       (ctx, activeView, activeSeries, activeCrosshair) =>
         this.orderbookHeatmap?.drawHover(ctx, activeView, activeSeries, activeCrosshair),

@@ -11,6 +11,7 @@ import {
 import { updateTpoProfileCache } from "./tpoProfileCache.js";
 import { tOr } from "../../chartLocale.js";
 import { tpoPalette } from "../../ui/seriesPalette.js";
+import { isPerformanceTelemetryEnabled, recordPerformanceDuration } from "../../performanceTelemetry.js";
 
 export interface TpoProfileHit {
   sessionStart: number;
@@ -53,17 +54,20 @@ export interface TpoRenderHost {
 const TPO_BLOCK_TONES = [-0.2, -0.1, 0.03, -0.15, 0.07, -0.05];
 const TPO_MIN_BLOCK_CELL_HEIGHT = 2;
 const TPO_MIN_BLOCK_CELL_WIDTH = 1.5;
-const tpoBlockColorCache = new Map<string, string>();
+const valueAreaTones = TPO_BLOCK_TONES.map((tone) => mixHexColor(tpoPalette.valueArea, tone));
+const outsideTones = TPO_BLOCK_TONES.map((tone) => mixHexColor(tpoPalette.outside, tone));
+const maxCounts = new WeakMap<TpoCacheGroup["result"], number>();
 
-function tpoBlockFillColor(baseColor: string, bracketIndex: number): string {
-  const toneIndex = Math.abs(bracketIndex) % TPO_BLOCK_TONES.length;
-  const key = `${baseColor}:${toneIndex}`;
-  const cached = tpoBlockColorCache.get(key);
-  if (cached) return cached;
-  const color = mixHexColor(baseColor, TPO_BLOCK_TONES[toneIndex]);
-  tpoBlockColorCache.set(key, color);
-  return color;
+function maxLevelCount(result: TpoCacheGroup["result"]): number {
+  let max = maxCounts.get(result);
+  if (max !== undefined) return max;
+  max = 0;
+  for (const { count } of result.levels) max = Math.max(max, count);
+  maxCounts.set(result, max);
+  return max;
 }
+
+type RetainTpoHistory = (key: string, paint: () => void) => void;
 
 function mixHexColor(hex: string, amount: number): string {
   const raw = hex.startsWith("#") ? hex.slice(1) : hex;
@@ -88,7 +92,13 @@ function toHexByte(value: number): string {
  * brackets (bars) that touched the price level. POC/VAH/VAL reuse the volume
  * profile level toggles + value-area percent.
  */
-export function drawTpo(host: TpoRenderHost, view: View, series: FootprintSeries, [from, to]: [number, number]): void {
+export function drawTpo(
+  host: TpoRenderHost,
+  view: View,
+  series: FootprintSeries,
+  [from, to]: [number, number],
+  retainHistory?: RetainTpoHistory,
+): void {
   const chartCfg = host.chartConfig ?? settings;
   if (chartCfg.chartType !== "tpo" || from >= to) return;
   const cfg = host.getProfileSettings?.();
@@ -96,26 +106,52 @@ export function drawTpo(host: TpoRenderHost, view: View, series: FootprintSeries
   const step = series.config.priceStep;
   host.tpoCache = updateTpoProfileCache(host.tpoCache, series, [from, to], chartCfg, vaPercent, host.tpoMergeLeftSessionStarts);
 
-  const brackets = host.tpoCache.brackets;
-  const ctx = host.ctx;
-  // Letters mode needs vertical room per price row and horizontal room per
-  // bracket column; otherwise fall back to the collapsed histogram.
+  const paintStartedAt = isPerformanceTelemetryEnabled() ? performance.now() : null;
+  const cache = host.tpoCache;
+  const { brackets, groups } = cache;
   const midPrice = view.priceOfY(view.area.top + view.area.height / 2);
   const cellH = Math.abs(view.yOfPrice(midPrice) - view.yOfPrice(midPrice + step));
-  let minBracketWidth = Number.POSITIVE_INFINITY;
-  for (const bracket of brackets) {
-    const width = view.xOfIndex(bracket.lastIdx + 1) - view.xOfIndex(bracket.firstIdx);
-    if (width < minBracketWidth) minBracketWidth = width;
-  }
-  const lettersMode = chartCfg.tpoMode === "letters" && cellH >= 9 && minBracketWidth >= 8;
+  // Letters need room in both dimensions. Blocks never need the bracket scan.
+  const lettersMode = chartCfg.tpoMode === "letters" && cellH >= 9 && brackets.every((bracket) =>
+    !(view.xOfIndex(bracket.lastIdx + 1) - view.xOfIndex(bracket.firstIdx) < 8)
+  );
 
+  try {
+    if (retainHistory && !lettersMode && !view.isLogScale() && groups.length > 1) {
+      // Only the group intersecting the series tail can change in a tail-only frame.
+      const closedEnd = groups.at(-1)?.lastIdx === series.length - 1 ? groups.length - 1 : groups.length;
+      const key = JSON.stringify([
+        closedEnd, vaPercent, series.config.intervalMs, chartCfg.tpoProfilePeriod, chartCfg.tpoBracketSize,
+        [...host.tpoMergeLeftSessionStarts],
+        settings.profilePoc, settings.profileVah, settings.profileVal,
+        groups.some((group) => group.partial) ? tOr("analysis.tpo.partial") : "",
+      ]);
+      retainHistory(key, () => paintTpoGroups(host, cache, view, from, to, step, cellH, false, 0, closedEnd));
+      if (closedEnd < groups.length) {
+        paintTpoGroups(host, cache, view, from, to, step, cellH, false, closedEnd, groups.length);
+      }
+    } else {
+      paintTpoGroups(host, cache, view, from, to, step, cellH, lettersMode, 0, groups.length);
+    }
+  } finally {
+    if (paintStartedAt !== null) recordPerformanceDuration("chart.tpo.paint.ms", performance.now() - paintStartedAt);
+  }
+}
+
+function paintTpoGroups(
+  host: TpoRenderHost, { brackets, groups }: TpoCacheState, view: View, from: number, to: number, step: number,
+  cellH: number, lettersMode: boolean, start: number, end: number,
+): void {
+  const ctx = host.ctx;
+  const plotBottom = view.area.top + view.area.height;
   ctx.save();
   if (lettersMode) {
     ctx.font = `${Math.min(11, cellH - 1)}px ui-monospace, Menlo, monospace`;
     ctx.textBaseline = "middle";
     ctx.textAlign = "center";
   }
-  for (const g of host.tpoCache.groups) {
+  for (let groupIndex = start; groupIndex < end; groupIndex++) {
+    const g = groups[groupIndex];
     if (g.lastIdx < from || g.firstIdx >= to) continue;
     const result = g.result;
     if (!result.levels.length) continue;
@@ -153,7 +189,7 @@ export function drawTpo(host: TpoRenderHost, view: View, series: FootprintSeries
         let bin = lo;
         for (let tick = 0; tick <= ticks; tick++) {
           const yMid = view.yOfPrice(bin + step / 2);
-          if (yMid >= view.area.top && yMid <= view.area.top + view.area.height) {
+          if (yMid >= view.area.top && yMid <= plotBottom) {
             ctx.fillStyle = isLast && bin === lastCloseBin ? tpoPalette.latest : bin === result.poc ? tpoPalette.pocLetters : tpoPalette.letters;
             ctx.fillText(label, cx, yMid);
           }
@@ -163,9 +199,9 @@ export function drawTpo(host: TpoRenderHost, view: View, series: FootprintSeries
     } else {
       // Market-Profile block columns: each square is one profile-local bracket
       // occurrence. Non-POC squares get a slight bracket-based tone variation.
-      const maxCount = Math.max(...result.levels.map((l) => l.count));
+      const maxCount = maxLevelCount(result);
       if (maxCount <= 0) continue;
-      const sessionPx = Math.max(view.colWidth, view.xOfIndex(g.lastIdx + 1) - left);
+      const sessionPx = Math.max(view.colWidth, right - left);
       const maxWidth = Math.max(8, sessionPx);
       const vaLo = result.val;
       const vaHi = result.vah;
@@ -174,41 +210,44 @@ export function drawTpo(host: TpoRenderHost, view: View, series: FootprintSeries
 
       if (blockMode) {
         const sqH = Math.max(cellH - 1, 1);
+        const sqW = Math.max(rawSquare - 1, 1);
+        const latestLocalBracketIndex = g.lastBracketIndex - g.firstBracketIndex;
+        let previousColor: string | undefined;
         for (const level of result.levels) {
           const yTop = view.yOfPrice(level.priceBin + step);
-          if (yTop > view.area.top + view.area.height || yTop + cellH < view.area.top) continue;
+          if (yTop > plotBottom || yTop + cellH < view.area.top) continue;
           const inVA = vaLo !== null && vaHi !== null && level.priceBin >= vaLo && level.priceBin <= vaHi;
-          const baseColor = level.priceBin === result.poc ? tpoPalette.poc
-            : inVA ? tpoPalette.valueArea
-            : tpoPalette.outside;
+          const isPoc = level.priceBin === result.poc;
+          const tones = inVA ? valueAreaTones : outsideTones;
           const latestPriceBin = level.priceBin === lastCloseBin;
-          const latestLocalBracketIndex = g.lastBracketIndex - g.firstBracketIndex;
-          const occurrenceIndices = level.bracketIndices.length
-            ? level.bracketIndices
-            : Array.from({ length: level.count }, (_, index) => index);
-          for (let k = 0; k < occurrenceIndices.length; k++) {
-            const bracketIndex = occurrenceIndices[k];
+          const occurrenceIndices = level.bracketIndices;
+          const occurrences = occurrenceIndices.length || level.count;
+          for (let k = 0; k < occurrences; k++) {
+            const bracketIndex = occurrenceIndices[k] ?? k;
             const x = left + k * rawSquare;
             if (x - left > maxWidth) break;
-            ctx.fillStyle = latestPriceBin && bracketIndex === latestLocalBracketIndex ? tpoPalette.latest
-              : level.priceBin === result.poc ? baseColor
-              : tpoBlockFillColor(baseColor, bracketIndex);
-            ctx.fillRect(x, yTop, Math.max(rawSquare - 1, 1), sqH);
+            const color = latestPriceBin && bracketIndex === latestLocalBracketIndex ? tpoPalette.latest
+              : isPoc ? tpoPalette.poc
+              : tones[Math.abs(bracketIndex) % tones.length];
+            if (color !== previousColor) ctx.fillStyle = previousColor = color;
+            ctx.fillRect(x, yTop, sqW, sqH);
           }
         }
       } else {
         // Rows too small for blocks: keep TPO colors in a collapsed proportional bar.
         ctx.globalAlpha = 0.55;
+        let previousColor: string | undefined;
         for (const level of result.levels) {
           const yTop = view.yOfPrice(level.priceBin + step);
           const yBottom = view.yOfPrice(level.priceBin);
-          if (yBottom < view.area.top || yTop > view.area.top + view.area.height) continue;
+          if (yBottom < view.area.top || yTop > plotBottom) continue;
           const inVA = vaLo !== null && vaHi !== null && level.priceBin >= vaLo && level.priceBin <= vaHi;
           const latestPriceBin = level.priceBin === lastCloseBin;
-          ctx.fillStyle = latestPriceBin ? tpoPalette.latest
+          const color = latestPriceBin ? tpoPalette.latest
             : level.priceBin === result.poc ? tpoPalette.poc
             : inVA ? tpoPalette.valueArea
             : tpoPalette.outside;
+          if (color !== previousColor) ctx.fillStyle = previousColor = color;
           ctx.fillRect(left, yTop, maxWidth * (level.count / maxCount), Math.max(1, yBottom - yTop - 1));
         }
         ctx.globalAlpha = 1;

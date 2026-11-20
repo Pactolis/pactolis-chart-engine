@@ -4,11 +4,13 @@ import { ChartChange } from "../scene/chartScene.js";
 export interface ChartRenderPass {
   readonly id: string;
   readonly interests: ChartChange;
+  readonly captureMain?: boolean;
 }
 
 const STATIC_ANNOTATION = ChartChange.All & ~ChartChange.DataTail;
 export function annotationPass(id: string, live = false): ChartRenderPass {
   if (live) return { id, interests: ChartChange.All };
+  if (id === "closed-tpo") return { id, interests: STATIC_ANNOTATION, captureMain: true };
   return { id, interests: ["axis", "drawings", "strategy-levels", "naked-poc", "reference-levels", "closed-footprint-text"].includes(id)
     ? STATIC_ANNOTATION : ChartChange.All };
 }
@@ -20,10 +22,12 @@ interface Entry<T> { canvas: HTMLCanvasElement; effects: T; key: string; valid: 
 export class AnnotationPassCache<T> {
   private entries = new Map<string, Entry<T>>();
   private frameKey = "";
+  private sameGeometry = false;
   private bytes = 0;
 
   begin(changes: ChartChange, key: string): void {
-    if (changes !== ChartChange.DataTail || key !== this.frameKey) {
+    this.sameGeometry = key === this.frameKey;
+    if (changes !== ChartChange.DataTail || !this.sameGeometry) {
       for (const entry of this.entries.values()) entry.valid = false;
     }
     this.frameKey = key;
@@ -47,6 +51,8 @@ export class AnnotationPassCache<T> {
       this.blit(ctx, retained.canvas);
       return "hit";
     }
+    // A moving viewport cannot reuse a capture on the following frame.
+    if (pass.captureMain && !this.sameGeometry) return false;
     const { canvas } = ctx;
     const required = canvas.width * canvas.height * 4;
     const previousBytes = retained ? retained.canvas.width * retained.canvas.height * 4 : 0;
@@ -63,12 +69,20 @@ export class AnnotationPassCache<T> {
     if (!target) return false;
     target.setTransform(1, 0, 0, 1, 0, 0);
     target.clearRect(0, 0, bitmap.width, bitmap.height);
-    const tx = ctx.getTransform();
-    target.setTransform(tx.a, tx.b, tx.c, tx.d, tx.e, tx.f);
-    const effects = draw(target);
+    let effects: T;
+    if (pass.captureMain) {
+      // This pass owns the initially empty surface. Capture the original paint
+      // so text rasterization and fractional edges match the main context.
+      effects = draw(ctx);
+      target.drawImage(canvas, 0, 0);
+    } else {
+      const tx = ctx.getTransform();
+      target.setTransform(tx.a, tx.b, tx.c, tx.d, tx.e, tx.f);
+      effects = draw(target);
+      this.blit(ctx, bitmap);
+    }
     this.entries.set(pass.id, { canvas: bitmap, effects, key, valid: true });
     this.bytes += required - previousBytes;
-    this.blit(ctx, bitmap);
     return "miss";
   }
 
