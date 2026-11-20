@@ -1,6 +1,5 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { configureChartLocale } from "../dist/core/chartLocale.js";
 import { View } from "../dist/core/engine/view.js";
 import { FootprintSeries } from "../dist/core/model/footprint.js";
 import { configurePerformanceTelemetry, snapshotPerformanceTelemetry } from "../dist/core/performanceTelemetry.js";
@@ -27,7 +26,6 @@ function fakeCanvas(width, height) {
 }
 
 test("closed TPO sessions reduce Canvas calls on a 38-session collapsed frame and replay hit zones", () => {
-  configureChartLocale({ locale: () => "en", translate: () => "Partial" });
   const intervalMs = 30 * 60_000;
   const start = Date.UTC(2026, 0, 1);
   const series = new FootprintSeries({ intervalMs, priceStep: 1, pricePrecision: 0 });
@@ -52,11 +50,14 @@ test("closed TPO sessions reduce Canvas calls on a 38-session collapsed frame an
   };
   const paintSamples = () => snapshotPerformanceTelemetry().metrics["chart.tpo.paint.ms"]?.count ?? 0;
 
+  const baseline = paintSamples();
+  const { enabled } = snapshotPerformanceTelemetry();
   try {
+    configurePerformanceTelemetry({ enabled: false });
     // The former path assigned every row and leader color and painted every row on each frame.
     const former = { fill: 0, fillRect: 228, fillStyle: 343, fillText: 115, drawImage: 0 };
     assert.equal(paint(ChartChange.Viewport).fillRect, former.fillRect);
-    assert.equal(paintSamples(), 0);
+    assert.equal(paintSamples(), baseline);
     configurePerformanceTelemetry({ enabled: true });
     const miss = paint(ChartChange.DataTail);
     assert.equal(miss.fillRect, former.fillRect);
@@ -67,11 +68,11 @@ test("closed TPO sessions reduce Canvas calls on a 38-session collapsed frame an
     assert.deepEqual(paint(ChartChange.DataTail), {
       fill: 0, fillRect: 6, fillStyle: 8, fillText: 4, drawImage: 1,
     });
-    assert.equal(paintSamples(), 2);
+    assert.equal(paintSamples(), baseline + 2);
     assert.ok(closedHit);
     assert.deepEqual(overlay.getTpoProfileAt(4, 10), closedHit);
   } finally {
-    configurePerformanceTelemetry({ enabled: false });
+    configurePerformanceTelemetry({ enabled });
     overlay.dispose();
   }
 });
