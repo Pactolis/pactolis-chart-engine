@@ -99,6 +99,21 @@ test("repair and a new daily session preserve profiles outside the changed group
   assert.equal(f.host.tpoCache.groups[5].partial, true);
 });
 
+test("historical replacements refresh bracket field presence without recomputing the profile", () => {
+  const f = fixture();
+  const initial = f.draw();
+  const repaired = [...f.bars];
+  repaired[4] = { ...repaired[4], updatedAt: undefined };
+  f.setBars(repaired);
+  for (const [index, result] of f.draw().entries()) assert.strictEqual(result, initial[index]);
+  assert.ok(Object.hasOwn(f.host.tpoCache.brackets[4].bar, "updatedAt"));
+
+  delete repaired[4].updatedAt;
+  f.series.structureRevision = 1;
+  for (const [index, result] of f.draw().entries()) assert.strictEqual(result, initial[index]);
+  assert.ok(!Object.hasOwn(f.host.tpoCache.brackets[4].bar, "updatedAt"));
+});
+
 test("TPO cache agrees with the oracle after prepend, merge, undo and viewport eviction", () => {
   const f = fixture();
   f.draw();
