@@ -1,3 +1,5 @@
+import type { BuiltInChartType } from "./scene/chartLayerPreset.js";
+
 export type ChartLod = "footprint" | "candlestick" | "pixel-bucket";
 
 export interface OhlcBarLike {
@@ -29,6 +31,15 @@ export function chartLodForSpacing(barSpacing: number): ChartLod {
   if (barSpacing >= FOOTPRINT_MIN_COL_WIDTH) return "footprint";
   if (barSpacing >= 1) return "candlestick";
   return "pixel-bucket";
+}
+
+export function candleStyleFor(
+  lod: Exclude<ChartLod, "pixel-bucket">,
+  chartType: BuiltInChartType,
+  candlesEnabled: boolean,
+): "full" | "strip" | "none" {
+  if (lod === "candlestick" || chartType === "candlestick" || chartType === "tpo") return "full";
+  return candlesEnabled ? "strip" : "none";
 }
 
 export type CellTextMode = "none" | "compact" | "full";
