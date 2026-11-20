@@ -11,6 +11,7 @@ import { settings, type FootprintCellData, type ChartViewConfig } from "../setti
 import {
   buildPixelCandleBuckets,
   buildPixelCellBuckets,
+  candleStyleFor,
   CELL_PIXEL_MERGE_HEIGHT,
   chartLodForSpacing,
   type OhlcBarLike,
@@ -271,14 +272,15 @@ export class FootprintRenderer {
           );
           for (const bucket of buckets) this.drawPixelBucketCandle(view, bucket);
         } else {
-          for (let i = from; i < to; i++) {
+          const candleStyle = candleStyleFor(lod, chartType, cfg.candles);
+          for (let i = from; candleStyle !== "none" && i < to; i++) {
             const bar = series.at(i);
             if (!bar) continue;
             const xLeft = view.xOfIndex(i);
             const colW = view.colWidth;
-            if (lod === "candlestick" || chartType === "candlestick") {
+            if (candleStyle === "full") {
               this.drawFullCandle(view, bar, xLeft, colW);
-            } else if ((chartType === "footprint" || chartType === "footprintProfile") && cfg.candles) {
+            } else {
               this.drawCandle(view, bar, xLeft, candleW);
             }
           }
