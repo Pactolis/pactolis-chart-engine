@@ -67,6 +67,12 @@ for (const scenario of ["blocks", "collapsed", "letters", "volume underlay"] as 
       const reads = () => ctx.getImageData(0, 0, width, height).data;
       const production = (changes: number) =>
         overlay.renderAnnotations(view, series, crosshair, range, [...underlay, "tpo"], changes);
+      const primeClosedPaint = () => {
+        // The reference pass has a different layer order. Re-establish the
+        // frame key, then capture the closed sessions at that same geometry.
+        production(ChartChange.DataTail);
+        production(ChartChange.DataTail);
+      };
       const reuseCount = () => snapshotPerformanceTelemetry().counters["chart.annotation.pass.closed-tpo.reuse"] ?? 0;
       const pixelDiff = (actual: Uint8ClampedArray, expected: Uint8ClampedArray) => {
         let pixels = 0;
@@ -210,7 +216,7 @@ for (const scenario of ["blocks", "collapsed", "letters", "volume underlay"] as 
       const firstZone = hit();
       const coldDiff = pixelDiff(cold, reference());
 
-      production(ChartChange.DataTail);
+      primeClosedPaint();
       const tail = series.at(series.length - 1)!;
       series.reassertOHLC(tail.startTime, tail.open, tail.high + 30, tail.low, {
         close: tail.high + 20, preferIncomingClose: true, observedAt: now,
@@ -221,7 +227,7 @@ for (const scenario of ["blocks", "collapsed", "letters", "volume underlay"] as 
       const retainedCount = reuseCount();
       const retainedDiff = pixelDiff(retained, reference());
 
-      production(ChartChange.DataTail);
+      primeClosedPaint();
       view.offsetX += 2.75;
       view.priceTop += 2.5;
       production(ChartChange.DataTail);
