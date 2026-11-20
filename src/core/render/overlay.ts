@@ -80,7 +80,9 @@ export class Overlay {
   /** Per-chart görünüm config'i (runtime set eder); null ise global settings. */
   private chartConfig: ChartViewConfig | null = null;
   private readonly axisCache = new AxisLayerCache();
-  private readonly annotationPassCache = new AnnotationPassCache<{ price: PriceMarker[]; time: TimeMarker[]; labels: LineLabelEntry[] }>();
+  private readonly annotationPassCache = new AnnotationPassCache<{
+    price: PriceMarker[]; time: TimeMarker[]; labels: LineLabelEntry[]; tpoHits: TpoProfileHitZone[];
+  }>();
   private readonly cellTextCache = new WeakMap<FootprintBar, { key: string; cellRevision: number; entries: Map<number, FormattedCellText> }>();
   private readonly hudDeps: HudRendererDeps;
   private readonly tpoHost: TpoRenderHost;
@@ -193,7 +195,7 @@ export class Overlay {
       view: View,
       series: FootprintSeries,
       range: [number, number],
-    ) => void,
+    ) => boolean | void,
     /** Orderbook hover table, drawn with the HUD. */
     private readonly drawOrderbookHover?: (
       ctx: CanvasRenderingContext2D,
@@ -332,10 +334,13 @@ export class Overlay {
     const empty = series.length === 0;
     const mainSuppressed = this.isMainChartSuppressed?.() === true;
     let indicatorBatchDrawn = false;
+    let canRetainTpo = changes === ChartChange.DataTail;
 
     for (const layerId of orderedLayers) {
       const isIndicatorLayer = layerId === "indicators" || layerId.startsWith("indicator:");
       if (isIndicatorLayer && (indicatorBatchDrawn || empty)) continue;
+      if (layerId !== "orderbook-heatmap" && layerId !== "volume-profile" &&
+        layerId !== "footprint-text" && layerId !== "tpo") canRetainTpo = false;
       const metricLayer = isIndicatorLayer ? "indicators" : layerId;
       const layerStartedAt = telemetryEnabled ? performance.now() : null;
       const paint = () => {
@@ -366,20 +371,34 @@ export class Overlay {
           if (empty || mainSuppressed) return;
           switch (layerId) {
             case "orderbook-heatmap":
-              this.drawOrderbookHeatmap?.(ctx, view, series, range);
+              if (this.drawOrderbookHeatmap && this.drawOrderbookHeatmap(ctx, view, series, range) !== false) {
+                canRetainTpo = false;
+              }
               break;
             case "footprint-text":
+              if ((this.chartConfig ?? settings).chartType !== "tpo") canRetainTpo = false;
               this.paintRetainedAnnotationPass("closed-footprint-text", "", changes, () => {
                 drawCells(this.annotationHost, view, series, [range[0], Math.min(range[1], series.length - 1)]);
               });
               if (range[1] > series.length - 1) drawCells(this.annotationHost, view, series, [Math.max(range[0], series.length - 1), range[1]]);
               break;
             case "volume-profile":
+              if (settings.volumeProfile) canRetainTpo = false;
               drawVolumeProfile(this.annotationHost, view, series, range);
               break;
-            case "tpo":
-              drawTpo(this.tpoHost, view, series, range);
+            case "tpo": {
+              // Compositing the closed prefix is exact on a cleared surface.
+              // With an underlay, paint directly to preserve blending order.
+              const retain = canRetainTpo ? (key: string, draw: () => void) => {
+                const transformKey = transform ? [transform.b, transform.c, transform.e, transform.f].join("|") : "";
+                if (this.paintRetainedAnnotationPass("closed-tpo", transformKey + key, changes, draw)) {
+                  incrementPerformanceCounter("chart.annotation.pass.closed-tpo.reuse");
+                }
+              } : undefined;
+              drawTpo(this.tpoHost, view, series, range, retain);
+              canRetainTpo = false;
               break;
+            }
             case "strategy-levels":
               drawPreviousWeekStrategy(this.annotationHost, view, series);
               drawMondayRange(this.annotationHost, view, series);
@@ -456,13 +475,18 @@ export class Overlay {
       const priceStart = this.priceMarkers.length;
       const timeStart = this.timeMarkers.length;
       const labelStart = this.lineLabels.length;
+      const tpoHitStart = this.tpoProfileHitZones.length;
       this.ctx = target;
       try { draw(); } finally { this.ctx = main; }
-      return { price: this.priceMarkers.slice(priceStart), time: this.timeMarkers.slice(timeStart), labels: this.lineLabels.slice(labelStart) };
+      return {
+        price: this.priceMarkers.slice(priceStart), time: this.timeMarkers.slice(timeStart),
+        labels: this.lineLabels.slice(labelStart), tpoHits: this.tpoProfileHitZones.slice(tpoHitStart),
+      };
     }, (effects) => {
       this.priceMarkers.push(...effects.price);
       this.timeMarkers.push(...effects.time);
       this.lineLabels.push(...effects.labels);
+      this.tpoProfileHitZones.push(...effects.tpoHits);
     });
     if (!handled) draw();
     return handled === "hit";
