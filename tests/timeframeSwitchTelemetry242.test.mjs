@@ -1,6 +1,5 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
 
 import { ChartDataPipeline } from "../dist/features/chart/ChartDataPipeline.js";
 import { ChartHistoryController } from "../dist/features/chart/ChartHistoryController.js";
@@ -575,28 +574,4 @@ test("changeConfig clears series synchronously, defers ETH subscription/repair u
   } finally {
     pipeline.dispose();
   }
-});
-
-test("log minified dist sizes for changed telemetry and pipeline modules", async () => {
-  const { minifySync } = await import("rolldown/utils");
-  const files = [
-    "dist/core/loadTrace.js",
-    "dist/core/performanceTelemetry.js",
-    "dist/features/chart/ChartDataPipeline.js",
-    "dist/features/chart/ChartHistoryController.js",
-    "dist/features/chart/ChartRuntime.js",
-    "dist/features/chart/pipeline/historyLoad.js",
-    "dist/features/chart/pipeline/liveTradeQueue.js",
-  ];
-  const sizes = {};
-  let totalMinifiedBytes = 0;
-  for (const rel of files) {
-    const code = readFileSync(new URL(`../${rel}`, import.meta.url), "utf8");
-    const min = minifySync(rel, code);
-    const bytes = Buffer.byteLength(min.code, "utf8");
-    sizes[rel] = bytes;
-    totalMinifiedBytes += bytes;
-    assert.ok(bytes > 0, `expected non-empty minified output for ${rel}`);
-  }
-  console.log("MINIFIED_DIST_SIZES", JSON.stringify({ files: sizes, totalMinifiedBytes }));
 });
