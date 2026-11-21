@@ -264,9 +264,14 @@ async function mountRepairChart(page: Page, timeframe: string): Promise<void> {
       "hud-243",
       surface,
     );
+    const deadline = performance.now() + 10_000;
+    while (!harness.getChartRuntime("hud-243") && performance.now() < deadline) {
+      await new Promise((r) => setTimeout(r, 15));
+    }
     (window as unknown as Record<string, unknown>).__hud243 = {
       root,
       handle,
+      getRuntime: () => harness.getChartRuntime("hud-243"),
       services,
       emitSession: (generation: number, boundaryAt: number) =>
         sessionCb?.({ generation, epoch: generation, session: `s-${generation}`, boundaryAt }),
@@ -292,11 +297,27 @@ test("12M WS-before-history stays live-only on canvas and data-hud, spares close
 
   const heldHistory: Array<{ route: Route; url: URL }> = [];
   const heldRepairs: Array<{ route: Route; url: URL }> = [];
+  let releaseHistory = false;
+
+  const fulfill12mHistory = (route: Route, url: URL) =>
+    route.fulfill({
+      contentType: "application/json",
+      body: JSON.stringify(
+        historyEnvelope(url, [
+          makeWireBar(closed12M, { open: 42_000, high: 99_000, low: 38_000, close: 93_500, volume: 300_000, delta: 5_000, count: 1_270_402_283 }),
+          makeWireBar(open12M, { count: 1_247_050_078 }),
+        ]),
+      ),
+    });
 
   await page.route(/\/history(?:\?|$)/, async (route) => {
     const url = new URL(route.request().url());
     if (url.searchParams.get("purpose") === "__repair_trade_id_v1") {
       heldRepairs.push({ route, url });
+      return;
+    }
+    if (releaseHistory) {
+      await fulfill12mHistory(route, url);
       return;
     }
     heldHistory.push({ route, url });
@@ -350,14 +371,12 @@ test("12M WS-before-history stays live-only on canvas and data-hud, spares close
 
   // Fulfill initial /history (returning closed 2025 + open 2026 candle) while repair is STILL pending.
   await expect.poll(() => heldHistory.length).toBeGreaterThanOrEqual(1);
+  releaseHistory = true;
   while (heldHistory.length) {
     const req = heldHistory.shift()!;
-    const bars = [
-      makeWireBar(closed12M, { open: 42_000, high: 99_000, low: 38_000, close: 93_500, volume: 300_000, delta: 5_000, count: 1_270_402_283 }),
-      makeWireBar(open12M, { count: 1_247_050_078 }),
-    ];
-    await req.route.fulfill({ contentType: "application/json", body: JSON.stringify(historyEnvelope(req.url, bars)) });
+    await fulfill12mHistory(req.route, req.url);
   }
+  await expect(hook).toHaveAttribute("data-history-loading", "false", { timeout: 10_000 });
   await expect(hook).toHaveAttribute("data-series-len", "2", { timeout: 10_000 });
   await settleFrames(page);
 
@@ -367,7 +386,7 @@ test("12M WS-before-history stays live-only on canvas and data-hud, spares close
   // Hovering the closed 2025 bar must show exact closed totals with NO [Live only] or ≈.
   await clearCanvasText(page);
   const closedCoords = await page.evaluate(() => {
-    const runtime = (window as unknown as Record<string, any>).__hud243.handle.runtime;
+    const runtime = (window as unknown as Record<string, any>).__hud243.getRuntime();
     const canvas = document.querySelector('canvas[data-chart-surface="interaction"]')!;
     const rect = canvas.getBoundingClientRect();
     const x = runtime.view.xOfIndex(0) + runtime.view.colWidth / 2;
@@ -500,7 +519,7 @@ test("history-first open bucket stays normal even during background history relo
   // Trigger a background refreshHistory while open bucket is already verified for (market, 1d, bucket, generation).
   holdBg = true;
   await page.evaluate(() => {
-    const runtime = (window as unknown as Record<string, any>).__hud243.handle.runtime;
+    const runtime = (window as unknown as Record<string, any>).__hud243.getRuntime();
     void runtime.refreshHistory(false, { preserveViewport: true });
   });
   await expect.poll(() => holdBackground !== null).toBe(true);
@@ -639,7 +658,7 @@ test("timeframe switches (1w -> 3d -> 1d -> 12M) scope readiness by generation a
   holdByInterval = true;
   await page.evaluate(async () => {
     const ctx = (window as unknown as Record<string, any>).__hud243;
-    const runtime = ctx.handle.runtime;
+    const runtime = ctx.getRuntime();
     runtime.updateState({ ...runtime.getState(), timeframe: "3d" });
     await new Promise((r) => setTimeout(r, 40));
     runtime.updateState({ ...runtime.getState(), timeframe: "1d" });
