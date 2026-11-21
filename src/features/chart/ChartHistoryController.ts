@@ -83,7 +83,6 @@ export interface ChartHistoryControllerHost {
   /** Report whether the settled load supplied any footprint, for the status badge. */
   setFootprintAvailable(available: boolean): void;
   notifyHistorySettled(market: string, timeframe: string): void;
-  onHistoryLoadBegin?(): void;
 }
 
 /** Backoff for re-requesting a range whose candle source failed. */
@@ -128,7 +127,6 @@ export class ChartHistoryController {
   };
   private candleGapRetryTimer: ReturnType<typeof setTimeout> | null = null;
   private candleGapRetryToken = 0;
-  private activeSeedJob: LiveBarSeedJob | null = null;
   private readonly pendingDayRefreshes = new Map<string, { dayTs: number; market: string; timeframe: string }>();
 
   constructor(private readonly host: ChartHistoryControllerHost) {
@@ -232,7 +230,6 @@ export class ChartHistoryController {
     const requestedMarket = state.market;
     const requestedTimeframe = state.timeframe;
     const historyGeneration = this.host.capture.beginHistoryLoad(requestedMarket, requestedTimeframe);
-    this.host.onHistoryLoadBegin?.();
     let settledForNpoc = false;
 
     try {
@@ -317,13 +314,7 @@ export class ChartHistoryController {
         }
       }
       settledForNpoc = true;
-      if (isPerformanceTelemetryEnabled()) {
-        recordTelemetryMark("chart:history-ready", {
-          market: requestedMarket,
-          timeframe: requestedTimeframe,
-          generation: this.host.pipeline.currentGeneration,
-        });
-      }
+      recordTelemetryMark("chart:history-ready", { market: requestedMarket, timeframe: requestedTimeframe });
     } catch (error) {
       if (!this.host.isDisposed()) {
         this.host.capture.failHistoryLoad(historyGeneration, requestedMarket, requestedTimeframe);
@@ -792,17 +783,14 @@ export class ChartHistoryController {
     this.liveOhlcSeedToken++;
     if (this.liveOhlcSeedTimer !== null) clearTimeout(this.liveOhlcSeedTimer);
     this.liveOhlcSeedTimer = null;
-    if (this.liveOhlcSeedAbort && !this.liveOhlcSeedAbort.signal.aborted && this.activeSeedJob && isPerformanceTelemetryEnabled()) {
+    if (this.liveOhlcSeedAbort && !this.liveOhlcSeedAbort.signal.aborted && isPerformanceTelemetryEnabled()) {
+      const s = this.host.getState();
       recordTelemetryJob("live-seed", "aborted", {
-        market: this.activeSeedJob.market,
-        timeframe: this.activeSeedJob.timeframe,
-        generation: this.activeSeedJob.generation,
-        reason: "live-seed",
+        market: s.market, timeframe: s.timeframe, generation: this.host.pipeline.currentGeneration, reason: "live-seed",
       });
     }
     this.liveOhlcSeedAbort?.abort();
     this.liveOhlcSeedAbort = null;
-    this.activeSeedJob = null;
   }
 
   private scheduleLiveBarOHLCSeed(market: string, timeframe: string, intervalMs: number): void {
@@ -839,7 +827,6 @@ export class ChartHistoryController {
     // single total timeout shared by direct acquisition and its gateway fallback.
     const abort = new AbortController();
     this.liveOhlcSeedAbort = abort;
-    this.activeSeedJob = job;
     let reason: LiveBarSeedRetryReason = "failed";
     let seeded = false;
     try {
@@ -855,17 +842,7 @@ export class ChartHistoryController {
         includeFootprint: false,
         signal: abort.signal,
       });
-      if (!this.isLiveBarOHLCSeedCurrent(job)) {
-        if (isPerformanceTelemetryEnabled()) {
-          recordTelemetryJob("live-seed", "aborted", {
-            market: job.market,
-            timeframe: job.timeframe,
-            generation: job.generation,
-            reason: "live-seed",
-          });
-        }
-        return;
-      }
+      if (!this.isLiveBarOHLCSeedCurrent(job)) return;
 
       const applied = this.host.pipeline.applyLiveBarSeed(bars, {
         market: job.market,
@@ -877,33 +854,14 @@ export class ChartHistoryController {
       // The open bucket is the one the history snapshot skipped; a response that only
       // carries buckets which have since closed has not finished the job.
       seeded = applied.includes(bucketStart(Date.now(), job.intervalMs));
-      if (applied.length > 0) {
-        if (isPerformanceTelemetryEnabled()) {
-          recordTelemetryJob("live-seed", "applied", {
-            market: job.market,
-            timeframe: job.timeframe,
-            generation: job.generation,
-            reason: "live-seed",
-          }, { bars: applied.length });
-        }
-        logLoadTrace(this.host.pipeline.activeHistoryTraceId, "live_ohlc_seed.applied", { buckets: applied.length });
-      }
+      if (applied.length > 0) logLoadTrace(this.host.pipeline.activeHistoryTraceId, "live_ohlc_seed.applied", { buckets: applied.length });
       if (!seeded) reason = "empty";
     } catch {
-      if ((abort.signal.aborted || !this.isLiveBarOHLCSeedCurrent(job)) && isPerformanceTelemetryEnabled()) {
-        recordTelemetryJob("live-seed", "aborted", {
-          market: job.market,
-          timeframe: job.timeframe,
-          generation: job.generation,
-          reason: "live-seed",
-        });
-      }
       // A failed or timed-out seed stays pending and retries below; unlike the periodic
       // maintenance refresh it is never cancelled by footprint sync.
     } finally {
       if (this.liveOhlcSeedInFlightToken === job.token) this.liveOhlcSeedInFlightToken = null;
       if (this.liveOhlcSeedAbort === abort) this.liveOhlcSeedAbort = null;
-      if (this.activeSeedJob === job) this.activeSeedJob = null;
       if (!seeded && this.isLiveBarOHLCSeedCurrent(job)) {
         const consecutiveEmpty = reason === "empty" ? job.consecutiveEmpty + 1 : 0;
         const liveStart = bucketStart(Date.now(), job.intervalMs);

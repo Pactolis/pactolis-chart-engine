@@ -87,6 +87,11 @@ export function isPerformanceTelemetryEnabled(): boolean {
   return enabled;
 }
 
+function pushBounded<T>(list: T[], item: T): void {
+  if (list.length >= MAX_EVENTS) list.shift();
+  list.push(item);
+}
+
 export function recordTelemetryJob(
   jobKind: TelemetryJobKind,
   phase: TelemetryJobPhase,
@@ -100,14 +105,7 @@ export function recordTelemetryJob(
   },
 ): void {
   if (!enabled) return;
-  if (jobEvents.length >= MAX_EVENTS) jobEvents.shift();
-  jobEvents.push({
-    ...attribution,
-    jobKind,
-    phase,
-    atMs: performance.now(),
-    ...extra,
-  });
+  pushBounded(jobEvents, { ...attribution, jobKind, phase, atMs: performance.now(), ...extra });
 }
 
 export function recordTelemetryMark(
@@ -121,8 +119,7 @@ export function recordTelemetryMark(
   } catch {
     // Ignore mark errors in non-standard environments.
   }
-  if (markEvents.length >= MAX_EVENTS) markEvents.shift();
-  markEvents.push({
+  pushBounded(markEvents, {
     name,
     atMs: performance.now(),
     ...context,

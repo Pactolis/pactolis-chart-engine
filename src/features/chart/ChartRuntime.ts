@@ -39,7 +39,6 @@ import { chartHost } from "./chartHost.js";
 import { drawIndicatorPaneBackground } from "../indicators/IndicatorManager.js";
 import {
   incrementPerformanceCounter,
-  isPerformanceTelemetryEnabled,
   measurePerformance,
   recordTelemetryMark,
 } from "../../core/performanceTelemetry.js";
@@ -626,7 +625,6 @@ class ChartRuntimeImpl implements ChartRuntime, ChartInputHost {
         if (surfaces & ChartSurfaceDirty.Annotation) this.analysisBridge?.onAnnotationRendered();
         if (
           this.pendingFirstCandleMark
-          && isPerformanceTelemetryEnabled()
           && (surfaces & ChartSurfaceDirty.GpuScene) !== 0
           && !this.surface.historyOverlay
           && this.pipeline.series.length > 0
@@ -732,7 +730,6 @@ class ChartRuntimeImpl implements ChartRuntime, ChartInputHost {
         this._hook.setAttribute("data-footprint-available", String(available));
       },
       notifyHistorySettled: (market, timeframe) => this._notifyNpocHistorySettled(market, timeframe),
-      onHistoryLoadBegin: () => { this.pendingFirstCandleMark = true; },
     });
 
     this.hookFollowsInvalidation = true;
@@ -1870,6 +1867,7 @@ class ChartRuntimeImpl implements ChartRuntime, ChartInputHost {
   }
 
   private _setHistoryLoading(loading: boolean): void {
+    if (loading) this.pendingFirstCandleMark = true;
     this.surface.historyOverlay = loading;
     this.surface.historyBackground = false;
     this._hook.setAttribute("data-history-loading", String(loading));
