@@ -1,6 +1,20 @@
 // Pure helpers for the chart's orderbook heatmap: tier choice, chunking, bar
-// lookup, unit conversion and formatting. No I/O, no DOM.
-import type { OrderbookHeatmapBar, OrderbookHeatmapCell, OrderbookResolution } from "./heatmapContracts.js";
+// lookup, unit conversion, color range, luminance palette, and WS tail projection. No I/O, no DOM.
+import {
+  normalizeOrderbookHeatmapSources,
+  type OrderbookHeatmapContrast,
+  type OrderbookHeatmapScaleMode,
+} from "../../core/orderbookHeatmap/settings.js";
+import type {
+  CanonicalHeatmapTailBar,
+  OrderbookHeatmapBar,
+  OrderbookHeatmapBucketStep,
+  OrderbookHeatmapCell,
+  OrderbookHeatmapSource,
+  OrderbookResolution,
+} from "./heatmapContracts.js";
+
+export type { CanonicalHeatmapTailBar } from "./heatmapContracts.js";
 
 const MINUTE_MS = 60_000;
 const HOUR_MS = 60 * MINUTE_MS;
@@ -105,48 +119,193 @@ export function heatmapValueInUnit(usd: number, priceStart: number, bucketStep: 
   return middle > 0 ? usd / middle : 0;
 }
 
-/**
- * 0..1 color strength on a log scale: the threshold maps to 0 and `ceiling`
- * to 1. The ceiling defaults to ten times the threshold; the chart passes the
- * largest visible value so the biggest wall on screen is always the deepest.
- */
-export function heatmapIntensity(value: number, threshold: number, ceiling = threshold * 10): number {
-  if (!(value > 0)) return 0;
-  if (!(threshold > 0)) return 1;
-  const span = Math.log10(Math.max(ceiling, threshold * HEATMAP_MIN_CEILING_RATIO) / threshold);
-  const ratio = Math.log10(value / threshold) / span;
-  return Math.min(1, Math.max(0, ratio));
-}
-
-/** The intensity ceiling never drops below this multiple of the threshold, so a screen of near-threshold walls stays light. */
+/** The intensity ceiling never drops below this multiple of the floor, so a screen of near-floor walls stays faint. */
 export const HEATMAP_MIN_CEILING_RATIO = 2;
 
-/** Cell colors from a wall just over the threshold (light, faint) to the largest wall (deep, opaque). */
-const HEATMAP_LIGHT_RGB: readonly [number, number, number] = [125, 211, 252];
-const HEATMAP_DEEP_RGB: readonly [number, number, number] = [29, 78, 216];
-const HEATMAP_LIGHT_ALPHA = 0.28;
-const HEATMAP_DEEP_ALPHA = 0.95;
+export const HEATMAP_SINGLE_CANONICAL_SOURCE = "binance:usd_perp";
+export const HEATMAP_MAX_CELLS_PER_BAR = 200;
 
-function computeHeatmapCellColor(k: number, alphaScale: number): string {
-  const channel = (i: number) => Math.round(HEATMAP_LIGHT_RGB[i] + (HEATMAP_DEEP_RGB[i] - HEATMAP_LIGHT_RGB[i]) * k);
-  const alpha = (HEATMAP_LIGHT_ALPHA + (HEATMAP_DEEP_ALPHA - HEATMAP_LIGHT_ALPHA) * k) * alphaScale;
-  return `rgba(${channel(0)}, ${channel(1)}, ${channel(2)}, ${alpha.toFixed(3)})`;
+/**
+ * Percentile bounds `[floorQuantile, ceilingQuantile]` per contrast level.
+ * Default `"medium"` uses P15–P96 so extreme single outliers do not crush mid-band walls.
+ */
+export const HEATMAP_AUTO_PERCENTILES: Readonly<Record<OrderbookHeatmapContrast, readonly [number, number]>> = {
+  low: [0.05, 0.99],
+  medium: [0.15, 0.96],
+  high: [0.25, 0.92],
+};
+
+export interface HeatmapColorRangeInput {
+  values: readonly number[];
+  threshold: number;
+  scaleMode?: OrderbookHeatmapScaleMode;
+  fixedCeiling?: number;
+  contrast?: OrderbookHeatmapContrast;
 }
 
-const HEATMAP_COLOR_LUT_FULL: readonly string[] = Array.from({ length: 1001 }, (_, q) => computeHeatmapCellColor(q / 1000, 1));
-const HEATMAP_COLOR_LUT_LIVE: readonly string[] = Array.from({ length: 1001 }, (_, q) => computeHeatmapCellColor(q / 1000, 0.45));
+export interface HeatmapColorRange {
+  floor: number;
+  ceiling: number;
+}
 
-/** Fill color for a cell of the given intensity; `alphaScale` fades it (the live bar's extension). */
-export function heatmapCellColor(intensity: number, alphaScale = 1): string {
-  const k = Math.min(1, Math.max(0, intensity));
+function sortedPercentile(sorted: readonly number[], quantile: number): number {
+  if (sorted.length === 0) return 0;
+  if (sorted.length === 1) return sorted[0];
+  const index = (sorted.length - 1) * quantile;
+  const lo = Math.floor(index);
+  const hi = Math.ceil(index);
+  if (lo === hi) return sorted[lo];
+  return sorted[lo] + (sorted[hi] - sorted[lo]) * (index - lo);
+}
+
+/**
+ * Resolves the `[floor, ceiling]` logarithmic color scale shared by Canvas2D and WebGL2.
+ * When `threshold === 0`, `floor` is derived from the positive distribution's lower percentile.
+ */
+export function resolveHeatmapColorRange(input: HeatmapColorRangeInput): HeatmapColorRange {
+  const scaleMode = input.scaleMode ?? "auto";
+  const contrast = input.contrast ?? "medium";
+  const [floorQ, ceilingQ] = HEATMAP_AUTO_PERCENTILES[contrast] ?? HEATMAP_AUTO_PERCENTILES.medium;
+
+  const positive: number[] = [];
+  for (const value of input.values) {
+    if (Number.isFinite(value) && value > 0) positive.push(value);
+  }
+  positive.sort((a, b) => a - b);
+
+  const hasThreshold = Number.isFinite(input.threshold) && input.threshold > 0;
+  const threshold = hasThreshold ? input.threshold : 0;
+
+  if (
+    scaleMode === "fixed" &&
+    input.fixedCeiling !== undefined &&
+    Number.isFinite(input.fixedCeiling) &&
+    input.fixedCeiling > 0
+  ) {
+    let floor = threshold;
+    if (floor <= 0) {
+      floor = positive.length > 0
+        ? Math.min(sortedPercentile(positive, floorQ), input.fixedCeiling / HEATMAP_MIN_CEILING_RATIO)
+        : 0;
+    }
+    const ceiling = floor > 0
+      ? Math.max(input.fixedCeiling, floor * HEATMAP_MIN_CEILING_RATIO)
+      : input.fixedCeiling;
+    return { floor, ceiling };
+  }
+
+  if (positive.length === 0) {
+    const floor = threshold;
+    return {
+      floor,
+      ceiling: floor > 0 ? floor * 10 : 0,
+    };
+  }
+
+  const pFloor = sortedPercentile(positive, floorQ);
+  const pCeiling = sortedPercentile(positive, ceilingQ);
+  const floor = threshold > 0 ? threshold : pFloor;
+  const ceiling = Math.max(pCeiling, floor * HEATMAP_MIN_CEILING_RATIO);
+  return { floor, ceiling };
+}
+
+const LOG10_101 = Math.log10(101);
+
+/**
+ * 0..1 color strength on a log scale: `floor` maps to 0 and `ceiling` maps to 1.
+ * When `floor <= 0`, positive values still scale smoothly across `0..ceiling` instead of collapsing to 1.
+ */
+export function heatmapIntensity(value: number, floor: number, ceiling = floor > 0 ? floor * 10 : 0): number {
+  if (!(value > 0)) return 0;
+  if (floor > 0) {
+    const effectiveCeiling = Math.max(ceiling, floor * HEATMAP_MIN_CEILING_RATIO);
+    const span = Math.log10(effectiveCeiling / floor);
+    if (!(span > 0)) return 0;
+    const ratio = Math.log10(value / floor) / span;
+    return Math.min(1, Math.max(0, ratio));
+  }
+  if (ceiling > 0) {
+    const ratio = Math.log10(1 + (value / ceiling) * 100) / LOG10_101;
+    return Math.min(1, Math.max(0, ratio));
+  }
+  return Math.min(1, Math.max(0, Math.log10(1 + value) / 8));
+}
+
+interface HeatmapColorStop {
+  readonly k: number;
+  readonly r: number;
+  readonly g: number;
+  readonly b: number;
+  readonly a: number;
+}
+
+/** Dark-theme luminance ramp: faint deep navy -> cobalt -> vivid turquoise -> warm pale yellow/off-white. */
+const HEATMAP_PALETTE_STOPS: readonly HeatmapColorStop[] = [
+  { k: 0.0, r: 18, g: 38, b: 84, a: 0.22 },
+  { k: 0.4, r: 24, g: 112, b: 168, a: 0.36 },
+  { k: 0.75, r: 34, g: 211, b: 238, a: 0.54 },
+  { k: 1.0, r: 254, g: 240, b: 178, a: 0.68 },
+];
+
+export interface HeatmapRgba {
+  r: number;
+  g: number;
+  b: number;
+  a: number;
+}
+
+/** Computes exact RGBA channels and quantized alpha matching `HEATMAP_GPU_FRAG_SRC`. */
+export function heatmapCellRgba(intensity: number, alphaScale = 1, opacity = 1): HeatmapRgba {
+  const k = Math.min(1, Math.max(0, Number.isFinite(intensity) ? intensity : 0));
+  const clampedOpacity = Math.min(1, Math.max(0, Number.isFinite(opacity) ? opacity : 1));
+  let s0 = HEATMAP_PALETTE_STOPS[0];
+  let s1 = HEATMAP_PALETTE_STOPS[1];
+  if (k > 0.75) {
+    s0 = HEATMAP_PALETTE_STOPS[2];
+    s1 = HEATMAP_PALETTE_STOPS[3];
+  } else if (k > 0.4) {
+    s0 = HEATMAP_PALETTE_STOPS[1];
+    s1 = HEATMAP_PALETTE_STOPS[2];
+  }
+  const t = (k - s0.k) / (s1.k - s0.k);
+  const r = Math.floor(s0.r + (s1.r - s0.r) * t + 0.5);
+  const g = Math.floor(s0.g + (s1.g - s0.g) * t + 0.5);
+  const b = Math.floor(s0.b + (s1.b - s0.b) * t + 0.5);
+  const rawAlpha = (s0.a + (s1.a - s0.a) * t) * alphaScale * clampedOpacity;
+  const a = Math.floor(Math.min(1, Math.max(0, rawAlpha)) * 1000 + 0.5) / 1000;
+  return { r, g, b, a };
+}
+
+function formatHeatmapRgba(rgba: HeatmapRgba): string {
+  return `rgba(${rgba.r}, ${rgba.g}, ${rgba.b}, ${rgba.a.toFixed(3)})`;
+}
+
+const HEATMAP_COLOR_LUT_FULL: readonly string[] = Array.from({ length: 1001 }, (_, q) =>
+  formatHeatmapRgba(heatmapCellRgba(q / 1000, 1, 1)),
+);
+const HEATMAP_COLOR_LUT_LIVE: readonly string[] = Array.from({ length: 1001 }, (_, q) =>
+  formatHeatmapRgba(heatmapCellRgba(q / 1000, 0.45, 1)),
+);
+const HEATMAP_COLOR_LUT_DEFAULT_FULL: readonly string[] = Array.from({ length: 1001 }, (_, q) =>
+  formatHeatmapRgba(heatmapCellRgba(q / 1000, 1, 0.85)),
+);
+const HEATMAP_COLOR_LUT_DEFAULT_LIVE: readonly string[] = Array.from({ length: 1001 }, (_, q) =>
+  formatHeatmapRgba(heatmapCellRgba(q / 1000, 0.45, 0.85)),
+);
+
+/** Fill color for a cell of the given intensity; `alphaScale` fades it (the live bar's extension) and `opacity` applies user opacity. */
+export function heatmapCellColor(intensity: number, alphaScale = 1, opacity = 1): string {
+  const k = Math.min(1, Math.max(0, Number.isFinite(intensity) ? intensity : 0));
+  const clampedOpacity = Math.min(1, Math.max(0, Number.isFinite(opacity) ? opacity : 1));
   const q = Math.round(k * 1000);
-  if (alphaScale === 1) {
-    return HEATMAP_COLOR_LUT_FULL[q];
+  if (clampedOpacity === 1) {
+    if (alphaScale === 1) return HEATMAP_COLOR_LUT_FULL[q];
+    if (alphaScale === 0.45) return HEATMAP_COLOR_LUT_LIVE[q];
+  } else if (clampedOpacity === 0.85) {
+    if (alphaScale === 1) return HEATMAP_COLOR_LUT_DEFAULT_FULL[q];
+    if (alphaScale === 0.45) return HEATMAP_COLOR_LUT_DEFAULT_LIVE[q];
   }
-  if (alphaScale === 0.45) {
-    return HEATMAP_COLOR_LUT_LIVE[q];
-  }
-  return computeHeatmapCellColor(k, alphaScale);
+  return formatHeatmapRgba(heatmapCellRgba(k, alphaScale, clampedOpacity));
 }
 
 export function formatHeatmapValue(value: number, unit: "usd" | "btc"): string {
@@ -164,4 +323,78 @@ export function formatHeatmapValue(value: number, unit: "usd" | "btc"): string {
 /** Merges a response's bars into the cache; a later copy of a bar replaces the earlier one. */
 export function mergeHeatmapBars(target: Map<number, OrderbookHeatmapBar>, bars: readonly OrderbookHeatmapBar[]): void {
   for (const bar of bars) target.set(bar.t, bar);
+}
+
+export interface ProjectCanonicalHeatmapTailOptions {
+  source: OrderbookHeatmapSource;
+  customSources?: readonly string[];
+  bucketStep: OrderbookHeatmapBucketStep;
+  minUsd?: number;
+  minBtc?: number;
+}
+
+/**
+ * Pure WS-first client projection matching backend `HeatmapBuilder`:
+ * sums selected sources from a canonical `$25` tail bar, re-buckets to `bucketStep`,
+ * applies `minUsd`/`minBtc` thresholds, and caps at `HEATMAP_MAX_CELLS_PER_BAR = 200` strongest levels.
+ */
+export function projectCanonicalHeatmapTailBar(
+  bar: CanonicalHeatmapTailBar,
+  options: ProjectCanonicalHeatmapTailOptions,
+): OrderbookHeatmapBar {
+  const step = options.bucketStep;
+  let allowed: Set<string> | null = null;
+  if (options.source === "single") {
+    allowed = new Set([HEATMAP_SINGLE_CANONICAL_SOURCE]);
+  } else if (options.source === "custom") {
+    const custom = normalizeOrderbookHeatmapSources(options.customSources ?? []);
+    if (custom.length === 0) return { t: bar.t, cells: [] };
+    allowed = new Set(custom);
+  }
+
+  const buckets = new Map<number, [number, number]>();
+  for (const [rawKey, sourceCells] of Object.entries(bar.sources)) {
+    const sourceId = rawKey.trim().toLowerCase();
+    if (sourceId.length === 0 || !Array.isArray(sourceCells)) continue;
+    if (allowed !== null && !allowed.has(sourceId)) continue;
+    for (const cell of sourceCells) {
+      const priceStart = cell[0];
+      const bid = cell[1];
+      const ask = cell[2];
+      if (!Number.isFinite(priceStart) || !Number.isFinite(bid) || !Number.isFinite(ask)) continue;
+      const index = Math.floor(priceStart / step);
+      const entry = buckets.get(index);
+      const cleanBid = Math.max(0, bid);
+      const cleanAsk = Math.max(0, ask);
+      if (entry) {
+        entry[0] += cleanBid;
+        entry[1] += cleanAsk;
+      } else {
+        buckets.set(index, [cleanBid, cleanAsk]);
+      }
+    }
+  }
+
+  const cells: OrderbookHeatmapCell[] = [];
+  for (const [index, [bid, ask]] of buckets) {
+    const priceStart = index * step;
+    const total = bid + ask;
+    if (!(total > 0)) continue;
+    if (options.minUsd !== undefined && total < options.minUsd) continue;
+    if (options.minBtc !== undefined) {
+      const middle = priceStart + step / 2;
+      if (!(middle > 0) || total / middle < options.minBtc) continue;
+    }
+    cells.push([priceStart, Math.round(bid), Math.round(ask)]);
+  }
+
+  if (cells.length > HEATMAP_MAX_CELLS_PER_BAR) {
+    cells.sort((left, right) => {
+      const strengthDiff = (right[1] + right[2]) - (left[1] + left[2]);
+      return strengthDiff !== 0 ? strengthDiff : left[0] - right[0];
+    });
+    cells.length = HEATMAP_MAX_CELLS_PER_BAR;
+  }
+  cells.sort((left, right) => left[0] - right[0]);
+  return { t: bar.t, cells };
 }

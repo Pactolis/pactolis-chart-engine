@@ -9,7 +9,9 @@ const HEATMAP_GPU_FEATURE = "orderbook-heatmap";
 export interface HeatmapGpuRenderFrame {
   dataKey: string;
   threshold: number;
+  floor?: number;
   ceiling: number;
+  opacity?: number;
   colWidth: number;
   offsetX: number;
   areaLeft: number;
@@ -267,7 +269,9 @@ export class ChartHeatmapGpuCoordinator {
     this.heatmapGpuFrame = {
       dataKey: frame.dataKey,
       threshold: frame.threshold,
+      floor: frame.floor,
       ceiling: frame.ceiling,
+      opacity: frame.opacity,
       colWidth: v.colWidth,
       offsetX: v.offsetX,
       areaLeft: v.area.left,

@@ -42,6 +42,8 @@ export interface HeatmapGpuCellFrame {
   extension: HeatmapGpuRect[];
   ceiling: number;
   threshold: number;
+  floor?: number;
+  opacity?: number;
   dataKey: string;
   /**
    * Production prepare only: lease covering the prepared lists' known
@@ -88,8 +90,9 @@ export class HeatmapGpuRenderer {
   private densityTexture: WebGLTexture | null = null;
   private validityTexture: WebGLTexture | null = null;
   private uResolution: WebGLUniformLocation | null = null;
-  private uThreshold: WebGLUniformLocation | null = null;
+  private uFloor: WebGLUniformLocation | null = null;
   private uLogSpan: WebGLUniformLocation | null = null;
+  private uOpacity: WebGLUniformLocation | null = null;
   private uDensity: WebGLUniformLocation | null = null;
   private uValidity: WebGLUniformLocation | null = null;
 
@@ -167,10 +170,13 @@ export class HeatmapGpuRenderer {
       if (rect.sourceMainIndex === undefined || rect.sourceMainIndex < 0
         || rect.sourceMainIndex >= frame.main.length || !Number.isInteger(rect.sourceMainIndex)) return false;
     }
-    // A positive threshold/ceiling must survive the Float32 uniform upload:
+    // A positive floor/threshold/ceiling must survive the Float32 uniform upload:
     // 1e-50 would round to a present zero and silently widen the drawn span.
     // A literal present zero stays accepted, exactly like present cell zeros.
-    if (!val(frame.threshold) || !val(frame.ceiling)) return false;
+    const floor = frame.floor ?? frame.threshold;
+    const opacity = frame.opacity ?? 1;
+    if (!val(frame.threshold) || !val(frame.ceiling) || !val(floor)) return false;
+    if (!Number.isFinite(opacity) || opacity < 0 || opacity > 1) return false;
     if (!(plot.width > 0) || !(plot.height > 0)) return false;
     // The prepared frame lists themselves are a known CPU payload: charge
     // both budgets for the lifetime of the frame (transient, released after
@@ -324,11 +330,12 @@ export class HeatmapGpuRenderer {
       this.reserve(UNIT_QUAD.byteLength);
       const program = createProgram(gl, HEATMAP_GPU_VERT_SRC, HEATMAP_GPU_FRAG_SRC);
       const uResolution = gl.getUniformLocation(program, "u_resolution");
-      const uThreshold = gl.getUniformLocation(program, "u_threshold");
+      const uFloor = gl.getUniformLocation(program, "u_floor");
       const uLogSpan = gl.getUniformLocation(program, "u_logSpan");
+      const uOpacity = gl.getUniformLocation(program, "u_opacity");
       const uDensity = gl.getUniformLocation(program, "u_density");
       const uValidity = gl.getUniformLocation(program, "u_validity");
-      if (!uResolution || !uThreshold || !uLogSpan || !uDensity || !uValidity) {
+      if (!uResolution || !uFloor || !uLogSpan || !uOpacity || !uDensity || !uValidity) {
         gl.deleteProgram(program);
         this.releaseReservation();
         throw new Error("Failed to locate heatmap prototype uniforms");
@@ -396,8 +403,9 @@ export class HeatmapGpuRenderer {
       // never make a retry skip them and still claim a drawn frame.
       this.program = program;
       this.uResolution = uResolution;
-      this.uThreshold = uThreshold;
+      this.uFloor = uFloor;
       this.uLogSpan = uLogSpan;
+      this.uOpacity = uOpacity;
       this.uDensity = uDensity;
       this.uValidity = uValidity;
       this.vao = vao;
@@ -625,12 +633,14 @@ export class HeatmapGpuRenderer {
     const bufferHeight = gl.drawingBufferHeight;
     if (!(bufferWidth > 0) || !(bufferHeight > 0) || !(dpr > 0)) throw new Error("Heatmap GPU draw: invalid buffer");
 
-    const threshold = frame.threshold;
-    const ceiling = threshold > 0 ? Math.max(frame.ceiling, threshold * HEATMAP_MIN_CEILING_RATIO) : threshold;
-    if (!Number.isFinite(Math.fround(threshold)) || !Number.isFinite(Math.fround(ceiling))) {
+    const floor = frame.floor ?? frame.threshold;
+    const opacity = frame.opacity ?? 1;
+    const ceiling = floor > 0 ? Math.max(frame.ceiling, floor * HEATMAP_MIN_CEILING_RATIO) : frame.ceiling;
+    if (!Number.isFinite(Math.fround(floor)) || !Number.isFinite(Math.fround(ceiling))
+      || !Number.isFinite(Math.fround(opacity))) {
       throw new Error("Heatmap GPU draw: non-finite uniforms");
     }
-    const logSpan = threshold > 0 ? Math.log10(ceiling / threshold) : 1;
+    const logSpan = floor > 0 ? Math.log10(ceiling / floor) : (ceiling > 0 ? ceiling : 0);
     if (!Number.isFinite(logSpan)) throw new Error("Heatmap GPU draw: invalid log span");
     const instanceCount = frame.main.length + frame.extension.length;
 
@@ -654,8 +664,9 @@ export class HeatmapGpuRenderer {
       gl.useProgram(this.program);
       gl.bindVertexArray(this.vao);
       gl.uniform2f(this.uResolution, bufferWidth / dpr, bufferHeight / dpr);
-      gl.uniform1f(this.uThreshold, threshold);
+      gl.uniform1f(this.uFloor, floor);
       gl.uniform1f(this.uLogSpan, logSpan);
+      gl.uniform1f(this.uOpacity, opacity);
       gl.activeTexture(gl.TEXTURE0);
       gl.bindTexture(gl.TEXTURE_2D, this.densityTexture);
       gl.uniform1i(this.uDensity, 0);

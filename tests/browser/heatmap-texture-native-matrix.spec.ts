@@ -223,8 +223,8 @@ async function prepare(page: Page, empty: boolean, log = false): Promise<string>
  * Then native GPU owns density, annotation is empty, other layers survive.
  * C/D: Given subpixel CSS columns, Then native final image matches independent
  * Canvas coverage (CPU fallback allowed); next CW32 frame recovers GPU, no toggle.
- * Literal fixture: present zero; 32 BTC at 125; 64 BTC at 225; threshold 16.
- * LOG(32/16)/LOG(64/16)=.5 => fixed CSS alpha .615, EXT .277; zero .28.
+ * Literal fixture: present zero; 32 BTC at 125; 64 BTC at 225; threshold 16; default opacity 0.85.
+ * LOG(32/16)/LOG(64/16)=.5 => mid-ramp turquoise CSS alpha .350, EXT .157; zero .187, peak .578.
  * Frozen source: 0637839fc2ba1e8ee9c07f9a8d13a6ca9209464e / aa45c97d9a4f71beeb9f090a4d6d7e1edb1395d3.
  */
 const scenarios = [
@@ -288,9 +288,9 @@ async function freezeOracle(page: Page, id: string, narrow: boolean, log: boolea
     // Fixed literal numeric values/colors; no observed ON color feeds this oracle.
     for (let k = -4; k <= 0; k++) {
       for (const cell of [
-        { lo: 50, hi: 100, css: "rgba(125, 211, 252, 0.28)", ext: "rgba(125, 211, 252, 0.126)" },
-        { lo: 100, hi: 150, css: "rgba(77, 145, 234, 0.615)", ext: "rgba(77, 145, 234, 0.277)" },
-        { lo: 200, hi: 250, css: "rgba(29, 78, 216, 0.95)", ext: "rgba(29, 78, 216, 0.427)" },
+        { lo: 50, hi: 100, css: "rgba(18, 38, 84, 0.187)", ext: "rgba(18, 38, 84, 0.084)" },
+        { lo: 100, hi: 150, css: "rgba(27, 140, 188, 0.350)", ext: "rgba(27, 140, 188, 0.157)" },
+        { lo: 200, hi: 250, css: "rgba(254, 240, 178, 0.578)", ext: "rgba(254, 240, 178, 0.260)" },
       ]) {
         rects.push({ x: x + k * v.colWidth, y: y(cell.hi), w: narrow ? 1 : 32,
           h: y(cell.lo) - y(cell.hi), css: cell.css });
