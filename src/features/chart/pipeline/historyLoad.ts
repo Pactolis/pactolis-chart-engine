@@ -5,7 +5,11 @@ import { FOOTPRINT_START_TIME, footprintEnabledAt } from "../../../core/footprin
 import { isFootprintSyncAllowed, recordFootprintSupport } from "../../../core/syncAllowlist.js";
 import type { AggTrade, FootprintBar } from "../../../core/types.js";
 import type { CandleCoverage, EnvelopeMeta } from "../../../core/envelope.js";
-import { incrementPerformanceCounter } from "../../../core/performanceTelemetry.js";
+import {
+  incrementPerformanceCounter,
+  recordTelemetryJob,
+  type JobAttribution,
+} from "../../../core/performanceTelemetry.js";
 import { snapshotFromSeries, type ChartDataSnapshot, type ChartDataUpdateEvent } from "../../../core/dataUpdateEvent.js";
 import { createLoadTrace, logLoadTrace } from "../../../core/loadTrace.js";
 import type { PipelineIntegrityReporter } from "../ChartDataPipelinePorts.js";
@@ -44,6 +48,11 @@ export interface LoadHistoryOpts {
   maxVisibleBarEnd?: number;
   /** Observe fetched bars without requiring them to be applied to the visible series. */
   onHistoryBars?: (bars: readonly FootprintBar[]) => void;
+  /** Telemetry attribution fields. */
+  reason?: string;
+  chartId?: string;
+  chartType?: string;
+  timeframe?: string;
 }
 
 export interface ExplicitHistoryReconcileState {
@@ -153,6 +162,9 @@ export interface HistoryLoadHost {
   getGeneration(): number;
   getMarket(): string;
   getIntervalMs(): number;
+  getChartId?(): string | undefined;
+  getTimeframe?(): string;
+  getChartType?(): string | undefined;
   isBlockingCandleMaintenance(): boolean;
   beginExplicitHistory(range: { from: number; toExclusive: number }): number;
   finishExplicitHistory(token: number): boolean;
@@ -202,9 +214,52 @@ export class HistoryLoadCoordinator {
   activeHistoryFootprintDetail = "";
   activeHistoryErrorDetail = "";
   activeHistoryCandlesOnly = false;
+  private activeHistoryAttribution: JobAttribution | null = null;
+  private readonly seenRequestRanges = new Set<string>();
 
   constructor(private readonly host: HistoryLoadHost, series: FootprintSeries) {
     this.series = series;
+  }
+
+  private buildAttribution(
+    reason: string,
+    overrides?: {
+      chartId?: string;
+      market?: string;
+      timeframe?: string;
+      chartType?: string;
+      generation?: number;
+    },
+  ): JobAttribution {
+    const intervalMs = this.host.getIntervalMs();
+    return {
+      chartId: overrides?.chartId ?? this.host.getChartId?.(),
+      market: overrides?.market ?? this.host.getMarket(),
+      timeframe: overrides?.timeframe ?? this.host.getTimeframe?.() ?? `${intervalMs}ms`,
+      chartType: overrides?.chartType ?? this.host.getChartType?.(),
+      generation: overrides?.generation ?? this.host.getGeneration(),
+      reason,
+    };
+  }
+
+  private trackHistoryRequestRange(
+    market: string,
+    intervalMs: number,
+    from: number,
+    to: number,
+    includeFootprint: boolean,
+  ): void {
+    incrementPerformanceCounter("pipeline.history.request.total");
+    const key = `${market}|${intervalMs}|${from}|${to}|${includeFootprint ? "fp" : "ohlcv"}`;
+    if (this.seenRequestRanges.has(key)) {
+      incrementPerformanceCounter("pipeline.history.request.repeated_range");
+    } else {
+      if (this.seenRequestRanges.size >= 512) {
+        const oldest = this.seenRequestRanges.values().next().value;
+        if (oldest !== undefined) this.seenRequestRanges.delete(oldest);
+      }
+      this.seenRequestRanges.add(key);
+    }
   }
 
   /**
@@ -245,7 +300,10 @@ export class HistoryLoadCoordinator {
     this.host.reportServerPriceStep(meta);
   }
 
-  cancelHistoryLoad(): void {
+  cancelHistoryLoad(reason = "cancelled"): void {
+    if (this.historyController && !this.historyController.signal.aborted && this.activeHistoryAttribution) {
+      recordTelemetryJob("history", "aborted", this.activeHistoryAttribution, { detail: reason });
+    }
     this.historyController?.abort();
     this.historyController = null;
   }
@@ -261,6 +319,9 @@ export class HistoryLoadCoordinator {
   }
 
   abortExplicitHistoryOverflow(): void {
+    if (this.historyController && !this.historyController.signal.aborted && this.activeHistoryAttribution) {
+      recordTelemetryJob("history", "aborted", this.activeHistoryAttribution, { detail: "explicit-history-overflow" });
+    }
     this.historyController?.abort();
     this.explicitHistoryReconcile = null;
     this.host.integrityReporter?.report("pending", "EXPLICIT_HISTORY_RECONCILE_OVERFLOW");
@@ -284,13 +345,26 @@ export class HistoryLoadCoordinator {
 
   resetForConfigChange(abortOnly: boolean): void {
     if (abortOnly) {
+      if (this.historyController && !this.historyController.signal.aborted && this.activeHistoryAttribution) {
+        recordTelemetryJob("history", "aborted", this.activeHistoryAttribution, { detail: "config-change" });
+      }
       this.historyController?.abort();
       this.historyController = null;
       this.explicitHistoryReconcile = null;
       this.liveOhlcController?.abort();
+      this.liveOhlcController = null;
       this.patchDayController?.abort();
       this.patchDayController = null;
       this.resetPatchDayQueue();
+      if (this.fillCellsController && !this.fillCellsController.signal.aborted) {
+        recordTelemetryJob("history", "aborted", this.buildAttribution("fill-missing-cells-aborted"), {
+          detail: "config-change",
+        });
+      }
+      this.fillCellsController?.abort();
+      this.fillCellsController = null;
+      this.fillCellsInFlightKey = null;
+      this.fillCellsPending = null;
       return;
     }
     this.activeHistoryFootprintDetail = "";
@@ -400,12 +474,20 @@ export class HistoryLoadCoordinator {
     const generation = this.host.getGeneration();
     const market = this.host.getMarket();
     const intervalMs = this.host.getIntervalMs();
+    const attribution = this.buildAttribution(opts.reason ?? "history-load", {
+      chartId: opts.chartId,
+      market,
+      timeframe: opts.timeframe,
+      chartType: opts.chartType,
+      generation,
+    });
+    this.activeHistoryAttribution = attribution;
     const bootstrapFrom = this.explicitHistoryReconcile?.generation === generation
       ? this.explicitHistoryReconcile.bootstrapFrom
       : bucketStart(Date.now(), intervalMs);
     const signal = opts.signal ? AbortSignal.any([opts.signal, controller.signal]) : controller.signal;
     const rebuild = opts.rebuildKlines ?? false;
-    const traceId = createLoadTrace(market, intervalMs);
+    const traceId = createLoadTrace(market, intervalMs, attribution);
     this.activeHistoryTraceId = traceId;
     this.activeHistoryFootprintReceived = false;
     this.activeHistoryFootprintAvailable = true;
@@ -422,7 +504,8 @@ export class HistoryLoadCoordinator {
     let loadDegradedMeta: EnvelopeMeta | undefined;
     const onHistoryMeta = (meta: EnvelopeMeta | undefined, trackCoverage = true): void => {
       // Metadata of a superseded or cancelled load belongs to no one; never let it reach the current one.
-      if (this.host.isDisposed() || generation !== this.host.getGeneration() || controller.signal.aborted) return;
+      if (this.host.isDisposed() || generation !== this.host.getGeneration() || controller.signal.aborted || signal.aborted) return;
+      if (meta?.cache?.hit) incrementPerformanceCounter("pipeline.history.cache.hit");
       const state = this.explicitHistoryReconcile;
       if (state && state.generation === generation) {
         state.watermark = decimalTradeId(meta?.footprintCoverage?.projectionThroughId);
@@ -471,6 +554,8 @@ export class HistoryLoadCoordinator {
         for (const fastWindow of fastWindows) {
           this._resetExplicitHistoryWatermark(generation);
           let fastWindowMeta: EnvelopeMeta | undefined;
+          this.trackHistoryRequestRange(market, intervalMs, fastWindow.from, fastWindow.to, false);
+          recordTelemetryJob("history", "started", attribution, { detail: "phase1-ohlcv" });
           const fastBars = await chartDataSource().fetchHistory({
             ...fastWindow,
             onMeta: (meta) => {
@@ -478,7 +563,11 @@ export class HistoryLoadCoordinator {
               fastWindow.onMeta?.(meta);
             },
           });
-          if (this.host.isDisposed() || generation !== this.host.getGeneration() || controller.signal.aborted) return;
+          if (this.host.isDisposed() || generation !== this.host.getGeneration() || controller.signal.aborted || signal.aborted) {
+            recordTelemetryJob("history", "aborted", attribution, { detail: "phase1-ohlcv-stale" });
+            return;
+          }
+          recordTelemetryJob("history", "responded", attribution, { bars: fastBars.length, cells: 0, detail: "phase1-ohlcv" });
           opts.onHistoryBars?.(fastBars.filter((bar) => bar.startTime <= opts.to));
           this._seedOpenBucketFromHistory(fastBars, bootstrapFrom, opts.to, opts.maxVisibleBarEnd);
           const replaceTo = Math.min(fastWindow.to, bootstrapFrom);
@@ -502,6 +591,7 @@ export class HistoryLoadCoordinator {
             true,
             false,
           )) return;
+          recordTelemetryJob("history", "applied", attribution, { bars: replaceableBars.length, cells: 0, detail: "phase1-ohlcv" });
           logLoadTrace(traceId, "pipeline.candles.applied", { bars: replaceableBars.length, seriesBars: this.series.length });
           emittedFast = true;
         }
@@ -511,11 +601,14 @@ export class HistoryLoadCoordinator {
         fastPhaseError = error;
       }
       if (fastPhaseComplete) {
-        if (this.host.isDisposed() || generation !== this.host.getGeneration() || controller.signal.aborted) return;
+        if (this.host.isDisposed() || generation !== this.host.getGeneration() || controller.signal.aborted || signal.aborted) return;
         this.host.onHistoryCandlesReady();
       }
       if (candlesOnly) {
-        if (controller.signal.aborted || this.host.isDisposed()) return;
+        if (controller.signal.aborted || signal.aborted || this.host.isDisposed() || generation !== this.host.getGeneration()) {
+          recordTelemetryJob("history", "aborted", attribution, { detail: "candles-only-stale" });
+          return;
+        }
         if (!fastPhaseComplete) throw fastPhaseError;
         this.activeHistoryFootprintDegraded = loadHasDegradedMeta && this.activeHistoryCandleSourceGap === null;
         logLoadTrace(traceId, "pipeline.history.complete", { seriesBars: this.series.length });
@@ -545,21 +638,34 @@ export class HistoryLoadCoordinator {
         let windowMeta: EnvelopeMeta | undefined;
         try {
           this._resetExplicitHistoryWatermark(generation);
+          this.trackHistoryRequestRange(market, intervalMs, chunk.from, chunk.to, true);
+          recordTelemetryJob("history", "started", attribution, { detail: `phase2-footprint-chunk-${chunkIndex}` });
           await chartDataSource().streamHistory({ ...chunk, onMeta: (meta) => { windowMeta = meta; } }, async ({ bars, cellCount, barCellCounts }: HistoryBatch) => {
-            if (this.host.isDisposed() || generation !== this.host.getGeneration() || controller.signal.aborted) return;
+            if (this.host.isDisposed() || generation !== this.host.getGeneration() || controller.signal.aborted || signal.aborted) return;
             receivedBars.push(...bars);
             receivedBarCellCounts.push(...(barCellCounts ?? bars.map((bar) => bar.cells.size)));
             receivedCells += cellCount ?? bars.reduce((sum, bar) => sum + bar.cells.size, 0);
           });
         } catch (error) {
-          if (controller.signal.aborted || this.host.isDisposed()) return;
+          if (controller.signal.aborted || signal.aborted || this.host.isDisposed() || generation !== this.host.getGeneration()) {
+            recordTelemetryJob("history", "aborted", attribution, { detail: "phase2-footprint-catch" });
+            return;
+          }
           throw error;
         }
-        if (this.host.isDisposed() || generation !== this.host.getGeneration() || controller.signal.aborted) return;
+        if (this.host.isDisposed() || generation !== this.host.getGeneration() || controller.signal.aborted || signal.aborted) {
+          recordTelemetryJob("history", "aborted", attribution, { detail: "phase2-footprint-stale" });
+          return;
+        }
+        recordTelemetryJob("history", "responded", attribution, {
+          bars: receivedBars.length,
+          cells: receivedCells,
+          detail: `phase2-footprint-chunk-${chunkIndex}`,
+        });
         const budgetError = historyCellBudgetError(windowMeta);
         if (budgetError) {
           const split = splitHistoryCellBudgetWindow(chunk);
-          if (!split) { onHistoryMeta(windowMeta); if (this.host.isDisposed() || generation !== this.host.getGeneration() || controller.signal.aborted) return; throw new Error(budgetError); }
+          if (!split) { onHistoryMeta(windowMeta); if (this.host.isDisposed() || generation !== this.host.getGeneration() || controller.signal.aborted || signal.aborted) return; throw new Error(budgetError); }
           if (split.older) chunkWindows.unshift(split.older);
           chunkWindows.unshift(split.newest);
           continue;
@@ -574,7 +680,10 @@ export class HistoryLoadCoordinator {
         onHistoryMeta(windowMeta);
         // The meta callback may re-enter (server step correction -> setPriceStep)
         // and restart this load; a superseded stack must not mutate the new epoch.
-        if (this.host.isDisposed() || generation !== this.host.getGeneration() || controller.signal.aborted) return;
+        if (this.host.isDisposed() || generation !== this.host.getGeneration() || controller.signal.aborted || signal.aborted) {
+          recordTelemetryJob("history", "aborted", attribution, { detail: "phase2-footprint-post-meta-stale" });
+          return;
+        }
         if (receivedBars.length) {
           const replaceableBars = receivedBars.filter((bar) => bar.startTime < bootstrapFrom
             && this._barWithinVisibleHistoryEnd(bar, intervalMs, opts.maxVisibleBarEnd));
@@ -583,6 +692,11 @@ export class HistoryLoadCoordinator {
             const batchTo = bucketEnd(replaceableBars[replaceableBars.length - 1]!.startTime, intervalMs);
             if (receivedCells > 0) this.activeHistoryFootprintReceived = true;
             if (!this._applyExplicitHistorySnapshot(batchFrom, batchTo, replaceableBars, generation, "history-patched", false, true)) return;
+            recordTelemetryJob("history", "applied", attribution, {
+              bars: replaceableBars.length,
+              cells: receivedCells,
+              detail: `phase2-footprint-chunk-${chunkIndex}`,
+            });
             logLoadTrace(traceId, "pipeline.footprint.applied", {
               bars: replaceableBars.length, cells: receivedCells, newestChunk: chunkIndex === 0, seriesBars: this.series.length,
             });
@@ -611,24 +725,33 @@ export class HistoryLoadCoordinator {
     });
     try {
       while (queue.length) {
-        if (this.host.isDisposed() || generation !== this.host.getGeneration() || controller.signal.aborted) return;
+        if (this.host.isDisposed() || generation !== this.host.getGeneration() || controller.signal.aborted || signal.aborted) {
+          recordTelemetryJob("history", "aborted", attribution, { detail: "single-phase-stale" });
+          return;
+        }
         const window = queue.shift()!;
         const receivedBars: FootprintBar[] = [];
         const receivedBarCellCounts: number[] = [];
         let receivedCells = 0;
         let windowMeta: EnvelopeMeta | undefined;
         this._resetExplicitHistoryWatermark(generation);
+        this.trackHistoryRequestRange(market, intervalMs, window.from, window.to, true);
+        recordTelemetryJob("history", "started", attribution, { detail: "single-phase" });
         await chartDataSource().streamHistory({ ...window, onMeta: (meta) => { windowMeta = meta; } }, async ({ bars, cellCount, barCellCounts }: HistoryBatch) => {
-          if (this.host.isDisposed() || generation !== this.host.getGeneration() || controller.signal.aborted) return;
+          if (this.host.isDisposed() || generation !== this.host.getGeneration() || controller.signal.aborted || signal.aborted) return;
           receivedBars.push(...bars);
           receivedBarCellCounts.push(...(barCellCounts ?? bars.map((bar) => bar.cells.size)));
           receivedCells += cellCount ?? bars.reduce((sum, bar) => sum + bar.cells.size, 0);
         });
-        if (this.host.isDisposed() || generation !== this.host.getGeneration() || controller.signal.aborted) return;
+        if (this.host.isDisposed() || generation !== this.host.getGeneration() || controller.signal.aborted || signal.aborted) {
+          recordTelemetryJob("history", "aborted", attribution, { detail: "single-phase-post-stream-stale" });
+          return;
+        }
+        recordTelemetryJob("history", "responded", attribution, { bars: receivedBars.length, cells: receivedCells, detail: "single-phase" });
         const budgetError = historyCellBudgetError(windowMeta);
         if (budgetError) {
           const split = splitHistoryCellBudgetWindow(window);
-          if (!split) { onHistoryMeta(windowMeta); if (this.host.isDisposed() || generation !== this.host.getGeneration() || controller.signal.aborted) return; throw new Error(budgetError); }
+          if (!split) { onHistoryMeta(windowMeta); if (this.host.isDisposed() || generation !== this.host.getGeneration() || controller.signal.aborted || signal.aborted) return; throw new Error(budgetError); }
           if (split.older) queue.unshift(split.older);
           queue.unshift(split.newest);
           continue;
@@ -641,7 +764,10 @@ export class HistoryLoadCoordinator {
         }
         opts.onHistoryBars?.(receivedBars.filter((bar) => bar.startTime <= opts.to));
         onHistoryMeta(windowMeta);
-        if (this.host.isDisposed() || generation !== this.host.getGeneration() || controller.signal.aborted) return;
+        if (this.host.isDisposed() || generation !== this.host.getGeneration() || controller.signal.aborted || signal.aborted) {
+          recordTelemetryJob("history", "aborted", attribution, { detail: "single-phase-post-meta-stale" });
+          return;
+        }
         this._seedOpenBucketFromHistory(receivedBars, bootstrapFrom, opts.to, opts.maxVisibleBarEnd);
         if (!receivedBars.length) continue;
         const replaceableBars = receivedBars.filter((bar) => bar.startTime < bootstrapFrom
@@ -658,15 +784,19 @@ export class HistoryLoadCoordinator {
           false,
           emitted,
         )) return;
+        recordTelemetryJob("history", "applied", attribution, { bars: replaceableBars.length, cells: receivedCells, detail: "single-phase" });
         if (receivedCells > 0) this.activeHistoryFootprintReceived = true;
         logLoadTrace(traceId, "pipeline.footprint.applied", { bars: replaceableBars.length, cells: receivedCells, seriesBars: this.series.length });
         emitted = true;
       }
     } catch (error) {
-      if (controller.signal.aborted || this.host.isDisposed()) return;
+      if (controller.signal.aborted || signal.aborted || this.host.isDisposed() || generation !== this.host.getGeneration()) {
+        recordTelemetryJob("history", "aborted", attribution, { detail: "single-phase-catch" });
+        return;
+      }
       throw error;
     }
-    if (this.host.isDisposed() || generation !== this.host.getGeneration() || controller.signal.aborted) return;
+    if (this.host.isDisposed() || generation !== this.host.getGeneration() || controller.signal.aborted || signal.aborted) return;
     if (!emitted) {
       const wipeTo = Math.min(opts.to, bootstrapFrom);
       if (wipeTo > opts.from) {
@@ -758,11 +888,26 @@ export class HistoryLoadCoordinator {
       from: number;
       observedAt: number;
       fillMissingOnly?: boolean;
+      generation?: number;
+      reason?: string;
     },
   ): number[] {
     const market = this.host.getMarket();
     const intervalMs = this.host.getIntervalMs();
-    if (this.host.isDisposed() || opts.market !== market || opts.intervalMs !== intervalMs) return [];
+    const generation = this.host.getGeneration();
+    const attribution = this.buildAttribution(opts.reason ?? "live-bar-seed", {
+      market: opts.market,
+      generation: opts.generation ?? generation,
+    });
+    if (
+      this.host.isDisposed()
+      || opts.market !== market
+      || opts.intervalMs !== intervalMs
+      || (opts.generation !== undefined && opts.generation !== generation)
+    ) {
+      recordTelemetryJob("live-seed", "aborted", attribution, { detail: "stale-live-seed-apply" });
+      return [];
+    }
     const liveStart = bucketStart(Date.now(), intervalMs);
     const applicable = bars.filter((bar) => bar.startTime >= opts.from
       && bar.startTime <= liveStart
@@ -927,19 +1072,29 @@ export class HistoryLoadCoordinator {
     const controller = new AbortController();
     this.fillCellsController = controller;
     const generation = this.host.getGeneration();
+    const attribution = this.buildAttribution("fill-missing-cells", { market, generation });
+    recordTelemetryJob("history", "started", attribution, { detail: `fill-cells:${reqFrom}-${reqTo}` });
     void (async () => {
       await chartDataSource().startRefresh([market], intervalMs, this.series.config.priceStep, market, reqFrom, reqTo, controller.signal);
       await this._awaitRefreshIdle(controller.signal);
       for (let day = reqFrom; day < reqTo; day += DAY_MS) {
-        if (this.host.isDisposed() || generation !== this.host.getGeneration() || controller.signal.aborted) return;
+        if (this.host.isDisposed() || generation !== this.host.getGeneration() || controller.signal.aborted) {
+          recordTelemetryJob("history", "aborted", attribution, { detail: "fill-cells-stale" });
+          return;
+        }
         await this.patchDay(day);
+      }
+      if (!this.host.isDisposed() && generation === this.host.getGeneration() && !controller.signal.aborted) {
+        recordTelemetryJob("history", "applied", attribution, { detail: `fill-cells:${reqFrom}-${reqTo}` });
       }
     })().catch(() => undefined).finally(() => {
       if (this.fillCellsInFlightKey === key) this.fillCellsInFlightKey = null;
       if (this.fillCellsController === controller) this.fillCellsController = null;
       const pending = this.fillCellsPending ?? { from, to };
       this.fillCellsPending = null;
-      if (!this.host.isDisposed() && !controller.signal.aborted) this.fillMissingCells(pending.from, pending.to);
+      if (!this.host.isDisposed() && !controller.signal.aborted && generation === this.host.getGeneration()) {
+        this.fillMissingCells(pending.from, pending.to);
+      }
     });
   }
 

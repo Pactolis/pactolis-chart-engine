@@ -37,7 +37,15 @@ import type { NakedPocLevel } from "../../core/analysis/nakedPoc.js";
 import type { ReplaySnapshot } from "../replay/replayController.js";
 import { chartHost } from "./chartHost.js";
 import { drawIndicatorPaneBackground } from "../indicators/IndicatorManager.js";
-import { incrementPerformanceCounter, measurePerformance } from "../../core/performanceTelemetry.js";
+import {
+  incrementPerformanceCounter,
+  isPerformanceTelemetryEnabled,
+  measurePerformance,
+  recordPerformanceDuration,
+  recordTelemetryJob,
+  recordTelemetryMark,
+} from "../../core/performanceTelemetry.js";
+import { bucketStart } from "../../core/time.js";
 import { isLoadTraceEnabled } from "../../core/loadTrace.js";
 import type { IndicatorInstance } from "../indicators/types.js";
 import { footprintVisiblePriceRange } from "../../core/model/footprintAutoscale.js";
@@ -76,6 +84,7 @@ import type { HeatmapGpuCellFrame } from "./heatmap/gpu/heatmapGpuRenderer.js";
 import type { FootprintSeries } from "../../core/model/footprint.js";
 import { abortableDelay } from "./abortableDelay.js";
 import type { ChartSurfaceModel } from "./chartSurfaceModel.js";
+import type { HistoryLoadTelemetryContext } from "./ChartHistoryController.js";
 
 export type { MagnetSnapTarget, HeatmapGpuRenderFrame };
 
@@ -251,6 +260,36 @@ class ChartRuntimeImpl implements ChartRuntime, ChartInputHost {
   private readonly hookAttrCache = new Map<string, string>();
   private lastSeriesTailSig: string | null = null;
   private lastSeriesTailJson: string = "[]";
+  private chartTypeSwitchGeneration = 0;
+  private activeHistorySwitch: {
+    readonly historyGeneration: number;
+    readonly refreshGeneration: number;
+    readonly pipelineGeneration: number;
+    readonly market: string;
+    readonly timeframe: string;
+    readonly chartType?: string;
+    readonly reason: string;
+    readonly startedAt: number;
+    firstCandlePaintedAt: number | null;
+    historyReadyAt: number | null;
+    initialBarCount: number | null;
+    initialVisibleCount: number | null;
+    initialHasOpenBucket: boolean | null;
+  } | null = null;
+  private activeChartTypeSwitch: {
+    readonly generation: number;
+    readonly chartType: ChartType;
+    readonly previousChartType: ChartType;
+    readonly market: string;
+    readonly timeframe: string;
+    readonly reason: string;
+    readonly startedAt: number;
+    readonly reusable: boolean;
+    firstDataFramePaintedAt: number | null;
+    visibleRangeReadyAt: number | null;
+    lastGpuMs: number;
+    lastAnnotationMs: number;
+  } | null = null;
 
   activeMagnetSnap: MagnetSnapTarget | null = null;
 
@@ -507,6 +546,7 @@ class ChartRuntimeImpl implements ChartRuntime, ChartInputHost {
     const view = this.view;
     const renderer = {
       render: (v: View, s: typeof series) => {
+        const gpuStartedAt = isPerformanceTelemetryEnabled() ? performance.now() : null;
         if (this.timeViewport.ensurePendingLatestPlacement(s.length)) this._autoFit();
         // Reset the completed-GPU-frame claim BEFORE this attempt; the density
         // decision below owns the whole frame, never a partial GPU+annotation mix.
@@ -526,6 +566,9 @@ class ChartRuntimeImpl implements ChartRuntime, ChartInputHost {
             heatmapFrame = null;
             throw error;
           }
+        }
+        if (gpuStartedAt !== null && this.activeChartTypeSwitch) {
+          this.activeChartTypeSwitch.lastGpuMs = performance.now() - gpuStartedAt;
         }
       },
       interactionAffectsAnnotation: () => this.overlay.hasInteractionDependentHudContent(crosshair),
@@ -565,8 +608,12 @@ class ChartRuntimeImpl implements ChartRuntime, ChartInputHost {
 
       annotation: {
         render: (v, s, c, r, changes) => {
+          const annotationStartedAt = isPerformanceTelemetryEnabled() ? performance.now() : null;
           this.overlay.setTpoMergeLeftSessionStarts(this.tpoMergeLeftSessionStarts);
           this.overlay.renderAnnotations(v, s, c, r, this.renderCoordinator?.getAnnotationLayerOrder() ?? [], changes, this.replayCoordinator?.getSnapshot()?.virtualTime);
+          if (annotationStartedAt !== null && this.activeChartTypeSwitch) {
+            this.activeChartTypeSwitch.lastAnnotationMs = performance.now() - annotationStartedAt;
+          }
         },
         requiresInteractionRedraw: () => this.indicatorController.requiresAnnotationInteractionRedraw(),
       },
@@ -613,6 +660,7 @@ class ChartRuntimeImpl implements ChartRuntime, ChartInputHost {
       },
       onRendered: (surfaces) => {
         if (surfaces & ChartSurfaceDirty.Annotation) this.analysisBridge?.onAnnotationRendered();
+        this.evaluateSwitchPaintTelemetry(surfaces);
       },
     });
 
@@ -698,6 +746,7 @@ class ChartRuntimeImpl implements ChartRuntime, ChartInputHost {
       svc: this.svc,
       capture: this.captureCoordinator,
       replay: this.replayCoordinator,
+      getChartId: () => this.panelId,
       isDisposed: () => this.disposed,
       getState: () => this.getState(),
       autoFit: () => this._autoFit(),
@@ -708,6 +757,10 @@ class ChartRuntimeImpl implements ChartRuntime, ChartInputHost {
         this._hook.setAttribute("data-footprint-available", String(available));
       },
       notifyHistorySettled: (market, timeframe) => this._notifyNpocHistorySettled(market, timeframe),
+      onHistoryLoadBegin: (context) => this.handleHistoryLoadBegin(context),
+      onHistoryLoadSettled: (context) => this.handleHistoryLoadSettled(context),
+      onHistoryLoadFailed: (context) => this.handleHistoryLoadFailed(context),
+      onOpenCandleCompleted: (context) => this.handleOpenCandleCompleted(context),
     });
 
     this.hookFollowsInvalidation = true;
@@ -784,6 +837,9 @@ class ChartRuntimeImpl implements ChartRuntime, ChartInputHost {
     };
     const marketChanged = constrainedNext.market !== prev.market;
     const timeframeChanged = constrainedNext.timeframe !== prev.timeframe;
+    const prevChartType = prev.chartType ?? settings.chartType;
+    const nextChartType = constrainedNext.chartType ?? settings.chartType;
+    const chartTypeChanged = nextChartType !== prevChartType;
 
     this.requestedChartType = requestedType;
     this.setPanelState(constrainedNext);
@@ -811,6 +867,14 @@ class ChartRuntimeImpl implements ChartRuntime, ChartInputHost {
     }
 
     this.historyController.handleSelectionChange(prev, constrainedNext);
+    if (chartTypeChanged) {
+      this.beginChartTypeSwitch(
+        prevChartType,
+        nextChartType,
+        marketChanged || timeframeChanged ? "selection-and-type-switch" : "chart-type-switch",
+        marketChanged || timeframeChanged,
+      );
+    }
     this.emitStateChange();
     this.syncController.emitStateChanges(prev, constrainedNext);
   }
@@ -1024,11 +1088,27 @@ class ChartRuntimeImpl implements ChartRuntime, ChartInputHost {
   }
 
   private _beginNpocRequest(market: string): void {
+    recordTelemetryJob("canonical-analysis", "started", {
+      chartId: this.panelId,
+      market,
+      timeframe: this.state.timeframe,
+      chartType: this.state.chartType,
+      generation: this.pipeline.currentGeneration,
+      reason: "npoc-snapshot",
+    });
     this.levelContextController.beginNpocRequest(market);
   }
 
   private _notifyNpocHistorySettled(market: string, timeframe: string): void {
     this.levelContextController.notifyNpocHistorySettled(market, timeframe);
+    recordTelemetryJob("canonical-analysis", "applied", {
+      chartId: this.panelId,
+      market,
+      timeframe,
+      chartType: this.state.chartType,
+      generation: this.pipeline.currentGeneration,
+      reason: "npoc-history-settled",
+    });
   }
 
   private _maybeApplyNpoc(): void {
@@ -1068,12 +1148,17 @@ class ChartRuntimeImpl implements ChartRuntime, ChartInputHost {
     };
   }
 
-  private applyViewState(patch: Partial<ChartPanelState>): void {
+  private applyViewState(patch: Partial<ChartPanelState>, reason = "view-state-change"): void {
     if (this.disposed) return;
+    const prevChartType = this.state.chartType ?? settings.chartType;
     this.setPanelState({ ...this.state, ...patch } as ChartPanelState);
     this.renderCoordinator.applyConfig(this.chartViewConfig());
     this.emitStateChange();
     this.session.invalidate(ChartChange.Style);
+    const nextChartType = this.state.chartType ?? settings.chartType;
+    if (patch.chartType !== undefined && nextChartType !== prevChartType) {
+      this.beginChartTypeSwitch(prevChartType, nextChartType, reason, false);
+    }
   }
 
   private enforceChartTypePolicy(): void {
@@ -1082,7 +1167,7 @@ class ChartRuntimeImpl implements ChartRuntime, ChartInputHost {
     // Constrain the requested type, not the current one: a candlestick forced while support
     // was unknown has to turn back into the requested footprint once the server allows it.
     const constrained = constrainChartTypeForMarket(this.state.market, this.requestedChartType);
-    if (constrained !== current) this.applyViewState({ chartType: constrained });
+    if (constrained !== current) this.applyViewState({ chartType: constrained }, "footprint-policy-restore");
   }
 
   /** Only a type the pair can actually show is saved; a forced candlestick is not a choice. */
@@ -1103,7 +1188,7 @@ class ChartRuntimeImpl implements ChartRuntime, ChartInputHost {
     this.requestedChartType = constrained;
     if (type === constrained) this.rememberPairChartType(this.state.market, constrained);
     if ((this.state.chartType ?? settings.chartType) !== constrained) {
-      this.applyViewState({ chartType: constrained });
+      this.applyViewState({ chartType: constrained }, "chart-type-switch");
     } else if (requestChanged) {
       this.emitStateChange();
     }
@@ -1874,6 +1959,358 @@ class ChartRuntimeImpl implements ChartRuntime, ChartInputHost {
     this.heatmapGpuCoordinator.setResidentHeatmapEnabled(enabled);
   }
 
+  private handleHistoryLoadBegin(context: HistoryLoadTelemetryContext): void {
+    this.activeHistorySwitch = {
+      ...context,
+      startedAt: performance.now(),
+      firstCandlePaintedAt: null,
+      historyReadyAt: null,
+      initialBarCount: null,
+      initialVisibleCount: null,
+      initialHasOpenBucket: null,
+    };
+  }
+
+  private handleHistoryLoadSettled(
+    context: HistoryLoadTelemetryContext & {
+      readonly footprintReceived: boolean;
+      readonly seriesLength: number;
+      readonly hasOpenBucket: boolean;
+    },
+  ): void {
+    const active = this.activeHistorySwitch;
+    if (!active || active.historyGeneration !== context.historyGeneration) return;
+    active.historyReadyAt = performance.now();
+    const openCandleCompletedLater = active.initialHasOpenBucket === false && context.hasOpenBucket;
+    const barsAddedAfterFirstPaint = active.initialBarCount !== null
+      ? Math.max(0, context.seriesLength - active.initialBarCount)
+      : 0;
+    recordTelemetryMark(
+      "chart:history-ready",
+      {
+        chartId: this.panelId,
+        market: context.market,
+        timeframe: context.timeframe,
+        chartType: this.state.chartType,
+        generation: context.pipelineGeneration,
+        reason: context.reason,
+      },
+      {
+        seriesLength: context.seriesLength,
+        hasOpenBucket: context.hasOpenBucket,
+        footprintReceived: context.footprintReceived,
+        initialBarCount: active.initialBarCount,
+        initialVisibleCount: active.initialVisibleCount,
+        initialHasOpenBucket: active.initialHasOpenBucket,
+        openCandleCompletedLater,
+        barsAddedAfterFirstPaint,
+      },
+    );
+    recordPerformanceDuration("chart.switch.historyReady.ms", active.historyReadyAt - active.startedAt);
+  }
+
+  private handleHistoryLoadFailed(context: HistoryLoadTelemetryContext): void {
+    if (this.activeHistorySwitch?.historyGeneration === context.historyGeneration) {
+      this.activeHistorySwitch = null;
+    }
+  }
+
+  private handleOpenCandleCompleted(context: {
+    readonly market: string;
+    readonly timeframe: string;
+    readonly generation: number;
+    readonly reason: string;
+    readonly buckets: number;
+  }): void {
+    const active = this.activeHistorySwitch;
+    recordTelemetryMark(
+      "chart:open-candle-completed",
+      {
+        chartId: this.panelId,
+        market: context.market,
+        timeframe: context.timeframe,
+        chartType: this.state.chartType,
+        generation: context.generation,
+        reason: context.reason,
+      },
+      {
+        buckets: context.buckets,
+        initialBarCount: active?.initialBarCount ?? null,
+        initialHasOpenBucket: active?.initialHasOpenBucket ?? null,
+      },
+    );
+  }
+
+  beginInitialChartTypeTelemetry(): void {
+    const currentType = this.state.chartType ?? settings.chartType;
+    this.beginChartTypeSwitch(currentType, currentType, "initial-mount", true);
+  }
+
+  private beginChartTypeSwitch(
+    previousChartType: ChartType,
+    nextChartType: ChartType,
+    reason: string,
+    seriesReset: boolean,
+  ): void {
+    const prevSwitch = this.activeChartTypeSwitch;
+    if (prevSwitch && prevSwitch.visibleRangeReadyAt === null && reason !== "initial-mount") {
+      recordTelemetryMark(
+        "chart:type-switch-aborted",
+        {
+          chartId: this.panelId,
+          market: this.state.market,
+          timeframe: this.state.timeframe,
+          chartType: prevSwitch.chartType,
+          generation: prevSwitch.generation,
+          reason: prevSwitch.reason,
+        },
+        { supersededBy: nextChartType },
+      );
+    }
+    const generation = ++this.chartTypeSwitchGeneration;
+    this.pipeline.setTelemetryContext({
+      chartId: this.panelId,
+      chartType: nextChartType,
+      timeframe: this.state.timeframe,
+      reason,
+    });
+    const series = this.pipeline.series;
+    const reusable = !seriesReset && series.length > 0 && (
+      nextChartType === "candlestick"
+      || nextChartType === "tpo"
+      || this.hasVisibleFootprintCells()
+    );
+    const sw = {
+      generation,
+      chartType: nextChartType,
+      previousChartType,
+      market: this.state.market,
+      timeframe: this.state.timeframe,
+      reason,
+      startedAt: performance.now(),
+      reusable,
+      firstDataFramePaintedAt: null,
+      visibleRangeReadyAt: null,
+      lastGpuMs: 0,
+      lastAnnotationMs: 0,
+    };
+    this.activeChartTypeSwitch = sw;
+    const attr = {
+      chartId: this.panelId,
+      market: sw.market,
+      timeframe: sw.timeframe,
+      chartType: nextChartType,
+      generation,
+      reason,
+    };
+    recordTelemetryMark("chart:type-selected", attr, { previousChartType, reusable });
+    if (reusable) {
+      recordTelemetryJob("history", "reused", attr, {
+        bars: series.length,
+        reusable: true,
+        detail: `reuse-for-${nextChartType}`,
+      });
+    } else if (
+      !seriesReset
+      && (nextChartType === "footprint" || nextChartType === "footprintProfile")
+      && !this.historyController.hasLoadInFlight()
+      && chartHost().isFootprintAutoFillEnabled()
+      && isFootprintSyncAllowed(this.state.market)
+    ) {
+      const visibleRange = this.getVisibleTimeRange();
+      if (visibleRange && visibleRange.to > visibleRange.from) {
+        recordTelemetryMark("chart:type-data-requested", attr, { from: visibleRange.from, to: visibleRange.to });
+        this.pipeline.fillMissingCells(visibleRange.from, visibleRange.to);
+      }
+    }
+  }
+
+  private hasVisibleFootprintCells(): boolean {
+    const series = this.pipeline.series;
+    if (series.length === 0) return false;
+    const [from, to] = this.renderer.visibleRange(this.view, series.length);
+    let sawVolumeBar = false;
+    for (let i = from; i < to; i++) {
+      const bar = series.at(i);
+      if (!bar) continue;
+      if (bar.volume > 0 || bar.count > 0) {
+        sawVolumeBar = true;
+        if (bar.cells.size === 0) return false;
+      }
+    }
+    return sawVolumeBar;
+  }
+
+  private hasAnyVisibleFootprintCells(from: number, to: number): boolean {
+    const series = this.pipeline.series;
+    for (let i = from; i < to; i++) {
+      const bar = series.at(i);
+      if (bar && bar.cells.size > 0) return true;
+    }
+    return false;
+  }
+
+  private hasAllVisibleFootprintCells(from: number, to: number): boolean {
+    const series = this.pipeline.series;
+    let hasCells = false;
+    for (let i = from; i < to; i++) {
+      const bar = series.at(i);
+      if (!bar) continue;
+      if (bar.cells.size > 0) hasCells = true;
+      else if (bar.volume > 0 || bar.count > 0) return false;
+    }
+    return hasCells;
+  }
+
+  private hasAnyFiniteOhlc(from: number, to: number): boolean {
+    const series = this.pipeline.series;
+    for (let i = from; i < to; i++) {
+      const bar = series.at(i);
+      if (
+        bar
+        && Number.isFinite(bar.open)
+        && Number.isFinite(bar.high)
+        && Number.isFinite(bar.low)
+        && Number.isFinite(bar.close)
+      ) {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  private hasPaintedTpoZone(from: number, to: number): boolean {
+    if (to <= from) return false;
+    const probeY = this.view.area.top + Math.max(1, this.view.area.height / 2);
+    const step = Math.max(1, Math.floor((to - from) / 4));
+    for (let i = from; i < to; i += step) {
+      const x = this.view.xOfIndex(i) + Math.max(0.5, this.view.colWidth * 0.25);
+      if (this.overlay.getTpoProfileAt(x, probeY) !== null) return true;
+    }
+    const lastX = this.view.xOfIndex(to - 1) + Math.max(0.5, this.view.colWidth * 0.25);
+    return this.overlay.getTpoProfileAt(lastX, probeY) !== null;
+  }
+
+  private evaluateSwitchPaintTelemetry(surfaces: ChartSurfaceDirty): void {
+    if (!isPerformanceTelemetryEnabled() || this.disposed) return;
+    if (this.surface.historyOverlay || this.indicatorController.isPaneMaximized()) return;
+    if (this.view.area.width <= 1 || this.view.area.height <= 1) return;
+    const series = this.pipeline.series;
+    if (series.length === 0) return;
+    const [from, to] = this.renderer.visibleRange(this.view, series.length);
+    if (to <= from) return;
+
+    const historySw = this.activeHistorySwitch;
+    if (
+      historySw
+      && historySw.firstCandlePaintedAt === null
+      && (surfaces & ChartSurfaceDirty.GpuScene) !== 0
+      && historySw.market === this.state.market
+      && historySw.timeframe === this.state.timeframe
+      && this.hasAnyFiniteOhlc(from, to)
+    ) {
+      historySw.firstCandlePaintedAt = performance.now();
+      historySw.initialBarCount = series.length;
+      historySw.initialVisibleCount = to - from;
+      historySw.initialHasOpenBucket = series.get(bucketStart(Date.now(), this.pipeline.intervalMs)) !== undefined;
+      recordTelemetryMark(
+        "chart:first-candle-painted",
+        {
+          chartId: this.panelId,
+          market: historySw.market,
+          timeframe: historySw.timeframe,
+          chartType: this.state.chartType,
+          generation: historySw.pipelineGeneration,
+          reason: historySw.reason,
+        },
+        {
+          initialBarCount: historySw.initialBarCount,
+          initialVisibleCount: historySw.initialVisibleCount,
+          initialHasOpenBucket: historySw.initialHasOpenBucket,
+          footprintReceived: this.pipeline.activeHistoryFootprintReceived,
+        },
+      );
+      recordPerformanceDuration("chart.switch.firstCandlePainted.ms", historySw.firstCandlePaintedAt - historySw.startedAt);
+    }
+
+    const typeSw = this.activeChartTypeSwitch;
+    if (
+      !typeSw
+      || typeSw.generation !== this.chartTypeSwitchGeneration
+      || typeSw.market !== this.state.market
+      || typeSw.timeframe !== this.state.timeframe
+      || typeSw.chartType !== (this.state.chartType ?? settings.chartType)
+    ) {
+      return;
+    }
+
+    const gpuLayers = this.renderCoordinator?.getGpuLayerIds() ?? new Set<string>();
+    const annotationLayers = this.renderCoordinator?.getAnnotationLayerOrder() ?? [];
+    let firstFrameReady = false;
+    let visibleReady = false;
+    switch (typeSw.chartType) {
+      case "candlestick":
+        firstFrameReady = (surfaces & ChartSurfaceDirty.GpuScene) !== 0
+          && gpuLayers.has("candles")
+          && this.hasAnyFiniteOhlc(from, to);
+        visibleReady = firstFrameReady;
+        break;
+      case "footprint":
+        firstFrameReady = (surfaces & ChartSurfaceDirty.GpuScene) !== 0
+          && gpuLayers.has("footprint")
+          && this.hasAnyVisibleFootprintCells(from, to);
+        visibleReady = (firstFrameReady || typeSw.firstDataFramePaintedAt !== null)
+          && this.hasAllVisibleFootprintCells(from, to);
+        break;
+      case "footprintProfile":
+        firstFrameReady = (surfaces & ChartSurfaceDirty.GpuScene) !== 0
+          && gpuLayers.has("footprint-profile")
+          && this.hasAnyVisibleFootprintCells(from, to);
+        visibleReady = (firstFrameReady || typeSw.firstDataFramePaintedAt !== null)
+          && this.hasAllVisibleFootprintCells(from, to);
+        break;
+      case "tpo":
+        firstFrameReady = (surfaces & ChartSurfaceDirty.Annotation) !== 0
+          && annotationLayers.includes("tpo")
+          && this.hasPaintedTpoZone(from, to);
+        visibleReady = firstFrameReady;
+        break;
+    }
+
+    const attr = {
+      chartId: this.panelId,
+      market: typeSw.market,
+      timeframe: typeSw.timeframe,
+      chartType: typeSw.chartType,
+      generation: typeSw.generation,
+      reason: typeSw.reason,
+    };
+    if (typeSw.firstDataFramePaintedAt === null && firstFrameReady) {
+      typeSw.firstDataFramePaintedAt = performance.now();
+      const elapsedMs = typeSw.firstDataFramePaintedAt - typeSw.startedAt;
+      recordTelemetryMark("chart:first-data-frame-painted", attr, {
+        elapsedMs,
+        reusable: typeSw.reusable,
+        gpuMs: typeSw.lastGpuMs,
+        annotationMs: typeSw.lastAnnotationMs,
+        visibleBars: to - from,
+      });
+      recordPerformanceDuration(`chart.typeSwitch.${typeSw.chartType}.firstDataFrame.ms`, elapsedMs);
+    }
+    if (typeSw.firstDataFramePaintedAt !== null && typeSw.visibleRangeReadyAt === null && visibleReady) {
+      typeSw.visibleRangeReadyAt = performance.now();
+      const elapsedMs = typeSw.visibleRangeReadyAt - typeSw.startedAt;
+      recordTelemetryMark("chart:visible-range-ready", attr, {
+        elapsedMs,
+        reusable: typeSw.reusable,
+        gpuMs: typeSw.lastGpuMs,
+        annotationMs: typeSw.lastAnnotationMs,
+        visibleBars: to - from,
+      });
+      recordPerformanceDuration(`chart.typeSwitch.${typeSw.chartType}.visibleRangeReady.ms`, elapsedMs);
+    }
+  }
+
   whenHeatmapGpuRendererReady(): Promise<void> {
     return this.heatmapGpuCoordinator.whenHeatmapGpuRendererReady();
   }
@@ -2049,6 +2486,9 @@ async function buildChartRuntime(
     intervalMs: timeframe.ms,
     priceStep,
     pricePrecision,
+    chartId: panelId,
+    chartType: initialState.chartType ?? settings.chartType,
+    timeframe: timeframe.label,
     services,
     onDataDegraded: (degraded, detail) => chartHost().setDataDegraded(panelId, degraded, detail),
     onServerPriceStep: (step) => onServerPriceStep?.(step),
@@ -2113,6 +2553,7 @@ async function buildChartRuntime(
     adoption.catch(() => { /* history failures surface through the load error state */ });
     return adoption;
   };
+  runtime.beginInitialChartTypeTelemetry();
   const initialHistoryLoad = runtime.loadHistory(undefined, { twoPhase: true });
   void initialHistoryLoad.catch(() => undefined);
   runtime.trackInitialHistoryLoad(initialHistoryLoad);
