@@ -1087,14 +1087,21 @@ class ChartRuntimeImpl implements ChartRuntime, ChartInputHost {
 
   /** Only a type the pair can actually show is saved; a forced candlestick is not a choice. */
   private rememberPairChartType(market: string, type: ChartType): void {
-    if (isFootprintSyncAllowed(market)) chartHost().setPairChartType(market, type);
+    const host = chartHost();
+    if (isFootprintSyncAllowed(market) || type === "tpo") {
+      host.setPairChartType(market, type);
+      return;
+    }
+    if (type === "candlestick" && this.requestedChartType === "candlestick" && host.getPairChartType(market) === "tpo") {
+      host.setPairChartType(market, "candlestick");
+    }
   }
 
   setChartType(type: ChartType): void {
     const constrained = constrainChartTypeForMarket(this.state.market, type);
-    this.rememberPairChartType(this.state.market, constrained);
     const requestChanged = this.requestedChartType !== constrained;
     this.requestedChartType = constrained;
+    if (type === constrained) this.rememberPairChartType(this.state.market, constrained);
     if ((this.state.chartType ?? settings.chartType) !== constrained) {
       this.applyViewState({ chartType: constrained });
     } else if (requestChanged) {
