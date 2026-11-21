@@ -80,6 +80,7 @@ export class ChartDataPipeline {
   private sessionUnsubscribe: (() => void) | null = null;
   private readinessUnsubscribe: (() => void) | null = null;
   private latestMarketReadiness: TradeMarketReadiness | null = null;
+  private pendingDeferredReadiness: TradeMarketReadiness | null = null;
   private disposed = false;
   private _market: string;
   private _intervalMs: number;
@@ -254,7 +255,7 @@ export class ChartDataPipeline {
     const readinessSupported = typeof this.services.subscribeToTradeMarketReadiness === "function";
     this.sessionUnsubscribe = this.services.subscribeToTradeSessions?.((session) => {
       this.cancelRecentFootprintCoverageRepair();
-      this.repair.onSession(session, !readinessSupported);
+      this.repair.onSession(session, !readinessSupported && !this.priceStepCoordinator.pendingMarketMetadata);
     }) ?? null;
     this.readinessUnsubscribe = this.services.subscribeToTradeMarketReadiness?.((readiness) => {
       if (this.disposed) return;
@@ -262,6 +263,10 @@ export class ChartDataPipeline {
       // A venue-recovery gap is repaired once; a later timeframe change replays only the boundary.
       const { repairFrom: _repairFrom, ...boundary } = readiness;
       this.latestMarketReadiness = boundary;
+      if (this.priceStepCoordinator.pendingMarketMetadata) {
+        this.pendingDeferredReadiness = readiness;
+        return;
+      }
       logLoadTrace(this.historyCoordinator.activeHistoryTraceId, "stream.market.acknowledged", { market: readiness.market, generation: readiness.generation });
       this.repair.onMarketReady(readiness);
     }) ?? null;
@@ -269,6 +274,7 @@ export class ChartDataPipeline {
 
   get market(): string { return this._market; }
   get intervalMs(): number { return this._intervalMs; }
+  get currentGeneration(): number { return this.generation; }
   get liveBootstrapReconciled(): boolean { return this.repair.isReconciled; }
 
   get activeHistoryTraceId(): string | undefined { return this.historyCoordinator.activeHistoryTraceId; }
@@ -499,7 +505,7 @@ export class ChartDataPipeline {
   cancelLiveBarOHLCRefresh(): void { this.historyCoordinator.cancelLiveBarOHLCRefresh(); }
   applyLiveBarSeed(
     bars: readonly FootprintBar[],
-    opts: { market: string; intervalMs: number; from: number; observedAt: number; fillMissingOnly?: boolean },
+    opts: { market: string; intervalMs: number; from: number; observedAt: number; fillMissingOnly?: boolean; generation?: number },
   ): number[] {
     const generation = this.generation;
     const missingBefore = new Set<number>();
@@ -522,26 +528,39 @@ export class ChartDataPipeline {
     const marketChanged = opts.market !== undefined && opts.market !== this._market;
     const tfChanged = opts.intervalMs !== undefined && opts.intervalMs !== this._intervalMs;
     if (marketChanged || tfChanged) this.repair.cancel();
-    if (marketChanged) this.latestMarketReadiness = null;
-    if (marketChanged) this._market = opts.market!;
+    if (marketChanged) {
+      this.latestMarketReadiness = null;
+      this.pendingDeferredReadiness = null;
+      this._market = opts.market!;
+    }
     if (tfChanged) this._intervalMs = opts.intervalMs!;
     if (marketChanged || tfChanged) {
       this.cancelRecentFootprintCoverageRepair();
       this.generation++;
       this.historyCoordinator.resetForConfigChange(true);
+      // Clear stale series/queues synchronously so superseded switches never leave old-market bars
+      // visible, while keeping new-market subscription & repair gated until priceStep resolves.
+      this.tradeQueueCoordinator.resetOnConfigOrStepChange();
+      if (marketChanged) this.tradeQueueCoordinator.clearSubscription();
+      this.lastAppliedTradeTime = -Infinity;
+      this.historyCoordinator.resetForConfigChange(false);
+      this.integrityReporter?.report("healthy");
+      this.onDataDegraded?.(false, "");
+      if (tfChanged) this.series.setInterval(this._intervalMs);
+      else if (marketChanged) this.series.clear();
     }
     if (marketChanged) {
       const generation = this.generation;
       await this.priceStepCoordinator.trackMarketSwitch(this._market);
       if (this.disposed || generation !== this.generation) {
-        this.tradeQueueCoordinator.ensureDesiredSubscription();
+        if (!this.priceStepCoordinator.pendingMarketMetadata) this.tradeQueueCoordinator.ensureDesiredSubscription();
         return;
       }
     } else if (tfChanged && this.priceStepCoordinator.pendingMarketMetadata) {
       const generation = this.generation;
       await this.priceStepCoordinator.awaitPendingMarketMetadata();
       if (this.disposed || generation !== this.generation) {
-        this.tradeQueueCoordinator.ensureDesiredSubscription();
+        if (!this.priceStepCoordinator.pendingMarketMetadata) this.tradeQueueCoordinator.ensureDesiredSubscription();
         return;
       }
     }
@@ -552,10 +571,13 @@ export class ChartDataPipeline {
       this.integrityReporter?.report("healthy");
       this.onDataDegraded?.(false, "");
     }
-    if (tfChanged) this.series.setInterval(this._intervalMs);
-    else if (marketChanged) this.series.clear();
     this.tradeQueueCoordinator.ensureDesiredSubscription();
-    if (tfChanged && !marketChanged && this.latestMarketReadiness?.market === this._market) {
+    if (marketChanged && this.pendingDeferredReadiness?.market === this._market) {
+      const readiness = this.pendingDeferredReadiness;
+      this.pendingDeferredReadiness = null;
+      logLoadTrace(this.historyCoordinator.activeHistoryTraceId, "stream.market.acknowledged", { market: readiness.market, generation: readiness.generation });
+      this.repair.onMarketReady(readiness);
+    } else if (tfChanged && !marketChanged && this.latestMarketReadiness?.market === this._market) {
       // The acknowledged boundary can be hours old. Repairing from it would let the live tail stretch
       // the replaced range over the history just loaded for the new timeframe, so start from now.
       const readiness = this.latestMarketReadiness;

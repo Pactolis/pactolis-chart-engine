@@ -1,11 +1,16 @@
 /** History window loading, explicit reconcile barrier, day patching, cell refill, and live OHLC seed coordinator. */
 import type { FootprintSeries } from "../../../core/model/footprint.js";
 import { WEEK_MS, bucketEnd, bucketStart } from "../../../core/time.js";
+import { TIMEFRAMES } from "../../../core/timeframes.js";
 import { FOOTPRINT_START_TIME, footprintEnabledAt } from "../../../core/footprintPolicy.js";
 import { isFootprintSyncAllowed, recordFootprintSupport } from "../../../core/syncAllowlist.js";
 import type { AggTrade, FootprintBar } from "../../../core/types.js";
 import type { CandleCoverage, EnvelopeMeta } from "../../../core/envelope.js";
-import { incrementPerformanceCounter } from "../../../core/performanceTelemetry.js";
+import {
+  incrementPerformanceCounter,
+  isPerformanceTelemetryEnabled,
+  recordTelemetryJob,
+} from "../../../core/performanceTelemetry.js";
 import { snapshotFromSeries, type ChartDataSnapshot, type ChartDataUpdateEvent } from "../../../core/dataUpdateEvent.js";
 import { createLoadTrace, logLoadTrace } from "../../../core/loadTrace.js";
 import type { PipelineIntegrityReporter } from "../ChartDataPipelinePorts.js";
@@ -202,9 +207,39 @@ export class HistoryLoadCoordinator {
   activeHistoryFootprintDetail = "";
   activeHistoryErrorDetail = "";
   activeHistoryCandlesOnly = false;
+  private readonly seenRequestRanges = new Set<string>();
 
   constructor(private readonly host: HistoryLoadHost, series: FootprintSeries) {
     this.series = series;
+  }
+
+  private emitJob(
+    phase: "started" | "aborted" | "applied",
+    generation = this.host.getGeneration(),
+    reason = "history",
+  ): void {
+    if (!isPerformanceTelemetryEnabled()) return;
+    const intervalMs = this.host.getIntervalMs();
+    recordTelemetryJob("history", phase, {
+      market: this.host.getMarket(),
+      timeframe: TIMEFRAMES.find((item) => item.ms === intervalMs)?.label ?? `${intervalMs}ms`,
+      generation,
+      reason,
+    });
+  }
+
+  private trackRange(market: string, intervalMs: number, from: number, to: number, includeFootprint: boolean): void {
+    incrementPerformanceCounter("pipeline.history.request.total");
+    const key = `${market}|${intervalMs}|${from}|${to}|${includeFootprint ? 1 : 0}`;
+    if (this.seenRequestRanges.has(key)) {
+      incrementPerformanceCounter("pipeline.history.request.repeated_range");
+      return;
+    }
+    if (this.seenRequestRanges.size >= 512) {
+      const oldest = this.seenRequestRanges.values().next().value;
+      if (oldest !== undefined) this.seenRequestRanges.delete(oldest);
+    }
+    this.seenRequestRanges.add(key);
   }
 
   /**
@@ -246,6 +281,9 @@ export class HistoryLoadCoordinator {
   }
 
   cancelHistoryLoad(): void {
+    if (this.historyController && !this.historyController.signal.aborted) {
+      this.emitJob("aborted");
+    }
     this.historyController?.abort();
     this.historyController = null;
   }
@@ -261,6 +299,9 @@ export class HistoryLoadCoordinator {
   }
 
   abortExplicitHistoryOverflow(): void {
+    if (this.historyController && !this.historyController.signal.aborted) {
+      this.emitJob("aborted");
+    }
     this.historyController?.abort();
     this.explicitHistoryReconcile = null;
     this.host.integrityReporter?.report("pending", "EXPLICIT_HISTORY_RECONCILE_OVERFLOW");
@@ -284,13 +325,24 @@ export class HistoryLoadCoordinator {
 
   resetForConfigChange(abortOnly: boolean): void {
     if (abortOnly) {
+      if (this.historyController && !this.historyController.signal.aborted) {
+        this.emitJob("aborted");
+      }
       this.historyController?.abort();
       this.historyController = null;
       this.explicitHistoryReconcile = null;
       this.liveOhlcController?.abort();
+      this.liveOhlcController = null;
       this.patchDayController?.abort();
       this.patchDayController = null;
       this.resetPatchDayQueue();
+      if (this.fillCellsController && !this.fillCellsController.signal.aborted) {
+        this.emitJob("aborted", this.host.getGeneration(), "fill-cells");
+      }
+      this.fillCellsController?.abort();
+      this.fillCellsController = null;
+      this.fillCellsInFlightKey = null;
+      this.fillCellsPending = null;
       return;
     }
     this.activeHistoryFootprintDetail = "";
@@ -418,11 +470,13 @@ export class HistoryLoadCoordinator {
     this.activeHistoryFootprintDetail = "";
     this.activeHistoryErrorDetail = "";
     logLoadTrace(traceId, "pipeline.history.begin", { from: opts.from, to: opts.to, twoPhase: !!opts.twoPhase, rebuild });
+    this.emitJob("started", generation);
     let loadHasDegradedMeta = false;
     let loadDegradedMeta: EnvelopeMeta | undefined;
     const onHistoryMeta = (meta: EnvelopeMeta | undefined, trackCoverage = true): void => {
       // Metadata of a superseded or cancelled load belongs to no one; never let it reach the current one.
-      if (this.host.isDisposed() || generation !== this.host.getGeneration() || controller.signal.aborted) return;
+      if (this.host.isDisposed() || generation !== this.host.getGeneration() || controller.signal.aborted || signal.aborted) return;
+      if (meta?.cache?.hit) incrementPerformanceCounter("pipeline.history.cache.hit");
       const state = this.explicitHistoryReconcile;
       if (state && state.generation === generation) {
         state.watermark = decimalTradeId(meta?.footprintCoverage?.projectionThroughId);
@@ -471,6 +525,7 @@ export class HistoryLoadCoordinator {
         for (const fastWindow of fastWindows) {
           this._resetExplicitHistoryWatermark(generation);
           let fastWindowMeta: EnvelopeMeta | undefined;
+          this.trackRange(market, intervalMs, fastWindow.from, fastWindow.to, false);
           const fastBars = await chartDataSource().fetchHistory({
             ...fastWindow,
             onMeta: (meta) => {
@@ -478,7 +533,10 @@ export class HistoryLoadCoordinator {
               fastWindow.onMeta?.(meta);
             },
           });
-          if (this.host.isDisposed() || generation !== this.host.getGeneration() || controller.signal.aborted) return;
+          if (this.host.isDisposed() || generation !== this.host.getGeneration() || controller.signal.aborted || signal.aborted) {
+            this.emitJob("aborted", generation);
+            return;
+          }
           opts.onHistoryBars?.(fastBars.filter((bar) => bar.startTime <= opts.to));
           this._seedOpenBucketFromHistory(fastBars, bootstrapFrom, opts.to, opts.maxVisibleBarEnd);
           const replaceTo = Math.min(fastWindow.to, bootstrapFrom);
@@ -511,13 +569,17 @@ export class HistoryLoadCoordinator {
         fastPhaseError = error;
       }
       if (fastPhaseComplete) {
-        if (this.host.isDisposed() || generation !== this.host.getGeneration() || controller.signal.aborted) return;
+        if (this.host.isDisposed() || generation !== this.host.getGeneration() || controller.signal.aborted || signal.aborted) return;
         this.host.onHistoryCandlesReady();
       }
       if (candlesOnly) {
-        if (controller.signal.aborted || this.host.isDisposed()) return;
+        if (controller.signal.aborted || signal.aborted || this.host.isDisposed() || generation !== this.host.getGeneration()) {
+          this.emitJob("aborted", generation);
+          return;
+        }
         if (!fastPhaseComplete) throw fastPhaseError;
         this.activeHistoryFootprintDegraded = loadHasDegradedMeta && this.activeHistoryCandleSourceGap === null;
+        this.emitJob("applied", generation);
         logLoadTrace(traceId, "pipeline.history.complete", { seriesBars: this.series.length });
         return;
       }
@@ -545,21 +607,28 @@ export class HistoryLoadCoordinator {
         let windowMeta: EnvelopeMeta | undefined;
         try {
           this._resetExplicitHistoryWatermark(generation);
+          this.trackRange(market, intervalMs, chunk.from, chunk.to, true);
           await chartDataSource().streamHistory({ ...chunk, onMeta: (meta) => { windowMeta = meta; } }, async ({ bars, cellCount, barCellCounts }: HistoryBatch) => {
-            if (this.host.isDisposed() || generation !== this.host.getGeneration() || controller.signal.aborted) return;
+            if (this.host.isDisposed() || generation !== this.host.getGeneration() || controller.signal.aborted || signal.aborted) return;
             receivedBars.push(...bars);
             receivedBarCellCounts.push(...(barCellCounts ?? bars.map((bar) => bar.cells.size)));
             receivedCells += cellCount ?? bars.reduce((sum, bar) => sum + bar.cells.size, 0);
           });
         } catch (error) {
-          if (controller.signal.aborted || this.host.isDisposed()) return;
+          if (controller.signal.aborted || signal.aborted || this.host.isDisposed() || generation !== this.host.getGeneration()) {
+            this.emitJob("aborted", generation);
+            return;
+          }
           throw error;
         }
-        if (this.host.isDisposed() || generation !== this.host.getGeneration() || controller.signal.aborted) return;
+        if (this.host.isDisposed() || generation !== this.host.getGeneration() || controller.signal.aborted || signal.aborted) {
+          this.emitJob("aborted", generation);
+          return;
+        }
         const budgetError = historyCellBudgetError(windowMeta);
         if (budgetError) {
           const split = splitHistoryCellBudgetWindow(chunk);
-          if (!split) { onHistoryMeta(windowMeta); if (this.host.isDisposed() || generation !== this.host.getGeneration() || controller.signal.aborted) return; throw new Error(budgetError); }
+          if (!split) { onHistoryMeta(windowMeta); if (this.host.isDisposed() || generation !== this.host.getGeneration() || controller.signal.aborted || signal.aborted) return; throw new Error(budgetError); }
           if (split.older) chunkWindows.unshift(split.older);
           chunkWindows.unshift(split.newest);
           continue;
@@ -574,7 +643,10 @@ export class HistoryLoadCoordinator {
         onHistoryMeta(windowMeta);
         // The meta callback may re-enter (server step correction -> setPriceStep)
         // and restart this load; a superseded stack must not mutate the new epoch.
-        if (this.host.isDisposed() || generation !== this.host.getGeneration() || controller.signal.aborted) return;
+        if (this.host.isDisposed() || generation !== this.host.getGeneration() || controller.signal.aborted || signal.aborted) {
+          this.emitJob("aborted", generation);
+          return;
+        }
         if (receivedBars.length) {
           const replaceableBars = receivedBars.filter((bar) => bar.startTime < bootstrapFrom
             && this._barWithinVisibleHistoryEnd(bar, intervalMs, opts.maxVisibleBarEnd));
@@ -600,6 +672,7 @@ export class HistoryLoadCoordinator {
       this.activeHistoryFootprintCoverageComplete = this.activeHistoryCoverageSeen
         && this.activeHistoryCoverageAllComplete && this.activeHistoryFootprintAvailable && !loadHasDegradedMeta;
       this.activeHistoryFootprintDegraded = loadHasDegradedMeta && this.activeHistoryCandleSourceGap === null;
+      this.emitJob("applied", generation);
       logLoadTrace(traceId, "pipeline.history.complete", { seriesBars: this.series.length });
       return;
     }
@@ -611,24 +684,31 @@ export class HistoryLoadCoordinator {
     });
     try {
       while (queue.length) {
-        if (this.host.isDisposed() || generation !== this.host.getGeneration() || controller.signal.aborted) return;
+        if (this.host.isDisposed() || generation !== this.host.getGeneration() || controller.signal.aborted || signal.aborted) {
+          this.emitJob("aborted", generation);
+          return;
+        }
         const window = queue.shift()!;
         const receivedBars: FootprintBar[] = [];
         const receivedBarCellCounts: number[] = [];
         let receivedCells = 0;
         let windowMeta: EnvelopeMeta | undefined;
         this._resetExplicitHistoryWatermark(generation);
+        this.trackRange(market, intervalMs, window.from, window.to, true);
         await chartDataSource().streamHistory({ ...window, onMeta: (meta) => { windowMeta = meta; } }, async ({ bars, cellCount, barCellCounts }: HistoryBatch) => {
-          if (this.host.isDisposed() || generation !== this.host.getGeneration() || controller.signal.aborted) return;
+          if (this.host.isDisposed() || generation !== this.host.getGeneration() || controller.signal.aborted || signal.aborted) return;
           receivedBars.push(...bars);
           receivedBarCellCounts.push(...(barCellCounts ?? bars.map((bar) => bar.cells.size)));
           receivedCells += cellCount ?? bars.reduce((sum, bar) => sum + bar.cells.size, 0);
         });
-        if (this.host.isDisposed() || generation !== this.host.getGeneration() || controller.signal.aborted) return;
+        if (this.host.isDisposed() || generation !== this.host.getGeneration() || controller.signal.aborted || signal.aborted) {
+          this.emitJob("aborted", generation);
+          return;
+        }
         const budgetError = historyCellBudgetError(windowMeta);
         if (budgetError) {
           const split = splitHistoryCellBudgetWindow(window);
-          if (!split) { onHistoryMeta(windowMeta); if (this.host.isDisposed() || generation !== this.host.getGeneration() || controller.signal.aborted) return; throw new Error(budgetError); }
+          if (!split) { onHistoryMeta(windowMeta); if (this.host.isDisposed() || generation !== this.host.getGeneration() || controller.signal.aborted || signal.aborted) return; throw new Error(budgetError); }
           if (split.older) queue.unshift(split.older);
           queue.unshift(split.newest);
           continue;
@@ -641,7 +721,10 @@ export class HistoryLoadCoordinator {
         }
         opts.onHistoryBars?.(receivedBars.filter((bar) => bar.startTime <= opts.to));
         onHistoryMeta(windowMeta);
-        if (this.host.isDisposed() || generation !== this.host.getGeneration() || controller.signal.aborted) return;
+        if (this.host.isDisposed() || generation !== this.host.getGeneration() || controller.signal.aborted || signal.aborted) {
+          this.emitJob("aborted", generation);
+          return;
+        }
         this._seedOpenBucketFromHistory(receivedBars, bootstrapFrom, opts.to, opts.maxVisibleBarEnd);
         if (!receivedBars.length) continue;
         const replaceableBars = receivedBars.filter((bar) => bar.startTime < bootstrapFrom
@@ -663,10 +746,13 @@ export class HistoryLoadCoordinator {
         emitted = true;
       }
     } catch (error) {
-      if (controller.signal.aborted || this.host.isDisposed()) return;
+      if (controller.signal.aborted || signal.aborted || this.host.isDisposed() || generation !== this.host.getGeneration()) {
+        this.emitJob("aborted", generation);
+        return;
+      }
       throw error;
     }
-    if (this.host.isDisposed() || generation !== this.host.getGeneration() || controller.signal.aborted) return;
+    if (this.host.isDisposed() || generation !== this.host.getGeneration() || controller.signal.aborted || signal.aborted) return;
     if (!emitted) {
       const wipeTo = Math.min(opts.to, bootstrapFrom);
       if (wipeTo > opts.from) {
@@ -676,6 +762,7 @@ export class HistoryLoadCoordinator {
     this.activeHistoryFootprintCoverageComplete = this.activeHistoryCoverageSeen
       && this.activeHistoryCoverageAllComplete && this.activeHistoryFootprintAvailable && !loadHasDegradedMeta;
     this.activeHistoryFootprintDegraded = loadHasDegradedMeta && this.activeHistoryCandleSourceGap === null;
+    this.emitJob("applied", generation);
     logLoadTrace(traceId, "pipeline.history.complete", { seriesBars: this.series.length });
   }
 
@@ -758,11 +845,19 @@ export class HistoryLoadCoordinator {
       from: number;
       observedAt: number;
       fillMissingOnly?: boolean;
+      generation?: number;
     },
   ): number[] {
     const market = this.host.getMarket();
     const intervalMs = this.host.getIntervalMs();
-    if (this.host.isDisposed() || opts.market !== market || opts.intervalMs !== intervalMs) return [];
+    if (
+      this.host.isDisposed()
+      || opts.market !== market
+      || opts.intervalMs !== intervalMs
+      || (opts.generation !== undefined && opts.generation !== this.host.getGeneration())
+    ) {
+      return [];
+    }
     const liveStart = bucketStart(Date.now(), intervalMs);
     const applicable = bars.filter((bar) => bar.startTime >= opts.from
       && bar.startTime <= liveStart
@@ -939,7 +1034,9 @@ export class HistoryLoadCoordinator {
       if (this.fillCellsController === controller) this.fillCellsController = null;
       const pending = this.fillCellsPending ?? { from, to };
       this.fillCellsPending = null;
-      if (!this.host.isDisposed() && !controller.signal.aborted) this.fillMissingCells(pending.from, pending.to);
+      if (!this.host.isDisposed() && !controller.signal.aborted && generation === this.host.getGeneration()) {
+        this.fillMissingCells(pending.from, pending.to);
+      }
     });
   }
 
