@@ -69,17 +69,6 @@ function maxLevelCount(result: TpoCacheGroup["result"]): number {
 
 type RetainTpoHistory = (key: string, paint: () => void) => void;
 
-interface PaintStep1Collector {
-  onPaintMeasure?: (sample: {
-    retainedPath: boolean;
-    retainHit: boolean;
-    b1Ms: number;
-    b2Ms: number;
-    b3Ms: number;
-    totalMs: number;
-  }) => void;
-}
-
 function mixHexColor(hex: string, amount: number): string {
   const raw = hex.startsWith("#") ? hex.slice(1) : hex;
   if (raw.length !== 6) return hex;
@@ -127,11 +116,6 @@ export function drawTpo(
     !(view.xOfIndex(bracket.lastIdx + 1) - view.xOfIndex(bracket.firstIdx) < 8)
   );
 
-  const globalBag = globalThis as Record<string, unknown>;
-  const step1 = globalBag.__tpoBenchMode === "main"
-    ? (globalBag.__tpoStep1 as PaintStep1Collector | undefined)
-    : undefined;
-  const step1PaintStart = step1 ? performance.now() : 0;
   try {
     if (retainHistory && !lettersMode && !view.isLogScale() && groups.length > 1) {
       // Only the group intersecting the series tail can change in a tail-only frame.
@@ -142,49 +126,10 @@ export function drawTpo(
         settings.profilePoc, settings.profileVah, settings.profileVal,
         groups.some((group) => group.partial) ? tOr("analysis.tpo.partial") : "",
       ]);
-      if (step1) {
-        let missed = false;
-        const tB1Start = performance.now();
-        retainHistory(key, () => {
-          missed = true;
-          paintTpoGroups(host, cache, view, from, to, step, cellH, false, 0, closedEnd);
-        });
-        const b1Ms = performance.now() - tB1Start;
-        const activeTiming = { blocksMs: 0, leadersMs: 0 };
-        if (closedEnd < groups.length) {
-          paintTpoGroups(host, cache, view, from, to, step, cellH, false, closedEnd, groups.length, activeTiming);
-        }
-        step1.onPaintMeasure?.({
-          retainedPath: true,
-          retainHit: !missed,
-          b1Ms,
-          b2Ms: activeTiming.blocksMs,
-          b3Ms: activeTiming.leadersMs,
-          totalMs: performance.now() - step1PaintStart,
-        });
-      } else {
-        retainHistory(key, () => paintTpoGroups(host, cache, view, from, to, step, cellH, false, 0, closedEnd));
-        if (closedEnd < groups.length) {
-          paintTpoGroups(host, cache, view, from, to, step, cellH, false, closedEnd, groups.length);
-        }
-      }
-    } else if (step1 && !lettersMode && !view.isLogScale() && groups.length > 1) {
-      const closedEnd = groups.at(-1)?.lastIdx === series.length - 1 ? groups.length - 1 : groups.length;
-      const tB1DirectStart = performance.now();
-      paintTpoGroups(host, cache, view, from, to, step, cellH, false, 0, closedEnd);
-      const b1Ms = performance.now() - tB1DirectStart;
-      const activeTiming = { blocksMs: 0, leadersMs: 0 };
+      retainHistory(key, () => paintTpoGroups(host, cache, view, from, to, step, cellH, false, 0, closedEnd));
       if (closedEnd < groups.length) {
-        paintTpoGroups(host, cache, view, from, to, step, cellH, false, closedEnd, groups.length, activeTiming);
+        paintTpoGroups(host, cache, view, from, to, step, cellH, false, closedEnd, groups.length);
       }
-      step1.onPaintMeasure?.({
-        retainedPath: false,
-        retainHit: false,
-        b1Ms,
-        b2Ms: activeTiming.blocksMs,
-        b3Ms: activeTiming.leadersMs,
-        totalMs: performance.now() - step1PaintStart,
-      });
     } else {
       paintTpoGroups(host, cache, view, from, to, step, cellH, lettersMode, 0, groups.length);
     }
@@ -196,7 +141,6 @@ export function drawTpo(
 function paintTpoGroups(
   host: TpoRenderHost, { brackets, groups }: TpoCacheState, view: View, from: number, to: number, step: number,
   cellH: number, lettersMode: boolean, start: number, end: number,
-  timing?: { blocksMs: number; leadersMs: number },
 ): void {
   const ctx = host.ctx;
   const plotBottom = view.area.top + view.area.height;
@@ -207,7 +151,6 @@ function paintTpoGroups(
     ctx.textAlign = "center";
   }
   for (let groupIndex = start; groupIndex < end; groupIndex++) {
-    const tGroupStart = timing ? performance.now() : 0;
     const g = groups[groupIndex];
     if (g.lastIdx < from || g.firstIdx >= to) continue;
     const result = g.result;
@@ -319,13 +262,10 @@ function paintTpoGroups(
       ctx.fillText(tOr("analysis.tpo.partial"), Math.max(left + 3, view.area.left + 3), view.area.top + 12);
       ctx.restore();
     }
-    if (timing) timing.blocksMs += performance.now() - tGroupStart;
-    const tLeaderStart = timing ? performance.now() : 0;
     // Level leaders + labels (both modes): solid white POC, dashed VA.
     if (settings.profilePoc && result.poc !== null) drawTpoLeader(ctx, view, result.poc + step / 2, "POC", tpoPalette.leaderPoc, left, labelX, false);
     if (settings.profileVah && result.vah !== null) drawTpoLeader(ctx, view, result.vah + step / 2, "VAH", tpoPalette.leaderVa, left, labelX, true);
     if (settings.profileVal && result.val !== null) drawTpoLeader(ctx, view, result.val + step / 2, "VAL", tpoPalette.leaderVa, left, labelX, true);
-    if (timing) timing.leadersMs += performance.now() - tLeaderStart;
   }
   ctx.restore();
 }

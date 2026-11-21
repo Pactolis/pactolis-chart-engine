@@ -28,11 +28,6 @@ interface CachedGroup {
   result: TpoProfileGroup["result"];
 }
 
-interface Step1Collector {
-  onCacheEarlyHit?: () => void;
-  onCacheMeasure?: (sample: { a1Ms: number; a2Ms: number; a3Ms: number; a4Ms: number; totalMs: number }) => void;
-}
-
 // Store only the previous render's visible groups without changing the exposed cache shape.
 const groupCaches = new WeakMap<TpoCacheState, {
   series: FootprintSeries;
@@ -97,8 +92,7 @@ function sameBracketMetadata(saved: BarInput, bar: FootprintBar, checkShape: boo
 }
 
 function groupChanges(
-  cached: CachedGroup | undefined, bars: readonly FootprintBar[], first: number, last: number,
-  structureChanged: boolean, ignoreOpenCloseForProfile: boolean,
+  cached: CachedGroup | undefined, bars: readonly FootprintBar[], first: number, last: number, structureChanged: boolean,
 ): "profile" | "brackets" | "none" {
   if (cached?.firstIdx !== first || cached.inputs.length !== last - first + 1) return "profile";
   let sameMetadata = true;
@@ -106,14 +100,12 @@ function groupChanges(
     const bar = bars[index];
     const localIndex = index - first;
     const saved = cached.inputs[localIndex];
-    if (
-      saved.startTime !== bar.startTime
-      || !Object.is(saved.high, bar.high)
-      || !Object.is(saved.low, bar.low)
-      || (!ignoreOpenCloseForProfile && (!Object.is(saved.open, bar.open) || !Object.is(saved.close, bar.close)))
-    ) return "profile";
+    if (saved.startTime !== bar.startTime || !Object.is(saved.high, bar.high) || !Object.is(saved.low, bar.low)) {
+      return "profile";
+    }
     if (sameMetadata && (
-      (ignoreOpenCloseForProfile && (!Object.is(saved.open, bar.open) || !Object.is(saved.close, bar.close)))
+      !Object.is(saved.open, bar.open)
+      || !Object.is(saved.close, bar.close)
       || !sameBracketMetadata(saved, bar, structureChanged || cached.sourceBars[localIndex] !== bar)
     )) {
       sameMetadata = false;
@@ -137,22 +129,12 @@ export function updateTpoProfileCache(
   { tpoProfilePeriod: period, tpoBracketSize: bracketSize }: Pick<ChartViewConfig, "tpoProfilePeriod" | "tpoBracketSize">,
   vaPercent: number, mergeLeft: ReadonlySet<number>,
 ): TpoCacheState {
-  const globalBag = globalThis as Record<string, unknown>;
-  const benchMode = globalBag.__tpoBenchMode as "main" | "pr" | undefined;
-  const useFastPath = benchMode !== "main";
-  const step1 = !useFastPath ? (globalBag.__tpoStep1 as Step1Collector | undefined) : undefined;
-
-  const tTotalStart = step1 ? performance.now() : 0;
-  const tA1Start = step1 ? performance.now() : 0;
-
   const bars = series.listReadonly();
   const { intervalMs, priceStep } = series.config;
   const bracketMs = effectiveTpoBracketMs(bracketSize, intervalMs);
   const { structureRevision, nonTailRevision } = series;
   const settingsKey = `${vaPercent}|${priceStep}|${period}|${bracketSize}|${bracketMs}|${intervalMs}`;
-  const mergeKey = !useFastPath
-    ? [...mergeLeft].sort((a, b) => a - b).join("|")
-    : mergeLeft.size === 0 ? ""
+  const mergeKey = mergeLeft.size === 0 ? ""
     : mergeLeft.size === 1 ? String(mergeLeft.values().next().value)
     : [...mergeLeft].sort((a, b) => a - b).join("|");
   const floorFrom = Math.floor(from);
@@ -167,8 +149,7 @@ export function updateTpoProfileCache(
   const closedBarsUnchanged = !structureChanged && typeof nonTailRevision === "number"
     && prior?.nonTailRevision === nonTailRevision;
 
-  const sameSessionBounds = useFastPath
-    && closedBarsUnchanged
+  const sameSessionBounds = closedBarsUnchanged
     && prior !== undefined
     && prior.series === series
     && prior.bars === bars
@@ -186,15 +167,7 @@ export function updateTpoProfileCache(
   const key = mergeKey
     ? `${settingsKey}|${series.revision}|${structureRevision}|${first}|${end}|${mergeKey}`
     : `${settingsKey}|${series.revision}|${structureRevision}|${first}|${end}`;
-  if (reusable && previous?.key === key) {
-    step1?.onCacheEarlyHit?.();
-    return previous;
-  }
-
-  let a1Ms = step1 ? performance.now() - tA1Start : 0;
-  let a2Ms = 0;
-  let a3Ms = 0;
-  let a4Ms = 0;
+  if (reusable && previous?.key === key) return previous;
 
   const startedAt = isPerformanceTelemetryEnabled() ? performance.now() : null;
   let computedGroups = 0;
@@ -367,30 +340,19 @@ export function updateTpoProfileCache(
     }
   }
 
-  const tSpansStart = step1 ? performance.now() : 0;
   const spans = bracketSessionSpans(bars, first, end, tpoProfilePeriodMs(period), bracketMs);
-  const mergedSpans = mergeTpoSessionSpans(spans, mergeLeft);
-  if (step1) a1Ms += performance.now() - tSpansStart;
-
   const groups = new Map<string, CachedGroup>();
   const groupEntries: CachedGroup[] = [];
   const groupIds: string[] = [];
   const state: TpoCacheState = { key, brackets: [], groups: [] };
-  for (const group of mergedSpans) {
+  for (const group of mergeTpoSessionSpans(spans, mergeLeft)) {
     const { firstIdx, lastIdx, sessionStarts } = group;
     const id = sessionStarts.join("|");
     const cached = reusable?.get(id);
-    let skip = false;
-    if (
-      closedBarsUnchanged && lastIdx < lastBarIdx
+    const skip = closedBarsUnchanged && lastIdx < lastBarIdx
       && cached?.firstIdx === firstIdx && cached.sourceBars.length === lastIdx - firstIdx + 1
-    ) {
-      const tA2 = step1 ? performance.now() : 0;
-      skip = cached.sourceBars.every((bar, index) => bar === bars[firstIdx + index]);
-      if (step1) a2Ms += performance.now() - tA2;
-    }
-    const tA4 = step1 && !skip ? performance.now() : 0;
-    const changes = skip ? "none" : groupChanges(cached, bars, firstIdx, lastIdx, structureChanged, useFastPath);
+      && cached.sourceBars.every((bar, index) => bar === bars[firstIdx + index]);
+    const changes = skip ? "none" : groupChanges(cached, bars, firstIdx, lastIdx, structureChanged);
     if (startedAt !== null && skip) skippedGroups++;
     let entry = cached;
     if (!entry || changes !== "none") {
@@ -410,9 +372,6 @@ export function updateTpoProfileCache(
       // A history refresh can replace equal bars. Keep the validated references for the next tick.
       entry = { ...entry, sourceBars: bars.slice(firstIdx, lastIdx + 1) };
     }
-    if (step1 && !skip) a4Ms += performance.now() - tA4;
-
-    const tA3 = step1 ? performance.now() : 0;
     groups.set(id, entry);
     groupEntries.push(entry);
     groupIds.push(id);
@@ -425,7 +384,6 @@ export function updateTpoProfileCache(
       partial: entry.partial,
       result: entry.result,
     });
-    if (step1) a3Ms += performance.now() - tA3;
   }
   groupCaches.set(state, {
     series,
@@ -444,15 +402,6 @@ export function updateTpoProfileCache(
     groupEntries,
     groupIds,
   });
-  if (step1) {
-    step1.onCacheMeasure?.({
-      a1Ms,
-      a2Ms,
-      a3Ms,
-      a4Ms,
-      totalMs: performance.now() - tTotalStart,
-    });
-  }
   if (startedAt !== null) {
     incrementPerformanceCounter("chart.tpo.compute.groups", computedGroups);
     incrementPerformanceCounter("chart.tpo.cache.skippedGroups", skippedGroups);
