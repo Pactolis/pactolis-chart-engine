@@ -212,8 +212,17 @@ test("rapid 1m -> 1d -> 15m and 1w -> 12M -> 5m switches abort superseded jobs a
     assert.equal(pipeline.series.length, 0, "stale 1d response must never populate 15m series");
 
     for (const [, entry] of pendingByInterval) {
-      if (entry.query.interval === tf15mMs) {
+      if (entry.query.interval === tf15mMs && !entry.resolved) {
         assert.equal(entry.query.signal?.aborted, false);
+        entry.resolved = true;
+        entry.gate.resolve([alignedBar(candle15m, 61000, entry.query.includeFootprint !== false)]);
+      }
+    }
+    await drainMicrotasks(8);
+    for (const [, entry] of pendingByInterval) {
+      if (entry.query.interval === tf15mMs && !entry.resolved) {
+        assert.equal(entry.query.signal?.aborted, false);
+        entry.resolved = true;
         entry.gate.resolve([alignedBar(candle15m, 61000, entry.query.includeFootprint !== false)]);
       }
     }
@@ -237,20 +246,24 @@ test("rapid 1m -> 1d -> 15m and 1w -> 12M -> 5m switches abort superseded jobs a
     const candle1w = Math.floor((Date.now() - 2 * tf1wMs) / tf1wMs) * tf1wMs;
 
     for (const [, entry] of pendingByInterval) {
-      if (entry.query.interval !== tf5mMs) {
+      if (entry.query.interval !== tf5mMs && !entry.resolved) {
         assert.equal(entry.query.signal?.aborted, true);
+        entry.resolved = true;
         entry.gate.resolve([alignedBar(candle1w, 30000, true)]);
       }
     }
     await drainMicrotasks(6);
     assert.equal(pipeline.series.length, 0, "stale 1w/12M responses must not mutate 5m series");
 
-    for (const [, entry] of pendingByInterval) {
-      if (entry.query.interval === tf5mMs) {
-        entry.gate.resolve([alignedBar(candle5m, 62500, entry.query.includeFootprint !== false)]);
+    for (let pass = 0; pass < 3; pass++) {
+      for (const [, entry] of pendingByInterval) {
+        if (entry.query.interval === tf5mMs && !entry.resolved) {
+          entry.resolved = true;
+          entry.gate.resolve([alignedBar(candle5m, 62500, entry.query.includeFootprint !== false)]);
+        }
       }
+      await drainMicrotasks(8);
     }
-    await drainMicrotasks(8);
     assert.equal(pipeline.series.length, 1);
     assert.equal(pipeline.series.at(0)?.startTime, candle5m);
     assert.equal(pipeline.series.at(0)?.close, 62500);

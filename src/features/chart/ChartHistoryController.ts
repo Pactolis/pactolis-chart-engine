@@ -154,6 +154,7 @@ export class ChartHistoryController {
   private candleGapRetryTimer: ReturnType<typeof setTimeout> | null = null;
   private candleGapRetryToken = 0;
   private activeLiveSeedAttribution: JobAttribution | null = null;
+  private activeLoadReason = "history-load";
   private readonly pendingDayRefreshes = new Map<string, { dayTs: number; market: string; timeframe: string }>();
 
   constructor(private readonly host: ChartHistoryControllerHost) {
@@ -300,6 +301,7 @@ export class ChartHistoryController {
     const requestedMarket = state.market;
     const requestedTimeframe = state.timeframe;
     const reason = options.reason ?? "history-load";
+    this.activeLoadReason = reason;
     const historyGeneration = this.host.capture.beginHistoryLoad(requestedMarket, requestedTimeframe);
     const pipelineGeneration = this.host.pipeline?.currentGeneration ?? this.refreshGeneration;
     const telemetryContext: HistoryLoadTelemetryContext = {
@@ -347,7 +349,7 @@ export class ChartHistoryController {
         chartType: state.chartType,
         timeframe: requestedTimeframe,
       });
-      this.scheduleLiveBarOHLCSeed(requestedMarket, requestedTimeframe, resolvedIntervalMs, reason);
+      this.scheduleLiveBarOHLCSeed(requestedMarket, requestedTimeframe, resolvedIntervalMs);
       logLoadTrace(this.host.pipeline.activeHistoryTraceId, "live_ohlc_seed.started", { market: requestedMarket, intervalMs: resolvedIntervalMs });
       await historyPromise;
 
@@ -440,14 +442,13 @@ export class ChartHistoryController {
     const { market, timeframe } = this.host.getState();
     // This load supersedes any background refresh; it positions the viewport itself.
     this.preserveViewportLoadToken = null;
-    await this.host.pipeline.loadHistory({
-      from: dayStart,
-      to: dayStart + dayMs - 1,
-      reason: "focus-trading-day",
+    this.host.pipeline.setTelemetryContext?.({
       chartId: this.host.getChartId?.(),
       chartType: this.host.getState().chartType,
       timeframe,
+      reason: "focus-trading-day",
     });
+    await this.host.pipeline.loadHistory({ from: dayStart, to: dayStart + dayMs - 1 });
     if (this.host.isDisposed() || this.host.replay.isActive() || generation !== this.refreshGeneration) return;
     const state = this.host.getState();
     if (state.market !== market || state.timeframe !== timeframe) return;
@@ -562,14 +563,13 @@ export class ChartHistoryController {
       this.scheduleCandleGapRetry(market, timeframe, intervalMs, attempt);
       return;
     }
-    await this.host.pipeline.loadHistory({
-      from: gap.from,
-      to: gap.to - 1,
-      reason: "candle-gap-retry",
+    this.host.pipeline.setTelemetryContext?.({
       chartId: this.host.getChartId?.(),
       chartType: state.chartType,
       timeframe,
+      reason: "candle-gap-retry",
     });
+    await this.host.pipeline.loadHistory({ from: gap.from, to: gap.to - 1 });
     if (token !== this.candleGapRetryToken || this.host.isDisposed()) return;
     this.runCanonicalAnalysis(market, timeframe, "candle-gap-retry");
     this.host.session.invalidate(ChartChange.DataNonTail);
@@ -882,10 +882,11 @@ export class ChartHistoryController {
     this.activeLiveSeedAttribution = null;
   }
 
-  private scheduleLiveBarOHLCSeed(market: string, timeframe: string, intervalMs: number, reason = "history-load"): void {
+  private scheduleLiveBarOHLCSeed(market: string, timeframe: string, intervalMs: number): void {
     this.cancelLiveBarOHLCSeed();
     const token = this.liveOhlcSeedToken;
     const generation = this.host.pipeline?.currentGeneration ?? this.refreshGeneration;
+    const reason = this.activeLoadReason;
     // The window starts at the bucket that is open right now and the request always
     // runs to `Date.now()`, so a retry that lands after a rollover still repairs the
     // bucket this seed was scheduled for instead of abandoning it half-seeded.

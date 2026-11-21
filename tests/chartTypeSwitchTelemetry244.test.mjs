@@ -32,7 +32,7 @@ test("chart-type job attribution distinguishes completed, aborted, and reusable 
   });
 
   const intervalMs = 15 * 60_000;
-  const base = Math.floor(Date.now() / intervalMs) * intervalMs - 4 * intervalMs;
+  const base = Math.floor((Date.now() - 2 * 86_400_000) / intervalMs) * intervalMs;
   const fillGate = deferred();
   const refreshCalls = [];
 
