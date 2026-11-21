@@ -90,7 +90,7 @@ async function runBackendSuite(page: Page, backend: "webgl2" | "canvas2d") {
   const bytesByTag = new Map<string, number>();
   const requestsByTag = new Map<string, number>();
   let delayedGates: Array<{ interval: number; release: () => void }> = [];
-  let holdIntervalMs: number | null = null;
+  const heldIntervals = new Set<number>();
 
   await page.route("**/*", async (route) => {
     const url = new URL(route.request().url());
@@ -108,7 +108,7 @@ async function runBackendSuite(page: Page, backend: "webgl2" | "canvas2d") {
     const now = Date.now();
     const openBucket = bucketStart(now, interval);
 
-    if (holdIntervalMs !== null && interval === holdIntervalMs) {
+    if (heldIntervals.has(interval)) {
       await new Promise<void>((resolve) => {
         delayedGates.push({ interval, release: resolve });
       });
@@ -158,7 +158,11 @@ async function runBackendSuite(page: Page, backend: "webgl2" | "canvas2d") {
     const body = JSON.stringify({ ok: true, data: { bars }, meta });
     bytesByTag.set(currentTag, (bytesByTag.get(currentTag) ?? 0) + Buffer.byteLength(body));
     requestsByTag.set(currentTag, (requestsByTag.get(currentTag) ?? 0) + 1);
-    return route.fulfill({ contentType: "application/json", body });
+    try {
+      return await route.fulfill({ contentType: "application/json", body });
+    } catch {
+      return;
+    }
   });
 
   await openHarness(page, `?chart=${encodeURIComponent(MARKET)}&timeframe=15m&type=footprint&priceStep=10&gpu=${backend}`);
@@ -267,23 +271,33 @@ async function runBackendSuite(page: Page, backend: "webgl2" | "canvas2d") {
     }
   }
 
-  // Rapid switches: 1m -> 1d -> 15m and 1w -> 12M -> 5m with held stale responses + live trade merge check
+  // Rapid switches: 1m -> 1d -> 15m and 1w -> 12M -> 5m with in-flight held stale responses + live trade merge check
   currentTag = "rapid-1";
-  holdIntervalMs = 24 * 60 * 60_000; // hold 1d
+  heldIntervals.add(60_000); // hold 1m
+  heldIntervals.add(24 * 60 * 60_000); // hold 1d
   await page.evaluate(async () => {
-    const harness = await import("/harness/chart.ts");
     const telemetry = await import("/src/core/performanceTelemetry.ts");
     telemetry.resetPerformanceTelemetry();
+    const harness = await import("/harness/chart.ts");
+    harness.getChartRuntime("harness-chart")!.updateState({ ...harness.getChartRuntime("harness-chart")!.getState(), timeframe: "1m" });
+  });
+  await expect.poll(() => delayedGates.some((g) => g.interval === 60_000)).toBe(true);
+  await page.evaluate(async () => {
+    const harness = await import("/harness/chart.ts");
     const r = harness.getChartRuntime("harness-chart")!;
-    r.updateState({ ...r.getState(), timeframe: "1m" });
     r.updateState({ ...r.getState(), timeframe: "1d" });
+  });
+  await expect.poll(() => delayedGates.some((g) => g.interval === 24 * 60 * 60_000)).toBe(true);
+  await page.evaluate(async () => {
+    const harness = await import("/harness/chart.ts");
+    const r = harness.getChartRuntime("harness-chart")!;
     r.updateState({ ...r.getState(), timeframe: "15m" });
   });
   await expect(hook).toHaveAttribute("data-timeframe", "15m");
   await expect(hook).toHaveAttribute("data-history-loading", "false");
+  heldIntervals.clear();
   for (const gate of delayedGates) gate.release();
   delayedGates = [];
-  holdIntervalMs = null;
 
   const rapid1Check = await page.evaluate(async () => {
     const harness = await import("/harness/chart.ts");
@@ -322,19 +336,30 @@ async function runBackendSuite(page: Page, backend: "webgl2" | "canvas2d") {
   expect(rapid1Check.aborts).toBeGreaterThanOrEqual(1);
 
   currentTag = "rapid-2";
-  holdIntervalMs = 12 * MONTH_TOKEN_MS; // hold 12M
+  heldIntervals.add(WEEK_MS); // hold 1w
+  heldIntervals.add(12 * MONTH_TOKEN_MS); // hold 12M
   await page.evaluate(async () => {
     const harness = await import("/harness/chart.ts");
     const r = harness.getChartRuntime("harness-chart")!;
     r.updateState({ ...r.getState(), timeframe: "1w" });
+  });
+  await expect.poll(() => delayedGates.some((g) => g.interval === WEEK_MS)).toBe(true);
+  await page.evaluate(async () => {
+    const harness = await import("/harness/chart.ts");
+    const r = harness.getChartRuntime("harness-chart")!;
     r.updateState({ ...r.getState(), timeframe: "12M" });
+  });
+  await expect.poll(() => delayedGates.some((g) => g.interval === 12 * MONTH_TOKEN_MS)).toBe(true);
+  await page.evaluate(async () => {
+    const harness = await import("/harness/chart.ts");
+    const r = harness.getChartRuntime("harness-chart")!;
     r.updateState({ ...r.getState(), timeframe: "5m" });
   });
   await expect(hook).toHaveAttribute("data-timeframe", "5m");
   await expect(hook).toHaveAttribute("data-history-loading", "false");
+  heldIntervals.clear();
   for (const gate of delayedGates) gate.release();
   delayedGates = [];
-  holdIntervalMs = null;
   const rapid2Interval = await hook.getAttribute("data-series-interval");
   expect(Number(rapid2Interval)).toBe(5 * 60_000);
 
