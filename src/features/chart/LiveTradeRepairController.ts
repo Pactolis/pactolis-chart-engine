@@ -303,6 +303,13 @@ export interface RepairSnapshotInput {
   generation: number;
 }
 
+export interface RepairReconciledSummary {
+  readonly from: number;
+  readonly to: number;
+  readonly generation: number;
+  readonly buckets: readonly number[];
+}
+
 export interface LiveTradeRepairHost {
   readonly services: ChartDataPipelineServices;
   readonly series: FootprintSeries;
@@ -319,7 +326,8 @@ export interface LiveTradeRepairHost {
   setDataDegraded(degraded: boolean, detail: string): void;
   reportIdentityConflicts?(count: number): void;
   scheduleRecentCoverageRetry?: (attempt: number, retry: () => boolean, reason: LiveRepairRetryReason) => boolean;
-  onReconciled?(): void;
+  onReconciled?(summary?: RepairReconciledSummary): void;
+  onRepairPending?(info: { from: number | null; generation: number }): void;
   trace?(stage: string, fields?: Record<string, unknown>): void;
 }
 
@@ -335,6 +343,7 @@ export class LiveTradeRepairController {
   private repairOwnership = 0;
   private repairActive = false;
   private reconciled = false;
+  private repairFailed = false;
   private localDataLossPending = false;
   private repairRetryCount = 0;
   /** When the current repair first failed; reset with the retry count. */
@@ -359,6 +368,15 @@ export class LiveTradeRepairController {
   }
 
   get isReconciled(): boolean { return this.reconciled; }
+
+  hasPendingOrActiveOrFailedRepair(): boolean {
+    return this.repairActive
+      || this.pendingSession !== null
+      || this.repairController !== null
+      || this.repairDeferred
+      || this.repairFailed
+      || (this.repairFailingSince !== null && !this.reconciled);
+  }
 
   isBlockingMaintenance(): boolean {
     return this.explicitHistoryRange !== null || this.repairActive || this.pendingSession !== null || this.repairController !== null;
@@ -513,9 +531,11 @@ export class LiveTradeRepairController {
     this.reconcileOverflow = false;
     this.overflowResyncCount = 0;
     this.reconciled = false;
+    this.repairFailed = false;
     this.explicitHistoryRange = null;
     this.explicitHistoryToken++;
     this.configSignature = this.currentConfigSignature();
+    this.host.onRepairPending?.({ from: null, generation: this.host.getGeneration() });
   }
 
   dispose(): void { this.cancel(); }
@@ -539,7 +559,9 @@ export class LiveTradeRepairController {
     this.reconcileOverflow = false;
     this.overflowResyncCount = 0;
     this.reconciled = false;
+    this.repairFailed = false;
     this.repairActive = true;
+    this.host.onRepairPending?.({ from, generation: this.host.getGeneration() });
     this.host.integrityReporter?.report("pending", detail);
     if (this.repairController) this.preempt(true);
     this.startPendingRepair();
@@ -806,6 +828,7 @@ export class LiveTradeRepairController {
         this.repairFailingSince = null;
         this.repairDeferred = false;
         this.overflowResyncCount = 0;
+        this.repairFailed = false;
         this.repairActive = false;
         this.host.series.releaseRepairFence();
         this.host.series.releaseRepairBarriers();
@@ -879,13 +902,14 @@ export class LiveTradeRepairController {
       this.repairFailingSince = null;
       this.repairDeferred = false;
       this.overflowResyncCount = 0;
+      this.repairFailed = false;
       this.reconciled = true;
       this.localDataLossPending = false;
       // Each step below reaches code outside this controller (reporter, degraded callback,
       // update listeners), which may cancel this repair, reset the series or start a new one.
       const stillOwned = (): boolean => ownership === this.repairOwnership && this.repairController === controller
         && !this.host.isDisposed() && generation === this.host.getGeneration() && !controller.signal.aborted;
-      this.host.onReconciled?.();
+      this.host.onReconciled?.({ from, to: commitTo, generation, buckets: repairBuckets });
       this.host.trace?.("repair.reconciled", { watermark: snapshot.watermark, bufferedTrades: buffered.length, tailTrades: joined.tail.length });
       if (!stillOwned()) return;
       this.host.integrityReporter?.report("healthy");
@@ -931,6 +955,7 @@ export class LiveTradeRepairController {
         return;
       }
       this.repairDeferred = false;
+      this.repairFailed = true;
       this.clearReconcileBuffer();
       this.host.series.releaseRepairFence();
       this.host.series.releaseRepairBarriers();

@@ -1063,3 +1063,11 @@ export function cellImbalance(cell: FootprintCell): number {
   if (total === 0) return 0;
   return (cell.buyVol - cell.sellVol) / total;
 }
+
+/** True when a bar was constructed solely from live/recovery prints without any history or repair snapshot. */
+export function isLiveOnlyProvisionalBar(bar: FootprintBar): boolean {
+  if (bar.completeness !== "provisional") return false;
+  const sources = bar.sources;
+  if (!sources || sources.length === 0) return true;
+  return !sources.includes("history");
+}

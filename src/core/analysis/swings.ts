@@ -1,3 +1,13 @@
+import {
+  MarketStructureEngine,
+  type BreakConfirmationMode,
+  type MarketStructureOptions,
+  type MarketStructureSnapshot,
+  type StructureBar,
+} from "./structuralSwings.js";
+
+export * from "./structuralSwings.js";
+
 /** Closed-bar swing analysis. Callers pass only bars closed at their as-of cut. */
 export interface SwingBar { high: number; low: number }
 export interface SwingPivot { index: number; price: number; kind: "high" | "low"; confirmedAtIndex: number }
@@ -63,4 +73,115 @@ export class IncrementalSwingDetector {
     this.right = r;
     return this.pivots;
   }
+}
+
+export interface MarketStructureResult extends MarketStructureSnapshot {
+  rawPivots: readonly SwingPivot[];
+  evaluatedWindows: number;
+}
+
+const EMPTY_PIVOTS: readonly SwingPivot[] = [];
+
+function collectPivotsAtConfirmation(
+  pivots: readonly SwingPivot[],
+  cursor: number,
+  confirmedAtIndex: number,
+): { group: readonly SwingPivot[]; nextCursor: number } {
+  let i = cursor;
+  while (i < pivots.length && pivots[i].confirmedAtIndex < confirmedAtIndex) i++;
+  if (i >= pivots.length || pivots[i].confirmedAtIndex !== confirmedAtIndex) {
+    return { group: EMPTY_PIVOTS, nextCursor: i };
+  }
+  const start = i;
+  while (i < pivots.length && pivots[i].confirmedAtIndex === confirmedAtIndex) i++;
+  return { group: pivots.slice(start, i), nextCursor: i };
+}
+
+/**
+ * Stateful incremental structural swing + BOS/CHoCH + protected-level analyzer.
+ * Append updates run in O(1) amortized structure steps and evaluate only newly closed windows;
+ * live open-bar ticks outside `closedLength` perform zero window evaluations.
+ */
+export class IncrementalMarketStructure {
+  private readonly rawDetector = new IncrementalSwingDetector();
+  private engine = new MarketStructureEngine();
+  private processedLength = 0;
+  private pivotCursor = 0;
+  private configKey = "";
+  private rawPivots: readonly SwingPivot[] = [];
+
+  get evaluatedWindows(): number {
+    return this.rawDetector.evaluatedWindows;
+  }
+
+  getRawPivots(): readonly SwingPivot[] {
+    return this.rawPivots;
+  }
+
+  update(
+    bars: readonly StructureBar[],
+    options: MarketStructureOptions,
+    change: "reset" | "tail" | "append" = "reset",
+    closedLength = bars.length,
+  ): MarketStructureResult {
+    const l = windowSize(options.left);
+    const r = windowSize(options.right);
+    const tolerance = typeof options.equalityTolerance === "number" && Number.isFinite(options.equalityTolerance) && options.equalityTolerance >= 0
+      ? options.equalityTolerance
+      : 0;
+    const confirmation: BreakConfirmationMode = options.breakConfirmation === "wick" ? "wick" : "close";
+    const length = Math.max(0, Math.min(bars.length, Math.floor(closedLength)));
+    const nextConfigKey = `${l}|${r}|${tolerance}|${confirmation}`;
+
+    // Live open-bar mutation outside closedLength cannot affect closed structure.
+    if (
+      change === "tail"
+      && nextConfigKey === this.configKey
+      && length === this.processedLength
+      && length < bars.length
+    ) {
+      return {
+        ...this.engine.snapshot(),
+        rawPivots: this.rawPivots,
+        evaluatedWindows: this.rawDetector.evaluatedWindows,
+      };
+    }
+
+    const rawPivots = this.rawDetector.update(bars, l, r, change, length);
+    this.rawPivots = rawPivots;
+
+    const resetEngine = change === "reset"
+      || nextConfigKey !== this.configKey
+      || length < this.processedLength
+      || (change === "tail" && length === bars.length);
+
+    if (resetEngine) {
+      this.engine = new MarketStructureEngine(tolerance, confirmation);
+      this.processedLength = 0;
+      this.pivotCursor = 0;
+      this.configKey = nextConfigKey;
+    }
+
+    for (let barIndex = this.processedLength; barIndex < length; barIndex++) {
+      const { group, nextCursor } = collectPivotsAtConfirmation(rawPivots, this.pivotCursor, barIndex);
+      this.pivotCursor = nextCursor;
+      this.engine.stepBar(bars[barIndex], barIndex, group);
+    }
+    this.processedLength = length;
+
+    return {
+      ...this.engine.snapshot(),
+      rawPivots: this.rawPivots,
+      evaluatedWindows: this.rawDetector.evaluatedWindows,
+    };
+  }
+}
+
+/** Pure one-shot market structure scan matching incremental updates identically. */
+export function analyzeMarketStructure(
+  bars: readonly StructureBar[],
+  options: MarketStructureOptions,
+  closedLength = bars.length,
+): MarketStructureResult {
+  return new IncrementalMarketStructure().update(bars, options, "reset", closedLength);
 }
