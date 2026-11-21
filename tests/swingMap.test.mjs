@@ -187,7 +187,7 @@ function makeRichCanvas() {
 test("Scenario 1 & 2: alternating structural swings pick most extreme candidate and finalize only on opposite pivot", () => {
   // Raw pivots (L=1,R=1): H(1,12), H(3,16), L(5,6), H(7,14), L(9,8)
   const bars1 = makeSimpleBars([
-    [10, 8], [12, 9], [10, 8], [16, 10], [11, 8], [10, 6], [11, 8], [14, 9], [11, 9], [10, 8], [12, 10],
+    [10, 4], [12, 5], [10, 7], [16, 8], [11, 7], [10, 6], [11, 8], [14, 9], [11, 9], [10, 8], [12, 10],
   ]);
   // Before L(5) confirms at index 6, H(3,16) replaces H(1,12) and remains provisional.
   const at5 = analyzeMarketStructure(bars1, { left: 1, right: 1 }, 6);
@@ -212,7 +212,7 @@ test("Scenario 1 & 2: alternating structural swings pick most extreme candidate 
 
   // Scenario 2: L, L(lower), H, L -> picks lowest candidate for low.
   const bars2 = makeSimpleBars([
-    [12, 10], [11, 8], [12, 9], [10, 4], [11, 7], [15, 9], [12, 8], [11, 7], [13, 9],
+    [14, 10], [13, 8], [12, 9], [10, 4], [11, 7], [15, 9], [12, 8], [11, 7], [13, 9],
   ]);
   const full2 = analyzeMarketStructure(bars2, { left: 1, right: 1 });
   assert.deepEqual(full2.swings.map((s) => [s.kind, s.price]), [["low", 4], ["high", 15], ["low", 7]]);
@@ -250,17 +250,17 @@ test("Scenario 3, 4, 5, 6: unknown initial suppression, HH+HL -> Bullish BOS, wi
   const bars = makeOhlcBars([
     [11, 12, 10, 11],
     [15, 20, 14, 19],
-    [18, 16, 13, 14],
+    [16, 16, 13, 14],
     [14, 15, 10, 12],
     [12, 18, 12, 17],
     [17, 25, 16, 23],
-    [23, 22, 18, 19],
+    [22, 22, 18, 19],
     [19, 20, 15, 18],
     [18, 21, 16, 20],
     [20, 26, 20, 25], // bar 9: wick > 25, close == 25 (sweep)
     [25, 28, 24, 27], // bar 10: close > 25 -> Bullish BOS
     [26, 27, 24, 26],
-    [25, 24, 14, 17], // bar 12: wick < 15, close > 15 (sweep)
+    [24, 24, 14, 17], // bar 12: wick < 15, close > 15 (sweep)
     [17, 18, 13, 13.5], // bar 13: close < 15 -> Bearish CHoCH -> transition
     [13.5, 14, 11, 11.5],
     [11.5, 12, 9, 10], // bar 15: L2=9 (conf@16)
@@ -268,7 +268,7 @@ test("Scenario 3, 4, 5, 6: unknown initial suppression, HH+HL -> Bullish BOS, wi
     [12, 18, 11, 16], // bar 17: H2=18 (LH, conf@18)
     [16, 16, 13, 14], // bar 18: H2 confirms -> bearish trend confirmed
     [14, 14, 8, 8.5], // bar 19: close < 9 -> Bearish BOS
-    [8.5, 19, 9, 18.5], // bar 20: close > 18 -> Bullish CHoCH -> transition
+    [9, 19, 9, 18.5], // bar 20: close > 18 -> Bullish CHoCH -> transition
   ]);
 
   const res = analyzeMarketStructure(bars, { left: 1, right: 1, equalityTolerance: 0, breakConfirmation: "close" });
@@ -317,11 +317,11 @@ test("wick mode fires on wick breach, single-fire per level, and gap candle trig
   const bars = makeOhlcBars([
     [11, 12, 10, 11],
     [15, 20, 14, 19],
-    [18, 16, 13, 14],
+    [16, 16, 13, 14],
     [14, 15, 10, 12],
     [12, 18, 12, 17],
     [17, 25, 16, 23],
-    [23, 22, 18, 19],
+    [22, 22, 18, 19],
     [19, 20, 15, 18],
     [18, 21, 16, 20],
     [20, 26, 20, 24], // wick above 25, close 24 -> fires in wick mode!
@@ -339,11 +339,11 @@ test("wick mode fires on wick breach, single-fire per level, and gap candle trig
   const gapBars = makeOhlcBars([
     [11, 12, 10, 11],
     [15, 20, 14, 19],
-    [18, 16, 13, 14],
+    [16, 16, 13, 14],
     [14, 15, 10, 12],
     [12, 18, 12, 17],
     [17, 25, 16, 23],
-    [23, 22, 18, 19],
+    [22, 22, 18, 19],
     [19, 20, 15, 18],
     [18, 21, 16, 20],
     [30, 31, 29, 30.5], // gap above 25
@@ -359,11 +359,11 @@ test("nested minor pullbacks do not prematurely raise protectedLow or cause fals
   const bars = makeOhlcBars([
     [11, 12, 10, 11],
     [15, 20, 14, 19], // H0=20
-    [18, 16, 13, 14],
+    [16, 16, 13, 14],
     [14, 15, 10, 12], // L0=10
     [12, 18, 12, 17],
     [17, 25, 16, 23], // H1=25 (HH)
-    [23, 22, 18, 19],
+    [22, 22, 18, 19],
     [19, 20, 14, 18], // L1=14 (HL) -> bullish (PL=14, target=25)
     [18, 21, 16, 20],
     [20, 27, 20, 26], // bar 9: BOS #1 above 25
@@ -392,16 +392,16 @@ test("Scenario 7 & 8: no look-ahead before pivot confirmedAtIndex and replay/as-
   const bars = makeOhlcBars([
     [11, 12, 10, 11],
     [15, 20, 14, 19],
-    [18, 16, 13, 14],
+    [16, 16, 13, 14],
     [14, 15, 10, 12],
     [12, 18, 12, 17],
     [17, 25, 16, 23],
-    [23, 22, 18, 19],
+    [22, 22, 18, 19],
     [19, 20, 15, 18],
     [18, 21, 16, 20],
     [20, 28, 20, 27],
     [27, 28, 24, 26],
-    [26, 24, 13, 13.5],
+    [24, 24, 13, 13.5],
     [13.5, 15, 12, 14],
   ]);
 
@@ -464,11 +464,11 @@ test("Scenario 10: incremental append/tail matches full scan and offscreen struc
   const bars = makeOhlcBars([
     [11, 12, 10, 11],
     [15, 20, 14, 19],
-    [18, 16, 13, 14],
+    [16, 16, 13, 14],
     [14, 15, 10, 12],
     [12, 18, 12, 17],
     [17, 25, 16, 23],
-    [23, 22, 18, 19],
+    [22, 22, 18, 19],
     [19, 20, 15, 18],
     [18, 21, 16, 20],
     [20, 28, 20, 27],
@@ -511,11 +511,11 @@ test("history correction (replaceRange) resets cleanly and matches fresh series"
   const bars = makeOhlcBars([
     [11, 12, 10, 11],
     [15, 20, 14, 19],
-    [18, 16, 13, 14],
+    [16, 16, 13, 14],
     [14, 15, 10, 12],
     [12, 18, 12, 17],
     [17, 25, 16, 23],
-    [23, 22, 18, 19],
+    [22, 22, 18, 19],
     [19, 20, 15, 18],
     [18, 21, 16, 20],
     [20, 28, 20, 27],
@@ -541,11 +541,11 @@ test("pivotMode raw/structural/both, legacy settings fallback, and drawSwingMap 
   const bars = makeOhlcBars([
     [11, 12, 10, 11],
     [15, 20, 14, 19],
-    [18, 16, 13, 14],
+    [16, 16, 13, 14],
     [14, 15, 10, 12],
     [12, 18, 12, 17],
     [17, 25, 16, 23],
-    [23, 22, 18, 19],
+    [22, 22, 18, 19],
     [19, 20, 15, 18],
     [18, 21, 16, 20],
     [20, 28, 20, 27],
@@ -581,7 +581,7 @@ test("pivotMode raw/structural/both, legacy settings fallback, and drawSwingMap 
 
   // Raw mode preserves raw non-alternating pivots.
   const nonAltBars = makeSimpleBars([
-    [10, 8], [12, 9], [10, 8], [16, 10], [11, 8], [10, 6], [12, 9],
+    [10, 4], [12, 5], [10, 7], [16, 8], [11, 7], [10, 6], [12, 9], [13, 10],
   ]);
   const rawCtx = context(nonAltBars, { pivotMode: "raw" });
   const structCtx = context(nonAltBars, { pivotMode: "structural" });
@@ -655,8 +655,8 @@ test("10k/50k bar performance and bounded incremental live-tick / pan / memory r
   const liveMs = performance.now() - tLive0;
   assert.ok(liveMs < 200, `50 live ticks on 49k bars took ${liveMs.toFixed(1)}ms`);
 
-  // Append 20 closed bars: each closed bar evaluates at most 1 new window.
-  const tAppend0 = performance.now();
+  // Append 20 closed bars: separate addTrades/snapshot overhead from prepareData cost.
+  let prepareAppendMs = 0;
   for (let b = 0; b < 20; b++) {
     const idx = N + b;
     const mid = 10_000 + Math.sin(idx / 8) * 50;
@@ -664,11 +664,13 @@ test("10k/50k bar performance and bounded incremental live-tick / pan / memory r
       { time: idx * 60_000 + 100, price: mid + 3, qty: 1, isBuy: true, id: `perf-app-a-${b}` },
       { time: idx * 60_000 + 200, price: mid - 3, qty: 1, isBuy: false, id: `perf-app-b-${b}` },
     ]);
+    ctx.series.listReadonly();
     ctx.range = [idx - 299, idx + 1];
+    const tPrep = performance.now();
     definition.prepareData(ctx);
+    prepareAppendMs += performance.now() - tPrep;
   }
-  const appendMs = performance.now() - tAppend0;
   const afterAppend = definition.prepareData(ctx);
   assert.ok(afterAppend.meta.evaluatedWindows - baseWindows <= 20, "bounded windows on 20 closed appends");
-  assert.ok(appendMs < 300, `20 closed appends on 49k bars took ${appendMs.toFixed(1)}ms`);
+  assert.ok(prepareAppendMs < 200, `20 closed prepareData appends on 49k bars took ${prepareAppendMs.toFixed(1)}ms`);
 });

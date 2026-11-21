@@ -23,17 +23,17 @@ test("Swing Map structural swings, BOS/CHoCH, protected levels, replay and Canva
     const specs: Array<[number, number, number, number]> = [
       [11, 12, 10, 11],
       [15, 20, 14, 19],
-      [18, 16, 13, 14],
+      [16, 16, 13, 14],
       [14, 15, 10, 12],
       [12, 18, 12, 17],
       [17, 25, 16, 23],
-      [23, 22, 18, 19],
+      [22, 22, 18, 19],
       [19, 20, 15, 18],
       [18, 21, 16, 20],
       [20, 26, 20, 25], // sweep above 25 (close=25)
       [25, 28, 24, 27], // Bullish BOS
       [26, 27, 24, 26],
-      [25, 24, 14, 17], // sweep below 15
+      [24, 24, 14, 17], // sweep below 15
       [17, 18, 13, 13.5], // Bearish CHoCH -> transition
       [13.5, 14, 11, 11.5],
       [11.5, 12, 9, 10],
@@ -41,7 +41,7 @@ test("Swing Map structural swings, BOS/CHoCH, protected levels, replay and Canva
       [12, 18, 11, 16],
       [16, 16, 13, 14], // Bearish confirmed
       [14, 14, 8, 8.5], // Bearish BOS
-      [8.5, 10, 8, 9.5], // open tail bar
+      [9, 10, 8, 9.5], // open tail bar
     ];
 
     const bars = specs.map(([open, high, low, close], i) => ({
