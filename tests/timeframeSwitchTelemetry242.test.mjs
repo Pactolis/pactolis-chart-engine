@@ -431,13 +431,13 @@ test("changeConfig clears series synchronously, defers ETH subscription/repair u
   useFakeChartDataSource(t, {
     history: async (query) => {
       historyRequests.push({
-        markets: [...query.markets],
+        markets: query.markets ? [...query.markets] : [query.market],
         priceStep: query.priceStep,
         from: query.from,
         to: query.to,
       });
       return {
-        bars: [alignedBar(openStart, 2500.5, true)],
+        bars: [alignedBar(openStart - intervalMs, 2500.5, true), alignedBar(openStart, 2500.5, true)],
         meta: {
           schemaVersion: 2,
           generatedAt: now,
