@@ -12,9 +12,9 @@ import { useFakeChartDataSource } from "./support/fakeChartDataSource.mjs";
 const MARKET = "BINANCE_FUTURES:btcusdt";
 const ETH_MARKET = "BINANCE_FUTURES:ethusdt";
 const INTERVAL_12M = TIMEFRAMES.find((tf) => tf.label === "12M").ms;
-const INTERVAL_1W = TIMEFRAMES.find((tf) => tf.label === "1W").ms;
-const INTERVAL_3D = TIMEFRAMES.find((tf) => tf.label === "3D").ms;
-const INTERVAL_1D = TIMEFRAMES.find((tf) => tf.label === "1D").ms;
+const INTERVAL_1W = TIMEFRAMES.find((tf) => tf.label === "1w").ms;
+const INTERVAL_3D = TIMEFRAMES.find((tf) => tf.label === "3d").ms;
+const INTERVAL_1D = TIMEFRAMES.find((tf) => tf.label === "1d").ms;
 
 const tick = async (n = 6) => {
   for (let i = 0; i < n; i++) await new Promise(setImmediate);

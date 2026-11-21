@@ -14,9 +14,9 @@ interface TextDraw {
 const MARKET = "BINANCE_FUTURES:btcusdt";
 
 const TF_MS = {
-  "1D": 86_400_000,
-  "3D": 3 * 86_400_000,
-  "1W": 7 * 86_400_000,
+  "1d": 86_400_000,
+  "3d": 3 * 86_400_000,
+  "1w": 7 * 86_400_000,
   "12M": 12 * 30 * 86_400_000,
 } as const;
 
@@ -25,10 +25,10 @@ function utcBucketStart(time: number, intervalMs: number): number {
     const d = new Date(time);
     return Date.UTC(d.getUTCFullYear(), 0, 1, 0, 0, 0, 0);
   }
-  if (intervalMs === TF_MS["1W"]) {
-    const day = Math.floor(time / TF_MS["1D"]) * TF_MS["1D"];
+  if (intervalMs === TF_MS["1w"]) {
+    const day = Math.floor(time / TF_MS["1d"]) * TF_MS["1d"];
     const d = new Date(day);
-    return day - ((d.getUTCDay() + 6) % 7) * TF_MS["1D"];
+    return day - ((d.getUTCDay() + 6) % 7) * TF_MS["1d"];
   }
   return Math.floor(time / intervalMs) * intervalMs;
 }
@@ -461,8 +461,8 @@ test("12M WS-before-history stays live-only on canvas and data-hud, spares close
 test("history-first open bucket stays normal even during background history reload", async ({ page }) => {
   await recordCanvasText(page);
   const now = await page.evaluate(() => Date.now());
-  const open1D = utcBucketStart(now, TF_MS["1D"]);
-  const closed1D = open1D - TF_MS["1D"];
+  const open1D = utcBucketStart(now, TF_MS["1d"]);
+  const closed1D = open1D - TF_MS["1d"];
   let holdBackground: Route | null = null;
   let holdBg = false;
 
@@ -486,7 +486,7 @@ test("history-first open bucket stays normal even during background history relo
   });
 
   await openHarness(page);
-  await mountRepairChart(page, "1D");
+  await mountRepairChart(page, "1d");
   const hook = page.locator('[data-testid="chart-hook"][data-panel-id="hud-243"]');
   await expect(hook).toHaveAttribute("data-history-loading", "false", { timeout: 10_000 });
   await expect(hook).toHaveAttribute("data-series-len", "2", { timeout: 10_000 });
@@ -497,7 +497,7 @@ test("history-first open bucket stays normal even during background history relo
   expect(initialHud).not.toContain("≈");
   expect(initialHud).toContain("Trades 42000");
 
-  // Trigger a background refreshHistory while open bucket is already verified for (market, 1D, bucket, generation).
+  // Trigger a background refreshHistory while open bucket is already verified for (market, 1d, bucket, generation).
   holdBg = true;
   await page.evaluate(() => {
     const runtime = (window as unknown as Record<string, any>).__hud243.handle.runtime;
@@ -520,8 +520,8 @@ test("history-first open bucket stays normal even during background history relo
 test("repair failure, degraded fallback, and retry transition HUD state cleanly", async ({ page }) => {
   await recordCanvasText(page);
   const now = await page.evaluate(() => Date.now());
-  const open1W = utcBucketStart(now, TF_MS["1W"]);
-  const closed1W = open1W - TF_MS["1W"];
+  const open1W = utcBucketStart(now, TF_MS["1w"]);
+  const closed1W = open1W - TF_MS["1w"];
   let repairAttempts = 0;
 
   await page.route(/\/history(?:\?|$)/, async (route) => {
@@ -552,7 +552,7 @@ test("repair failure, degraded fallback, and retry transition HUD state cleanly"
   });
 
   await openHarness(page);
-  await mountRepairChart(page, "1W");
+  await mountRepairChart(page, "1w");
   const hook = page.locator('[data-testid="chart-hook"][data-panel-id="hud-243"]');
   await expect(hook).toHaveAttribute("data-history-loading", "false", { timeout: 10_000 });
 
@@ -583,12 +583,12 @@ test("repair failure, degraded fallback, and retry transition HUD state cleanly"
   expect(await hudCanvasLine(page, "annotation")).toContain("Trades 9,001");
 });
 
-test("timeframe switches (1W -> 3D -> 1D -> 12M) scope readiness by generation and reject stale responses", async ({ page }) => {
+test("timeframe switches (1w -> 3d -> 1d -> 12M) scope readiness by generation and reject stale responses", async ({ page }) => {
   await recordCanvasText(page);
   const now = await page.evaluate(() => Date.now());
-  const open1W = utcBucketStart(now, TF_MS["1W"]);
-  const open3D = utcBucketStart(now, TF_MS["3D"]);
-  const open1D = utcBucketStart(now, TF_MS["1D"]);
+  const open1W = utcBucketStart(now, TF_MS["1w"]);
+  const open3D = utcBucketStart(now, TF_MS["3d"]);
+  const open1D = utcBucketStart(now, TF_MS["1d"]);
   const open12M = utcBucketStart(now, TF_MS["12M"]);
 
   const held3dRepairs: Array<{ route: Route; url: URL }> = [];
@@ -599,7 +599,7 @@ test("timeframe switches (1W -> 3D -> 1D -> 12M) scope readiness by generation a
     const url = new URL(route.request().url());
     const interval = Number(url.searchParams.get("interval"));
     const isRepair = url.searchParams.get("purpose") === "__repair_trade_id_v1";
-    if (holdByInterval && isRepair && interval === TF_MS["3D"]) {
+    if (holdByInterval && isRepair && interval === TF_MS["3d"]) {
       held3dRepairs.push({ route, url });
       return;
     }
@@ -608,14 +608,14 @@ test("timeframe switches (1W -> 3D -> 1D -> 12M) scope readiness by generation a
       return;
     }
     const open =
-      interval === TF_MS["1W"] ? open1W
-        : interval === TF_MS["3D"] ? open3D
-          : interval === TF_MS["1D"] ? open1D
+      interval === TF_MS["1w"] ? open1W
+        : interval === TF_MS["3d"] ? open3D
+          : interval === TF_MS["1d"] ? open1D
             : open12M;
     const count =
-      interval === TF_MS["1W"] ? 700_000
-        : interval === TF_MS["3D"] ? 300_000
-          : interval === TF_MS["1D"] ? 100_000
+      interval === TF_MS["1w"] ? 700_000
+        : interval === TF_MS["3d"] ? 300_000
+          : interval === TF_MS["1d"] ? 100_000
             : 1_247_050_078;
     const bars = isRepair ? [makeWireBar(open, { count })] : [makeWireBar(open - interval, { count: count - 10 }), makeWireBar(open, { count })];
     await route.fulfill({
@@ -625,7 +625,7 @@ test("timeframe switches (1W -> 3D -> 1D -> 12M) scope readiness by generation a
   });
 
   await openHarness(page);
-  await mountRepairChart(page, "1W");
+  await mountRepairChart(page, "1w");
   const hook = page.locator('[data-testid="chart-hook"][data-panel-id="hud-243"]');
   await expect(hook).toHaveAttribute("data-history-loading", "false", { timeout: 10_000 });
   await page.evaluate((t) => {
@@ -633,14 +633,14 @@ test("timeframe switches (1W -> 3D -> 1D -> 12M) scope readiness by generation a
   }, now);
   await expect(hook).toHaveAttribute("data-hud", /Trades 700000/, { timeout: 10_000 });
 
-  // Switch 1W -> 3D (hold 3D repair), then rapidly to 1D -> 12M (hold 12M repair).
+  // Switch 1w -> 3d (hold 3d repair), then rapidly to 1d -> 12M (hold 12M repair).
   holdByInterval = true;
   await page.evaluate(async (t) => {
     const ctx = (window as unknown as Record<string, any>).__hud243;
     const runtime = ctx.handle.runtime;
-    runtime.updateState({ ...runtime.getState(), timeframe: "3D" });
+    runtime.updateState({ ...runtime.getState(), timeframe: "3d" });
     await new Promise((r) => setTimeout(r, 40));
-    runtime.updateState({ ...runtime.getState(), timeframe: "1D" });
+    runtime.updateState({ ...runtime.getState(), timeframe: "1d" });
     await new Promise((r) => setTimeout(r, 40));
     runtime.updateState({ ...runtime.getState(), timeframe: "12M" });
     ctx.services.pushTrade("BINANCE_FUTURES:btcusdt", {
