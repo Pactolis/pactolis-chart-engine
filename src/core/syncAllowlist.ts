@@ -109,25 +109,31 @@ export function getAllowedFootprintSyncMarkets(): readonly string[] {
 }
 
 
+function requiresFootprintCells(type: ChartType): boolean {
+  return type === "footprint" || type === "footprintProfile";
+}
+
 /**
- * Footprint allowlist dışında kalan bir marketin chart görünümü mum grafiğine
- * kilitlenir. Bu kontrol UI seçicisinden bağımsızdır; persisted state, link-group
- * veya elle dispatch edilen bir chart-type değişikliği de aynı kurala tabidir.
+ * Footprint allowlist dışında kalan bir markette trade hücrelerine bağımlı grafik
+ * tipleri (`footprint`, `footprintProfile`) mum grafiğine kilitlenir; yalnızca OHLC
+ * okuyan tipler (`tpo`, `candlestick`) olduğu gibi kalır. Bu kontrol UI seçicisinden
+ * bağımsızdır; persisted state, link-group veya elle dispatch edilen değişiklikler de
+ * aynı kurala tabidir.
  */
 export function constrainChartTypeForMarket(market: string, requested: ChartType): ChartType {
-  return isFootprintSyncAllowed(market) ? requested : "candlestick";
+  return !requiresFootprintCells(requested) || isFootprintSyncAllowed(market) ? requested : "candlestick";
 }
 
 /**
  * Kalıcı state'e yazılacak grafik tipi.
  *
  * Sunucu bir market için henüz konuşmadıysa `constrainChartTypeForMarket` önyükleme
- * listesine düşer ve listede olmayan (ör. operatörün sonradan eklediği)
- * marketleri geçici olarak mum grafiğine kilitler. O geçici kilit kullanıcının seçimi
- * değildir; kaydedilirse sayfa yenilendiğinde footprint seçimi kaybolur. Bu yüzden
- * seçim yalnızca sunucu bu market için footprint'i açıkça kapattığında mum grafiğine
- * indirilir.
+ * listesine düşer ve listede olmayan marketlerde yalnızca trade hücresi gerektiren
+ * tipleri geçici olarak mum grafiğine kilitler (`tpo` ise OHLC-only markette kalıcı
+ * olarak seçilebilir). O geçici kilit kullanıcının seçimi değildir; kaydedilirse sayfa
+ * yenilendiğinde footprint seçimi kaybolur. Bu yüzden yalnızca sunucu bu market için
+ * footprint'i açıkça kapattığında `footprint`/`footprintProfile` mum grafiğine indirilir.
  */
 export function persistableChartTypeForMarket(market: string, requested: ChartType): ChartType {
-  return getFootprintSupport(market) === false ? "candlestick" : requested;
+  return requiresFootprintCells(requested) && getFootprintSupport(market) === false ? "candlestick" : requested;
 }
