@@ -177,6 +177,12 @@ export class LiveTradeQueueCoordinator {
     this.subscribedMarket = null;
   }
 
+  clearSubscription(): void {
+    this.unsubscribe?.();
+    this.unsubscribe = null;
+    this.subscribedMarket = null;
+  }
+
   ensureDesiredSubscription(): void {
     if (this.host.isDisposed() || this.subscribedMarket === this.host.getMarket()) return;
     this._resubscribe();
@@ -193,7 +199,7 @@ export class LiveTradeQueueCoordinator {
     this.unsubscribe?.();
     const market = this.host.getMarket();
     this.unsubscribe = this.host.services.subscribeToTrades(market, (trade: AggTrade) => {
-      if (this.host.isDisposed() || this.paused) return;
+      if (this.host.isDisposed() || this.paused || market !== this.host.getMarket()) return;
       if (trade.market !== undefined && trade.market !== market) return;
       if (this.host.recordRecentRepairTrade(trade)) {
         if (!this._enqueuePendingTrade(trade)) this.host._scheduleFlush();

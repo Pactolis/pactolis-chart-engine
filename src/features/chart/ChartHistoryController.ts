@@ -16,6 +16,8 @@ import {
   incrementPerformanceCounter,
   isPerformanceTelemetryEnabled,
   recordPerformanceDuration,
+  recordTelemetryJob,
+  recordTelemetryMark,
 } from "../../core/performanceTelemetry.js";
 import type { ReplaySnapshot } from "../replay/replayController.js";
 import {
@@ -42,6 +44,7 @@ interface LiveBarSeedJob {
   readonly market: string;
   readonly timeframe: string;
   readonly intervalMs: number;
+  readonly generation: number;
   /** Bucket that was open when the seed was scheduled; the request never starts later. */
   readonly target: number;
   readonly startedAt: number;
@@ -282,6 +285,14 @@ export class ChartHistoryController {
         this.host.pipeline.series,
         this.host.pipeline.series.config.priceStep,
       );
+      if (isPerformanceTelemetryEnabled()) {
+        recordTelemetryJob("canonical-analysis", "applied", {
+          market: requestedMarket,
+          timeframe: requestedTimeframe,
+          generation: this.host.pipeline.currentGeneration,
+          reason: "history",
+        }, { bars: this.host.pipeline.series.length });
+      }
 
       const series = this.host.pipeline.series;
       if (series.length > 0) {
@@ -303,6 +314,7 @@ export class ChartHistoryController {
         }
       }
       settledForNpoc = true;
+      recordTelemetryMark("chart:history-ready", { market: requestedMarket, timeframe: requestedTimeframe });
     } catch (error) {
       if (!this.host.isDisposed()) {
         this.host.capture.failHistoryLoad(historyGeneration, requestedMarket, requestedTimeframe);
@@ -384,8 +396,9 @@ export class ChartHistoryController {
   }
 
   private runDayRefresh(dayTs: number, market: string, timeframe: string): void {
+    const generation = this.refreshGeneration;
     void this.host.pipeline.patchDay(dayTs).then(() => {
-      if (this.host.isDisposed() || this.host.replay.isActive()) return;
+      if (this.host.isDisposed() || this.host.replay.isActive() || generation !== this.refreshGeneration) return;
       const state = this.host.getState();
       if (state.market !== market || state.timeframe !== timeframe) return;
       this.host.svc.updateAnalysisFromSeries(
@@ -770,6 +783,12 @@ export class ChartHistoryController {
     this.liveOhlcSeedToken++;
     if (this.liveOhlcSeedTimer !== null) clearTimeout(this.liveOhlcSeedTimer);
     this.liveOhlcSeedTimer = null;
+    if (this.liveOhlcSeedAbort && !this.liveOhlcSeedAbort.signal.aborted && isPerformanceTelemetryEnabled()) {
+      const s = this.host.getState();
+      recordTelemetryJob("live-seed", "aborted", {
+        market: s.market, timeframe: s.timeframe, generation: this.host.pipeline.currentGeneration, reason: "live-seed",
+      });
+    }
     this.liveOhlcSeedAbort?.abort();
     this.liveOhlcSeedAbort = null;
   }
@@ -777,12 +796,13 @@ export class ChartHistoryController {
   private scheduleLiveBarOHLCSeed(market: string, timeframe: string, intervalMs: number): void {
     this.cancelLiveBarOHLCSeed();
     const token = this.liveOhlcSeedToken;
+    const generation = this.host.pipeline?.currentGeneration ?? this.refreshGeneration;
     // The window starts at the bucket that is open right now and the request always
     // runs to `Date.now()`, so a retry that lands after a rollover still repairs the
     // bucket this seed was scheduled for instead of abandoning it half-seeded.
     const target = bucketStart(Date.now(), intervalMs);
     void this.runLiveBarOHLCSeed({
-      token, market, timeframe, intervalMs, target,
+      token, market, timeframe, intervalMs, generation, target,
       startedAt: Date.now(), attempt: 0, consecutiveEmpty: 0,
     });
   }
@@ -829,6 +849,7 @@ export class ChartHistoryController {
         intervalMs: job.intervalMs,
         from: job.target,
         observedAt: requestedAt,
+        generation: job.generation,
       });
       // The open bucket is the one the history snapshot skipped; a response that only
       // carries buckets which have since closed has not finished the job.

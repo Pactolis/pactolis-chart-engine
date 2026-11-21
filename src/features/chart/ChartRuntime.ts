@@ -37,7 +37,11 @@ import type { NakedPocLevel } from "../../core/analysis/nakedPoc.js";
 import type { ReplaySnapshot } from "../replay/replayController.js";
 import { chartHost } from "./chartHost.js";
 import { drawIndicatorPaneBackground } from "../indicators/IndicatorManager.js";
-import { incrementPerformanceCounter, measurePerformance } from "../../core/performanceTelemetry.js";
+import {
+  incrementPerformanceCounter,
+  measurePerformance,
+  recordTelemetryMark,
+} from "../../core/performanceTelemetry.js";
 import { isLoadTraceEnabled } from "../../core/loadTrace.js";
 import type { IndicatorInstance } from "../indicators/types.js";
 import { footprintVisiblePriceRange } from "../../core/model/footprintAutoscale.js";
@@ -251,6 +255,7 @@ class ChartRuntimeImpl implements ChartRuntime, ChartInputHost {
   private readonly hookAttrCache = new Map<string, string>();
   private lastSeriesTailSig: string | null = null;
   private lastSeriesTailJson: string = "[]";
+  private pendingFirstCandleMark = false;
 
   activeMagnetSnap: MagnetSnapTarget | null = null;
 
@@ -618,6 +623,18 @@ class ChartRuntimeImpl implements ChartRuntime, ChartInputHost {
       },
       onRendered: (surfaces) => {
         if (surfaces & ChartSurfaceDirty.Annotation) this.analysisBridge?.onAnnotationRendered();
+        if (
+          this.pendingFirstCandleMark
+          && (surfaces & ChartSurfaceDirty.GpuScene) !== 0
+          && !this.surface.historyOverlay
+          && this.pipeline.series.length > 0
+        ) {
+          this.pendingFirstCandleMark = false;
+          recordTelemetryMark("chart:first-candle-painted", {
+            market: this.state.market,
+            timeframe: this.state.timeframe,
+          });
+        }
       },
     });
 
@@ -1850,6 +1867,7 @@ class ChartRuntimeImpl implements ChartRuntime, ChartInputHost {
   }
 
   private _setHistoryLoading(loading: boolean): void {
+    if (loading) this.pendingFirstCandleMark = true;
     this.surface.historyOverlay = loading;
     this.surface.historyBackground = false;
     this._hook.setAttribute("data-history-loading", String(loading));
