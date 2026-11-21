@@ -207,8 +207,8 @@ test("isLiveOnlyProvisionalBar identifies WS-only provisional bars without affec
 
 test("HUD marks live-only open bar consistently on canvas (wide + narrow) and data-hud, leaving closed bars untouched", () => {
   const now = Date.now();
-  const closedStart = bucketStart(now, INTERVAL_12M) - INTERVAL_12M;
   const openStart = bucketStart(now, INTERVAL_12M);
+  const closedStart = bucketStart(openStart - 1, INTERVAL_12M);
   const series = new FootprintSeries({ intervalMs: INTERVAL_12M, priceStep: 10, referenceMarket: MARKET, pricePrecision: 1 });
   series.loadBars([makeHistoryBar(closedStart, { open: 42_000, high: 99_000, low: 38_000, close: 93_500, count: 1_270_402_283 })]);
   series.addTrade({ id: "1", time: now - 500, price: 57_996.9, qty: 0.008, isBuy: true, market: MARKET, source: "live", receivedAt: now - 400 });
@@ -280,7 +280,7 @@ test("HUD marks live-only open bar consistently on canvas (wide + narrow) and da
 test("BTC 12M WS-before-history repro: stays live-only even after OHLC-only seed, then reconciles snapshot + tail without double-count", async (t) => {
   const now = Date.now();
   const openStart = bucketStart(now, INTERVAL_12M);
-  const prevStart = openStart - INTERVAL_12M;
+  const prevStart = bucketStart(openStart - 1, INTERVAL_12M);
   const repairReq = deferred();
   const phase1Req = deferred();
 
@@ -421,18 +421,21 @@ test("repair failure, degraded fallback, and retry transition HUD readiness accu
 
   const retries = [];
   let attempt = 0;
-  const h = makePipelineHarness(async (q) => {
-    attempt++;
-    if (attempt === 1) {
-      throw new Error("HTTP 503");
-    }
-    if (attempt === 2) {
-      q.onMeta?.({ ...repairMeta(q, { degraded: true, omitRepair: true }) });
+  const h = makePipelineHarness(
+    async (q) => {
+      attempt++;
+      if (attempt === 1) {
+        throw new Error("HTTP 503");
+      }
+      if (attempt === 2) {
+        q.onMeta?.({ ...repairMeta(q, { degraded: true, omitRepair: true }) });
+        return [makeHistoryBar(openStart, { volume: 50, delta: 10, count: 500 })];
+      }
+      q.onMeta?.(repairMeta(q, { watermark: "10" }));
       return [makeHistoryBar(openStart, { volume: 50, delta: 10, count: 500 })];
-    }
-    q.onMeta?.(repairMeta(q, { watermark: "10" }));
-    return [makeHistoryBar(openStart, { volume: 50, delta: 10, count: 500 })];
-  });
+    },
+    { intervalMs: INTERVAL_1D },
+  );
   h.pipeline.setRecentCoverageRetryScheduler((num, cb) => retries.push({ num, cb }));
 
   try {
@@ -474,11 +477,14 @@ test("fatal non-retryable repair error keeps live-only status instead of clearin
   const openStart = bucketStart(now, INTERVAL_1D);
   useFakeChartDataSource(t);
 
-  const h = makePipelineHarness(async (q) => {
-    q.onMeta?.(repairMeta(q, { watermark: "10" }));
-    // Return invalid bar outside range to trigger non-retryable RepairRejection(state: "error").
-    return [makeHistoryBar(openStart - 10 * INTERVAL_1D)];
-  });
+  const h = makePipelineHarness(
+    async (q) => {
+      q.onMeta?.(repairMeta(q, { watermark: "10" }));
+      // Return invalid bar outside range to trigger non-retryable RepairRejection(state: "error").
+      return [makeHistoryBar(openStart - 10 * INTERVAL_1D)];
+    },
+    { intervalMs: INTERVAL_1D },
+  );
 
   try {
     h.emitSession({ generation: 1, epoch: 1, session: "s1", boundaryAt: now - 1000 });
@@ -529,16 +535,17 @@ test("readiness is scoped to market + timeframe + bucket + generation and ignore
 
     // Rapidly switch to 12M before 3D resolves.
     await h.pipeline.changeConfig({ intervalMs: INTERVAL_12M });
-    const yearStart = bucketStart(now, INTERVAL_12M);
-    h.emitTrade({ id: "30", time: now - 100, price: 60_200, qty: 1, isBuy: true, market: MARKET, source: "live", receivedAt: now - 50 });
-    assert.equal(h.pipeline.isOpenBarLiveOnly(h.pipeline.series.get(yearStart), { now }), true);
+    const liveNow = Date.now() + 50;
+    const yearStart = bucketStart(liveNow, INTERVAL_12M);
+    h.emitTrade({ id: "30", time: liveNow, price: 60_200, qty: 1, isBuy: true, market: MARKET, source: "live", receivedAt: liveNow });
+    assert.equal(h.pipeline.isOpenBarLiveOnly(h.pipeline.series.get(yearStart), { now: liveNow }), true);
 
     // Resolving stale 3D repair must NOT corrupt or verify 12M!
     stale3dRepair.q.onMeta?.(repairMeta(stale3dRepair.q, { watermark: "20" }));
     stale3dRepair.resolve([makeHistoryBar(threeDayStart, { count: 777 })]);
     await tick();
     assert.equal(h.pipeline.series.get(yearStart)?.count, 1);
-    assert.equal(h.pipeline.isOpenBarLiveOnly(h.pipeline.series.get(yearStart), { now }), true);
+    assert.equal(h.pipeline.isOpenBarLiveOnly(h.pipeline.series.get(yearStart), { now: liveNow }), true);
 
     // Resolving current 12M repair verifies 12M.
     const current12mRepair = pendingRepairs.at(-1);
@@ -546,10 +553,10 @@ test("readiness is scoped to market + timeframe + bucket + generation and ignore
     current12mRepair.resolve([makeHistoryBar(yearStart, { count: 1_247_050_078 })]);
     await tick();
     assert.equal(h.pipeline.series.get(yearStart)?.count, 1_247_050_079);
-    assert.equal(h.pipeline.isOpenBarLiveOnly(h.pipeline.series.get(yearStart), { now }), false);
+    assert.equal(h.pipeline.isOpenBarLiveOnly(h.pipeline.series.get(yearStart), { now: liveNow }), false);
 
     // Market mismatch on scope query cannot falsely report verified.
-    assert.equal(h.pipeline.isOpenBarLiveOnly(h.pipeline.series.get(yearStart), { market: ETH_MARKET, now }), true);
+    assert.equal(h.pipeline.isOpenBarLiveOnly(h.pipeline.series.get(yearStart), { market: ETH_MARKET, now: liveNow }), true);
   } finally {
     h.pipeline.dispose();
   }
@@ -561,10 +568,13 @@ test("zero-history-trades repair bucket with tail trades and continuous rollover
   const nextBucket = currentBucket + INTERVAL_1D;
   useFakeChartDataSource(t);
 
-  const h = makePipelineHarness(async (q) => {
-    q.onMeta?.(repairMeta(q, { watermark: "100" }));
-    return [];
-  });
+  const h = makePipelineHarness(
+    async (q) => {
+      q.onMeta?.(repairMeta(q, { watermark: "100" }));
+      return [];
+    },
+    { intervalMs: INTERVAL_1D },
+  );
 
   try {
     h.emitSession({ generation: 1, epoch: 1, session: "s1", boundaryAt: now - 1000 });

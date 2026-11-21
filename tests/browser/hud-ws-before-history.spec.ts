@@ -617,7 +617,9 @@ test("timeframe switches (1w -> 3d -> 1d -> 12M) scope readiness by generation a
         : interval === TF_MS["3d"] ? 300_000
           : interval === TF_MS["1d"] ? 100_000
             : 1_247_050_078;
-    const bars = isRepair ? [makeWireBar(open, { count })] : [makeWireBar(open - interval, { count: count - 10 }), makeWireBar(open, { count })];
+    const bars = isRepair
+      ? [makeWireBar(open, { count })]
+      : [makeWireBar(utcBucketStart(open - 1, interval), { count: count - 10 }), makeWireBar(open, { count })];
     await route.fulfill({
       contentType: "application/json",
       body: JSON.stringify(isRepair ? repairEnvelope(url, bars, { watermark: "100" }) : historyEnvelope(url, bars)),
@@ -635,7 +637,7 @@ test("timeframe switches (1w -> 3d -> 1d -> 12M) scope readiness by generation a
 
   // Switch 1w -> 3d (hold 3d repair), then rapidly to 1d -> 12M (hold 12M repair).
   holdByInterval = true;
-  await page.evaluate(async (t) => {
+  await page.evaluate(async () => {
     const ctx = (window as unknown as Record<string, any>).__hud243;
     const runtime = ctx.handle.runtime;
     runtime.updateState({ ...runtime.getState(), timeframe: "3d" });
@@ -643,17 +645,18 @@ test("timeframe switches (1w -> 3d -> 1d -> 12M) scope readiness by generation a
     runtime.updateState({ ...runtime.getState(), timeframe: "1d" });
     await new Promise((r) => setTimeout(r, 40));
     runtime.updateState({ ...runtime.getState(), timeframe: "12M" });
+    const tradeTime = Date.now() + 50;
     ctx.services.pushTrade("BINANCE_FUTURES:btcusdt", {
       id: "105",
-      time: t - 50,
+      time: tradeTime,
       price: 58_500,
       qty: 1,
       isBuy: true,
       market: "BINANCE_FUTURES:btcusdt",
       source: "live",
-      receivedAt: t - 40,
+      receivedAt: tradeTime,
     });
-  }, now);
+  });
 
   await expect(hook).toHaveAttribute("data-timeframe", "12M", { timeout: 10_000 });
   await expect(hook).toHaveAttribute("data-hud", /^\[Live only\] /, { timeout: 10_000 });
