@@ -436,7 +436,40 @@ test("changeConfig clears series synchronously, defers ETH subscription/repair u
         from: query.from,
         to: query.to,
       });
-      return [alignedBar(openStart, 2500.5, true)];
+      return {
+        bars: [alignedBar(openStart, 2500.5, true)],
+        meta: {
+          schemaVersion: 2,
+          generatedAt: now,
+          footprint: { available: true, allowed: true, priceStep: query.priceStep },
+          repairSnapshot: {
+            schemaVersion: 1,
+            mode: "trade-id-v1",
+            source: "binance-usdm-aggTrade",
+            instrument: eth,
+            interval: intervalMs,
+            priceStep: query.priceStep,
+            authority: "provisional",
+            authorityToken: "token",
+            requestedFrom: query.from,
+            requestedTo: query.to,
+            bucketFrom: Math.floor(query.from / intervalMs) * intervalMs,
+            bucketThrough: Math.floor(query.to / intervalMs) * intervalMs,
+            coveredFrom: query.from,
+            coveredThrough: query.to,
+            watermark: "100",
+            coverageProof: {
+              kind: "resolver-contiguous-v1",
+              authority: "provisional",
+              requestedFrom: query.from,
+              requestedTo: query.to,
+              coveredFrom: query.from,
+              coveredThrough: query.to,
+              complete: true,
+            },
+          },
+        },
+      };
     },
   });
 
@@ -516,7 +549,6 @@ test("changeConfig clears series synchronously, defers ETH subscription/repair u
     // (c) Post-metadata subscription and data work with correct priceStep=0.5!
     assert.equal(pipeline.series.config.priceStep, 0.5);
     assert.equal(listeners.get(eth)?.size ?? 0, 1, "ETH must be subscribed after priceStep resolves");
-    assert.ok(historyRequests.every((req) => req.priceStep === 0.5), "any post-metadata history/repair request must use step 0.5");
 
     for (const cb of listeners.get(eth) ?? []) {
       cb({
@@ -528,10 +560,13 @@ test("changeConfig clears series synchronously, defers ETH subscription/repair u
         market: eth,
         source: "live",
         receivedAt: now + 10,
-        id: "eth-live-after-meta",
+        id: "101",
       });
     }
-    await drainMicrotasks(4);
+    await drainMicrotasks(8);
+
+    assert.ok(historyRequests.length >= 1, "deferred repair must run once priceStep resolves");
+    assert.ok(historyRequests.every((req) => req.priceStep === 0.5), "all post-metadata history/repair requests must use step 0.5");
 
     const ethBar = pipeline.series.get(openStart);
     assert.ok(ethBar, "ETH live bar must be created after metadata resolves");

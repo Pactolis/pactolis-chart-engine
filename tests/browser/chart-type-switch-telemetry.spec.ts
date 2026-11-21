@@ -82,7 +82,7 @@ async function installBrowserProbe(page: Page, intervalMs: number, frozenNow: nu
 
       const pipeline = Reflect.get(r, "pipeline") as {
         series: {
-          listReadonly(): readonly Array<{
+          listReadonly(): ReadonlyArray<{
             startTime: number;
             open: number;
             high: number;
