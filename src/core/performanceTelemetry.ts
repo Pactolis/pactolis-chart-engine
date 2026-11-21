@@ -106,11 +106,7 @@ export function recordTelemetryJob(
     jobKind,
     phase,
     atMs: performance.now(),
-    ...(extra?.bytes !== undefined ? { bytes: extra.bytes } : {}),
-    ...(extra?.bars !== undefined ? { bars: extra.bars } : {}),
-    ...(extra?.cells !== undefined ? { cells: extra.cells } : {}),
-    ...(extra?.reusable !== undefined ? { reusable: extra.reusable } : {}),
-    ...(extra?.detail !== undefined ? { detail: extra.detail } : {}),
+    ...extra,
   });
 }
 
@@ -121,9 +117,7 @@ export function recordTelemetryMark(
 ): void {
   if (!enabled) return;
   try {
-    if (typeof performance !== "undefined" && typeof performance.mark === "function") {
-      performance.mark(name);
-    }
+    if (typeof performance !== "undefined") performance.mark?.(name);
   } catch {
     // Ignore mark errors in non-standard environments.
   }
@@ -131,12 +125,7 @@ export function recordTelemetryMark(
   markEvents.push({
     name,
     atMs: performance.now(),
-    ...(context?.chartId !== undefined ? { chartId: context.chartId } : {}),
-    ...(context?.market !== undefined ? { market: context.market } : {}),
-    ...(context?.timeframe !== undefined ? { timeframe: context.timeframe } : {}),
-    ...(context?.chartType !== undefined ? { chartType: context.chartType } : {}),
-    ...(context?.generation !== undefined ? { generation: context.generation } : {}),
-    ...(context?.reason !== undefined ? { reason: context.reason } : {}),
+    ...context,
     ...(detail !== undefined ? { detail: { ...detail } } : {}),
   });
 }

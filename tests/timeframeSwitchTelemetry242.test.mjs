@@ -1,9 +1,9 @@
 import test from "node:test";
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 
 import { ChartDataPipeline } from "../dist/features/chart/ChartDataPipeline.js";
 import { ChartHistoryController } from "../dist/features/chart/ChartHistoryController.js";
-import { FootprintSeries } from "../dist/core/model/footprint.js";
 import { View } from "../dist/core/engine/view.js";
 import {
   configurePerformanceTelemetry,
@@ -123,7 +123,7 @@ function makeControllerHost(pipeline, svc, initialState) {
     revealCandles() {},
     setFootprintAvailable() {},
     notifyHistorySettled(market, timeframe) { settled.push({ market, timeframe }); },
-    onHistoryLoadBegin(ctx) { marks.push({ event: "begin", ...ctx }); },
+    onHistoryLoadBegin() { marks.push({ event: "begin" }); },
     onHistoryLoadSettled(ctx) { marks.push({ event: "settled", ...ctx }); },
     onOpenCandleCompleted(ctx) { marks.push({ event: "open-candle", ...ctx }); },
   };
@@ -179,9 +179,6 @@ test("rapid 1m -> 1d -> 15m and 1w -> 12M -> 5m switches abort superseded jobs a
     market: MARKET,
     intervalMs: 60_000,
     priceStep: 10,
-    chartId: "chart-242-test",
-    chartType: "footprint",
-    timeframe: "1m",
     services: svc,
   });
   const harness = makeControllerHost(pipeline, svc, {
@@ -287,8 +284,7 @@ test("rapid 1m -> 1d -> 15m and 1w -> 12M -> 5m switches abort superseded jobs a
     assert.ok(analysisJobs.some((job) => job.phase === "applied" && job.timeframe === "5m"));
     assert.ok(liveSeedJobs.some((job) => job.phase === "aborted"));
     assert.ok(switchSnap.jobs.every((job) =>
-      job.chartId === "chart-242-test"
-      && job.market === MARKET
+      job.market === MARKET
       && typeof job.timeframe === "string"
       && job.timeframe.length > 0
       && typeof job.generation === "number"
@@ -398,8 +394,6 @@ test("repeated range counter, cache hit counter, and open/closed candle merge ar
     market: MARKET,
     intervalMs,
     priceStep: 10,
-    chartId: "merge-check",
-    timeframe: "15m",
     services: makeServices(),
   });
 
@@ -420,4 +414,154 @@ test("repeated range counter, cache hit counter, and open/closed candle merge ar
   } finally {
     pipeline.dispose();
   }
+});
+
+test("changeConfig clears series synchronously, defers ETH subscription/repair until priceStep resolves, and writes live cells at new step", async (t) => {
+  const btc = "BINANCE_FUTURES:btcusdt";
+  const eth = "BINANCE_FUTURES:ethusdt";
+  const intervalMs = 15 * 60_000;
+  const now = Date.now();
+  const openStart = Math.floor(now / intervalMs) * intervalMs;
+  const ethStepGate = deferred();
+  const listeners = new Map();
+  const subscriptionEvents = [];
+  const historyRequests = [];
+  let readinessCb = null;
+
+  useFakeChartDataSource(t, {
+    history: async (query) => {
+      historyRequests.push({
+        markets: [...query.markets],
+        priceStep: query.priceStep,
+        from: query.from,
+        to: query.to,
+      });
+      return [alignedBar(openStart, 2500.5, true)];
+    },
+  });
+
+  const pipeline = new ChartDataPipeline({
+    market: btc,
+    intervalMs,
+    priceStep: 10,
+    services: {
+      subscribeToTrades(market, cb) {
+        if (!listeners.has(market)) listeners.set(market, new Set());
+        listeners.get(market).add(cb);
+        subscriptionEvents.push({ op: "subscribe", market });
+        return () => {
+          listeners.get(market)?.delete(cb);
+          subscriptionEvents.push({ op: "unsubscribe", market });
+        };
+      },
+      subscribeToTradeMarketReadiness(cb) {
+        readinessCb = cb;
+        return () => { readinessCb = null; };
+      },
+      fetchPriceStep: async (market) => (market === eth ? (await ethStepGate.promise).step : 10),
+      fetchPriceStepResult: (market) => (market === eth ? ethStepGate.promise : Promise.resolve({ step: 10, resolved: true })),
+      fetchPricePrecision: async () => 2,
+      triggerAutoSync() {},
+    },
+  });
+
+  try {
+    // Seed initial BTC series at step 10.
+    pipeline.series.loadBars([alignedBar(openStart - intervalMs, 60000, true)]);
+    assert.equal(pipeline.series.length, 1);
+    const capturedBtcListeners = [...(listeners.get(btc) ?? [])];
+    assert.equal(capturedBtcListeners.length, 1);
+
+    // Start BTC -> ETH market switch with delayed fetchPriceStep.
+    const switchPromise = pipeline.changeConfig({ market: eth });
+
+    // (a) Series cleared synchronously; BTC unsubscribed; ETH NOT yet subscribed during metadata window.
+    assert.equal(pipeline.series.length, 0, "stale BTC bars must be cleared synchronously");
+    assert.equal(listeners.get(btc)?.size ?? 0, 0, "old BTC subscription must be closed synchronously");
+    assert.equal(listeners.get(eth)?.size ?? 0, 0, "new ETH subscription must stay closed until priceStep resolves");
+
+    // Emit stale BTC trade, queued ETH trade, and ETH readiness during the metadata window.
+    for (const cb of capturedBtcListeners) {
+      cb({ time: now, price: 60005, qty: 1, isBuy: true, liquidation: false, market: btc, source: "live", receivedAt: now, id: "btc-stale" });
+    }
+    pipeline._enqueuePendingTrade({
+      time: now,
+      price: 2500.75,
+      qty: 1,
+      isBuy: true,
+      liquidation: false,
+      market: eth,
+      source: "live",
+      receivedAt: now,
+      id: "eth-during-meta",
+    });
+    readinessCb?.({
+      market: eth,
+      generation: 2,
+      boundaryAt: now,
+      repairFrom: openStart - intervalMs,
+    });
+    await drainMicrotasks(4);
+
+    // (a) & (b): Zero cells written with step 10, and zero history/repair requests sent with step 10!
+    assert.equal(pipeline.series.length, 0, "no cells may be written to series with old priceStep=10 during metadata window");
+    assert.equal(historyRequests.length, 0, "no history/repair request may start with old priceStep=10 during metadata window");
+    assert.equal(listeners.get(eth)?.size ?? 0, 0, "ETH trade subscription must remain unsubscribed before metadata resolves");
+
+    // Resolve ETH priceStep = 0.5 and await switch completion.
+    ethStepGate.resolve({ step: 0.5, resolved: true });
+    await switchPromise;
+    await drainMicrotasks(4);
+
+    // (c) Post-metadata subscription and data work with correct priceStep=0.5!
+    assert.equal(pipeline.series.config.priceStep, 0.5);
+    assert.equal(listeners.get(eth)?.size ?? 0, 1, "ETH must be subscribed after priceStep resolves");
+    assert.ok(historyRequests.every((req) => req.priceStep === 0.5), "any post-metadata history/repair request must use step 0.5");
+
+    for (const cb of listeners.get(eth) ?? []) {
+      cb({
+        time: now + 10,
+        price: 2500.75,
+        qty: 2,
+        isBuy: true,
+        liquidation: false,
+        market: eth,
+        source: "live",
+        receivedAt: now + 10,
+        id: "eth-live-after-meta",
+      });
+    }
+    await drainMicrotasks(4);
+
+    const ethBar = pipeline.series.get(openStart);
+    assert.ok(ethBar, "ETH live bar must be created after metadata resolves");
+    assert.ok(ethBar.cells.has(2500.5), "ETH trade at 2500.75 must quantize to step 0.5 bin (2500.5)");
+    assert.equal(ethBar.cells.has(2500), false, "no cell may remain at old step 10 bin (2500)");
+  } finally {
+    pipeline.dispose();
+  }
+});
+
+test("log minified dist sizes for changed telemetry and pipeline modules", async () => {
+  const { minifySync } = await import("rolldown/utils");
+  const files = [
+    "dist/core/loadTrace.js",
+    "dist/core/performanceTelemetry.js",
+    "dist/features/chart/ChartDataPipeline.js",
+    "dist/features/chart/ChartHistoryController.js",
+    "dist/features/chart/ChartRuntime.js",
+    "dist/features/chart/pipeline/historyLoad.js",
+    "dist/features/chart/pipeline/liveTradeQueue.js",
+  ];
+  const sizes = {};
+  let totalMinifiedBytes = 0;
+  for (const rel of files) {
+    const code = readFileSync(new URL(`../${rel}`, import.meta.url), "utf8");
+    const min = minifySync(rel, code);
+    const bytes = Buffer.byteLength(min.code, "utf8");
+    sizes[rel] = bytes;
+    totalMinifiedBytes += bytes;
+    assert.ok(bytes > 0, `expected non-empty minified output for ${rel}`);
+  }
+  console.log("MINIFIED_DIST_SIZES", JSON.stringify({ files: sizes, totalMinifiedBytes }));
 });

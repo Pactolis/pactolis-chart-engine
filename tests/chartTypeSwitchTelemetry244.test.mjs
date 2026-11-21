@@ -23,7 +23,7 @@ function deferred() {
   return { promise, resolve, reject };
 }
 
-test("chart-type job attribution distinguishes completed, aborted, and reusable work across rapid transitions", async (t) => {
+test("changeConfig aborts in-flight fillMissingCells work and telemetry records attributed jobs", async (t) => {
   configurePerformanceTelemetry({ enabled: true });
   resetPerformanceTelemetry();
   t.after(() => {
@@ -34,20 +34,17 @@ test("chart-type job attribution distinguishes completed, aborted, and reusable 
   const intervalMs = 15 * 60_000;
   const base = Math.floor((Date.now() - 2 * 86_400_000) / intervalMs) * intervalMs;
   const fillGate = deferred();
-  const refreshCalls = [];
+  const refreshSignals = [];
 
   useFakeChartDataSource(t, {
-    history: async (query) => {
-      refreshCalls.push(query);
-      return [
-        historyBar(base, {
-          open: 60000, high: 60200, low: 59900, close: 60100, volume: 10, delta: 2, count: 5,
-          cells: [{ priceBin: 60000, buyVol: 6, sellVol: 4, liquidationBuyVol: 0, liquidationSellVol: 0, count: 5, buyCount: 3, sellCount: 2 }],
-        }),
-      ];
-    },
+    history: async () => [
+      historyBar(base, {
+        open: 60000, high: 60200, low: 59900, close: 60100, volume: 10, delta: 2, count: 5,
+        cells: [{ priceBin: 60000, buyVol: 6, sellVol: 4, liquidationBuyVol: 0, liquidationSellVol: 0, count: 5, buyCount: 3, sellCount: 2 }],
+      }),
+    ],
     startRefresh: async (req) => {
-      refreshCalls.push(req);
+      refreshSignals.push(req.signal);
       return fillGate.promise;
     },
   });
@@ -56,9 +53,6 @@ test("chart-type job attribution distinguishes completed, aborted, and reusable 
     market: MARKET,
     intervalMs,
     priceStep: 10,
-    chartId: "chart-244-unit",
-    chartType: "candlestick",
-    timeframe: "15m",
     services: {
       subscribeToTrades: () => () => {},
       fetchPriceStep: async () => 10,
@@ -68,40 +62,44 @@ test("chart-type job attribution distinguishes completed, aborted, and reusable 
   });
 
   try {
-    // Load candle-only bars (simulating cold candlestick before footprint is filled).
     pipeline.series.loadBars([
       historyBar(base, { open: 60000, high: 60200, low: 59900, close: 60100, volume: 10, delta: 2, count: 5 }),
     ]);
 
-    // 1. Switch to footprint (Cluster) -> starts fillMissingCells while waiting.
-    pipeline.setTelemetryContext({ chartId: "chart-244-unit", chartType: "footprint", timeframe: "15m", reason: "chart-type-switch" });
-    recordTelemetryMark("chart:type-selected", pipeline.getTelemetryAttribution("chart-type-switch"), { reusable: false });
     pipeline.fillMissingCells(base, base + intervalMs);
+    assert.equal(refreshSignals.length, 1);
+    assert.equal(refreshSignals[0]?.aborted, false);
 
-    // 2. Rapidly switch to TPO before fillMissingCells resolves, then simulate config reset aborting stale work.
-    pipeline.setTelemetryContext({ chartId: "chart-244-unit", chartType: "tpo", timeframe: "15m", reason: "chart-type-switch" });
-    recordTelemetryJob("history", "reused", pipeline.getTelemetryAttribution("chart-type-switch"), {
-      bars: pipeline.series.length,
-      reusable: true,
-      detail: "reuse-for-tpo",
-    });
+    // Record reusable & selection marks via core telemetry
+    recordTelemetryMark("chart:type-selected", {
+      market: MARKET,
+      timeframe: "15m",
+      chartType: "footprint",
+      generation: pipeline.currentGeneration,
+      reason: "chart-type-switch",
+    }, { reusable: false });
+    recordTelemetryJob("history", "reused", {
+      market: MARKET,
+      timeframe: "15m",
+      chartType: "tpo",
+      generation: pipeline.currentGeneration,
+      reason: "chart-type-switch",
+    }, { bars: pipeline.series.length, reusable: true });
 
-    // 3. Trigger timeframe change while old footprint fill is still waiting -> old fill must be aborted cleanly.
-    await pipeline.changeConfig({ intervalMs: 5 * 60_000, chartType: "candlestick", reason: "timeframe-switch" });
+    // Trigger timeframe change while fillMissingCells is in-flight -> abort signal must trip
+    await pipeline.changeConfig({ intervalMs: 5 * 60_000 });
+    assert.equal(refreshSignals[0]?.aborted, true);
     fillGate.resolve();
     await new Promise((resolve) => setImmediate(resolve));
 
     const switchSnap = snapshotSwitchTelemetry();
     const reused = switchSnap.jobs.filter((job) => job.phase === "reused");
-    const aborted = switchSnap.jobs.filter((job) => job.phase === "aborted");
     const selectedMarks = switchSnap.marks.filter((mark) => mark.name === "chart:type-selected");
 
     assert.equal(reused.length, 1);
     assert.equal(reused[0].chartType, "tpo");
     assert.equal(reused[0].reusable, true);
-    assert.ok(aborted.some((job) => job.detail === "config-change"));
     assert.equal(selectedMarks.length, 1);
-    assert.equal(selectedMarks[0].chartId, "chart-244-unit");
     assert.equal(selectedMarks[0].market, MARKET);
     assert.equal(selectedMarks[0].timeframe, "15m");
     assert.equal(selectedMarks[0].chartType, "footprint");
@@ -110,18 +108,23 @@ test("chart-type job attribution distinguishes completed, aborted, and reusable 
   }
 });
 
-test("telemetry marks distinguish empty/placeholder rejections from verified painted frames", () => {
-  configurePerformanceTelemetry({ enabled: true });
+test("telemetry marks preserve monotonic ordering when enabled and are no-ops when disabled", () => {
+  configurePerformanceTelemetry({ enabled: false });
   resetPerformanceTelemetry();
 
   const ctx = {
-    chartId: "chart-244-stages",
     market: MARKET,
     timeframe: "15m",
     chartType: "footprint",
     generation: 2,
     reason: "chart-type-switch",
   };
+  recordTelemetryMark("chart:type-selected", ctx);
+  recordTelemetryJob("history", "started", ctx);
+  assert.equal(snapshotSwitchTelemetry().marks.length, 0);
+  assert.equal(snapshotSwitchTelemetry().jobs.length, 0);
+
+  configurePerformanceTelemetry({ enabled: true });
   recordTelemetryMark("chart:type-selected", ctx, { previousChartType: "candlestick", reusable: false });
   recordTelemetryMark("chart:type-data-requested", ctx, { from: 1000, to: 2000 });
   recordTelemetryMark("chart:first-data-frame-painted", ctx, { elapsedMs: 12.5, visibleBars: 40 });

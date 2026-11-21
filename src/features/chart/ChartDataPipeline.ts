@@ -5,13 +5,7 @@ import { bucketStart } from "../../core/time.js";
 import { TIMEFRAMES } from "../../core/timeframes.js";
 import type { EnvelopeMeta } from "../../core/envelope.js";
 import type { ChartDataStateInputs } from "./chartDataState.js";
-import {
-  incrementPerformanceCounter,
-  measurePerformance,
-  recordTelemetryJob,
-  type JobAttribution,
-} from "../../core/performanceTelemetry.js";
-import { TIMEFRAMES } from "../../core/timeframes.js";
+import { incrementPerformanceCounter, measurePerformance } from "../../core/performanceTelemetry.js";
 import {
   makeDataUpdateEvent,
   snapshotFromSeries,
@@ -50,9 +44,6 @@ export interface PipelineOptions {
   intervalMs: number;
   priceStep: number;
   pricePrecision?: number;
-  chartId?: string;
-  chartType?: string;
-  timeframe?: string;
   services: ChartDataPipelineServices;
   scheduler?: TradeFlushScheduler;
   priceStepResolveTimeoutMs?: number;
@@ -89,13 +80,10 @@ export class ChartDataPipeline {
   private sessionUnsubscribe: (() => void) | null = null;
   private readinessUnsubscribe: (() => void) | null = null;
   private latestMarketReadiness: TradeMarketReadiness | null = null;
+  private pendingDeferredReadiness: TradeMarketReadiness | null = null;
   private disposed = false;
   private _market: string;
   private _intervalMs: number;
-  private _chartId: string | undefined;
-  private _chartType: string | undefined;
-  private _timeframe: string | undefined;
-  private _reason = "initial-load";
   private lastAppliedTradeTime = -Infinity;
   private generation = 0;
   /** Aborted on dispose so a pending step-lookup retry leaves no timer behind. */
@@ -121,9 +109,6 @@ export class ChartDataPipeline {
   constructor(opts: PipelineOptions) {
     this._market = opts.market;
     this._intervalMs = opts.intervalMs;
-    this._chartId = opts.chartId;
-    this._chartType = opts.chartType;
-    this._timeframe = opts.timeframe;
     this.services = opts.services;
     const integrityReporter = this.services.acquirePipelineIntegrityReporter?.();
     // A trade identity conflict stays reported until the series is reset: unrelated
@@ -166,9 +151,6 @@ export class ChartDataPipeline {
       getGeneration: () => this.generation,
       getMarket: () => this._market,
       getIntervalMs: () => this._intervalMs,
-      getChartId: () => this._chartId,
-      getTimeframe: () => this.resolvedTimeframe(),
-      getChartType: () => this._chartType,
       isBlockingCandleMaintenance: () => this.repair.isBlockingCandleMaintenance(),
       beginExplicitHistory: (range) => this.repair.beginExplicitHistory(range),
       finishExplicitHistory: (token) => this.repair.finishExplicitHistory(token),
@@ -273,7 +255,7 @@ export class ChartDataPipeline {
     const readinessSupported = typeof this.services.subscribeToTradeMarketReadiness === "function";
     this.sessionUnsubscribe = this.services.subscribeToTradeSessions?.((session) => {
       this.cancelRecentFootprintCoverageRepair();
-      this.repair.onSession(session, !readinessSupported);
+      this.repair.onSession(session, !readinessSupported && !this.priceStepCoordinator.pendingMarketMetadata);
     }) ?? null;
     this.readinessUnsubscribe = this.services.subscribeToTradeMarketReadiness?.((readiness) => {
       if (this.disposed) return;
@@ -281,6 +263,10 @@ export class ChartDataPipeline {
       // A venue-recovery gap is repaired once; a later timeframe change replays only the boundary.
       const { repairFrom: _repairFrom, ...boundary } = readiness;
       this.latestMarketReadiness = boundary;
+      if (this.priceStepCoordinator.pendingMarketMetadata) {
+        this.pendingDeferredReadiness = readiness;
+        return;
+      }
       logLoadTrace(this.historyCoordinator.activeHistoryTraceId, "stream.market.acknowledged", { market: readiness.market, generation: readiness.generation });
       this.repair.onMarketReady(readiness);
     }) ?? null;
@@ -290,30 +276,6 @@ export class ChartDataPipeline {
   get intervalMs(): number { return this._intervalMs; }
   get currentGeneration(): number { return this.generation; }
   get liveBootstrapReconciled(): boolean { return this.repair.isReconciled; }
-
-  private resolvedTimeframe(): string {
-    return this._timeframe
-      ?? TIMEFRAMES.find((item) => item.ms === this._intervalMs)?.label
-      ?? `${this._intervalMs}ms`;
-  }
-
-  setTelemetryContext(context: { chartId?: string; chartType?: string; timeframe?: string; reason?: string }): void {
-    if (context.chartId !== undefined) this._chartId = context.chartId;
-    if (context.chartType !== undefined) this._chartType = context.chartType;
-    if (context.timeframe !== undefined) this._timeframe = context.timeframe;
-    if (context.reason !== undefined) this._reason = context.reason;
-  }
-
-  getTelemetryAttribution(reason = this._reason): JobAttribution {
-    return {
-      chartId: this._chartId,
-      market: this._market,
-      timeframe: this.resolvedTimeframe(),
-      chartType: this._chartType,
-      generation: this.generation,
-      reason,
-    };
-  }
 
   get activeHistoryTraceId(): string | undefined { return this.historyCoordinator.activeHistoryTraceId; }
   set activeHistoryTraceId(value: string | undefined) { this.historyCoordinator.activeHistoryTraceId = value; }
@@ -397,7 +359,7 @@ export class ChartDataPipeline {
     };
   }
 
-  cancelHistoryLoad(reason?: string): void { this.historyCoordinator.cancelHistoryLoad(reason); }
+  cancelHistoryLoad(): void { this.historyCoordinator.cancelHistoryLoad(); }
   cancelPatchDay(): void { this.historyCoordinator.cancelPatchDay(); }
   async loadHistory(opts: LoadHistoryOpts): Promise<void> {
     const market = this._market;
@@ -536,31 +498,14 @@ export class ChartDataPipeline {
     return this.getOpenBucketReadiness(bar, opts).status === "live-only";
   }
   cancelRecentFootprintCoverageRepair(): void { this.recentRepairCoordinator.cancel(); }
-  async repairRecentFootprintCoverage(from: number, to: number): Promise<RecentFootprintRepairOutcome> {
-    const attribution = this.getTelemetryAttribution("recent-coverage-repair");
-    recordTelemetryJob("live-seed", "started", attribution, { detail: `repair:${from}-${to}` });
-    const outcome = await this.recentRepairCoordinator.repair(from, to);
-    recordTelemetryJob(
-      "live-seed",
-      outcome === "complete" ? "applied" : outcome === "stop" ? "aborted" : "responded",
-      attribution,
-      { detail: `repair:${outcome}` },
-    );
-    return outcome;
+  repairRecentFootprintCoverage(from: number, to: number): Promise<RecentFootprintRepairOutcome> {
+    return this.recentRepairCoordinator.repair(from, to);
   }
   refreshLiveBarOHLC(): Promise<void> { return this.historyCoordinator.refreshLiveBarOHLC(); }
   cancelLiveBarOHLCRefresh(): void { this.historyCoordinator.cancelLiveBarOHLCRefresh(); }
   applyLiveBarSeed(
     bars: readonly FootprintBar[],
-    opts: {
-      market: string;
-      intervalMs: number;
-      from: number;
-      observedAt: number;
-      fillMissingOnly?: boolean;
-      generation?: number;
-      reason?: string;
-    },
+    opts: { market: string; intervalMs: number; from: number; observedAt: number; fillMissingOnly?: boolean; generation?: number },
   ): number[] {
     const generation = this.generation;
     const missingBefore = new Set<number>();
@@ -578,72 +523,61 @@ export class ChartDataPipeline {
     return applied;
   }
 
-  async changeConfig(opts: {
-    market?: string;
-    intervalMs?: number;
-    timeframe?: string;
-    chartType?: string;
-    reason?: string;
-  }): Promise<void> {
+  async changeConfig(opts: { market?: string; intervalMs?: number }): Promise<void> {
     if (this.disposed) return;
     const marketChanged = opts.market !== undefined && opts.market !== this._market;
     const tfChanged = opts.intervalMs !== undefined && opts.intervalMs !== this._intervalMs;
-    if (opts.chartType !== undefined) this._chartType = opts.chartType;
-    if (opts.reason !== undefined) this._reason = opts.reason;
+    if (marketChanged || tfChanged) this.repair.cancel();
+    if (marketChanged) {
+      this.latestMarketReadiness = null;
+      this.pendingDeferredReadiness = null;
+      this._market = opts.market!;
+    }
+    if (tfChanged) this._intervalMs = opts.intervalMs!;
     if (marketChanged || tfChanged) {
-      if (this.recentRepairCoordinator.state !== null) {
-        recordTelemetryJob("live-seed", "aborted", this.getTelemetryAttribution(opts.reason ?? "config-change"), {
-          detail: "recent-coverage-repair",
-        });
-      }
-      this.repair.cancel();
       this.cancelRecentFootprintCoverageRepair();
       this.generation++;
       this.historyCoordinator.resetForConfigChange(true);
-    }
-    if (marketChanged) this.latestMarketReadiness = null;
-    if (marketChanged) this._market = opts.market!;
-    if (tfChanged) this._intervalMs = opts.intervalMs!;
-    if (opts.timeframe !== undefined) this._timeframe = opts.timeframe;
-    else if (tfChanged) {
-      this._timeframe = TIMEFRAMES.find((item) => item.ms === this._intervalMs)?.label;
-    }
-    if (marketChanged || tfChanged) {
-      // Reset queues, series and subscriptions synchronously before any metadata await so a
-      // superseded switch can never leave previous-market/previous-interval bars or trades behind.
+      // Clear stale series/queues synchronously so superseded switches never leave old-market bars
+      // visible, while keeping new-market subscription & repair gated until priceStep resolves.
       this.tradeQueueCoordinator.resetOnConfigOrStepChange();
+      if (marketChanged) this.tradeQueueCoordinator.clearSubscription();
       this.lastAppliedTradeTime = -Infinity;
       this.historyCoordinator.resetForConfigChange(false);
       this.integrityReporter?.report("healthy");
       this.onDataDegraded?.(false, "");
       if (tfChanged) this.series.setInterval(this._intervalMs);
       else if (marketChanged) this.series.clear();
-      this.tradeQueueCoordinator.ensureDesiredSubscription();
-      recordTelemetryJob(
-        "history",
-        "started",
-        this.getTelemetryAttribution(opts.reason ?? (marketChanged && tfChanged ? "market-and-timeframe-switch" : marketChanged ? "market-switch" : "timeframe-switch")),
-        { detail: "config-change" },
-      );
-    } else {
-      this.tradeQueueCoordinator.ensureDesiredSubscription();
     }
     if (marketChanged) {
       const generation = this.generation;
       await this.priceStepCoordinator.trackMarketSwitch(this._market);
       if (this.disposed || generation !== this.generation) {
-        this.tradeQueueCoordinator.ensureDesiredSubscription();
+        if (!this.priceStepCoordinator.pendingMarketMetadata) this.tradeQueueCoordinator.ensureDesiredSubscription();
         return;
       }
     } else if (tfChanged && this.priceStepCoordinator.pendingMarketMetadata) {
       const generation = this.generation;
       await this.priceStepCoordinator.awaitPendingMarketMetadata();
       if (this.disposed || generation !== this.generation) {
-        this.tradeQueueCoordinator.ensureDesiredSubscription();
+        if (!this.priceStepCoordinator.pendingMarketMetadata) this.tradeQueueCoordinator.ensureDesiredSubscription();
         return;
       }
     }
-    if (tfChanged && !marketChanged && this.latestMarketReadiness?.market === this._market) {
+    if (tfChanged || marketChanged) {
+      this.tradeQueueCoordinator.resetOnConfigOrStepChange();
+      this.lastAppliedTradeTime = -Infinity;
+      this.historyCoordinator.resetForConfigChange(false);
+      this.integrityReporter?.report("healthy");
+      this.onDataDegraded?.(false, "");
+    }
+    this.tradeQueueCoordinator.ensureDesiredSubscription();
+    if (marketChanged && this.pendingDeferredReadiness?.market === this._market) {
+      const readiness = this.pendingDeferredReadiness;
+      this.pendingDeferredReadiness = null;
+      logLoadTrace(this.historyCoordinator.activeHistoryTraceId, "stream.market.acknowledged", { market: readiness.market, generation: readiness.generation });
+      this.repair.onMarketReady(readiness);
+    } else if (tfChanged && !marketChanged && this.latestMarketReadiness?.market === this._market) {
       // The acknowledged boundary can be hours old. Repairing from it would let the live tail stretch
       // the replaced range over the history just loaded for the new timeframe, so start from now.
       const readiness = this.latestMarketReadiness;
