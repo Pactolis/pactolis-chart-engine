@@ -155,6 +155,7 @@ test("rapid 1m -> 1d -> 15m and 1w -> 12M -> 5m switches abort superseded jobs a
   });
 
   const pendingByInterval = new Map();
+  const pendingLiveSeeds = [];
   const seenSignals = [];
   useFakeChartDataSource(t, {
     history: async (query) => {
@@ -166,7 +167,11 @@ test("rapid 1m -> 1d -> 15m and 1w -> 12M -> 5m switches abort superseded jobs a
       // the generation guard even if a transport resolves after abort().
       return gate.promise;
     },
-    liveOhlc: async () => [],
+    liveOhlc: async (query) => {
+      const gate = deferred();
+      pendingLiveSeeds.push({ query, gate });
+      return gate.promise;
+    },
   });
 
   const svc = makeServices();
@@ -273,6 +278,9 @@ test("rapid 1m -> 1d -> 15m and 1w -> 12M -> 5m switches abort superseded jobs a
     const historyJobs = switchSnap.jobs.filter((job) => job.jobKind === "history");
     const analysisJobs = switchSnap.jobs.filter((job) => job.jobKind === "canonical-analysis");
     const liveSeedJobs = switchSnap.jobs.filter((job) => job.jobKind === "live-seed");
+
+    for (const seed of pendingLiveSeeds) seed.gate.resolve([]);
+    await drainMicrotasks(4);
 
     assert.ok(historyJobs.some((job) => job.phase === "aborted" && job.timeframe === "1d"));
     assert.ok(historyJobs.some((job) => job.phase === "applied" && job.timeframe === "5m"));
