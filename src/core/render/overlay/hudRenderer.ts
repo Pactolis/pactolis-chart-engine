@@ -1,8 +1,10 @@
 import type { View } from "../../engine/view.js";
-import type { FootprintSeries } from "../../model/footprint.js";
+import { isLiveOnlyProvisionalBar, type FootprintSeries } from "../../model/footprint.js";
+import type { FootprintBar } from "../../types.js";
 import type { ResolvedChartDisplayOptions } from "../../model/chartDisplayOptions.js";
 import { quoteVolumeForBar } from "../../model/footprintCellMetrics.js";
 import { configDecimals } from "../../axisLabelUtils.js";
+import { bucketStart } from "../../time.js";
 import { uiColor } from "../../ui/seriesPalette.js";
 import { HUD_ROW_HEIGHT, hudMaxRows, layoutHud, type HudPart } from "../hudLayout.js";
 import { TOUCH_MENU_BUTTON_RESERVE, touchMenuButtonRect } from "../touchControlsRenderer.js";
@@ -13,6 +15,18 @@ export interface HudRendererDeps {
   readonly displayOptions: ResolvedChartDisplayOptions;
   readonly getSyncCrosshairTime?: () => number | null;
   readonly onHudText?: (text: string | null) => void;
+  readonly isOpenBarLiveOnly?: (bar: FootprintBar) => boolean;
+}
+
+function liveOnlyLabel(locale: string): string {
+  const normalized = locale.toLowerCase();
+  return normalized === "tr" || normalized.startsWith("tr-") || normalized.startsWith("tr_")
+    ? "Yalnızca canlı"
+    : "Live only";
+}
+
+function isStandaloneOpenLiveOnlyBar(bar: FootprintBar, intervalMs: number): boolean {
+  return isLiveOnlyProvisionalBar(bar) && bar.startTime >= bucketStart(Date.now(), intervalMs);
 }
 
 const hudNumberFormatters = new Map<string, Intl.NumberFormat>();
@@ -85,7 +99,10 @@ export function drawHud(
   const displayOptions = deps.displayOptions;
   const locale = displayOptions.numberLocale;
   const labels = displayOptions.labels;
-  const partialMarker = bar.completeness === "partial" ? "≈" : "";
+  const liveOnly = bar.completeness !== "partial"
+    && (deps.isOpenBarLiveOnly?.(bar) ?? isStandaloneOpenLiveOnlyBar(bar, series.config.intervalMs));
+  const partialMarker = bar.completeness === "partial" || liveOnly ? "≈" : "";
+  const liveOnlyTag = liveOnly ? `[${liveOnlyLabel(locale)}]` : "";
   const volTxt = deps.showNotional ? fmtNotional(quoteVolumeForBar(bar), locale) : fmtVol(bar.volume, locale);
   const deltaTxt = deps.showNotional
     ? fmtNotional(Math.abs(bar.delta) * bar.close, locale)
@@ -99,12 +116,16 @@ export function drawHud(
   ctx.textAlign = "left";
   ctx.textBaseline = "top";
   ctx.fillStyle = uiColor.textHeading;
-  const hudText = `O ${fmtFixed(bar.open, pd, locale)} H ${fmtFixed(bar.high, pd, locale)} L ${fmtFixed(bar.low, pd, locale)} `
+  const livePrefix = liveOnlyTag ? `${liveOnlyTag} ` : "";
+  const hudText = `${livePrefix}O ${fmtFixed(bar.open, pd, locale)} H ${fmtFixed(bar.high, pd, locale)} L ${fmtFixed(bar.low, pd, locale)} `
     + `C ${fmtFixed(bar.close, pd, locale)} ${labels.volume} ${partialMarker}${unit}${volTxt} Δ ${partialMarker}${bar.delta >= 0 ? "+" : "-"}${unit}${deltaTxt} `
     + `${labels.trades} ${partialMarker}${bar.count} ${labels.range} ${fmtFixed(rangePct, 2, locale)}% ${labels.change} ${changePct >= 0 ? "+" : ""}${fmtFixed(changePct, 2, locale)}%`;
   deps.onHudText?.(hudText);
 
-  const prefix = `${hovered ? "◆ " : ""}O ${fmtFixed(bar.open, pd, locale)}  H ${fmtFixed(bar.high, pd, locale)}  L ${fmtFixed(bar.low, pd, locale)}  C ${fmtFixed(bar.close, pd, locale)}  ${labels.volume} ${partialMarker}${unit}${volTxt}`;
+  const hover = hovered ? "◆ " : "";
+  const liveOnlyPart = liveOnlyTag ? `${hover}${liveOnlyTag}` : "";
+  const liveOnlyWidth = liveOnlyPart ? ctx.measureText(liveOnlyPart + "  ").width : 0;
+  const prefix = `${liveOnlyPart ? "" : hover}O ${fmtFixed(bar.open, pd, locale)}  H ${fmtFixed(bar.high, pd, locale)}  L ${fmtFixed(bar.low, pd, locale)}  C ${fmtFixed(bar.close, pd, locale)}  ${labels.volume} ${partialMarker}${unit}${volTxt}`;
   const prefixWidth = ctx.measureText(prefix + "   ").width;
   const deltaPart = `Δ ${partialMarker}${bar.delta >= 0 ? "+" : "-"}${unit}${deltaTxt}`;
   const deltaWidth = ctx.measureText(deltaPart + "   ").width;
@@ -112,7 +133,8 @@ export function drawHud(
   const tradesWidth = ctx.measureText(tradesPart + "   ").width;
 
   const rangePart = `${labels.range} ${fmtFixed(rangePct, 2, locale)}%`;
-  const rangeX = x + prefixWidth + deltaWidth + tradesWidth;
+  const prefixX = x + liveOnlyWidth;
+  const rangeX = prefixX + prefixWidth + deltaWidth + tradesWidth;
   const rangeWidth = ctx.measureText(rangePart + "   ").width;
 
   const chgPart = `${labels.change} ${changePct >= 0 ? "+" : ""}${fmtFixed(changePct, 2, locale)}%`;
@@ -122,14 +144,14 @@ export function drawHud(
   // running over the price axis. The corner menu button keeps its column in touch mode.
   const reserved = crosshair.touch && touchMenuButtonRect(view) !== null ? TOUCH_MENU_BUTTON_RESERVE : 0;
   const maxWidth = view.area.width - 16 - reserved;
-  if (prefixWidth + deltaWidth + tradesWidth + rangeWidth + chgWidth > maxWidth) {
-    const hover = hovered ? "◆ " : "";
+  if (liveOnlyWidth + prefixWidth + deltaWidth + tradesWidth + rangeWidth + chgWidth > maxWidth) {
     const parts: HudPart[] = [
-      { text: `${hover}O ${fmtFixed(bar.open, pd, locale)}`, color: uiColor.textHeading, dropOrder: 0 },
+      ...(liveOnlyTag ? [{ text: `${hover}${liveOnlyTag}`, color: uiColor.warn, dropOrder: 0 }] : []),
+      { text: `${liveOnlyTag ? "" : hover}O ${fmtFixed(bar.open, pd, locale)}`, color: uiColor.textHeading, dropOrder: 0 },
       { text: `H ${fmtFixed(bar.high, pd, locale)}`, color: uiColor.textHeading, dropOrder: 0 },
       { text: `L ${fmtFixed(bar.low, pd, locale)}`, color: uiColor.textHeading, dropOrder: 0 },
       { text: `C ${fmtFixed(bar.close, pd, locale)}`, color: uiColor.textHeading, dropOrder: 0 },
-      { text: `${labels.volume} ${unit}${volTxt}`, color: uiColor.textHeading, dropOrder: 2 },
+      { text: `${labels.volume} ${partialMarker}${unit}${volTxt}`, color: uiColor.textHeading, dropOrder: 2 },
       { text: deltaPart, color: bar.delta >= 0 ? uiColor.buy : uiColor.sell, dropOrder: 3 },
       { text: tradesPart, color: uiColor.textSecondary, dropOrder: 4 },
       { text: rangePart, color: uiColor.textSecondary, dropOrder: 5 },
@@ -141,16 +163,20 @@ export function drawHud(
 
   const pillW = Math.min(
     Math.max(0, view.area.width - 8),
-    prefixWidth + deltaWidth + tradesWidth + rangeWidth + chgWidth + 12,
+    liveOnlyWidth + prefixWidth + deltaWidth + tradesWidth + rangeWidth + chgWidth + 12,
   );
   drawOverlayPill(ctx, x - 6, 4, pillW, 20, 5, "rgba(11, 16, 24, 0.78)", "rgba(148, 163, 184, 0.16)");
 
+  if (liveOnlyPart) {
+    ctx.fillStyle = uiColor.warn;
+    ctx.fillText(liveOnlyPart, x, 8);
+  }
   ctx.fillStyle = uiColor.textHeading;
-  ctx.fillText(prefix, x, 8);
+  ctx.fillText(prefix, prefixX, 8);
   ctx.fillStyle = bar.delta >= 0 ? uiColor.buy : uiColor.sell;
-  ctx.fillText(deltaPart, x + prefixWidth, 8);
+  ctx.fillText(deltaPart, prefixX + prefixWidth, 8);
   ctx.fillStyle = uiColor.textSecondary;
-  ctx.fillText(tradesPart, x + prefixWidth + deltaWidth, 8);
+  ctx.fillText(tradesPart, prefixX + prefixWidth + deltaWidth, 8);
   ctx.fillText(rangePart, rangeX, 8);
   ctx.fillStyle = changePct >= 0 ? uiColor.buy : uiColor.sell;
   ctx.fillText(chgPart, rangeX + rangeWidth, 8);

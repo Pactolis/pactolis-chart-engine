@@ -1,6 +1,8 @@
 /** Per-panel historical/live chart data facade. */
 import { FootprintSeries } from "../../core/model/footprint.js";
 import type { AggTrade, FootprintBar } from "../../core/types.js";
+import { bucketStart } from "../../core/time.js";
+import { TIMEFRAMES } from "../../core/timeframes.js";
 import type { EnvelopeMeta } from "../../core/envelope.js";
 import type { ChartDataStateInputs } from "./chartDataState.js";
 import { incrementPerformanceCounter, measurePerformance } from "../../core/performanceTelemetry.js";
@@ -11,7 +13,7 @@ import {
 } from "../../core/dataUpdateEvent.js";
 import { logLoadTrace } from "../../core/loadTrace.js";
 import type { ChartDataPipelineServices, PipelineIntegrityReporter, TradeMarketReadiness } from "./ChartDataPipelinePorts.js";
-import { LiveTradeRepairController } from "./LiveTradeRepairController.js";
+import { LiveTradeRepairController, type RepairReconciledSummary } from "./LiveTradeRepairController.js";
 import type { LiveRepairRetryReason } from "./recentCoverageRetryPolicy.js";
 import {
   HistoryLoadCoordinator,
@@ -52,6 +54,24 @@ export interface PipelineOptions {
 
 export type PipelineDataStateInputs = Omit<ChartDataStateInputs, "historyStatus" | "footprintSupported" | "transportOffline">;
 
+export interface OpenBucketReadiness {
+  readonly market: string;
+  readonly timeframe: string;
+  readonly intervalMs: number;
+  readonly bucket: number;
+  readonly generation: number;
+  readonly status: "verified" | "partial" | "live-only";
+  readonly source: "repair" | "history" | "live-rollover" | "live-only";
+}
+
+function timeframeLabelForInterval(intervalMs: number): string {
+  return TIMEFRAMES.find((tf) => tf.ms === intervalMs)?.label ?? String(intervalMs);
+}
+
+function openBucketScopeKey(market: string, intervalMs: number, bucket: number, generation: number): string {
+  return `${market}\u0000${intervalMs}\u0000${bucket}\u0000${generation}`;
+}
+
 export class ChartDataPipeline {
   readonly series: FootprintSeries;
   readonly services: ChartDataPipelineServices;
@@ -81,6 +101,9 @@ export class ChartDataPipeline {
 
   /** Last state this pipeline reported to its integrity gate. */
   private integrityState: { state: "pending" | "healthy" | "error"; detail: string } = { state: "healthy", detail: "" };
+  private readonly verifiedOpenBuckets = new Map<string, "repair" | "history">();
+  private lastReconciledScope: { market: string; intervalMs: number; generation: number; maxBucket: number } | null = null;
+  private lastSettledHistoryScope: { market: string; intervalMs: number; generation: number; bucket: number } | null = null;
 
   constructor(opts: PipelineOptions) {
     this._market = opts.market;
@@ -218,7 +241,11 @@ export class ChartDataPipeline {
       setDataDegraded: (degraded, detail) => this.onDataDegraded?.(degraded, detail),
       reportIdentityConflicts: (count) => this.tradeQueueCoordinator.reportIdentityConflicts(count),
       scheduleRecentCoverageRetry: (attempt, retry, reason) => this.recentRepairCoordinator.scheduleRetry(attempt, retry, reason),
-      onReconciled: () => this.tradeQueueCoordinator.markReconciled(),
+      onReconciled: (summary) => {
+        this.tradeQueueCoordinator.markReconciled();
+        this.markRepairReconciled(summary);
+      },
+      onRepairPending: (info) => this.markRepairPending(info),
       trace: (stage, fields) => logLoadTrace(this.historyCoordinator.activeHistoryTraceId, stage, fields),
     });
 
@@ -328,7 +355,142 @@ export class ChartDataPipeline {
 
   cancelHistoryLoad(): void { this.historyCoordinator.cancelHistoryLoad(); }
   cancelPatchDay(): void { this.historyCoordinator.cancelPatchDay(); }
-  loadHistory(opts: LoadHistoryOpts): Promise<void> { return this.historyCoordinator.loadHistory(opts); }
+  async loadHistory(opts: LoadHistoryOpts): Promise<void> {
+    const market = this._market;
+    const intervalMs = this._intervalMs;
+    const generation = this.generation;
+    await this.historyCoordinator.loadHistory(opts);
+    if (!this.disposed && generation === this.generation && market === this._market && intervalMs === this._intervalMs) {
+      this.lastSettledHistoryScope = {
+        market,
+        intervalMs,
+        generation,
+        bucket: bucketStart(Date.now(), intervalMs),
+      };
+    }
+  }
+  getOpenBucketReadiness(
+    bar: FootprintBar,
+    opts?: { market?: string; timeframe?: string; now?: number },
+  ): OpenBucketReadiness {
+    const now = opts?.now ?? Date.now();
+    const market = opts?.market ?? this._market;
+    const intervalMs = this._intervalMs;
+    const timeframe = opts?.timeframe ?? timeframeLabelForInterval(intervalMs);
+    const generation = this.generation;
+    const openBucket = bucketStart(now, intervalMs);
+
+    if (bar.startTime < openBucket) {
+      return {
+        market,
+        timeframe,
+        intervalMs,
+        bucket: bar.startTime,
+        generation,
+        status: bar.completeness === "partial" ? "partial" : "verified",
+        source: "history",
+      };
+    }
+    if (bar.completeness === "partial") {
+      return {
+        market,
+        timeframe,
+        intervalMs,
+        bucket: bar.startTime,
+        generation,
+        status: "partial",
+        source: "history",
+      };
+    }
+    if (market !== this._market) {
+      return {
+        market,
+        timeframe,
+        intervalMs,
+        bucket: bar.startTime,
+        generation,
+        status: "live-only",
+        source: "live-only",
+      };
+    }
+
+    const scopeKey = openBucketScopeKey(market, intervalMs, bar.startTime, generation);
+    const verifiedSource = this.verifiedOpenBuckets.get(scopeKey);
+    if (verifiedSource && (verifiedSource === "history" || this.series.isRepairOwned(bar.startTime) || bar.sources?.includes("history"))) {
+      return {
+        market,
+        timeframe,
+        intervalMs,
+        bucket: bar.startTime,
+        generation,
+        status: "verified",
+        source: verifiedSource,
+      };
+    }
+    if (bar.sources?.includes("history")) {
+      return {
+        market,
+        timeframe,
+        intervalMs,
+        bucket: bar.startTime,
+        generation,
+        status: "verified",
+        source: "history",
+      };
+    }
+    if (
+      this.repair.isReconciled
+      && !this.repair.hasPendingOrActiveOrFailedRepair()
+      && this.lastReconciledScope !== null
+      && this.lastReconciledScope.market === market
+      && this.lastReconciledScope.intervalMs === intervalMs
+      && this.lastReconciledScope.generation === generation
+      && bar.startTime > this.lastReconciledScope.maxBucket
+    ) {
+      return {
+        market,
+        timeframe,
+        intervalMs,
+        bucket: bar.startTime,
+        generation,
+        status: "verified",
+        source: "live-rollover",
+      };
+    }
+    if (
+      !this.repair.hasPendingOrActiveOrFailedRepair()
+      && this.lastSettledHistoryScope !== null
+      && this.lastSettledHistoryScope.market === market
+      && this.lastSettledHistoryScope.intervalMs === intervalMs
+      && this.lastSettledHistoryScope.generation === generation
+      && bar.startTime > this.lastSettledHistoryScope.bucket
+    ) {
+      return {
+        market,
+        timeframe,
+        intervalMs,
+        bucket: bar.startTime,
+        generation,
+        status: "verified",
+        source: "live-rollover",
+      };
+    }
+    return {
+      market,
+      timeframe,
+      intervalMs,
+      bucket: bar.startTime,
+      generation,
+      status: "live-only",
+      source: "live-only",
+    };
+  }
+  isOpenBarLiveOnly(
+    bar: FootprintBar,
+    opts?: { market?: string; timeframe?: string; now?: number },
+  ): boolean {
+    return this.getOpenBucketReadiness(bar, opts).status === "live-only";
+  }
   cancelRecentFootprintCoverageRepair(): void { this.recentRepairCoordinator.cancel(); }
   repairRecentFootprintCoverage(from: number, to: number): Promise<RecentFootprintRepairOutcome> {
     return this.recentRepairCoordinator.repair(from, to);
@@ -339,7 +501,20 @@ export class ChartDataPipeline {
     bars: readonly FootprintBar[],
     opts: { market: string; intervalMs: number; from: number; observedAt: number; fillMissingOnly?: boolean },
   ): number[] {
-    return this.historyCoordinator.applyLiveBarSeed(bars, opts);
+    const generation = this.generation;
+    const missingBefore = new Set<number>();
+    for (const bar of bars) {
+      if (this.series.get(bar.startTime) === undefined) missingBefore.add(bar.startTime);
+    }
+    const applied = this.historyCoordinator.applyLiveBarSeed(bars, opts);
+    if (!this.disposed && generation === this.generation && opts.market === this._market && opts.intervalMs === this._intervalMs) {
+      for (const startTime of applied) {
+        if (missingBefore.has(startTime) || this.series.get(startTime)?.sources?.includes("history")) {
+          this.markOpenBucketVerified(startTime, generation, "history");
+        }
+      }
+    }
+    return applied;
   }
 
   async changeConfig(opts: { market?: string; intervalMs?: number }): Promise<void> {
@@ -459,6 +634,54 @@ export class ChartDataPipeline {
 
   private conflictHeld(): boolean {
     return this.tradeQueueCoordinator.conflictHeld();
+  }
+
+  private markOpenBucketVerified(bucket: number, generation: number, source: "repair" | "history"): void {
+    if (this.disposed || generation !== this.generation) return;
+    if (this.verifiedOpenBuckets.size >= 64) {
+      const oldest = this.verifiedOpenBuckets.keys().next().value;
+      if (oldest !== undefined) this.verifiedOpenBuckets.delete(oldest);
+    }
+    this.verifiedOpenBuckets.set(
+      openBucketScopeKey(this._market, this._intervalMs, bucket, generation),
+      source,
+    );
+  }
+
+  private markRepairPending(info: { from: number | null; generation: number }): void {
+    if (this.disposed || info.generation !== this.generation) return;
+    this.lastReconciledScope = null;
+    for (const key of this.verifiedOpenBuckets.keys()) {
+      const parts = key.split("\u0000");
+      if (parts.length !== 4) continue;
+      if (parts[0] !== this._market || Number(parts[1]) !== this._intervalMs || Number(parts[3]) !== info.generation) continue;
+      const bucket = Number(parts[2]);
+      if (info.from === null || (Number.isFinite(bucket) && bucket >= info.from)) {
+        this.verifiedOpenBuckets.delete(key);
+      }
+    }
+  }
+
+  private markRepairReconciled(summary?: RepairReconciledSummary): void {
+    if (!summary || this.disposed || summary.generation !== this.generation) return;
+    let maxBucket = -Infinity;
+    for (const bucket of summary.buckets) {
+      this.markOpenBucketVerified(bucket, summary.generation, "repair");
+      if (bucket > maxBucket) maxBucket = bucket;
+    }
+    if (Number.isFinite(maxBucket)) {
+      const prevMax = this.lastReconciledScope?.market === this._market
+        && this.lastReconciledScope.intervalMs === this._intervalMs
+        && this.lastReconciledScope.generation === summary.generation
+        ? this.lastReconciledScope.maxBucket
+        : -Infinity;
+      this.lastReconciledScope = {
+        market: this._market,
+        intervalMs: this._intervalMs,
+        generation: summary.generation,
+        maxBucket: Math.max(prevMax, maxBucket),
+      };
+    }
   }
 
   private _beforeUpdateKeepsPlan(kind: ChartDataUpdateEvent["kind"], generation: number, owned: () => boolean = () => true): boolean {

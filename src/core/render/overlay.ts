@@ -205,6 +205,7 @@ export class Overlay {
     ) => void,
     private readonly getDisplayOptions?: () => ResolvedChartDisplayOptions,
     private readonly hasLiveSeriesDrawings?: () => boolean,
+    private readonly isOpenBarLiveOnly?: (bar: FootprintBar) => boolean,
   ) {
     const self = this;
     this.hudDeps = {
@@ -212,6 +213,7 @@ export class Overlay {
       get displayOptions() { return self.displayOptions; },
       get getSyncCrosshairTime() { return self.getSyncCrosshairTime; },
       get onHudText() { return self.onHudText; },
+      get isOpenBarLiveOnly() { return self.isOpenBarLiveOnly; },
     };
     this.tpoHost = {
       get ctx() { return self.ctx; },
@@ -229,6 +231,7 @@ export class Overlay {
       get displayOptions() { return self.displayOptions; },
       get getSyncCrosshairTime() { return self.getSyncCrosshairTime; },
       get onHudText() { return self.onHudText; },
+      get isOpenBarLiveOnly() { return self.isOpenBarLiveOnly; },
       get isMainChartSuppressed() { return self.isMainChartSuppressed; },
       get getIndicatorPanes() { return self.getIndicatorPanes; },
       get drawInteractionForeground() { return self.drawInteractionForeground; },
