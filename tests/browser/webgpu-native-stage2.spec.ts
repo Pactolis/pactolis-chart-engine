@@ -265,7 +265,7 @@ test("Stage 2 SwiftShader WebGPU verifies pixel-bucket LOD, sub-pixel merged-cel
         if (nativeEnabled) {
           autoscaleGpu = await r.currentGpuSurface.readNativeVisiblePriceRangeAsync(s, 10, 250);
           const cpuRange = footprintVisiblePriceRange(s, { from: 10, to: 250 });
-          autoscaleCpu = cpuRange ? { min: cpuRange.min, max: cpuRange.max } : null;
+          autoscaleCpu = cpuRange ? { min: cpuRange.minValue(), max: cpuRange.maxValue() } : null;
         }
 
         return {

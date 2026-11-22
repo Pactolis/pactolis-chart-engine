@@ -400,9 +400,9 @@ test("Stage 2 GPU sub-pixel merged-cells LOD accumulates per pixel row with 4 Mi
   assert.equal(prep2.ok, true);
   assert.equal(new Uint32Array(lodBuf.data.buffer)[3], 2);
 
-  // > 4 MiB case: 1000 visible bars * 600px * 16B = 9.6 MiB > 4 MiB -> prepareFrame returns ok=false
+  // > 4 MiB case: 801 visible bars * 600px * 16B = 7.69 MiB > 4 MiB -> prepareFrame returns ok=false
   const largeSeries = makeSeriesWithBars(1000, { basePrice: 60_000, priceStep: 10, cellsPerBar: 2 });
-  const largeView = makeView({ colWidth: 1, priceTop: 60_200, pricePerPx: 20, width: 1000, height: 600 });
+  const largeView = makeView({ colWidth: 6, priceTop: 60_200, pricePerPx: 20, width: 4800, height: 600 });
   const prepLarge = pipeline.prepareFrame({
     ...baseScene,
     series: largeSeries,
@@ -414,7 +414,7 @@ test("Stage 2 GPU sub-pixel merged-cells LOD accumulates per pixel row with 4 Mi
       pricePerPx: largeView.pricePerPx,
       candleWidth: largeView.candleStripWidth(),
     },
-  }, 1000, 600);
+  }, 4800, 600);
   assert.equal(prepLarge.ok, false);
 
   pipeline.dispose();
@@ -430,7 +430,7 @@ test("Stage 2 GPU sub-pixel merged-cells LOD accumulates per pixel row with 4 Mi
   try {
     const surfaceMock = makeStage2FakeWebGpuDevice();
     const ctx = makeFakeWebGpuContext("rgba8unorm");
-    const canvas = { width: 1000, height: 600, getContext: (k) => (k === "webgpu" ? ctx : null) };
+    const canvas = { width: 4800, height: 600, getContext: (k) => (k === "webgpu" ? ctx : null) };
     const surface = new WebGpuSurface(canvas, {
       adapter: {},
       device: surfaceMock.device,
@@ -494,8 +494,8 @@ test("Stage 2 GPU autoscale reduction matches footprintVisiblePriceRange with f6
   assert.ok(expected);
   const actual = await pipeline.readVisiblePriceRangeAsync(series, 15, 112);
   assert.ok(actual);
-  assert.ok(Math.abs(actual.min - expected.min) < 1e-4, `min ${actual.min} vs ${expected.min}`);
-  assert.ok(Math.abs(actual.max - expected.max) < 1e-4, `max ${actual.max} vs ${expected.max}`);
+  assert.ok(Math.abs(actual.min - expected.minValue()) < 1e-4, `min ${actual.min} vs ${expected.minValue()}`);
+  assert.ok(Math.abs(actual.max - expected.maxValue()) < 1e-4, `max ${actual.max} vs ${expected.maxValue()}`);
 
   assert.equal(await pipeline.readVisiblePriceRangeAsync(series, 50, 50), null);
 
