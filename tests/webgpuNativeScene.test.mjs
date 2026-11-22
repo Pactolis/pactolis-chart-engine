@@ -869,16 +869,16 @@ test("FootprintRenderer routes to renderNativeScene when eligible and falls back
     assert.equal(getGpuDiagnostics().featurePaths.scene, "immediate-quads");
     view.setScaleMode("linear");
 
-    // 4. pixel-bucket LOD -> immediate-quads
+    // 4. pixel-bucket LOD -> webgpu-native (Stage 2 GPU pixel-bucket compute + render)
     view.colWidth = 0.5;
     renderer.renderLayers(view, series, new Set(["grid", "candles", "footprint"]));
-    assert.equal(getGpuDiagnostics().featurePaths.scene, "immediate-quads");
+    assert.equal(getGpuDiagnostics().featurePaths.scene, "webgpu-native");
     view.colWidth = 20;
 
-    // 5. Sub-pixel cell merge height (< 2px) -> immediate-quads
+    // 5. Sub-pixel cell merge height (< 2px) -> webgpu-native (Stage 2 GPU merged-cells compute + render)
     view.pricePerPx = 20; // priceStep 10 / 20 = 0.5px < 2px
     renderer.renderLayers(view, series, new Set(["grid", "candles", "footprint"]));
-    assert.equal(getGpuDiagnostics().featurePaths.scene, "immediate-quads");
+    assert.equal(getGpuDiagnostics().featurePaths.scene, "webgpu-native");
     view.pricePerPx = 0.2;
 
     // 6. footprintProfile -> immediate-quads

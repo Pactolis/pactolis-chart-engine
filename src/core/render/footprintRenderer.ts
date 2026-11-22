@@ -359,21 +359,20 @@ export class FootprintRenderer {
     if (!readGpuSettings(ownerWin).nativeWebGpu) {
       return false;
     }
-    if (view.isLogScale() || lod === "pixel-bucket") {
+    if (view.isLogScale()) {
       return false;
     }
     if (chartType !== "candlestick" && chartType !== "footprint") {
       return false;
     }
     const isFootprintCells = lod === "footprint" && chartType === "footprint";
-    if (isFootprintCells && this.rowHeight(view, step) < CELL_PIXEL_MERGE_HEIGHT) {
-      return false;
-    }
+    const isMergedCells = isFootprintCells && this.rowHeight(view, step) < CELL_PIXEL_MERGE_HEIGHT;
+    const lodMode = lod === "pixel-bucket" ? "pixel-bucket" : isMergedCells ? "merged-cells" : "standard";
 
     const clearStartedAt = telemetryEnabled ? performance.now() : null;
     const drawGrid = settings.grid && activeLayers.has("grid");
-    const candleStyle = candleStyleFor(lod, chartType, cfg.candles);
-    const drawCandles = activeLayers.has("candles") && candleStyle !== "none";
+    const candleStyle = lod === "pixel-bucket" ? "full" : candleStyleFor(lod, chartType, cfg.candles);
+    const drawCandles = activeLayers.has("candles") && (lod === "pixel-bucket" || candleStyle !== "none");
     const drawFootprint = isFootprintCells && activeLayers.has("footprint");
     const [from, to] = this.visibleRange(view, series.length);
     const w = (this.surface.canvas.width ?? 0) / dpr || (view.area.left + view.area.width);
@@ -398,6 +397,7 @@ export class FootprintRenderer {
           candleWidth: candleW,
         },
         candleStyle,
+        lodMode,
         drawGrid,
         drawCandles,
         drawFootprint,
@@ -416,7 +416,7 @@ export class FootprintRenderer {
               }
             }
           : undefined,
-        drawForegroundOverlay: drawFootprint && cfg.stackedImbalance && to > from
+        drawForegroundOverlay: lodMode === "standard" && drawFootprint && cfg.stackedImbalance && to > from
           ? (quads) => {
               const overlayStartedAt = telemetryEnabled ? performance.now() : null;
               try {

@@ -1,4 +1,4 @@
-import type { GpuNativeSceneInput } from "../gpuBackend.js";
+import type { GpuNativeSceneInput, GpuNativeSceneLodMode } from "../gpuBackend.js";
 import type { FootprintSeries } from "../../model/footprint.js";
 import type { FootprintBar } from "../../types.js";
 import { incrementPerformanceCounter, recordPerformanceDuration } from "../../performanceTelemetry.js";
@@ -18,6 +18,20 @@ export const VIEW_UNIFORM_BYTES = VIEW_UNIFORM_WORDS * 4;
 /** ComputeUniforms: 4 x 32-bit words (16 bytes, 16-byte aligned). */
 export const COMPUTE_UNIFORM_WORDS = 4;
 export const COMPUTE_UNIFORM_BYTES = COMPUTE_UNIFORM_WORDS * 4;
+
+/** PixelBucketRecord: 8 x 32-bit words (32 bytes, 16-byte aligned). */
+export const PIXEL_BUCKET_RECORD_BYTES = 32;
+/** MergedRowRecord: 4 x 32-bit words (16 bytes, 16-byte aligned). */
+export const MERGED_ROW_RECORD_BYTES = 16;
+/** Hard 4 MiB cap on sub-pixel merged row storage (falls back to immediate-quads above cap). */
+export const MERGED_ROW_BUFFER_MAX_BYTES = 4 * 1024 * 1024;
+/** LodUniforms: 8 x 32-bit words (32 bytes, 16-byte aligned). */
+export const LOD_UNIFORM_WORDS = 8;
+export const LOD_UNIFORM_BYTES = LOD_UNIFORM_WORDS * 4;
+/** AutoscaleUniforms & AutoscaleResult: 4 x 32-bit words (16 bytes, 16-byte aligned). */
+export const AUTOSCALE_UNIFORM_WORDS = 4;
+export const AUTOSCALE_UNIFORM_BYTES = AUTOSCALE_UNIFORM_WORDS * 4;
+export const AUTOSCALE_RESULT_BYTES = 16;
 
 export const TAIL_BAR_HEADROOM = 64;
 export const TAIL_CELL_HEADROOM = 2048;
@@ -365,6 +379,544 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
 }
 `;
 
+export const COMPUTE_PIXEL_BUCKET_WGSL = `
+struct ViewUniform {
+  resolution: vec2<f32>,
+  visibleFrom: u32,
+  flags: u32,
+  area: vec4<f32>,
+  offsetX: f32,
+  colWidth: f32,
+  priceTopRel: f32,
+  pricePerPx: f32,
+  candleWidth: f32,
+  priceStep: f32,
+  candleStyle: u32,
+  visibleCellOffset: u32,
+};
+
+struct LodUniform {
+  count: u32,
+  startCoord: i32,
+  plotHeight: u32,
+  frameGen: u32,
+  visibleTo: u32,
+  pad0: u32,
+  pad1: u32,
+  pad2: u32,
+};
+
+struct BarRecord {
+  openRel: f32,
+  highRel: f32,
+  lowRel: f32,
+  closeRel: f32,
+  maxVol: f32,
+  pocBinRel: f32,
+  cellOffset: u32,
+  cellCount: u32,
+};
+
+struct PixelBucketRecord {
+  openRel: f32,
+  highRel: f32,
+  lowRel: f32,
+  closeRel: f32,
+  px: f32,
+  valid: u32,
+  pad0: u32,
+  pad1: u32,
+};
+
+@group(0) @binding(0) var<uniform> u_view: ViewUniform;
+@group(0) @binding(1) var<uniform> u_lod: LodUniform;
+@group(0) @binding(2) var<storage, read> bars: array<BarRecord>;
+@group(0) @binding(3) var<storage, read_write> buckets: array<PixelBucketRecord>;
+
+@compute @workgroup_size(64)
+fn cs_main(@builtin(global_invocation_id) gid: vec3<u32>) {
+  let idx = gid.x;
+  if (idx >= u_lod.count) {
+    return;
+  }
+  let px = u_lod.startCoord + i32(idx);
+  let origin_x = u_view.area.x + u_view.offsetX;
+  let col_w = max(u_view.colWidth, 1e-6);
+
+  let raw_start = (f32(px) - origin_x) / col_w;
+  let raw_end = (f32(px + 1) - origin_x) / col_w;
+  let vis_from = i32(u_view.visibleFrom);
+  let vis_to = i32(u_lod.visibleTo);
+  let cand_start = max(vis_from, i32(floor(raw_start)) - 1);
+  let cand_end = min(vis_to, i32(ceil(raw_end)) + 1);
+
+  var found: u32 = 0u;
+  var open_rel: f32 = 0.0;
+  var high_rel: f32 = 0.0;
+  var low_rel: f32 = 0.0;
+  var close_rel: f32 = 0.0;
+
+  for (var i: i32 = cand_start; i < cand_end; i = i + 1) {
+    let bx = i32(floor(origin_x + f32(i) * u_view.colWidth));
+    if (bx == px) {
+      let b = bars[u32(i)];
+      if (found == 0u) {
+        found = 1u;
+        open_rel = b.openRel;
+        high_rel = b.highRel;
+        low_rel = b.lowRel;
+        close_rel = b.closeRel;
+      } else {
+        high_rel = max(high_rel, b.highRel);
+        low_rel = min(low_rel, b.lowRel);
+        close_rel = b.closeRel;
+      }
+    }
+  }
+
+  buckets[idx] = PixelBucketRecord(
+    open_rel,
+    high_rel,
+    low_rel,
+    close_rel,
+    f32(px),
+    found,
+    0u,
+    0u
+  );
+}
+`;
+
+export const PIXEL_BUCKET_CANDLE_WGSL = `
+struct ViewUniform {
+  resolution: vec2<f32>,
+  visibleFrom: u32,
+  flags: u32,
+  area: vec4<f32>,
+  offsetX: f32,
+  colWidth: f32,
+  priceTopRel: f32,
+  pricePerPx: f32,
+  candleWidth: f32,
+  priceStep: f32,
+  candleStyle: u32,
+  visibleCellOffset: u32,
+};
+
+struct PixelBucketRecord {
+  openRel: f32,
+  highRel: f32,
+  lowRel: f32,
+  closeRel: f32,
+  px: f32,
+  valid: u32,
+  pad0: u32,
+  pad1: u32,
+};
+
+@group(0) @binding(0) var<uniform> u_view: ViewUniform;
+@group(0) @binding(1) var<storage, read> buckets: array<PixelBucketRecord>;
+
+struct VertexOutput {
+  @builtin(position) position: vec4<f32>,
+  @location(0) color: vec4<f32>,
+};
+
+var<private> UNIT_QUAD: array<vec2<f32>, 6> = array<vec2<f32>, 6>(
+  vec2<f32>(0.0, 0.0),
+  vec2<f32>(1.0, 0.0),
+  vec2<f32>(1.0, 1.0),
+  vec2<f32>(0.0, 0.0),
+  vec2<f32>(1.0, 1.0),
+  vec2<f32>(0.0, 1.0)
+);
+
+fn y_of_price_rel(price_rel: f32) -> f32 {
+  return u_view.area.y + (u_view.priceTopRel - price_rel) / u_view.pricePerPx;
+}
+
+@vertex
+fn vs_main(
+  @builtin(vertex_index) vertex_idx: u32,
+  @builtin(instance_index) instance_idx: u32,
+) -> VertexOutput {
+  var out: VertexOutput;
+  let bucket = buckets[instance_idx];
+  if (bucket.valid == 0u) {
+    out.position = vec4<f32>(2.0, 2.0, 0.0, 1.0);
+    out.color = vec4<f32>(0.0, 0.0, 0.0, 0.0);
+    return out;
+  }
+
+  let is_up = bucket.closeRel >= bucket.openRel;
+  let color = select(
+    vec4<f32>(1.0, 0.42, 0.45, 1.0),
+    vec4<f32>(0.27, 0.86, 0.62, 1.0),
+    is_up
+  );
+
+  let is_body = vertex_idx >= 6u;
+  let unit = UNIT_QUAD[vertex_idx % 6u];
+  var ry: f32;
+  var rh: f32;
+  if (!is_body) {
+    let y_high = y_of_price_rel(bucket.highRel);
+    let y_low = y_of_price_rel(bucket.lowRel);
+    ry = y_high;
+    rh = max(y_low - y_high, 1.0);
+  } else {
+    let y_open = y_of_price_rel(bucket.openRel);
+    let y_close = y_of_price_rel(bucket.closeRel);
+    ry = min(y_open, y_close);
+    rh = max(abs(y_close - y_open), 1.0);
+  }
+
+  let pos = vec2<f32>(bucket.px, ry) + unit * vec2<f32>(1.0, rh);
+  let clip_x = (pos.x / u_view.resolution.x) * 2.0 - 1.0;
+  let clip_y = 1.0 - (pos.y / u_view.resolution.y) * 2.0;
+  out.position = vec4<f32>(clip_x, clip_y, 0.0, 1.0);
+  out.color = color;
+  return out;
+}
+
+@fragment
+fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
+  if (in.color.a <= 0.0) {
+    discard;
+  }
+  return in.color;
+}
+`;
+
+export const COMPUTE_MERGED_CELLS_WGSL = `
+struct ViewUniform {
+  resolution: vec2<f32>,
+  visibleFrom: u32,
+  flags: u32,
+  area: vec4<f32>,
+  offsetX: f32,
+  colWidth: f32,
+  priceTopRel: f32,
+  pricePerPx: f32,
+  candleWidth: f32,
+  priceStep: f32,
+  candleStyle: u32,
+  visibleCellOffset: u32,
+};
+
+struct LodUniform {
+  count: u32,
+  startCoord: i32,
+  plotHeight: u32,
+  frameGen: u32,
+  visibleTo: u32,
+  pad0: u32,
+  pad1: u32,
+  pad2: u32,
+};
+
+struct BarRecord {
+  openRel: f32,
+  highRel: f32,
+  lowRel: f32,
+  closeRel: f32,
+  maxVol: f32,
+  pocBinRel: f32,
+  cellOffset: u32,
+  cellCount: u32,
+};
+
+struct CellRecord {
+  barIndex: u32,
+  priceBinRel: f32,
+  buyVol: f32,
+  sellVol: f32,
+};
+
+struct MergedRowRecord {
+  buyVol: f32,
+  sellVol: f32,
+  frameGen: u32,
+  rowH: f32,
+};
+
+@group(0) @binding(0) var<uniform> u_view: ViewUniform;
+@group(0) @binding(1) var<uniform> u_lod: LodUniform;
+@group(0) @binding(2) var<storage, read> bars: array<BarRecord>;
+@group(0) @binding(3) var<storage, read> cells: array<CellRecord>;
+@group(0) @binding(4) var<storage, read_write> merged_rows: array<MergedRowRecord>;
+@group(0) @binding(5) var<storage, read_write> merged_bar_max: array<f32>;
+
+@compute @workgroup_size(64)
+fn cs_main(@builtin(global_invocation_id) gid: vec3<u32>) {
+  let vis_bar_idx = gid.x;
+  if (vis_bar_idx >= u_lod.count) {
+    return;
+  }
+  let bar_idx = u_view.visibleFrom + vis_bar_idx;
+  let bar = bars[bar_idx];
+  let end = bar.cellOffset + bar.cellCount;
+  var merged_max: f32 = 0.0;
+
+  for (var i: u32 = bar.cellOffset; i < end; i = i + 1u) {
+    let cell = cells[i];
+    let y_top_f = u_view.area.y + (u_view.priceTopRel - (cell.priceBinRel + u_view.priceStep)) / u_view.pricePerPx;
+    let y_bot_f = u_view.area.y + (u_view.priceTopRel - cell.priceBinRel) / u_view.pricePerPx;
+    let y_top_i = i32(floor(y_top_f));
+    let row_idx = y_top_i - u_lod.startCoord;
+    if (row_idx >= 0 && row_idx < i32(u_lod.plotHeight)) {
+      let slot = vis_bar_idx * u_lod.plotHeight + u32(row_idx);
+      var rec = merged_rows[slot];
+      if (rec.frameGen != u_lod.frameGen) {
+        rec.buyVol = 0.0;
+        rec.sellVol = 0.0;
+        rec.frameGen = u_lod.frameGen;
+        rec.rowH = max(y_bot_f - f32(y_top_i), 1.0);
+      }
+      rec.buyVol = rec.buyVol + cell.buyVol;
+      rec.sellVol = rec.sellVol + cell.sellVol;
+      merged_rows[slot] = rec;
+      merged_max = max(merged_max, max(rec.buyVol, rec.sellVol));
+    }
+  }
+
+  merged_bar_max[vis_bar_idx] = merged_max;
+}
+`;
+
+export const MERGED_CELL_WGSL = `
+struct ViewUniform {
+  resolution: vec2<f32>,
+  visibleFrom: u32,
+  flags: u32,
+  area: vec4<f32>,
+  offsetX: f32,
+  colWidth: f32,
+  priceTopRel: f32,
+  pricePerPx: f32,
+  candleWidth: f32,
+  priceStep: f32,
+  candleStyle: u32,
+  visibleCellOffset: u32,
+};
+
+struct LodUniform {
+  count: u32,
+  startCoord: i32,
+  plotHeight: u32,
+  frameGen: u32,
+  visibleTo: u32,
+  pad0: u32,
+  pad1: u32,
+  pad2: u32,
+};
+
+struct BarRecord {
+  openRel: f32,
+  highRel: f32,
+  lowRel: f32,
+  closeRel: f32,
+  maxVol: f32,
+  pocBinRel: f32,
+  cellOffset: u32,
+  cellCount: u32,
+};
+
+struct MergedRowRecord {
+  buyVol: f32,
+  sellVol: f32,
+  frameGen: u32,
+  rowH: f32,
+};
+
+@group(0) @binding(0) var<uniform> u_view: ViewUniform;
+@group(0) @binding(1) var<uniform> u_lod: LodUniform;
+@group(0) @binding(2) var<storage, read> bars: array<BarRecord>;
+@group(0) @binding(3) var<storage, read> merged_rows: array<MergedRowRecord>;
+@group(0) @binding(4) var<storage, read> merged_bar_max: array<f32>;
+
+struct VertexOutput {
+  @builtin(position) position: vec4<f32>,
+  @location(0) color: vec4<f32>,
+};
+
+var<private> UNIT_QUAD: array<vec2<f32>, 6> = array<vec2<f32>, 6>(
+  vec2<f32>(0.0, 0.0),
+  vec2<f32>(1.0, 0.0),
+  vec2<f32>(1.0, 1.0),
+  vec2<f32>(0.0, 0.0),
+  vec2<f32>(1.0, 1.0),
+  vec2<f32>(0.0, 1.0)
+);
+
+fn degenerate_out() -> VertexOutput {
+  var out: VertexOutput;
+  out.position = vec4<f32>(2.0, 2.0, 0.0, 1.0);
+  out.color = vec4<f32>(0.0, 0.0, 0.0, 0.0);
+  return out;
+}
+
+@vertex
+fn vs_main(
+  @builtin(vertex_index) vertex_idx: u32,
+  @builtin(instance_index) instance_idx: u32,
+) -> VertexOutput {
+  if ((u_view.flags & 1u) == 0u || u_lod.plotHeight == 0u) {
+    return degenerate_out();
+  }
+  let vis_bar_idx = instance_idx / u_lod.plotHeight;
+  if (vis_bar_idx >= u_lod.count) {
+    return degenerate_out();
+  }
+  let rec = merged_rows[instance_idx];
+  if (rec.frameGen != u_lod.frameGen) {
+    return degenerate_out();
+  }
+  let merged_max = merged_bar_max[vis_bar_idx];
+  if (!(merged_max > 0.0)) {
+    return degenerate_out();
+  }
+
+  let row_idx = instance_idx % u_lod.plotHeight;
+  let bar_idx = u_view.visibleFrom + vis_bar_idx;
+  let bar = bars[bar_idx];
+
+  let y_top_raw = f32(u_lod.startCoord + i32(row_idx));
+  let y_high = u_view.area.y + (u_view.priceTopRel - bar.highRel) / u_view.pricePerPx;
+  let y_low = u_view.area.y + (u_view.priceTopRel - bar.lowRel) / u_view.pricePerPx;
+  let bar_top = min(y_high, y_low);
+  let bar_bottom = max(max(y_high, y_low), bar_top + 1.0);
+  let top_y = max(y_top_raw, bar_top);
+  let bot_y = min(y_top_raw + rec.rowH, bar_bottom);
+  let h = bot_y - top_y;
+  if (!(h > 0.0)) {
+    return degenerate_out();
+  }
+  if (top_y > u_view.area.y + u_view.area.w || bot_y < u_view.area.y) {
+    return degenerate_out();
+  }
+
+  let x_left = u_view.area.x + u_view.offsetX + f32(bar_idx) * u_view.colWidth;
+  let fp_left = x_left + u_view.candleWidth;
+  let half_w = (u_view.colWidth - u_view.candleWidth) * 0.5;
+  let sub_quad = vertex_idx / 6u;
+  let unit = UNIT_QUAD[vertex_idx % 6u];
+
+  var rx: f32;
+  var color: vec4<f32>;
+  if (sub_quad == 0u) {
+    rx = fp_left;
+    let sell_a = 0.12 + 0.7 * (rec.sellVol / merged_max);
+    color = vec4<f32>(0.85, 0.25, 0.3, sell_a);
+  } else {
+    rx = fp_left + half_w;
+    let buy_a = 0.12 + 0.7 * (rec.buyVol / merged_max);
+    color = vec4<f32>(0.13, 0.62, 0.45, buy_a);
+  }
+
+  let pos = vec2<f32>(rx, top_y) + unit * vec2<f32>(half_w, h);
+  let clip_x = (pos.x / u_view.resolution.x) * 2.0 - 1.0;
+  let clip_y = 1.0 - (pos.y / u_view.resolution.y) * 2.0;
+  var out: VertexOutput;
+  out.position = vec4<f32>(clip_x, clip_y, 0.0, 1.0);
+  out.color = color;
+  return out;
+}
+
+@fragment
+fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
+  if (in.color.a <= 0.0) {
+    discard;
+  }
+  return in.color;
+}
+`;
+
+export const COMPUTE_AUTOSCALE_WGSL = `
+struct AutoscaleUniform {
+  fromIdx: u32,
+  toIdx: u32,
+  pad0: u32,
+  pad1: u32,
+};
+
+struct BarRecord {
+  openRel: f32,
+  highRel: f32,
+  lowRel: f32,
+  closeRel: f32,
+  maxVol: f32,
+  pocBinRel: f32,
+  cellOffset: u32,
+  cellCount: u32,
+};
+
+struct AutoscaleResult {
+  minLowRel: f32,
+  maxHighRel: f32,
+  validCount: u32,
+  pad0: u32,
+};
+
+@group(0) @binding(0) var<uniform> u_auto: AutoscaleUniform;
+@group(0) @binding(1) var<storage, read> bars: array<BarRecord>;
+@group(0) @binding(2) var<storage, read_write> out_range: AutoscaleResult;
+
+var<workgroup> s_min: array<f32, 64>;
+var<workgroup> s_max: array<f32, 64>;
+var<workgroup> s_valid: array<u32, 64>;
+
+@compute @workgroup_size(64)
+fn cs_main(@builtin(local_invocation_index) lid: u32) {
+  var local_min: f32 = 0.0;
+  var local_max: f32 = 0.0;
+  var local_valid: u32 = 0u;
+
+  for (var i: u32 = u_auto.fromIdx + lid; i < u_auto.toIdx; i = i + 64u) {
+    let b = bars[i];
+    let low_ok = (b.lowRel == b.lowRel) && abs(b.lowRel) < 3.4e38;
+    let high_ok = (b.highRel == b.highRel) && abs(b.highRel) < 3.4e38;
+    if (low_ok && high_ok) {
+      if (local_valid == 0u) {
+        local_min = b.lowRel;
+        local_max = b.highRel;
+        local_valid = 1u;
+      } else {
+        local_min = min(local_min, b.lowRel);
+        local_max = max(local_max, b.highRel);
+        local_valid = local_valid + 1u;
+      }
+    }
+  }
+
+  s_min[lid] = local_min;
+  s_max[lid] = local_max;
+  s_valid[lid] = local_valid;
+  workgroupBarrier();
+
+  for (var stride: u32 = 32u; stride > 0u; stride = stride >> 1u) {
+    if (lid < stride) {
+      let ov = s_valid[lid + stride];
+      if (ov != 0u) {
+        if (s_valid[lid] == 0u) {
+          s_min[lid] = s_min[lid + stride];
+          s_max[lid] = s_max[lid + stride];
+        } else {
+          s_min[lid] = min(s_min[lid], s_min[lid + stride]);
+          s_max[lid] = max(s_max[lid], s_max[lid + stride]);
+        }
+        s_valid[lid] = s_valid[lid] + ov;
+      }
+    }
+    workgroupBarrier();
+  }
+
+  if (lid == 0u) {
+    out_range = AutoscaleResult(s_min[0], s_max[0], s_valid[0], 0u);
+  }
+}
+`;
+
 export interface WebGpuNativeScenePipelineOptions {
   readonly supportsTimestampQuery?: boolean;
   readonly maxBufferSize?: number;
@@ -372,10 +924,14 @@ export interface WebGpuNativeScenePipelineOptions {
 
 export interface PreparedNativeFrame {
   readonly ok: boolean;
+  readonly lodMode: GpuNativeSceneLodMode;
   readonly visibleFrom: number;
   readonly visibleTo: number;
   readonly visibleCellOffset: number;
   readonly visibleCellCount: number;
+  readonly pixelBucketCount: number;
+  readonly mergedVisibleBars: number;
+  readonly mergedPlotHeight: number;
 }
 
 interface TimestampSlot {
@@ -417,6 +973,47 @@ export class WebGpuNativeScenePipeline {
 
   private readonly computeUniformRaw = new ArrayBuffer(COMPUTE_UNIFORM_BYTES);
   private readonly computeUniformU32 = new Uint32Array(this.computeUniformRaw);
+
+  private readonly lodUniformRaw = new ArrayBuffer(LOD_UNIFORM_BYTES);
+  private readonly lodUniformU32 = new Uint32Array(this.lodUniformRaw);
+  private readonly lodUniformI32 = new Int32Array(this.lodUniformRaw);
+
+  private readonly autoscaleUniformRaw = new ArrayBuffer(AUTOSCALE_UNIFORM_BYTES);
+  private readonly autoscaleUniformU32 = new Uint32Array(this.autoscaleUniformRaw);
+
+  private lodUniformBuffer: any = null;
+  private pixelBucketBuffer: any = null;
+  private pixelBucketCapacity = 0;
+  private pixelBucketComputePipeline: any = null;
+  private pixelBucketComputeBindGroupLayout: any = null;
+  private pixelBucketComputeBindGroup: any = null;
+  private pixelBucketRenderPipeline: any = null;
+  private pixelBucketRenderBindGroupLayout: any = null;
+  private pixelBucketRenderBindGroup: any = null;
+
+  private mergedRowBuffer: any = null;
+  private mergedRowCapacityBytes = 0;
+  private mergedBarMaxBuffer: any = null;
+  private mergedBarMaxCapacity = 0;
+  private mergedFrameGen = 0;
+  private mergedCellsComputePipeline: any = null;
+  private mergedCellsComputeBindGroupLayout: any = null;
+  private mergedCellsComputeBindGroup: any = null;
+  private mergedCellsRenderPipeline: any = null;
+  private mergedCellsRenderBindGroupLayout: any = null;
+  private mergedCellsRenderBindGroup: any = null;
+
+  private autoscaleUniformBuffer: any = null;
+  private autoscaleResultBuffer: any = null;
+  private autoscaleReadBuffer: any = null;
+  private autoscaleComputePipeline: any = null;
+  private autoscaleBindGroupLayout: any = null;
+  private autoscaleBindGroup: any = null;
+  private autoscaleQueuePromise: Promise<void> = Promise.resolve();
+
+  private activeLodMode: GpuNativeSceneLodMode = "standard";
+  private pendingPixelBucketCount = 0;
+  private pendingMergedVisibleBars = 0;
 
   private barCellOffsets = new Uint32Array(64);
   private barCellCounts = new Uint32Array(64);
@@ -641,6 +1238,10 @@ export class WebGpuNativeScenePipeline {
         { binding: 2, resource: { buffer: this.cellBuffer } },
       ],
     });
+    this.pixelBucketComputeBindGroup = null;
+    this.mergedCellsComputeBindGroup = null;
+    this.mergedCellsRenderBindGroup = null;
+    this.autoscaleBindGroup = null;
   }
 
   private recordBarMetadata(index: number, bar: FootprintBar | undefined): void {
@@ -1074,13 +1675,303 @@ export class WebGpuNativeScenePipeline {
     return true;
   }
 
+  private ensureLodUniformBuffer(): any {
+    if (!this.lodUniformBuffer) {
+      this.lodUniformBuffer = this.device.createBuffer({
+        label: "NativeSceneLodUniform",
+        size: LOD_UNIFORM_BYTES,
+        usage: 0x0040 | 0x0008, // UNIFORM | COPY_DST
+      });
+    }
+    return this.lodUniformBuffer;
+  }
+
+  private createAlphaBlendTarget(): { format: string; blend: any } {
+    return {
+      format: this.format,
+      blend: {
+        color: { srcFactor: "src-alpha", dstFactor: "one-minus-src-alpha", operation: "add" },
+        alpha: { srcFactor: "one", dstFactor: "one-minus-src-alpha", operation: "add" },
+      },
+    };
+  }
+
+  private ensurePixelBucketResources(bucketCount: number): boolean {
+    const needed = Math.max(1, bucketCount);
+    const neededBytes = needed * PIXEL_BUCKET_RECORD_BYTES;
+    if (neededBytes > this.maxBufferSize) return false;
+
+    const lodUniform = this.ensureLodUniformBuffer();
+    if (!this.pixelBucketComputePipeline) {
+      const computeMod = this.device.createShaderModule({
+        label: "NativeSceneComputePixelBucketShader",
+        code: COMPUTE_PIXEL_BUCKET_WGSL,
+      });
+      const renderMod = this.device.createShaderModule({
+        label: "NativeScenePixelBucketCandleShader",
+        code: PIXEL_BUCKET_CANDLE_WGSL,
+      });
+      this.pixelBucketComputeBindGroupLayout = this.device.createBindGroupLayout({
+        label: "NativeScenePixelBucketComputeBindGroupLayout",
+        entries: [
+          { binding: 0, visibility: 0x4, buffer: { type: "uniform" } },
+          { binding: 1, visibility: 0x4, buffer: { type: "uniform" } },
+          { binding: 2, visibility: 0x4, buffer: { type: "read-only-storage" } },
+          { binding: 3, visibility: 0x4, buffer: { type: "storage" } },
+        ],
+      });
+      this.pixelBucketRenderBindGroupLayout = this.device.createBindGroupLayout({
+        label: "NativeScenePixelBucketRenderBindGroupLayout",
+        entries: [
+          { binding: 0, visibility: 0x1, buffer: { type: "uniform" } },
+          { binding: 1, visibility: 0x1, buffer: { type: "read-only-storage" } },
+        ],
+      });
+      this.pixelBucketComputePipeline = this.device.createComputePipeline({
+        label: "NativeScenePixelBucketComputePipeline",
+        layout: this.device.createPipelineLayout({
+          label: "NativeScenePixelBucketComputePipelineLayout",
+          bindGroupLayouts: [this.pixelBucketComputeBindGroupLayout],
+        }),
+        compute: { module: computeMod, entryPoint: "cs_main" },
+      });
+      this.pixelBucketRenderPipeline = this.device.createRenderPipeline({
+        label: "NativeScenePixelBucketCandlePipeline",
+        layout: this.device.createPipelineLayout({
+          label: "NativeScenePixelBucketRenderPipelineLayout",
+          bindGroupLayouts: [this.pixelBucketRenderBindGroupLayout],
+        }),
+        vertex: { module: renderMod, entryPoint: "vs_main" },
+        fragment: { module: renderMod, entryPoint: "fs_main", targets: [this.createAlphaBlendTarget()] },
+        primitive: { topology: "triangle-list" },
+      });
+    }
+
+    if (needed > this.pixelBucketCapacity) {
+      const maxFit = Math.floor(this.maxBufferSize / PIXEL_BUCKET_RECORD_BYTES);
+      let nextCap = Math.max(256, this.pixelBucketCapacity);
+      while (nextCap < needed) nextCap *= 2;
+      nextCap = Math.min(Math.max(needed, nextCap), maxFit);
+      this.pixelBucketBuffer?.destroy?.();
+      this.pixelBucketCapacity = nextCap;
+      this.pixelBucketBuffer = this.allocateStorageBuffer("NativeScenePixelBucketStorage", nextCap * PIXEL_BUCKET_RECORD_BYTES);
+      this.pixelBucketComputeBindGroup = null;
+      this.pixelBucketRenderBindGroup = null;
+    }
+
+    if (!this.pixelBucketComputeBindGroup) {
+      this.pixelBucketComputeBindGroup = this.device.createBindGroup({
+        label: "NativeScenePixelBucketComputeBindGroup",
+        layout: this.pixelBucketComputeBindGroupLayout,
+        entries: [
+          { binding: 0, resource: { buffer: this.viewUniformBuffer } },
+          { binding: 1, resource: { buffer: lodUniform } },
+          { binding: 2, resource: { buffer: this.barBuffer } },
+          { binding: 3, resource: { buffer: this.pixelBucketBuffer } },
+        ],
+      });
+    }
+    if (!this.pixelBucketRenderBindGroup) {
+      this.pixelBucketRenderBindGroup = this.device.createBindGroup({
+        label: "NativeScenePixelBucketRenderBindGroup",
+        layout: this.pixelBucketRenderBindGroupLayout,
+        entries: [
+          { binding: 0, resource: { buffer: this.viewUniformBuffer } },
+          { binding: 1, resource: { buffer: this.pixelBucketBuffer } },
+        ],
+      });
+    }
+    return true;
+  }
+
+  private ensureMergedCellsResources(visibleBars: number, plotHeight: number): boolean {
+    const neededBytes = visibleBars * plotHeight * MERGED_ROW_RECORD_BYTES;
+    const barMaxBytes = visibleBars * 4;
+    if (
+      neededBytes > MERGED_ROW_BUFFER_MAX_BYTES
+      || neededBytes > this.maxBufferSize
+      || barMaxBytes > this.maxBufferSize
+    ) {
+      return false;
+    }
+
+    const lodUniform = this.ensureLodUniformBuffer();
+    if (!this.mergedCellsComputePipeline) {
+      const computeMod = this.device.createShaderModule({
+        label: "NativeSceneComputeMergedCellsShader",
+        code: COMPUTE_MERGED_CELLS_WGSL,
+      });
+      const renderMod = this.device.createShaderModule({
+        label: "NativeSceneMergedCellsShader",
+        code: MERGED_CELL_WGSL,
+      });
+      this.mergedCellsComputeBindGroupLayout = this.device.createBindGroupLayout({
+        label: "NativeSceneMergedCellsComputeBindGroupLayout",
+        entries: [
+          { binding: 0, visibility: 0x4, buffer: { type: "uniform" } },
+          { binding: 1, visibility: 0x4, buffer: { type: "uniform" } },
+          { binding: 2, visibility: 0x4, buffer: { type: "read-only-storage" } },
+          { binding: 3, visibility: 0x4, buffer: { type: "read-only-storage" } },
+          { binding: 4, visibility: 0x4, buffer: { type: "storage" } },
+          { binding: 5, visibility: 0x4, buffer: { type: "storage" } },
+        ],
+      });
+      this.mergedCellsRenderBindGroupLayout = this.device.createBindGroupLayout({
+        label: "NativeSceneMergedCellsRenderBindGroupLayout",
+        entries: [
+          { binding: 0, visibility: 0x1, buffer: { type: "uniform" } },
+          { binding: 1, visibility: 0x1, buffer: { type: "uniform" } },
+          { binding: 2, visibility: 0x1, buffer: { type: "read-only-storage" } },
+          { binding: 3, visibility: 0x1, buffer: { type: "read-only-storage" } },
+          { binding: 4, visibility: 0x1, buffer: { type: "read-only-storage" } },
+        ],
+      });
+      this.mergedCellsComputePipeline = this.device.createComputePipeline({
+        label: "NativeSceneMergedCellsComputePipeline",
+        layout: this.device.createPipelineLayout({
+          label: "NativeSceneMergedCellsComputePipelineLayout",
+          bindGroupLayouts: [this.mergedCellsComputeBindGroupLayout],
+        }),
+        compute: { module: computeMod, entryPoint: "cs_main" },
+      });
+      this.mergedCellsRenderPipeline = this.device.createRenderPipeline({
+        label: "NativeSceneMergedCellsRenderPipeline",
+        layout: this.device.createPipelineLayout({
+          label: "NativeSceneMergedCellsRenderPipelineLayout",
+          bindGroupLayouts: [this.mergedCellsRenderBindGroupLayout],
+        }),
+        vertex: { module: renderMod, entryPoint: "vs_main" },
+        fragment: { module: renderMod, entryPoint: "fs_main", targets: [this.createAlphaBlendTarget()] },
+        primitive: { topology: "triangle-list" },
+      });
+    }
+
+    const safeNeededBytes = Math.max(16, neededBytes);
+    if (safeNeededBytes > this.mergedRowCapacityBytes) {
+      const capMax = Math.min(MERGED_ROW_BUFFER_MAX_BYTES, this.maxBufferSize);
+      let nextBytes = Math.max(64 * 1024, this.mergedRowCapacityBytes);
+      while (nextBytes < safeNeededBytes) nextBytes *= 2;
+      nextBytes = Math.min(Math.max(safeNeededBytes, nextBytes), capMax);
+      this.mergedRowBuffer?.destroy?.();
+      this.mergedRowCapacityBytes = nextBytes;
+      this.mergedRowBuffer = this.allocateStorageBuffer("NativeSceneMergedRowStorage", nextBytes);
+      this.mergedCellsComputeBindGroup = null;
+      this.mergedCellsRenderBindGroup = null;
+    }
+
+    const safeBars = Math.max(4, visibleBars);
+    if (safeBars > this.mergedBarMaxCapacity) {
+      const maxBarFit = Math.floor(this.maxBufferSize / 4);
+      let nextCap = Math.max(64, this.mergedBarMaxCapacity);
+      while (nextCap < safeBars) nextCap *= 2;
+      nextCap = Math.min(Math.max(safeBars, nextCap), maxBarFit);
+      this.mergedBarMaxBuffer?.destroy?.();
+      this.mergedBarMaxCapacity = nextCap;
+      this.mergedBarMaxBuffer = this.allocateStorageBuffer("NativeSceneMergedBarMaxStorage", nextCap * 4);
+      this.mergedCellsComputeBindGroup = null;
+      this.mergedCellsRenderBindGroup = null;
+    }
+
+    if (!this.mergedCellsComputeBindGroup) {
+      this.mergedCellsComputeBindGroup = this.device.createBindGroup({
+        label: "NativeSceneMergedCellsComputeBindGroup",
+        layout: this.mergedCellsComputeBindGroupLayout,
+        entries: [
+          { binding: 0, resource: { buffer: this.viewUniformBuffer } },
+          { binding: 1, resource: { buffer: lodUniform } },
+          { binding: 2, resource: { buffer: this.barBuffer } },
+          { binding: 3, resource: { buffer: this.cellBuffer } },
+          { binding: 4, resource: { buffer: this.mergedRowBuffer } },
+          { binding: 5, resource: { buffer: this.mergedBarMaxBuffer } },
+        ],
+      });
+    }
+    if (!this.mergedCellsRenderBindGroup) {
+      this.mergedCellsRenderBindGroup = this.device.createBindGroup({
+        label: "NativeSceneMergedCellsRenderBindGroup",
+        layout: this.mergedCellsRenderBindGroupLayout,
+        entries: [
+          { binding: 0, resource: { buffer: this.viewUniformBuffer } },
+          { binding: 1, resource: { buffer: lodUniform } },
+          { binding: 2, resource: { buffer: this.barBuffer } },
+          { binding: 3, resource: { buffer: this.mergedRowBuffer } },
+          { binding: 4, resource: { buffer: this.mergedBarMaxBuffer } },
+        ],
+      });
+    }
+    return true;
+  }
+
+  private ensureAutoscaleResources(): boolean {
+    if (!this.autoscaleComputePipeline) {
+      const mod = this.device.createShaderModule({
+        label: "NativeSceneComputeAutoscaleShader",
+        code: COMPUTE_AUTOSCALE_WGSL,
+      });
+      this.autoscaleUniformBuffer = this.device.createBuffer({
+        label: "NativeSceneAutoscaleUniform",
+        size: AUTOSCALE_UNIFORM_BYTES,
+        usage: 0x0040 | 0x0008, // UNIFORM | COPY_DST
+      });
+      this.autoscaleResultBuffer = this.device.createBuffer({
+        label: "NativeSceneAutoscaleResult",
+        size: AUTOSCALE_RESULT_BYTES,
+        usage: 0x0080 | 0x0004, // STORAGE | COPY_SRC
+      });
+      this.autoscaleReadBuffer = this.device.createBuffer({
+        label: "NativeSceneAutoscaleRead",
+        size: AUTOSCALE_RESULT_BYTES,
+        usage: 0x0008 | 0x0001, // COPY_DST | MAP_READ
+      });
+      this.autoscaleBindGroupLayout = this.device.createBindGroupLayout({
+        label: "NativeSceneAutoscaleBindGroupLayout",
+        entries: [
+          { binding: 0, visibility: 0x4, buffer: { type: "uniform" } },
+          { binding: 1, visibility: 0x4, buffer: { type: "read-only-storage" } },
+          { binding: 2, visibility: 0x4, buffer: { type: "storage" } },
+        ],
+      });
+      this.autoscaleComputePipeline = this.device.createComputePipeline({
+        label: "NativeSceneAutoscaleComputePipeline",
+        layout: this.device.createPipelineLayout({
+          label: "NativeSceneAutoscalePipelineLayout",
+          bindGroupLayouts: [this.autoscaleBindGroupLayout],
+        }),
+        compute: { module: mod, entryPoint: "cs_main" },
+      });
+    }
+    if (!this.autoscaleBindGroup) {
+      this.autoscaleBindGroup = this.device.createBindGroup({
+        label: "NativeSceneAutoscaleBindGroup",
+        layout: this.autoscaleBindGroupLayout,
+        entries: [
+          { binding: 0, resource: { buffer: this.autoscaleUniformBuffer } },
+          { binding: 1, resource: { buffer: this.barBuffer } },
+          { binding: 2, resource: { buffer: this.autoscaleResultBuffer } },
+        ],
+      });
+    }
+    return true;
+  }
+
   prepareFrame(scene: GpuNativeSceneInput, logicalWidth: number, logicalHeight: number): PreparedNativeFrame {
+    const emptyFail: PreparedNativeFrame = {
+      ok: false,
+      lodMode: scene.lodMode ?? "standard",
+      visibleFrom: 0,
+      visibleTo: 0,
+      visibleCellOffset: 0,
+      visibleCellCount: 0,
+      pixelBucketCount: 0,
+      mergedVisibleBars: 0,
+      mergedPlotHeight: 0,
+    };
     if (this.disposed) {
-      return { ok: false, visibleFrom: 0, visibleTo: 0, visibleCellOffset: 0, visibleCellCount: 0 };
+      return emptyFail;
     }
 
     if (!this.syncSeries(scene.series)) {
-      return { ok: false, visibleFrom: 0, visibleTo: 0, visibleCellOffset: 0, visibleCellCount: 0 };
+      return emptyFail;
     }
 
     if (this.dirtyCount > 0) {
@@ -1112,6 +2003,57 @@ export class WebGpuNativeScenePipeline {
       visibleCellCount = Math.max(0, lastEnd - visibleCellOffset);
     }
 
+    const lodMode: GpuNativeSceneLodMode = scene.lodMode ?? "standard";
+    this.activeLodMode = lodMode;
+    this.pendingPixelBucketCount = 0;
+    this.pendingMergedVisibleBars = 0;
+    let pixelBucketCount = 0;
+    let mergedVisibleBars = 0;
+    let mergedPlotHeight = 0;
+
+    if (lodMode === "pixel-bucket" && scene.drawCandles && visibleTo > visibleFrom) {
+      const minPx = Math.floor(area.left + offsetX + visibleFrom * safeColWidth);
+      const maxPx = Math.floor(area.left + offsetX + (visibleTo - 1) * safeColWidth);
+      pixelBucketCount = Math.max(0, maxPx - minPx + 1);
+      if (pixelBucketCount > 0) {
+        if (!this.ensurePixelBucketResources(pixelBucketCount)) {
+          return emptyFail;
+        }
+        this.lodUniformU32[0] = pixelBucketCount;
+        this.lodUniformI32[1] = minPx;
+        this.lodUniformU32[2] = 0;
+        this.lodUniformU32[3] = 0;
+        this.lodUniformU32[4] = visibleTo;
+        this.lodUniformU32[5] = 0;
+        this.lodUniformU32[6] = 0;
+        this.lodUniformU32[7] = 0;
+        this.writeStorageBuffer(this.lodUniformBuffer, 0, this.lodUniformRaw, LOD_UNIFORM_BYTES);
+        incrementPerformanceCounter("gpu.upload.bytes", LOD_UNIFORM_BYTES);
+        incrementPerformanceCounter("gpu.native.upload.uniformBytes", LOD_UNIFORM_BYTES);
+        this.pendingPixelBucketCount = pixelBucketCount;
+      }
+    } else if (lodMode === "merged-cells" && scene.drawFootprint && scene.drawHeat && visibleTo > visibleFrom) {
+      mergedVisibleBars = visibleTo - visibleFrom;
+      const areaTopInt = Math.floor(area.top);
+      mergedPlotHeight = Math.max(1, Math.ceil(area.height));
+      if (!this.ensureMergedCellsResources(mergedVisibleBars, mergedPlotHeight)) {
+        return emptyFail;
+      }
+      this.mergedFrameGen = ((this.mergedFrameGen + 1) >>> 0) || 1;
+      this.lodUniformU32[0] = mergedVisibleBars;
+      this.lodUniformI32[1] = areaTopInt;
+      this.lodUniformU32[2] = mergedPlotHeight;
+      this.lodUniformU32[3] = this.mergedFrameGen;
+      this.lodUniformU32[4] = visibleTo;
+      this.lodUniformU32[5] = 0;
+      this.lodUniformU32[6] = 0;
+      this.lodUniformU32[7] = 0;
+      this.writeStorageBuffer(this.lodUniformBuffer, 0, this.lodUniformRaw, LOD_UNIFORM_BYTES);
+      incrementPerformanceCounter("gpu.upload.bytes", LOD_UNIFORM_BYTES);
+      incrementPerformanceCounter("gpu.native.upload.uniformBytes", LOD_UNIFORM_BYTES);
+      this.pendingMergedVisibleBars = mergedVisibleBars;
+    }
+
     const flags = (scene.drawHeat ? 1 : 0) | (scene.drawPoc ? 2 : 0);
     const candleStyle = scene.candleStyle === "full" ? 2 : scene.candleStyle === "strip" ? 1 : 0;
 
@@ -1136,11 +2078,22 @@ export class WebGpuNativeScenePipeline {
     incrementPerformanceCounter("gpu.upload.bytes", VIEW_UNIFORM_BYTES);
     incrementPerformanceCounter("gpu.native.upload.uniformBytes", VIEW_UNIFORM_BYTES);
 
-    return { ok: true, visibleFrom, visibleTo, visibleCellOffset, visibleCellCount };
+    return {
+      ok: true,
+      lodMode,
+      visibleFrom,
+      visibleTo,
+      visibleCellOffset,
+      visibleCellCount,
+      pixelBucketCount,
+      mergedVisibleBars,
+      mergedPlotHeight,
+    };
   }
 
   needsComputeDispatch(): boolean {
-    return !this.disposed && this.dirtyCount > 0;
+    if (this.disposed) return false;
+    return this.dirtyCount > 0 || this.pendingPixelBucketCount > 0 || this.pendingMergedVisibleBars > 0;
   }
 
   computeTimestampWritesFor(slot: number): { querySet: any; beginningOfPassWriteIndex: number; endOfPassWriteIndex: number } {
@@ -1152,14 +2105,25 @@ export class WebGpuNativeScenePipeline {
   }
 
   recordComputePass(commandEncoder: any, tsSlot: number | null = null): void {
-    if (this.disposed || this.dirtyCount <= 0) return;
+    if (this.disposed || !this.needsComputeDispatch()) return;
     const pass = commandEncoder.beginComputePass({
       label: "NativeSceneComputeStatsPass",
       ...(tsSlot !== null && this.querySet ? { timestampWrites: this.computeTimestampWritesFor(tsSlot) } : {}),
     });
-    pass.setPipeline(this.computePipeline);
-    pass.setBindGroup(0, this.computeBindGroup);
-    pass.dispatchWorkgroups(Math.ceil(this.dirtyCount / COMPUTE_WORKGROUP_SIZE));
+    if (this.dirtyCount > 0) {
+      pass.setPipeline(this.computePipeline);
+      pass.setBindGroup(0, this.computeBindGroup);
+      pass.dispatchWorkgroups(Math.ceil(this.dirtyCount / COMPUTE_WORKGROUP_SIZE));
+    }
+    if (this.activeLodMode === "pixel-bucket" && this.pendingPixelBucketCount > 0 && this.pixelBucketComputePipeline) {
+      pass.setPipeline(this.pixelBucketComputePipeline);
+      pass.setBindGroup(0, this.pixelBucketComputeBindGroup);
+      pass.dispatchWorkgroups(Math.ceil(this.pendingPixelBucketCount / COMPUTE_WORKGROUP_SIZE));
+    } else if (this.activeLodMode === "merged-cells" && this.pendingMergedVisibleBars > 0 && this.mergedCellsComputePipeline) {
+      pass.setPipeline(this.mergedCellsComputePipeline);
+      pass.setBindGroup(0, this.mergedCellsComputeBindGroup);
+      pass.dispatchWorkgroups(Math.ceil(this.pendingMergedVisibleBars / COMPUTE_WORKGROUP_SIZE));
+    }
     pass.end();
   }
 
@@ -1167,16 +2131,135 @@ export class WebGpuNativeScenePipeline {
     if (this.disposed || prepared.visibleTo <= prepared.visibleFrom) return;
     const visibleBarCount = prepared.visibleTo - prepared.visibleFrom;
 
+    if (prepared.lodMode === "pixel-bucket") {
+      if (scene.drawCandles && prepared.pixelBucketCount > 0 && this.pixelBucketRenderPipeline) {
+        passEncoder.setPipeline(this.pixelBucketRenderPipeline);
+        passEncoder.setBindGroup(0, this.pixelBucketRenderBindGroup);
+        passEncoder.draw(12, prepared.pixelBucketCount, 0, 0);
+      }
+      return;
+    }
+
     if (scene.drawCandles && scene.candleStyle !== "none" && visibleBarCount > 0) {
       passEncoder.setPipeline(this.candlePipeline);
       passEncoder.setBindGroup(0, this.renderBindGroup);
       passEncoder.draw(12, visibleBarCount, 0, 0);
     }
 
+    if (prepared.lodMode === "merged-cells") {
+      const mergedInstances = prepared.mergedVisibleBars * prepared.mergedPlotHeight;
+      if (scene.drawFootprint && scene.drawHeat && mergedInstances > 0 && this.mergedCellsRenderPipeline) {
+        passEncoder.setPipeline(this.mergedCellsRenderPipeline);
+        passEncoder.setBindGroup(0, this.mergedCellsRenderBindGroup);
+        passEncoder.draw(12, mergedInstances, 0, 0);
+      }
+      return;
+    }
+
     if (scene.drawFootprint && (scene.drawHeat || scene.drawPoc) && prepared.visibleCellCount > 0) {
       passEncoder.setPipeline(this.footprintPipeline);
       passEncoder.setBindGroup(0, this.renderBindGroup);
       passEncoder.draw(18, prepared.visibleCellCount, 0, 0);
+    }
+  }
+
+  /** Non-blocking GPU visible price autoscale reduction over `[visibleFrom, visibleTo)`. */
+  readVisiblePriceRangeAsync(
+    series: FootprintSeries,
+    visibleFrom: number,
+    visibleTo: number,
+  ): Promise<{ min: number; max: number } | null> {
+    const task = this.autoscaleQueuePromise.then(() => this.runAutoscaleReadback(series, visibleFrom, visibleTo));
+    this.autoscaleQueuePromise = task.then(() => undefined, () => undefined);
+    return task;
+  }
+
+  private async runAutoscaleReadback(
+    series: FootprintSeries,
+    visibleFrom: number,
+    visibleTo: number,
+  ): Promise<{ min: number; max: number } | null> {
+    if (this.disposed) return null;
+    const from = Math.max(0, Math.floor(visibleFrom));
+    const to = Math.min(series.length, Math.ceil(visibleTo));
+    if (from >= to) return null;
+
+    if (
+      this.syncedSeries !== series
+      || this.syncedResetEpoch !== series.resetEpoch
+      || this.syncedRevision !== series.revision
+    ) {
+      if (!this.syncSeries(series)) return null;
+    }
+    if (this.activeBarCount === 0 || to > this.activeBarCount) return null;
+
+    if (!this.ensureAutoscaleResources() || typeof this.autoscaleReadBuffer?.mapAsync !== "function") {
+      return null;
+    }
+
+    const commandEncoder = this.device.createCommandEncoder({
+      label: "NativeSceneAutoscaleCommandEncoder",
+    });
+
+    if (this.dirtyCount > 0) {
+      this.computeUniformU32[0] = this.dirtyStart;
+      this.computeUniformU32[1] = this.dirtyCount;
+      this.computeUniformU32[2] = 0;
+      this.computeUniformU32[3] = 0;
+      this.writeStorageBuffer(this.computeUniformBuffer, 0, this.computeUniformRaw, COMPUTE_UNIFORM_BYTES);
+      const statsPass = commandEncoder.beginComputePass({ label: "NativeSceneComputeStatsPass" });
+      statsPass.setPipeline(this.computePipeline);
+      statsPass.setBindGroup(0, this.computeBindGroup);
+      statsPass.dispatchWorkgroups(Math.ceil(this.dirtyCount / COMPUTE_WORKGROUP_SIZE));
+      statsPass.end();
+      this.dirtyCount = 0;
+    }
+
+    this.autoscaleUniformU32[0] = from;
+    this.autoscaleUniformU32[1] = to;
+    this.autoscaleUniformU32[2] = 0;
+    this.autoscaleUniformU32[3] = 0;
+    this.writeStorageBuffer(this.autoscaleUniformBuffer, 0, this.autoscaleUniformRaw, AUTOSCALE_UNIFORM_BYTES);
+
+    const autoPass = commandEncoder.beginComputePass({ label: "NativeSceneAutoscalePass" });
+    autoPass.setPipeline(this.autoscaleComputePipeline);
+    autoPass.setBindGroup(0, this.autoscaleBindGroup);
+    autoPass.dispatchWorkgroups(1);
+    autoPass.end();
+
+    commandEncoder.copyBufferToBuffer(
+      this.autoscaleResultBuffer,
+      0,
+      this.autoscaleReadBuffer,
+      0,
+      AUTOSCALE_RESULT_BYTES,
+    );
+    this.device.queue.submit([commandEncoder.finish()]);
+
+    let mapped = false;
+    try {
+      await Promise.resolve(this.autoscaleReadBuffer.mapAsync(0x0001));
+      mapped = true;
+      if (this.disposed) return null;
+      const range = this.autoscaleReadBuffer.getMappedRange();
+      const f32 = new Float32Array(range);
+      const u32 = new Uint32Array(range);
+      const validCount = u32[2] ?? 0;
+      const minLowRel = f32[0];
+      const maxHighRel = f32[1];
+      if (validCount === 0 || !Number.isFinite(minLowRel) || !Number.isFinite(maxHighRel)) {
+        return null;
+      }
+      return {
+        min: minLowRel + this.priceOriginValue,
+        max: maxHighRel + this.priceOriginValue,
+      };
+    } catch {
+      return null;
+    } finally {
+      if (mapped) {
+        try { this.autoscaleReadBuffer?.unmap?.(); } catch {}
+      }
     }
   }
 
@@ -1256,8 +2339,15 @@ export class WebGpuNativeScenePipeline {
     try {
       this.viewUniformBuffer?.destroy?.();
       this.computeUniformBuffer?.destroy?.();
+      this.lodUniformBuffer?.destroy?.();
       this.barBuffer?.destroy?.();
       this.cellBuffer?.destroy?.();
+      this.pixelBucketBuffer?.destroy?.();
+      this.mergedRowBuffer?.destroy?.();
+      this.mergedBarMaxBuffer?.destroy?.();
+      this.autoscaleUniformBuffer?.destroy?.();
+      this.autoscaleResultBuffer?.destroy?.();
+      this.autoscaleReadBuffer?.destroy?.();
       this.querySet?.destroy?.();
       for (const slot of this.timestampSlots) {
         slot.resolveBuffer?.destroy?.();
