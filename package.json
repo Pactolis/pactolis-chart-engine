@@ -392,7 +392,8 @@
     "harness": "vite",
     "benchmark:gpu": "node scripts/gpu-heatmap-benchmark.mjs",
     "benchmark:heatmap-pan": "node scripts/heatmap-pan-benchmark.mjs",
-    "benchmark:webgpu-native": "node scripts/webgpu-native-benchmark.mjs"
+    "benchmark:webgpu-native": "node scripts/webgpu-native-benchmark.mjs",
+    "benchmark:webgpu-native:large": "node scripts/webgpu-native-benchmark.mjs --profile large"
   },
   "devDependencies": {
     "@playwright/test": "^1.65.1",

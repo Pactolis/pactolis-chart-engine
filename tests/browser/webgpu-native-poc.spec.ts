@@ -8,15 +8,22 @@ import {
   computeMissedFrameStats,
   computeUploadStats,
   readWebGpuAdapterIdentity,
+  resolveWebGpuNativeFixture,
   selectWebGpuProbe,
   shouldTryWebGpuVulkan,
   summarizeMetricValues,
-  WEBGPU_NATIVE_FIXTURE,
   WEBGPU_NATIVE_METRICS,
   WEBGPU_NATIVE_SCENARIOS,
   webGpuFlushHardwareInvalidReasons,
   webGpuFlushLaunchArgs,
 } from "../../harness/webgpuNativeBenchmark.mjs";
+
+const ACTIVE_FIXTURE = resolveWebGpuNativeFixture({
+  profile: process.env.CHART_GPU_NATIVE_PROFILE,
+  barCount: process.env.CHART_GPU_NATIVE_BARS,
+  cellsPerBar: process.env.CHART_GPU_NATIVE_CELLS,
+  fitColumns: process.env.CHART_GPU_NATIVE_FIT,
+});
 
 const {
   viewport: VIEWPORT,
@@ -35,7 +42,9 @@ const {
   repetitions: REPETITIONS,
   frozenNow: FROZEN_NOW,
   missedFrameThresholdMs: MISSED_FRAME_THRESHOLD_MS,
-} = WEBGPU_NATIVE_FIXTURE;
+} = ACTIVE_FIXTURE;
+
+const READY_TIMEOUT_MS = ACTIVE_FIXTURE.profile === "large" ? 90_000 : 30_000;
 
 type NativeMode = "immediate" | "gpu-native";
 type WebGpuVariant = "no-vulkan-compositor" | "vulkan-compositor";
@@ -86,7 +95,7 @@ async function installCommonRoutes(page: Page, sharedAnchorTo: number): Promise<
     await route.fulfill({ status: response.status(), headers, body: patched });
   });
 
-  const denseBars = buildDenseFootprintBars(sharedAnchorTo);
+  const denseBars = buildDenseFootprintBars(sharedAnchorTo, ACTIVE_FIXTURE);
   await page.route(/\/history(?:\?|$)/, (route) => {
     const url = new URL(route.request().url());
     const from = Number(url.searchParams.get("from"));
@@ -354,6 +363,7 @@ async function measureMode(
         repetitions,
         metricNames,
         referencePngBase64,
+        readyTimeoutMs,
       }) => {
         document.body.replaceChildren();
         document.body.style.margin = "0";
@@ -471,7 +481,7 @@ async function measureMode(
         }
 
         const runtimes = () => panelIds.map((id: string) => harness.getChartRuntime(id)!);
-        const readyDeadline = performance.now() + 30_000;
+        const readyDeadline = performance.now() + readyTimeoutMs;
         while (true) {
           const allReady = runtimes().every((runtime) => {
             if (!runtime) return false;
@@ -843,6 +853,7 @@ async function measureMode(
         repetitions: REPETITIONS,
         metricNames: [...WEBGPU_NATIVE_METRICS],
         referencePngBase64,
+        readyTimeoutMs: READY_TIMEOUT_MS,
       },
     );
 
@@ -933,7 +944,7 @@ async function measureMode(
 }
 
 test("four-chart WebGPU immediate vs GPU-native PoC comparison across pan, zoom, live and live-rollover", async ({ baseURL }, testInfo) => {
-  test.setTimeout(240_000);
+  test.setTimeout(ACTIVE_FIXTURE.profile === "large" ? 480_000 : 240_000);
   const resolvedBaseURL = baseURL ?? testInfo.project.use.baseURL ?? "http://127.0.0.1:4173";
   const reportPath = process.env.CHART_GPU_NATIVE_REPORT_PATH;
   const sharedAnchorTo = Date.now();
@@ -976,10 +987,11 @@ test("four-chart WebGPU immediate vs GPU-native PoC comparison across pan, zoom,
 
   if (!webgpuProbe.ok) {
     if (HARDWARE_MODE) {
-      const assessment = buildWebGpuNativeAssessment({ hardwareValid: false });
+      const assessment = buildWebGpuNativeAssessment({ hardwareValid: false, fixture: ACTIVE_FIXTURE });
       await writeReport({
         schemaVersion: 1,
         issue: "#258",
+        fixture: ACTIVE_FIXTURE,
         hardwareValid: false,
         hardwareInvalidReasons,
         timestampQuerySupported: false,
@@ -1021,10 +1033,11 @@ test("four-chart WebGPU immediate vs GPU-native PoC comparison across pan, zoom,
     hardwareValid = false;
   }
 
-  const assessment = buildWebGpuNativeAssessment({ hardwareValid, immediate, gpuNative });
+  const assessment = buildWebGpuNativeAssessment({ hardwareValid, immediate, gpuNative, parity, fixture: ACTIVE_FIXTURE });
   const report = {
     schemaVersion: 1,
     issue: "#258",
+    fixture: ACTIVE_FIXTURE,
     hardwareValid,
     hardwareInvalidReasons,
     timestampQuerySupported: Boolean(gpuNative.timestampQuerySupported || webgpuProbe.timestampQuerySupported),
@@ -1037,7 +1050,9 @@ test("four-chart WebGPU immediate vs GPU-native PoC comparison across pan, zoom,
     ...assessment,
   };
   console.log("WEBGPU_NATIVE_POC_EVIDENCE", JSON.stringify({
+    profile: ACTIVE_FIXTURE.profile,
     decision: report.decision,
+    defaultGate: report.defaultGate,
     hardwareValid: report.hardwareValid,
     timestampQuerySupported: report.timestampQuerySupported,
     parity: report.parity,
@@ -1073,7 +1088,8 @@ test("four-chart WebGPU immediate vs GPU-native PoC comparison across pan, zoom,
     immediate.scenarios["live-rollover"].uploads.totalBytes * 0.25,
   );
   expect(gpuNative.scenarios["live-rollover"].rolloverFrames).not.toBeNull();
-  expect(gpuNative.scenarios["live-rollover"].rolloverFrames!.uploads.dataPerFrameBytes).toBeLessThan(8_192);
+  const rolloverUploadCapBytes = Math.max(8_192, (CELLS_PER_BAR * 16 + 32) * 4);
+  expect(gpuNative.scenarios["live-rollover"].rolloverFrames!.uploads.dataPerFrameBytes).toBeLessThan(rolloverUploadCapBytes);
 
   expect(gpuNative.capture.width).toBeGreaterThan(0);
   expect(gpuNative.capture.height).toBeGreaterThan(0);

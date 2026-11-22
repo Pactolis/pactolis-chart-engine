@@ -27,6 +27,45 @@ export const WEBGPU_NATIVE_FIXTURE = Object.freeze({
   missedFrameThresholdMs: 20,
 });
 
+export const WEBGPU_NATIVE_PROFILES = Object.freeze({
+  standard: Object.freeze({ name: "standard", barCount: 600, cellsPerBar: 40, fitColumns: 60 }),
+  large: Object.freeze({ name: "large", barCount: 2_500, cellsPerBar: 120, fitColumns: 120 }),
+});
+
+export const WEBGPU_NATIVE_DEFAULT_DECISION_RULE = Object.freeze({
+  name: "webgpu-native-default-go",
+  minP95SpeedupRatio: 0.80,
+  maxRolloverP99RegressionRatio: 1.05,
+  minParityMatchRatio: 0.99,
+  requireZeroPanZoomDataUpload: true,
+  requireZeroFallbacks: true,
+  recommendedProfile: "large",
+});
+
+function parseBoundedFixtureInt(raw, fallback, min, max, label) {
+  if (raw === undefined || raw === null || raw === "") return fallback;
+  const parsed = Number(raw);
+  if (!Number.isInteger(parsed) || parsed < min || parsed > max) {
+    throw new Error(`Invalid ${label}: ${raw} (expected integer in ${min}..${max})`);
+  }
+  return parsed;
+}
+
+export function resolveWebGpuNativeFixture({ profile, barCount, cellsPerBar, fitColumns } = {}) {
+  const profileName = profile === undefined || profile === null || profile === "" ? "standard" : String(profile);
+  const preset = WEBGPU_NATIVE_PROFILES[profileName];
+  if (!preset) {
+    throw new Error(`Unknown WebGPU native profile: ${profileName} (expected standard or large)`);
+  }
+  return Object.freeze({
+    ...WEBGPU_NATIVE_FIXTURE,
+    profile: preset.name,
+    barCount: parseBoundedFixtureInt(barCount, preset.barCount, 100, 10_000, "barCount"),
+    cellsPerBar: parseBoundedFixtureInt(cellsPerBar, preset.cellsPerBar, 10, 500, "cellsPerBar"),
+    fitColumns: parseBoundedFixtureInt(fitColumns, preset.fitColumns, 20, 500, "fitColumns"),
+  });
+}
+
 export const WEBGPU_NATIVE_SCENARIOS = Object.freeze(["pan", "zoom", "live", "live-rollover"]);
 
 export const WEBGPU_NATIVE_MODES = Object.freeze(["immediate", "gpu-native"]);
@@ -138,10 +177,119 @@ function summarizeRolloverFrames(scenarioEntry) {
   };
 }
 
+function evaluateDefaultGate({ hardwareValid, incomplete, immediate, gpuNative, parity, comparisons, zeroPanZoomUpload, fixture }) {
+  const profile = fixture?.profile ?? "standard";
+  const rule = WEBGPU_NATIVE_DEFAULT_DECISION_RULE;
+
+  if (!hardwareValid) {
+    return {
+      rule,
+      profile,
+      decision: "NOT_EVALUATED_HARDWARE_INVALID",
+      passed: false,
+      checks: [],
+    };
+  }
+
+  const rolloverComp = comparisons.find((c) => c.scenario === "live-rollover");
+  const hasRolloverP99 = Boolean(
+    rolloverComp?.immediate?.rolloverFrames?.frameRender?.count > 0
+    && Number.isFinite(rolloverComp.immediate.rolloverFrames.frameRender.p99Ms)
+    && rolloverComp?.gpuNative?.rolloverFrames?.frameRender?.count > 0
+    && Number.isFinite(rolloverComp.gpuNative.rolloverFrames.frameRender.p99Ms),
+  );
+  const hasParity = Boolean(parity && Number.isFinite(parity.matchRatio));
+
+  if (incomplete || !immediate || !gpuNative || !hasRolloverP99 || !hasParity) {
+    return {
+      rule,
+      profile,
+      decision: "NOT_EVALUATED_INCOMPLETE",
+      passed: false,
+      checks: [],
+    };
+  }
+
+  const checks = [];
+  for (const scenario of ["pan", "zoom", "live"]) {
+    const comp = comparisons.find((c) => c.scenario === scenario);
+    const immP95 = comp?.immediate?.frameRender?.p95Ms;
+    const natP95 = comp?.gpuNative?.frameRender?.p95Ms;
+    const ratioVal = Number.isFinite(immP95) && immP95 > 0 && Number.isFinite(natP95)
+      ? round6(natP95 / immP95)
+      : null;
+    checks.push({
+      name: `${scenario}.p95Speedup`,
+      passed: ratioVal !== null && ratioVal <= rule.minP95SpeedupRatio,
+      actual: ratioVal,
+      threshold: `<= ${rule.minP95SpeedupRatio}x immediate p95Ms`,
+    });
+  }
+
+  const immRollP99 = rolloverComp.immediate.rolloverFrames.frameRender.p99Ms;
+  const natRollP99 = rolloverComp.gpuNative.rolloverFrames.frameRender.p99Ms;
+  const rollP99Ratio = immRollP99 > 0 ? round6(natRollP99 / immRollP99) : null;
+  checks.push({
+    name: "live-rollover.p99Regression",
+    passed: rollP99Ratio !== null && rollP99Ratio <= rule.maxRolloverP99RegressionRatio,
+    actual: rollP99Ratio,
+    threshold: `<= ${rule.maxRolloverP99RegressionRatio}x immediate p99Ms`,
+  });
+
+  const rollTotalSaved = rolloverComp.gpuNative.uploads.totalBytes < rolloverComp.immediate.uploads.totalBytes;
+  const rollDataPerFrame = rolloverComp.gpuNative.rolloverFrames.uploads.dataPerFrameBytes;
+  const immRollPerFrame = rolloverComp.immediate.rolloverFrames.uploads.perFrameBytes;
+  const rollUploadSaved = rollTotalSaved && (immRollPerFrame <= 0 || rollDataPerFrame < immRollPerFrame);
+  checks.push({
+    name: "live-rollover.uploadSavings",
+    passed: rollUploadSaved,
+    actual: rolloverComp.uploadReductionRatio ?? null,
+    threshold: "< 1.0x immediate upload bytes",
+  });
+
+  const panComp = comparisons.find((c) => c.scenario === "pan");
+  const zoomComp = comparisons.find((c) => c.scenario === "zoom");
+  checks.push({
+    name: "panZoomZeroDataUpload",
+    passed: Boolean(zeroPanZoomUpload),
+    actual: {
+      pan: panComp?.gpuNative?.uploads?.dataBytes ?? null,
+      zoom: zoomComp?.gpuNative?.uploads?.dataBytes ?? null,
+    },
+    threshold: 0,
+  });
+
+  checks.push({
+    name: "parity.matchRatio",
+    passed: parity.matchRatio >= rule.minParityMatchRatio,
+    actual: round6(parity.matchRatio),
+    threshold: `>= ${rule.minParityMatchRatio}`,
+  });
+
+  const fallbacks = Array.isArray(gpuNative.fallbacks) ? gpuNative.fallbacks : null;
+  checks.push({
+    name: "gpuNative.zeroFallbacks",
+    passed: fallbacks !== null && fallbacks.length === 0,
+    actual: fallbacks ? fallbacks.length : "missing",
+    threshold: 0,
+  });
+
+  const passed = checks.every((c) => c.passed);
+  return {
+    rule,
+    profile,
+    decision: passed ? "DEFAULT_GO" : "DEFAULT_NO_GO",
+    passed,
+    checks,
+  };
+}
+
 export function buildWebGpuNativeAssessment({
   hardwareValid,
   immediate,
   gpuNative,
+  parity = null,
+  fixture = WEBGPU_NATIVE_FIXTURE,
   measurementError = null,
 } = {}) {
   const comparisons = WEBGPU_NATIVE_SCENARIOS.map((scenario) => {
@@ -218,6 +366,16 @@ export function buildWebGpuNativeAssessment({
       display: "hardware-invalid",
       rationale: "Yazılım rasterizer veya kullanılamayan WebGPU adaptörü nedeniyle donanım kararı üretilemedi.",
       comparisons,
+      defaultGate: evaluateDefaultGate({
+        hardwareValid: false,
+        incomplete: true,
+        immediate,
+        gpuNative,
+        parity,
+        comparisons,
+        zeroPanZoomUpload: false,
+        fixture,
+      }),
     };
   }
 
@@ -230,6 +388,16 @@ export function buildWebGpuNativeAssessment({
       display: "incomplete",
       rationale: measurementError ?? "En az bir mod/senaryo için geçerli chart.frame.render.ms ölçümü alınamadı.",
       comparisons,
+      defaultGate: evaluateDefaultGate({
+        hardwareValid: true,
+        incomplete: true,
+        immediate,
+        gpuNative,
+        parity,
+        comparisons,
+        zeroPanZoomUpload: false,
+        fixture,
+      }),
     };
   }
 
@@ -244,12 +412,22 @@ export function buildWebGpuNativeAssessment({
       ? "Aynı WebGPU adaptöründe immediate vs gpu-native kıyası tamamlandı; pan ve zoom senaryolarında gpu.native.upload.dataBytes = 0 doğrulandı."
       : "Ölçüm tamamlandı ancak pan veya zoom senaryosunda gpu.native.upload.dataBytes sıfır değil.",
     comparisons,
+    defaultGate: evaluateDefaultGate({
+      hardwareValid: true,
+      incomplete: false,
+      immediate,
+      gpuNative,
+      parity,
+      comparisons,
+      zeroPanZoomUpload,
+      fixture,
+    }),
   };
 }
 
-function fmtMsPair(stats) {
+function fmtMsQuad(stats) {
   if (!stats || !stats.count) return "—";
-  return `${stats.meanMs.toFixed(3)} / ${stats.p95Ms.toFixed(3)}`;
+  return `${stats.meanMs.toFixed(3)} / ${stats.p50Ms.toFixed(3)} / ${stats.p95Ms.toFixed(3)} / ${stats.p99Ms.toFixed(3)}`;
 }
 
 function fmtMsTriple(stats) {
@@ -268,10 +446,13 @@ export function formatWebGpuNativeMarkdown(report) {
   const env = report?.environment ?? {};
   const adapter = env.webgpuAdapter ?? report?.webgpuProbe?.adapterInfo ?? {};
   const renderer = env.webglRenderer ?? report?.webgpuProbe?.webglInfo ?? {};
+  const fixture = report?.fixture ?? WEBGPU_NATIVE_FIXTURE;
+  const profileName = fixture?.profile ?? "standard";
   const lines = [
     "# WebGPU Immediate vs GPU-Native PoC Raporu (`Refs #258`)",
     "",
     `- Run ID: ${report?.runId ?? "unknown"}`,
+    `- Profil: **${profileName}**`,
     `- Karar / Durum: **${report?.decision ?? "NOT_EVALUATED"}** (${report?.display ?? "—"})`,
     `- Donanım geçerli (` + "`hardwareValid`" + `): **${Boolean(report?.hardwareValid)}**`,
     `- Sunum modu (` + "`presentation`" + `): **${report?.presentation ?? "unavailable"}**`,
@@ -292,12 +473,13 @@ export function formatWebGpuNativeMarkdown(report) {
     "",
     "## Fixture Özeti (#88 Yoğun Sahne)",
     "",
-    `- Viewport: ${WEBGPU_NATIVE_FIXTURE.viewport.width}×${WEBGPU_NATIVE_FIXTURE.viewport.height} (4 grafik, 2×2 800×450)`,
-    `- Seri: ${WEBGPU_NATIVE_FIXTURE.barCount} bar × ${WEBGPU_NATIVE_FIXTURE.cellsPerBar} hücre, fit=${WEBGPU_NATIVE_FIXTURE.fitColumns}`,
-    `- Canlı akış: ${WEBGPU_NATIVE_FIXTURE.liveRatePerSecondPerMarket} trade/s/market; rollover: ${WEBGPU_NATIVE_FIXTURE.liveRolloverFramesPerRepetition} kare/rep, her ${WEBGPU_NATIVE_FIXTURE.liveRolloverEveryFrames} karede bar devri`,
-    `- rAF missed-frame eşiği: interval > ${WEBGPU_NATIVE_FIXTURE.missedFrameThresholdMs} ms`,
+    `- Profil: **${profileName}**`,
+    `- Viewport: ${fixture.viewport.width}×${fixture.viewport.height} (4 grafik, 2×2 800×450)`,
+    `- Seri: ${fixture.barCount} bar × ${fixture.cellsPerBar} hücre, fit=${fixture.fitColumns}`,
+    `- Canlı akış: ${fixture.liveRatePerSecondPerMarket} trade/s/market; rollover: ${fixture.liveRolloverFramesPerRepetition} kare/rep, her ${fixture.liveRolloverEveryFrames} karede bar devri`,
+    `- rAF missed-frame eşiği: interval > ${fixture.missedFrameThresholdMs} ms`,
     "",
-    "## Senaryo Bazlı Zamanlama Karşılaştırması (mean / p95 ms)",
+    "## Senaryo Bazlı Zamanlama Karşılaştırması (mean / p50 / p95 / p99 ms)",
     "",
     "| Senaryo | Mod | `frame.render` | `surface.gpu.draw` | `gpu.candles` | `gpu.footprint` | `gpu.flush` | `gpu.timestamp` | `gpu.ts.compute` | rAF missed |",
     "| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |",
@@ -307,7 +489,7 @@ export function formatWebGpuNativeMarkdown(report) {
     for (const [label, data] of [["immediate", item.immediate], ["gpu-native", item.gpuNative]]) {
       const missedPct = data.raf?.sampleCount > 0 ? `${(data.raf.missedFrameRatio * 100).toFixed(1)}%` : "—";
       lines.push(
-        `| ${item.scenario} | ${label} | ${fmtMsPair(data.frameRender)} | ${fmtMsPair(data.surfaceGpuDraw)} | ${fmtMsPair(data.candles)} | ${fmtMsPair(data.footprint)} | ${fmtMsPair(data.flush)} | ${data.timestampDisplay ?? "yok"} | ${data.timestampComputeDisplay ?? "yok"} | ${missedPct} |`,
+        `| ${item.scenario} | ${label} | ${fmtMsQuad(data.frameRender)} | ${fmtMsQuad(data.surfaceGpuDraw)} | ${fmtMsQuad(data.candles)} | ${fmtMsQuad(data.footprint)} | ${fmtMsQuad(data.flush)} | ${data.timestampDisplay ?? "yok"} | ${data.timestampComputeDisplay ?? "yok"} | ${missedPct} |`,
       );
     }
   }
@@ -360,6 +542,31 @@ export function formatWebGpuNativeMarkdown(report) {
       `- ` + "`gpu-native`" + ` arka plan dışı piksel sayısı: ${report.parity.nonBgPixelsNative ?? "—"}`,
       `- Parite eşleşme oranı (kanal toleransı ≤ 2): ${Number.isFinite(report.parity.matchRatio) ? `${(report.parity.matchRatio * 100).toFixed(2)}%` : "—"}`,
     );
+  }
+
+  if (report?.defaultGate) {
+    const gate = report.defaultGate;
+    lines.push(
+      "",
+      "## Varsayılan Bayrak (`nativeWebGpu`) Karar Kuralı (`defaultGate`)",
+      "",
+      `- Kural: \`${gate.rule?.name ?? WEBGPU_NATIVE_DEFAULT_DECISION_RULE.name}\` (önerilen profil: \`${gate.rule?.recommendedProfile ?? "large"}\`)`,
+      `- Değerlendirilen profil: \`${gate.profile ?? profileName}\``,
+      `- Kapı Kararı: **${gate.decision}** (\`passed=${Boolean(gate.passed)}\`)`,
+    );
+    if (Array.isArray(gate.checks) && gate.checks.length > 0) {
+      lines.push(
+        "",
+        "| Kontrol | Durum | Gerçekleşen | Eşik |",
+        "| --- | --- | ---: | ---: |",
+      );
+      for (const chk of gate.checks) {
+        const actualStr = typeof chk.actual === "object" && chk.actual !== null
+          ? JSON.stringify(chk.actual)
+          : String(chk.actual ?? "—");
+        lines.push(`| \`${chk.name}\` | ${chk.passed ? "PASS" : "FAIL"} | \`${actualStr}\` | \`${chk.threshold}\` |`);
+      }
+    }
   }
 
   lines.push(
