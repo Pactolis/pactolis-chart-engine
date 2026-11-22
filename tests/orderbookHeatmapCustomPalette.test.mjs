@@ -603,25 +603,80 @@ test("visual-only settings changes invalidate raster & GPU prepare caches with 0
   });
 });
 
-test("projectCanonicalHeatmapTailBar matches HeatmapBuilder parity and feeds 1m live tail projection", async () => {
-  const canonicalBar = {
-    t: 1002 * MINUTE,
-    bucketStep: 25,
-    sources: {
-      "BINANCE:USD_PERP": [
-        [50_000, 10_000_000, 5_000_000],
-        [50_025, 2_000_000, 3_000_000],
-        [50_050, 1_000_000, 1_000_000],
-      ],
-      "okx:spot": [
-        [50_000, 4_000_000, 6_000_000],
-        [50_025, 1_000_000, 1_000_000],
-        [50_100, 500_000, 500_000],
-      ],
-      "coinbase:spot": [
-        [50_050, 3_000_000, 2_000_000],
+test("projectCanonicalHeatmapTailBar matches BE #532 wire shape, HeatmapBuilder parity, and 1m live tail projection", async () => {
+  // Verbatim copy of Pactolis-Backend contracts/ws/fixtures/orderbook-v1.json (heatmap-tail-canonical snapshot)
+  const beCanonicalSnapshotFixture = {
+    type: "heatmap_tail",
+    v: 1,
+    id: "heatmap-tail-canonical",
+    epoch: 1,
+    seq: 1,
+    prevSeq: null,
+    kind: "snapshot",
+    reason: "initial",
+    confirmation: 1,
+    data: {
+      schemaVersion: 1,
+      generatedAt: 1700000103500,
+      base: "BTC",
+      source: "canonical",
+      resolution: "1m",
+      bucketStep: 25,
+      bars: [
+        {
+          t: 1700000040000,
+          closed: true,
+          sources: ["binance:usd_perp", "bybit:spot"],
+          cells: [[99975, [[0, 120000, 0], [1, 79950, 0]]]],
+        },
+        {
+          t: 1700000100000,
+          closed: false,
+          sources: ["binance:usd_perp"],
+          cells: [[100000, [[0, 0, 150037]]]],
+        },
       ],
     },
+  };
+
+  for (const bar of beCanonicalSnapshotFixture.data.bars) {
+    const asSingle = projectCanonicalHeatmapTailBar(bar, {
+      source: "single",
+      bucketStep: 25,
+      minUsd: 0,
+    });
+    const asSingleCustom = projectCanonicalHeatmapTailBar(bar, {
+      source: "custom",
+      customSources: ["binance:usd_perp"],
+      bucketStep: 25,
+      minUsd: 0,
+    });
+    assert.deepEqual(asSingleCustom, asSingle, "[\"binance:usd_perp\"] custom parity with single");
+  }
+  assert.deepEqual(projectCanonicalHeatmapTailBar(beCanonicalSnapshotFixture.data.bars[0], {
+    source: "aggregated",
+    bucketStep: 25,
+    minUsd: 0,
+  }), { t: 1700000040000, cells: [[99975, 199950, 0]] });
+  assert.deepEqual(projectCanonicalHeatmapTailBar(beCanonicalSnapshotFixture.data.bars[0], {
+    source: "custom",
+    customSources: ["bybit:spot"],
+    bucketStep: 25,
+    minUsd: 0,
+  }), { t: 1700000040000, cells: [[99975, 79950, 0]] });
+
+  const canonicalBar = {
+    t: 1002 * MINUTE,
+    closed: false,
+    sources: ["BINANCE:USD_PERP", "okx:spot", "coinbase:spot"],
+    cells: [
+      [50_000, [[0, 10_000_000, 5_000_000], [1, 4_000_000, 6_000_000]]],
+      [50_025, [[0, 2_000_000, 3_000_000], [1, 1_000_000, 1_000_000]]],
+      [50_050, [[0, 1_000_000, 1_000_000], [2, 3_000_000, 2_000_000]]],
+      [50_100, [[1, 500_000, 500_000]]],
+      // Out-of-bounds and invalid sourceIndex entries must be ignored safely
+      [50_200, [[-1, 99_000_000, 0], [3, 99_000_000, 0], [1.5, 99_000_000, 0], [Number.NaN, 99_000_000, 0]]],
+    ],
   };
 
   // Single uses binance:usd_perp only
@@ -636,7 +691,7 @@ test("projectCanonicalHeatmapTailBar matches HeatmapBuilder parity and feeds 1m 
     cells: [[50_000, 12_000_000, 8_000_000]],
   });
 
-  // Aggregated sums all sources and buckets $25 -> $50
+  // Aggregated sums all valid sources and buckets $25 -> $50
   const aggregated = projectCanonicalHeatmapTailBar(canonicalBar, {
     source: "aggregated",
     bucketStep: 50,
@@ -673,12 +728,13 @@ test("projectCanonicalHeatmapTailBar matches HeatmapBuilder parity and feeds 1m 
   // Caps at HEATMAP_MAX_CELLS_PER_BAR (200) strongest levels sorted by price ascending
   const denseCells = Array.from({ length: 260 }, (_, idx) => [
     50_000 + idx * 25,
-    (idx + 1) * 1_000,
-    (idx + 1) * 1_000,
+    [[0, (idx + 1) * 1_000, (idx + 1) * 1_000]],
   ]);
   const capped = projectCanonicalHeatmapTailBar({
     t: 123_000,
-    sources: { "binance:usd_perp": denseCells },
+    closed: true,
+    sources: ["binance:usd_perp"],
+    cells: denseCells,
   }, {
     source: "single",
     bucketStep: 25,
@@ -689,19 +745,22 @@ test("projectCanonicalHeatmapTailBar matches HeatmapBuilder parity and feeds 1m 
   assert.equal(capped.cells[0][0], 50_000 + 60 * 25);
   assert.equal(capped.cells[199][0], 50_000 + 259 * 25);
 
-  // Live tail push with canonicalBars on 1m overlay
-  await withSettings(() => ({
+  // Live tail canonical subscription (BE #532): request shape, no re-subscribe on client filter changes,
+  // immediate re-projection from canonicalTailBars, and unsubscribe when customSources becomes empty.
+  let currentSettings = {
     mode: "custom",
     unit: "usd",
     bucketStep: 50,
     single: { usd: 1_000_000, btc: 10 },
     aggregated: { usd: 1_000_000, btc: 10 },
-    custom: { usd: 10_000_000, btc: 100 },
+    custom: { usd: 10_000_000, btc: 300 },
     customSources: ["okx:spot", "binance:usd_perp"],
-  }), async () => {
+  };
+  let currentMarket = MARKET;
+  await withSettings(() => currentSettings, async (notify) => {
     const series = makeSeries(3, MINUTE);
     const view = makeView();
-    let listener = null;
+    const subscriptions = [];
     const overlay = new OrderbookHeatmapOverlay({
       fetch: async (req) => ({
         schemaVersion: 1,
@@ -715,21 +774,90 @@ test("projectCanonicalHeatmapTailBar matches HeatmapBuilder parity and feeds 1m 
         bars: [],
       }),
       invalidate: () => {},
-      getMarket: () => MARKET,
+      getMarket: () => currentMarket,
       now: () => 1002 * MINUTE + 500,
-      subscribeLiveTail: (cb) => {
-        listener = cb;
-        return () => {};
+      subscribeLiveTail: (cb, request) => {
+        const entry = { listener: cb, request, unsubscribed: false };
+        subscriptions.push(entry);
+        return () => { entry.unsubscribed = true; };
       },
     });
     try {
+      assert.equal(subscriptions.length, 1);
+      assert.deepEqual(subscriptions[0].request, {
+        market: MARKET,
+        base: "BTC",
+        source: "canonical",
+        bucketStep: 25,
+      });
+      assert.equal("sources" in subscriptions[0].request, false);
+      assert.equal("minQuantityUsd" in subscriptions[0].request, false);
+      assert.equal("minUsd" in subscriptions[0].request, false);
+      assert.equal("minBtc" in subscriptions[0].request, false);
+
       overlay.draw(makeRecordingCtx().ctx, view, series, [0, 2]);
       await new Promise((resolve) => setTimeout(resolve, 10));
-      listener({ market: MARKET, canonicalBars: [canonicalBar] });
-      const frame = overlay.prepareGpuCells(view, series, [0, 2], () => ({ release() {} }));
+      subscriptions[0].listener({ market: MARKET, canonicalBars: [canonicalBar] });
+      let frame = overlay.prepareGpuCells(view, series, [0, 2], () => ({ release() {} }));
       assert.ok(frame);
       assert.equal(frame.main.length, 1);
       assert.equal(frame.main[0].value, 32_000_000);
+
+      // Change customSources, bucketStep, unit, and threshold -> 0 re-subscriptions, immediate re-projection
+      currentSettings = {
+        ...currentSettings,
+        customSources: ["okx:spot", "coinbase:spot"],
+        bucketStep: 100,
+        unit: "btc",
+        custom: { usd: 10_000_000, btc: 300 },
+      };
+      notify();
+      assert.equal(subscriptions.length, 1, "custom mode keeps single canonical subscription across client changes");
+      assert.equal(subscriptions[0].unsubscribed, false);
+      frame = overlay.prepareGpuCells(view, series, [0, 2], () => ({ release() {} }));
+      assert.ok(frame);
+      assert.equal(frame.main.length, 1);
+      assert.ok(Math.abs(frame.main[0].value - 17_000_000 / 50_050) < 1e-6);
+
+      // Lower threshold in custom mode -> still 0 re-subscriptions, updates projected cells
+      currentSettings = {
+        ...currentSettings,
+        custom: { usd: 1_000_000, btc: 10 },
+      };
+      notify();
+      assert.equal(subscriptions.length, 1);
+      frame = overlay.prepareGpuCells(view, series, [0, 2], () => ({ release() {} }));
+      assert.ok(frame);
+      assert.equal(frame.main.length, 2, "lowered threshold reveals $50_100 bucket from stored canonicalTailBars");
+
+      // Clearing customSources closes active live-tail subscription
+      currentSettings = { ...currentSettings, customSources: [] };
+      notify();
+      assert.equal(subscriptions[0].unsubscribed, true);
+      assert.equal(subscriptions.length, 1);
+
+      // Restoring customSources re-subscribes canonical live tail
+      currentSettings = { ...currentSettings, customSources: ["binance:usd_perp"] };
+      notify();
+      assert.equal(subscriptions.length, 2);
+      assert.deepEqual(subscriptions[1].request, {
+        market: MARKET,
+        base: "BTC",
+        source: "canonical",
+        bucketStep: 25,
+      });
+
+      // Market change re-subscribes canonical live tail for new market
+      currentMarket = "BINANCE_FUTURES:ethusdt";
+      overlay.handleMarketChange();
+      assert.equal(subscriptions[1].unsubscribed, true);
+      assert.equal(subscriptions.length, 3);
+      assert.deepEqual(subscriptions[2].request, {
+        market: "BINANCE_FUTURES:ethusdt",
+        base: "ETH",
+        source: "canonical",
+        bucketStep: 25,
+      });
     } finally {
       overlay.dispose();
     }

@@ -14,7 +14,11 @@ import type {
   OrderbookResolution,
 } from "./heatmapContracts.js";
 
-export type { CanonicalHeatmapTailBar } from "./heatmapContracts.js";
+export type {
+  CanonicalHeatmapTailBar,
+  CanonicalHeatmapTailCell,
+  CanonicalHeatmapTailSourceEntry,
+} from "./heatmapContracts.js";
 
 const MINUTE_MS = 60_000;
 const HOUR_MS = 60 * MINUTE_MS;
@@ -342,6 +346,9 @@ export function projectCanonicalHeatmapTailBar(
   bar: CanonicalHeatmapTailBar,
   options: ProjectCanonicalHeatmapTailOptions,
 ): OrderbookHeatmapBar {
+  if (!Array.isArray(bar.sources) || !Array.isArray(bar.cells)) {
+    return { t: bar.t, cells: [] };
+  }
   const step = options.bucketStep;
   let allowed: Set<string> | null = null;
   if (options.source === "single") {
@@ -352,20 +359,39 @@ export function projectCanonicalHeatmapTailBar(
     allowed = new Set(custom);
   }
 
+  const selectedIndices = new Set<number>();
+  for (let idx = 0; idx < bar.sources.length; idx++) {
+    const rawSource = bar.sources[idx];
+    if (typeof rawSource !== "string") continue;
+    const sourceId = rawSource.trim().toLowerCase();
+    if (sourceId.length === 0) continue;
+    if (allowed === null || allowed.has(sourceId)) {
+      selectedIndices.add(idx);
+    }
+  }
+  if (selectedIndices.size === 0) {
+    return { t: bar.t, cells: [] };
+  }
+
   const buckets = new Map<number, [number, number]>();
-  for (const [rawKey, sourceCells] of Object.entries(bar.sources)) {
-    const sourceId = rawKey.trim().toLowerCase();
-    if (sourceId.length === 0 || !Array.isArray(sourceCells)) continue;
-    if (allowed !== null && !allowed.has(sourceId)) continue;
-    for (const cell of sourceCells) {
-      const priceStart = cell[0];
-      const bid = cell[1];
-      const ask = cell[2];
-      if (!Number.isFinite(priceStart) || !Number.isFinite(bid) || !Number.isFinite(ask)) continue;
-      const index = Math.floor(priceStart / step);
-      const entry = buckets.get(index);
+  for (const cell of bar.cells) {
+    if (!Array.isArray(cell)) continue;
+    const priceStart = cell[0];
+    const contributions = cell[1];
+    if (!Number.isFinite(priceStart) || priceStart < 0 || !Array.isArray(contributions)) continue;
+    const index = Math.floor(priceStart / step);
+    for (const contribution of contributions) {
+      if (!Array.isArray(contribution)) continue;
+      const sourceIdx = contribution[0];
+      const bid = contribution[1];
+      const ask = contribution[2];
+      if (!Number.isSafeInteger(sourceIdx) || sourceIdx < 0 || sourceIdx >= bar.sources.length) continue;
+      if (!selectedIndices.has(sourceIdx)) continue;
+      if (!Number.isFinite(bid) || !Number.isFinite(ask)) continue;
       const cleanBid = Math.max(0, bid);
       const cleanAsk = Math.max(0, ask);
+      if (cleanBid === 0 && cleanAsk === 0) continue;
+      const entry = buckets.get(index);
       if (entry) {
         entry[0] += cleanBid;
         entry[1] += cleanAsk;

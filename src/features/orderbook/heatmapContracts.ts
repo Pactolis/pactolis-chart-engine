@@ -45,12 +45,23 @@ export interface OrderbookHeatmapResponse {
   missingSources?: readonly string[];
 }
 
-/** Canonical per-source `$25`-bucket tail bar delivered over WS for client-side projection. */
+/** `[sourceIndex, bidUsd, askUsd]` contribution into `CanonicalHeatmapTailBar.sources`. */
+export type CanonicalHeatmapTailSourceEntry = readonly [number, number, number];
+
+/** `[bucketStartPrice, contributions]` at canonical `$25` resolution. */
+export type CanonicalHeatmapTailCell = readonly [number, readonly CanonicalHeatmapTailSourceEntry[]];
+
+/**
+ * Canonical per-source `$25`-bucket tail snapshot bar projected on the client.
+ * BE WS delta frames (`{ t, closed, sources, upserts, deletes }`) are merged into
+ * snapshot `CanonicalHeatmapTailBar` objects in the frontend WS transport layer
+ * before being passed to the chart engine.
+ */
 export interface CanonicalHeatmapTailBar {
   t: number;
-  bucketStep?: 25;
-  /** Map of source identifier (e.g. `"binance:usd_perp"`) to `$25` `[priceStart, bidUsd, askUsd]` cells. */
-  sources: Readonly<Record<string, readonly OrderbookHeatmapCell[]>>;
+  closed?: boolean;
+  sources: readonly string[];
+  cells: readonly CanonicalHeatmapTailCell[];
 }
 
 /** Live-tail invalidation or push event payload from an external transport (e.g. WebSocket). */
@@ -65,8 +76,7 @@ export interface LiveHeatmapTailEvent {
 export interface LiveHeatmapTailRequest {
   market: string;
   base?: string;
-  source?: OrderbookHeatmapSource | "canonical";
-  sources?: readonly string[];
+  source?: "single" | "aggregated" | "canonical";
   minQuantityUsd?: number;
   priceStepPct?: number;
   bucketStep?: OrderbookHeatmapBucketStep;

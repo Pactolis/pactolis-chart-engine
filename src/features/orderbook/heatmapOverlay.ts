@@ -19,6 +19,7 @@ import {
 } from "../../core/performanceTelemetry.js";
 import { orderbookHeatmapSettingsSource } from "./heatmapSettingsSource.js";
 import type {
+  CanonicalHeatmapTailBar,
   LiveHeatmapTailEvent,
   LiveHeatmapTailRequest,
   OrderbookHeatmapBar,
@@ -202,6 +203,8 @@ export class OrderbookHeatmapOverlay {
   /** Identifies what the cached bars were fetched for; any change drops the cache. */
   private dataKey = "";
   private bars = new Map<number, OrderbookHeatmapBar>();
+  private canonicalTailBars = new Map<number, CanonicalHeatmapTailBar>();
+  private canonicalProjectionKey = "";
   private chunks = new Map<number, ChunkState>();
   private chunkCoverage = new Map<number, OrderbookHeatmapCoverage>();
   private inFlight = new Set<AbortController>();
@@ -247,6 +250,7 @@ export class OrderbookHeatmapOverlay {
         } else if (nextSettings && nextSettings.mode !== "off" && this.activeFor(nextSettings)) {
           const nextKey = this.dataKeyFor(nextSettings, this.currentTier);
           if (nextKey !== this.dataKey) this.reset(nextKey);
+          this.syncCanonicalTailProjection(nextSettings, this.currentTier);
         }
       }
       this.syncLiveTailSubscription();
@@ -280,10 +284,8 @@ export class OrderbookHeatmapOverlay {
 
   private liveTailKeyFor(market: string, settings: OrderbookHeatmapSettings | null): string {
     if (!settings) return `${market}|unconfigured`;
-    const sourceKey = settings.mode === "custom"
-      ? normalizeOrderbookHeatmapSources(settings.customSources ?? []).join(",")
-      : "";
-    return `${market}|${settings.mode}|${sourceKey}|${settings.unit}|${settings.bucketStep}|${activeOrderbookHeatmapThreshold(settings)}`;
+    if (settings.mode === "custom") return `${market}|canonical`;
+    return `${market}|${settings.mode}|${settings.unit}|${settings.bucketStep}|${activeOrderbookHeatmapThreshold(settings)}`;
   }
 
   /** Synchronizes the active live-tail subscription with current market and heatmap settings. */
@@ -297,6 +299,10 @@ export class OrderbookHeatmapOverlay {
     const customDisabled = settings?.mode === "custom" && customSources.length === 0;
     if (!settings || settings.mode === "off" || customDisabled || !isOrderbookHeatmapMarket(market)) {
       this.releaseRasterCache();
+    }
+    if (settings?.mode !== "custom" || customDisabled) {
+      this.canonicalTailBars.clear();
+      this.canonicalProjectionKey = "";
     }
     if (!this.subscribeLiveTail) return;
     if (customDisabled) {
@@ -314,6 +320,8 @@ export class OrderbookHeatmapOverlay {
     const key = this.liveTailKeyFor(market, settings);
     if (key === this.liveTailRequestKey && this.unsubscribeLiveTail !== null) return;
 
+    this.canonicalTailBars.clear();
+    this.canonicalProjectionKey = "";
     this.liveTailGeneration++;
     const generation = this.liveTailGeneration;
     this.unsubscribeLiveTail?.();
@@ -326,16 +334,19 @@ export class OrderbookHeatmapOverlay {
     this.liveTailRequestKey = key;
 
     const parsed = parseMarket(market);
-    const request: LiveHeatmapTailRequest = {
-      market,
-      ...(parsed.base ? { base: parsed.base } : {}),
-    };
-    if (settings) {
+    const request: LiveHeatmapTailRequest = settings?.mode === "custom"
+      ? {
+          market,
+          ...(parsed.base ? { base: parsed.base } : {}),
+          source: "canonical",
+          bucketStep: 25,
+        }
+      : {
+          market,
+          ...(parsed.base ? { base: parsed.base } : {}),
+        };
+    if (settings && settings.mode !== "custom") {
       request.bucketStep = settings.bucketStep;
-      if (settings.mode === "custom") {
-        request.source = "custom";
-        request.sources = customSources;
-      }
       if (settings.mode !== "off" && settings.unit === "usd") {
         request.minQuantityUsd = activeOrderbookHeatmapThreshold(settings);
       }
@@ -354,6 +365,7 @@ export class OrderbookHeatmapOverlay {
     if (this.disposed) return;
     this.lastMarket = this.getMarket();
     this.currentTier = null;
+    this.canonicalTailBars.clear();
     this.reset("");
     this.syncLiveTailSubscription();
   }
@@ -361,6 +373,39 @@ export class OrderbookHeatmapOverlay {
   /** Whether the live-tail subscription is actively receiving events. */
   private isLiveTailHealthy(now: number): boolean {
     return Boolean(this.subscribeLiveTail && this.lastLiveEventAt > 0 && now - this.lastLiveEventAt < LIVE_TAIL_IDLE_FALLBACK_MS);
+  }
+
+  private canonicalProjectionKeyFor(settings: OrderbookHeatmapSettings, tier: HeatmapTier): string {
+    return `${this.dataKeyFor(settings, tier)}|${settings.unit}|${activeOrderbookHeatmapThreshold(settings)}`;
+  }
+
+  private projectCanonicalBar(bar: CanonicalHeatmapTailBar, settings: OrderbookHeatmapSettings): OrderbookHeatmapBar {
+    const threshold = activeOrderbookHeatmapThreshold(settings);
+    const source = settings.mode === "custom" ? "custom" : settings.mode === "single" ? "single" : "aggregated";
+    return projectCanonicalHeatmapTailBar(bar, {
+      source,
+      customSources: settings.customSources,
+      bucketStep: settings.bucketStep,
+      ...(settings.unit === "btc" ? { minBtc: threshold } : { minUsd: threshold }),
+    });
+  }
+
+  private reprojectCanonicalTailBars(settings: OrderbookHeatmapSettings, tier: HeatmapTier): void {
+    if (this.canonicalTailBars.size === 0) return;
+    const projected: OrderbookHeatmapBar[] = [];
+    for (const bar of this.canonicalTailBars.values()) {
+      projected.push(this.projectCanonicalBar(bar, settings));
+    }
+    mergeHeatmapBars(this.bars, projected);
+    this.canonicalProjectionKey = this.canonicalProjectionKeyFor(settings, tier);
+    this.barsRevision++;
+  }
+
+  private syncCanonicalTailProjection(settings: OrderbookHeatmapSettings, tier: HeatmapTier): void {
+    if (settings.mode !== "custom" || tier.name !== "1m" || this.canonicalTailBars.size === 0) return;
+    const nextKey = this.canonicalProjectionKeyFor(settings, tier);
+    if (nextKey === this.canonicalProjectionKey) return;
+    this.reprojectCanonicalTailBars(settings, tier);
   }
 
   /** Handles incoming transport-agnostic live-tail invalidation or bars push. */
@@ -380,15 +425,17 @@ export class OrderbookHeatmapOverlay {
       }
       let barsToMerge = event.bars;
       if (barsToMerge === undefined && event.canonicalBars !== undefined) {
+        for (const bar of event.canonicalBars) {
+          this.canonicalTailBars.set(bar.t, bar);
+        }
+        while (this.canonicalTailBars.size > 1000) {
+          const oldest = this.canonicalTailBars.keys().next().value;
+          if (oldest === undefined) break;
+          this.canonicalTailBars.delete(oldest);
+        }
         const settings = this.settings;
-        const threshold = activeOrderbookHeatmapThreshold(settings);
-        const source = settings.mode === "custom" ? "custom" : settings.mode === "single" ? "single" : "aggregated";
-        barsToMerge = event.canonicalBars.map((bar) => projectCanonicalHeatmapTailBar(bar, {
-          source,
-          customSources: settings.customSources,
-          bucketStep: settings.bucketStep,
-          ...(settings.unit === "btc" ? { minBtc: threshold } : { minUsd: threshold }),
-        }));
+        barsToMerge = event.canonicalBars.map((bar) => this.projectCanonicalBar(bar, settings));
+        this.canonicalProjectionKey = this.canonicalProjectionKeyFor(settings, this.currentTier);
       }
       if (barsToMerge && barsToMerge.length > 0) {
         mergeHeatmapBars(this.bars, barsToMerge);
@@ -469,7 +516,12 @@ export class OrderbookHeatmapOverlay {
       if (key !== this.dataKey || controller.signal.aborted) return;
       mergeHeatmapBars(this.bars, response.bars);
       this.recordChunkCoverage(chunkStart, response);
-      this.barsRevision++;
+      const liveSettings = this.settings;
+      if (liveSettings.mode === "custom" && tier.name === "1m" && this.canonicalTailBars.size > 0 && this.isLiveTailHealthy(this.now())) {
+        this.reprojectCanonicalTailBars(liveSettings, tier);
+      } else {
+        this.barsRevision++;
+      }
       this.chunks.set(chunkStart, {
         status: "ready",
         fetchedAt: this.now(),
@@ -506,6 +558,7 @@ export class OrderbookHeatmapOverlay {
     this.unsubscribeLiveTail = null;
     this.liveTailRequestKey = "";
     this.releaseVisibilityTracking();
+    this.canonicalTailBars.clear();
     this.reset("");
   }
 
@@ -543,6 +596,7 @@ export class OrderbookHeatmapOverlay {
     this.inFlight.clear();
     this.dataKey = key;
     this.bars = new Map();
+    this.canonicalProjectionKey = "";
     this.chunks = new Map();
     this.chunkCoverage = new Map();
     this.hoverWindows = new Map();
@@ -1001,6 +1055,7 @@ export class OrderbookHeatmapOverlay {
     const market = this.getMarket();
     if (this.lastMarket !== "" && market !== this.lastMarket) {
       this.currentTier = null;
+      this.canonicalTailBars.clear();
       this.reset("");
     }
     this.lastMarket = market;
@@ -1021,6 +1076,7 @@ export class OrderbookHeatmapOverlay {
     // dataset. Raising threshold or switching visual settings reuses the compatible cache.
     const key = this.dataKeyFor(settings, tier);
     if (key !== this.dataKey) this.reset(key);
+    this.syncCanonicalTailProjection(settings, tier);
     const first = Math.max(0, Math.floor(range[0]));
     const last = Math.min(series.length - 1, Math.ceil(range[1]));
     if (last < first) {
@@ -1372,7 +1428,12 @@ export class OrderbookHeatmapOverlay {
         if (key !== this.dataKey || controller.signal.aborted) return;
         mergeHeatmapBars(this.bars, response.bars);
         this.recordChunkCoverage(chunkStart, response);
-        this.barsRevision++;
+        const liveSettings = this.settings;
+        if (liveSettings.mode === "custom" && tier.name === "1m" && this.canonicalTailBars.size > 0 && this.isLiveTailHealthy(this.now())) {
+          this.reprojectCanonicalTailBars(liveSettings, tier);
+        } else {
+          this.barsRevision++;
+        }
         this.chunks.set(chunkStart, {
           status: "ready",
           fetchedAt: this.now(),
@@ -1408,6 +1469,7 @@ export class OrderbookHeatmapOverlay {
     const settings = this.settings;
     const expectedKey = this.dataKeyFor(settings, tier);
     if (expectedKey !== this.dataKey) this.reset(expectedKey);
+    this.syncCanonicalTailProjection(settings, tier);
     const step = settings.bucketStep;
     const center = Math.floor(view.indexOfX(crosshair.x));
     if (center < 0 || center > series.length - 1) return;

@@ -170,8 +170,7 @@ export class ChartHeatmapGpuCoordinator {
       this.clearPreparedCache();
       return null;
     }
-    const dpr = v.pixelRatio !== null && v.pixelRatio > 0 ? v.pixelRatio : 1;
-    if (v.area.width <= 1 || v.area.height <= 1 || s.length === 0 || v.colWidth * dpr < 1) {
+    if (v.area.width <= 1 || v.area.height <= 1 || s.length === 0) {
       this.clearPreparedCache();
       return null;
     }
