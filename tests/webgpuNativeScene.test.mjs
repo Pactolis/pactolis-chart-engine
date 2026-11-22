@@ -551,10 +551,10 @@ test("WebGpuNativeScenePipeline enforces 32B/16B layouts, priceOrigin precision,
       BAR_RECORD_BYTES + series.at(series.length - 1).cells.size * CELL_RECORD_BYTES,
     );
 
-    // 3e. Multi-bar append across >64 bars triggers staging growth while preserving prefix barCellOffsets
-    const beforeGrowBars = series.length;
-    const growOffset = beforeGrowBars - 1;
-    for (let k = 1; k <= 70; k++) {
+    // 3e. Multi-bar append within initial barCapacity (<= 64)
+    const beforeMultiAppendBars = series.length;
+    const growOffset = beforeMultiAppendBars - 1;
+    for (let k = 1; k <= 20; k++) {
       series.addTrade({
         time: newBarTime + k * 60_000 + 500,
         price: prevTail.low + 0.01,
@@ -569,15 +569,15 @@ test("WebGpuNativeScenePipeline enforces 32B/16B layouts, priceOrigin precision,
     assert.equal(pipeline.needsComputeDispatch(), true);
     assert.equal(cu32[0], growOffset, "multi-bar append starts from previous tail");
     assert.equal(cu32[1], series.length - growOffset, "multi-bar append dispatches only appended slice");
-    assert.equal(pipeline.barCellOffsets[0], 0, "staging growth preserves bar 0 offset");
-    assert.equal(pipeline.barCellOffsets[1], 3, "staging growth preserves prefix bar offsets");
+    assert.equal(pipeline.barCellOffsets[0], 0);
+    assert.equal(pipeline.barCellOffsets[1], 3);
 
     // 3f. Prefix mutation (< prevTailIdx) alongside rollover falls back cleanly to full rebuild
     const prefixBar = series.at(0);
     prefixBar.open += 0.01;
     const beforeFallbackData = snapshotPerformanceTelemetry().counters["gpu.native.upload.dataBytes"];
     series.addTrade({
-      time: newBarTime + 71 * 60_000 + 500,
+      time: newBarTime + 21 * 60_000 + 500,
       price: prevTail.low + 0.01,
       qty: 1,
       isBuy: true,
@@ -590,7 +590,29 @@ test("WebGpuNativeScenePipeline enforces 32B/16B layouts, priceOrigin precision,
     assert.equal(cu32[1], series.length);
     assert.ok(snapshotPerformanceTelemetry().counters["gpu.native.upload.dataBytes"] - beforeFallbackData > BAR_RECORD_BYTES * series.length);
 
+    // 3g. Staging growth (> 128 bars while barCapacity = 256) preserves prefix barCellOffsets during append
+    const grownSeries = makeSeriesWithBars(65, { basePrice: 100_000.01, priceStep: 0.01 });
+    assert.equal(pipeline.prepareFrame({ ...panScene, series: grownSeries }, 800, 600).ok, true);
+    const grownTail = grownSeries.at(grownSeries.length - 1);
+    for (let k = 1; k <= 70; k++) {
+      grownSeries.addTrade({
+        time: grownTail.startTime + k * 60_000 + 500,
+        price: grownTail.low + 0.01,
+        qty: 2,
+        isBuy: true,
+        source: "live",
+        id: `t-stage-grow-${k}`,
+      });
+    }
+    assert.equal(pipeline.prepareFrame({ ...panScene, series: grownSeries }, 800, 600).ok, true);
+    assert.equal(cu32[0], 64, "append across staging growth preserves prefix without full rebuild");
+    assert.equal(cu32[1], grownSeries.length - 64);
+    assert.equal(pipeline.barCellOffsets[0], 0, "staging growth preserves bar 0 offset");
+    assert.equal(pipeline.barCellOffsets[1], 3, "staging growth preserves prefix bar offsets");
+
     // 4. resetEpoch / full reload: triggers full rebuild
+    const prepReattach = pipeline.prepareFrame(panScene, 800, 600);
+    assert.equal(prepReattach.ok, true);
     const beforeResetData = snapshotPerformanceTelemetry().counters["gpu.native.upload.dataBytes"];
     const nextBars = makeSeriesWithBars(6, { basePrice: 100_000.01, priceStep: 0.01 }).list();
     series.loadBars(nextBars);
@@ -677,7 +699,7 @@ test("WebGpuNativeScenePipeline timestamp-query 2-slot ring records chart.gpu.ti
     assert.equal(mock.renderPasses.length, 3);
     assert.ok(mock.renderPasses[0].desc.timestampWrites);
     assert.equal(mock.renderPasses[0].desc.timestampWrites.beginningOfPassWriteIndex, 0);
-    assert.equal(mock.renderPasses[1].desc.timestampWrites.beginningOfPassWriteIndex, 2);
+    assert.equal(mock.renderPasses[1].desc.timestampWrites.beginningOfPassWriteIndex, 4);
     assert.equal(mock.renderPasses[2].desc.timestampWrites, undefined, "3rd frame skips timestamp non-blocking when 2 slots are busy");
 
     // Verify draw order within the single render pass: grid -> native candles -> native footprint -> foreground overlay
