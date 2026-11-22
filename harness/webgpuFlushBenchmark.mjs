@@ -143,17 +143,27 @@ export function formatWebGpuFlushMetadata(flushReport, decision) {
   return lines.join("\n");
 }
 
-export function buildDenseFootprintBars(anchorTo) {
-  const { barCount, cellsPerBar, priceStep, intervalMs, frozenNow } = WEBGPU_FLUSH_FIXTURE;
+export function buildDenseFootprintBars(anchorTo, options = {}) {
+  const barCount = options.barCount ?? WEBGPU_FLUSH_FIXTURE.barCount;
+  const cellsPerBar = options.cellsPerBar ?? WEBGPU_FLUSH_FIXTURE.cellsPerBar;
+  const priceStep = options.priceStep ?? WEBGPU_FLUSH_FIXTURE.priceStep;
+  const { intervalMs, frozenNow } = WEBGPU_FLUSH_FIXTURE;
   const bucketEnd = Math.floor(anchorTo / intervalMs) * intervalMs;
   const firstTime = bucketEnd - barCount * intervalMs;
   const basePrice = 60_000;
+  const clampCellIdx = (idx) => Math.max(0, Math.min(cellsPerBar - 1, idx));
   return Array.from({ length: barCount }, (_, barIndex) => {
     const time = firstTime + barIndex * intervalMs;
     const low = basePrice;
     const high = basePrice + (cellsPerBar - 1) * priceStep;
-    const open = basePrice + (10 + (barIndex % 6)) * priceStep;
-    const close = basePrice + (28 - (barIndex % 6)) * priceStep;
+    const openIdx = cellsPerBar >= 40
+      ? 10 + (barIndex % 6)
+      : clampCellIdx(Math.floor(cellsPerBar * 0.25) + (barIndex % Math.max(1, Math.min(6, cellsPerBar))));
+    const closeIdx = cellsPerBar >= 40
+      ? 28 - (barIndex % 6)
+      : clampCellIdx(Math.floor(cellsPerBar * 0.75) - (barIndex % Math.max(1, Math.min(6, cellsPerBar))));
+    const open = basePrice + openIdx * priceStep;
+    const close = basePrice + closeIdx * priceStep;
     let totalBuy = 0;
     let totalSell = 0;
     const cells = [];
