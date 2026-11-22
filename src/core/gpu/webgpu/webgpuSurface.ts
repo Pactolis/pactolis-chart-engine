@@ -267,26 +267,6 @@ export class WebGpuSurface implements GpuSurface {
     return true;
   }
 
-  readNativeVisiblePriceRangeAsync(
-    series: any,
-    visibleFrom: number,
-    visibleTo: number,
-  ): Promise<{ min: number; max: number } | null> {
-    if (!this.supportsNativeScene()) return Promise.resolve(null);
-    if (!this.nativePipeline) {
-      try {
-        this.nativePipeline = new WebGpuNativeScenePipeline(this.handle.device, this.handle.format, {
-          supportsTimestampQuery: this.handle.supportsTimestampQuery,
-          maxBufferSize: this.handle.limits?.maxBufferSize,
-        });
-      } catch {
-        this.nativeSceneDisabled = true;
-        return Promise.resolve(null);
-      }
-    }
-    return this.nativePipeline.readVisiblePriceRangeAsync(series, visibleFrom, visibleTo);
-  }
-
   supportsNativeHeatmap(): boolean {
     if (this.disposed || this.nativeHeatmapDisabled || this.handle.isLost()) return false;
     const device = this.handle.device;

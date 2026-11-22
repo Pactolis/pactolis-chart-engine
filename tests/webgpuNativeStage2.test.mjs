@@ -17,7 +17,6 @@ import {
   resetGpuDiagnosticsForTest,
 } from "../dist/core/gpu/gpuDiagnostics.js";
 import {
-  AUTOSCALE_RESULT_BYTES,
   MERGED_ROW_BUFFER_MAX_BYTES,
   MERGED_ROW_RECORD_BYTES,
   PIXEL_BUCKET_RECORD_BYTES,
@@ -34,7 +33,6 @@ import {
 import { WebGpuSurface } from "../dist/core/gpu/webgpu/webgpuSurface.js";
 import { FootprintRenderer } from "../dist/core/render/footprintRenderer.js";
 import { FootprintSeries } from "../dist/core/model/footprint.js";
-import { footprintVisiblePriceRange } from "../dist/core/model/footprintAutoscale.js";
 import { quantizeToStep } from "../dist/core/priceStep.js";
 import { View } from "../dist/core/engine/view.js";
 import { settings } from "../dist/core/settings.js";
@@ -43,7 +41,6 @@ import { ChartHeatmapGpuCoordinator } from "../dist/features/chart/ChartHeatmapG
 function makeStage2FakeWebGpuDevice({
   format = "rgba8unorm",
   maxBufferSize = 268435456,
-  simulateAutoscaleCompute = false,
 } = {}) {
   const buffers = [];
   const shaderModules = [];
@@ -118,35 +115,6 @@ function makeStage2FakeWebGpuDevice({
             setBindGroup() {},
             dispatchWorkgroups(x, y = 1, z = 1) {
               computeDispatches.push({ pipeline: this.pipeline?.label, x, y, z });
-              if (simulateAutoscaleCompute && this.pipeline?.label === "NativeSceneAutoscaleComputePipeline") {
-                const autoUniform = buffers.find((b) => b.label === "NativeSceneAutoscaleUniform" && !b.destroyed);
-                const barStorage = buffers.find((b) => b.label === "NativeSceneBarStorage" && !b.destroyed);
-                const autoResult = buffers.find((b) => b.label === "NativeSceneAutoscaleResult" && !b.destroyed);
-                if (autoUniform && barStorage && autoResult) {
-                  const u32 = new Uint32Array(autoUniform.data.buffer);
-                  const fromIdx = u32[0];
-                  const toIdx = u32[1];
-                  const barF32 = new Float32Array(barStorage.data.buffer);
-                  let minLow = Infinity;
-                  let maxHigh = -Infinity;
-                  let valid = 0;
-                  for (let i = fromIdx; i < toIdx; i++) {
-                    const highRel = barF32[i * 8 + 1];
-                    const lowRel = barF32[i * 8 + 2];
-                    if (Number.isFinite(lowRel) && Number.isFinite(highRel)) {
-                      minLow = Math.min(minLow, lowRel);
-                      maxHigh = Math.max(maxHigh, highRel);
-                      valid++;
-                    }
-                  }
-                  const resF32 = new Float32Array(autoResult.data.buffer);
-                  const resU32 = new Uint32Array(autoResult.data.buffer);
-                  resF32[0] = valid > 0 ? minLow : 0;
-                  resF32[1] = valid > 0 ? maxHigh : 0;
-                  resU32[2] = valid;
-                  resU32[3] = 0;
-                }
-              }
             },
             end() {},
           };
@@ -460,49 +428,6 @@ test("Stage 2 GPU sub-pixel merged-cells LOD accumulates per pixel row with 4 Mi
   } finally {
     resetGpuSettingsForTest();
   }
-});
-
-test("Stage 2 GPU autoscale reduction matches footprintVisiblePriceRange with f64 priceOrigin precision", async () => {
-  assert.equal(AUTOSCALE_RESULT_BYTES, 16);
-  const mock = makeStage2FakeWebGpuDevice({ simulateAutoscaleCompute: true });
-  const pipeline = new WebGpuNativeScenePipeline(mock.device, "rgba8unorm");
-  const series = makeSeriesWithBars(150, { basePrice: 100_000.01, priceStep: 0.01, cellsPerBar: 3 });
-
-  // Note: mock queue.submit() flushes pending mapAsync synchronously; resolve promises cleanly
-  const OrigPromise = globalThis.Promise;
-  const origQueueSubmit = mock.device.queue.submit;
-  mock.device.queue.submit = function (cmds) {
-    origQueueSubmit.call(this, cmds);
-    setTimeout(() => mock.flushMaps(), 0);
-  };
-
-  // Trigger map resolve right after mapAsync runs
-  const origCreateBuffer = mock.device.createBuffer.bind(mock.device);
-  mock.device.createBuffer = (desc) => {
-    const b = origCreateBuffer(desc);
-    const origMap = b.mapAsync;
-    b.mapAsync = function () {
-      const p = origMap.apply(this, arguments);
-      queueMicrotask(() => mock.flushMaps());
-      return p;
-    };
-    return b;
-  };
-  void OrigPromise;
-
-  const expected = footprintVisiblePriceRange(series, { from: 15, to: 112 });
-  assert.ok(expected);
-  const actual = await pipeline.readVisiblePriceRangeAsync(series, 15, 112);
-  assert.ok(actual);
-  assert.ok(Math.abs(actual.min - expected.minValue()) < 1e-4, `min ${actual.min} vs ${expected.minValue()}`);
-  assert.ok(Math.abs(actual.max - expected.maxValue()) < 1e-4, `max ${actual.max} vs ${expected.maxValue()}`);
-
-  assert.equal(await pipeline.readVisiblePriceRangeAsync(series, 50, 50), null);
-
-  pipeline.dispose();
-  assert.equal(mock.buffers.find((b) => b.label === "NativeSceneAutoscaleUniform").destroyed, true);
-  assert.equal(mock.buffers.find((b) => b.label === "NativeSceneAutoscaleResult").destroyed, true);
-  assert.equal(mock.buffers.find((b) => b.label === "NativeSceneAutoscaleRead").destroyed, true);
 });
 
 test("Stage 2 WebGpuNativeHeatmapPipeline enforces 32B/64B layouts, static 0-upload, 64 MiB/256 MiB budgets and telemetry", () => {

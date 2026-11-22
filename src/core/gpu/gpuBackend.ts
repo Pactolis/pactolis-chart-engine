@@ -93,11 +93,6 @@ export interface GpuSurface {
   beginFrame(clear: RGBA): GpuFrame;
   supportsNativeScene?(): boolean;
   renderNativeScene?(clear: RGBA, logicalWidth: number, logicalHeight: number, scene: GpuNativeSceneInput): boolean;
-  readNativeVisiblePriceRangeAsync?(
-    series: FootprintSeries,
-    visibleFrom: number,
-    visibleTo: number,
-  ): Promise<{ min: number; max: number } | null>;
   supportsNativeHeatmap?(): boolean;
   reserveNativeHeatmapPayload?(logicalBytes: number): { release(): void } | null;
   renderNativeHeatmap?(frame: GpuNativeHeatmapFrame, plot: GpuNativeHeatmapPlot): boolean;

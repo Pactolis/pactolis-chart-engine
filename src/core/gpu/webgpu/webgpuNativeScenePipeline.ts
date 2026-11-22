@@ -28,10 +28,6 @@ export const MERGED_ROW_BUFFER_MAX_BYTES = 4 * 1024 * 1024;
 /** LodUniforms: 8 x 32-bit words (32 bytes, 16-byte aligned). */
 export const LOD_UNIFORM_WORDS = 8;
 export const LOD_UNIFORM_BYTES = LOD_UNIFORM_WORDS * 4;
-/** AutoscaleUniforms & AutoscaleResult: 4 x 32-bit words (16 bytes, 16-byte aligned). */
-export const AUTOSCALE_UNIFORM_WORDS = 4;
-export const AUTOSCALE_UNIFORM_BYTES = AUTOSCALE_UNIFORM_WORDS * 4;
-export const AUTOSCALE_RESULT_BYTES = 16;
 
 export const TAIL_BAR_HEADROOM = 64;
 export const TAIL_CELL_HEADROOM = 2048;
@@ -832,91 +828,6 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
 }
 `;
 
-export const COMPUTE_AUTOSCALE_WGSL = `
-struct AutoscaleUniform {
-  fromIdx: u32,
-  toIdx: u32,
-  pad0: u32,
-  pad1: u32,
-};
-
-struct BarRecord {
-  openRel: f32,
-  highRel: f32,
-  lowRel: f32,
-  closeRel: f32,
-  maxVol: f32,
-  pocBinRel: f32,
-  cellOffset: u32,
-  cellCount: u32,
-};
-
-struct AutoscaleResult {
-  minLowRel: f32,
-  maxHighRel: f32,
-  validCount: u32,
-  pad0: u32,
-};
-
-@group(0) @binding(0) var<uniform> u_auto: AutoscaleUniform;
-@group(0) @binding(1) var<storage, read> bars: array<BarRecord>;
-@group(0) @binding(2) var<storage, read_write> out_range: AutoscaleResult;
-
-var<workgroup> s_min: array<f32, 64>;
-var<workgroup> s_max: array<f32, 64>;
-var<workgroup> s_valid: array<u32, 64>;
-
-@compute @workgroup_size(64)
-fn cs_main(@builtin(local_invocation_index) lid: u32) {
-  var local_min: f32 = 0.0;
-  var local_max: f32 = 0.0;
-  var local_valid: u32 = 0u;
-
-  for (var i: u32 = u_auto.fromIdx + lid; i < u_auto.toIdx; i = i + 64u) {
-    let b = bars[i];
-    let low_ok = (b.lowRel == b.lowRel) && abs(b.lowRel) < 3.4e38;
-    let high_ok = (b.highRel == b.highRel) && abs(b.highRel) < 3.4e38;
-    if (low_ok && high_ok) {
-      if (local_valid == 0u) {
-        local_min = b.lowRel;
-        local_max = b.highRel;
-        local_valid = 1u;
-      } else {
-        local_min = min(local_min, b.lowRel);
-        local_max = max(local_max, b.highRel);
-        local_valid = local_valid + 1u;
-      }
-    }
-  }
-
-  s_min[lid] = local_min;
-  s_max[lid] = local_max;
-  s_valid[lid] = local_valid;
-  workgroupBarrier();
-
-  for (var stride: u32 = 32u; stride > 0u; stride = stride >> 1u) {
-    if (lid < stride) {
-      let ov = s_valid[lid + stride];
-      if (ov != 0u) {
-        if (s_valid[lid] == 0u) {
-          s_min[lid] = s_min[lid + stride];
-          s_max[lid] = s_max[lid + stride];
-        } else {
-          s_min[lid] = min(s_min[lid], s_min[lid + stride]);
-          s_max[lid] = max(s_max[lid], s_max[lid + stride]);
-        }
-        s_valid[lid] = s_valid[lid] + ov;
-      }
-    }
-    workgroupBarrier();
-  }
-
-  if (lid == 0u) {
-    out_range = AutoscaleResult(s_min[0], s_max[0], s_valid[0], 0u);
-  }
-}
-`;
-
 export interface WebGpuNativeScenePipelineOptions {
   readonly supportsTimestampQuery?: boolean;
   readonly maxBufferSize?: number;
@@ -978,9 +889,6 @@ export class WebGpuNativeScenePipeline {
   private readonly lodUniformU32 = new Uint32Array(this.lodUniformRaw);
   private readonly lodUniformI32 = new Int32Array(this.lodUniformRaw);
 
-  private readonly autoscaleUniformRaw = new ArrayBuffer(AUTOSCALE_UNIFORM_BYTES);
-  private readonly autoscaleUniformU32 = new Uint32Array(this.autoscaleUniformRaw);
-
   private lodUniformBuffer: any = null;
   private pixelBucketBuffer: any = null;
   private pixelBucketCapacity = 0;
@@ -1002,14 +910,6 @@ export class WebGpuNativeScenePipeline {
   private mergedCellsRenderPipeline: any = null;
   private mergedCellsRenderBindGroupLayout: any = null;
   private mergedCellsRenderBindGroup: any = null;
-
-  private autoscaleUniformBuffer: any = null;
-  private autoscaleResultBuffer: any = null;
-  private autoscaleReadBuffer: any = null;
-  private autoscaleComputePipeline: any = null;
-  private autoscaleBindGroupLayout: any = null;
-  private autoscaleBindGroup: any = null;
-  private autoscaleQueuePromise: Promise<void> = Promise.resolve();
 
   private activeLodMode: GpuNativeSceneLodMode = "standard";
   private pendingPixelBucketCount = 0;
@@ -1241,7 +1141,6 @@ export class WebGpuNativeScenePipeline {
     this.pixelBucketComputeBindGroup = null;
     this.mergedCellsComputeBindGroup = null;
     this.mergedCellsRenderBindGroup = null;
-    this.autoscaleBindGroup = null;
   }
 
   private recordBarMetadata(index: number, bar: FootprintBar | undefined): void {
@@ -1902,58 +1801,6 @@ export class WebGpuNativeScenePipeline {
     return true;
   }
 
-  private ensureAutoscaleResources(): boolean {
-    if (!this.autoscaleComputePipeline) {
-      const mod = this.device.createShaderModule({
-        label: "NativeSceneComputeAutoscaleShader",
-        code: COMPUTE_AUTOSCALE_WGSL,
-      });
-      this.autoscaleUniformBuffer = this.device.createBuffer({
-        label: "NativeSceneAutoscaleUniform",
-        size: AUTOSCALE_UNIFORM_BYTES,
-        usage: 0x0040 | 0x0008, // UNIFORM | COPY_DST
-      });
-      this.autoscaleResultBuffer = this.device.createBuffer({
-        label: "NativeSceneAutoscaleResult",
-        size: AUTOSCALE_RESULT_BYTES,
-        usage: 0x0080 | 0x0004, // STORAGE | COPY_SRC
-      });
-      this.autoscaleReadBuffer = this.device.createBuffer({
-        label: "NativeSceneAutoscaleRead",
-        size: AUTOSCALE_RESULT_BYTES,
-        usage: 0x0008 | 0x0001, // COPY_DST | MAP_READ
-      });
-      this.autoscaleBindGroupLayout = this.device.createBindGroupLayout({
-        label: "NativeSceneAutoscaleBindGroupLayout",
-        entries: [
-          { binding: 0, visibility: 0x4, buffer: { type: "uniform" } },
-          { binding: 1, visibility: 0x4, buffer: { type: "read-only-storage" } },
-          { binding: 2, visibility: 0x4, buffer: { type: "storage" } },
-        ],
-      });
-      this.autoscaleComputePipeline = this.device.createComputePipeline({
-        label: "NativeSceneAutoscaleComputePipeline",
-        layout: this.device.createPipelineLayout({
-          label: "NativeSceneAutoscalePipelineLayout",
-          bindGroupLayouts: [this.autoscaleBindGroupLayout],
-        }),
-        compute: { module: mod, entryPoint: "cs_main" },
-      });
-    }
-    if (!this.autoscaleBindGroup) {
-      this.autoscaleBindGroup = this.device.createBindGroup({
-        label: "NativeSceneAutoscaleBindGroup",
-        layout: this.autoscaleBindGroupLayout,
-        entries: [
-          { binding: 0, resource: { buffer: this.autoscaleUniformBuffer } },
-          { binding: 1, resource: { buffer: this.barBuffer } },
-          { binding: 2, resource: { buffer: this.autoscaleResultBuffer } },
-        ],
-      });
-    }
-    return true;
-  }
-
   prepareFrame(scene: GpuNativeSceneInput, logicalWidth: number, logicalHeight: number): PreparedNativeFrame {
     const emptyFail: PreparedNativeFrame = {
       ok: false,
@@ -2163,106 +2010,6 @@ export class WebGpuNativeScenePipeline {
     }
   }
 
-  /** Non-blocking GPU visible price autoscale reduction over `[visibleFrom, visibleTo)`. */
-  readVisiblePriceRangeAsync(
-    series: FootprintSeries,
-    visibleFrom: number,
-    visibleTo: number,
-  ): Promise<{ min: number; max: number } | null> {
-    const task = this.autoscaleQueuePromise.then(() => this.runAutoscaleReadback(series, visibleFrom, visibleTo));
-    this.autoscaleQueuePromise = task.then(() => undefined, () => undefined);
-    return task;
-  }
-
-  private async runAutoscaleReadback(
-    series: FootprintSeries,
-    visibleFrom: number,
-    visibleTo: number,
-  ): Promise<{ min: number; max: number } | null> {
-    if (this.disposed) return null;
-    const from = Math.max(0, Math.floor(visibleFrom));
-    const to = Math.min(series.length, Math.ceil(visibleTo));
-    if (from >= to) return null;
-
-    if (
-      this.syncedSeries !== series
-      || this.syncedResetEpoch !== series.resetEpoch
-      || this.syncedRevision !== series.revision
-    ) {
-      if (!this.syncSeries(series)) return null;
-    }
-    if (this.activeBarCount === 0 || to > this.activeBarCount) return null;
-
-    if (!this.ensureAutoscaleResources() || typeof this.autoscaleReadBuffer?.mapAsync !== "function") {
-      return null;
-    }
-
-    const commandEncoder = this.device.createCommandEncoder({
-      label: "NativeSceneAutoscaleCommandEncoder",
-    });
-
-    if (this.dirtyCount > 0) {
-      this.computeUniformU32[0] = this.dirtyStart;
-      this.computeUniformU32[1] = this.dirtyCount;
-      this.computeUniformU32[2] = 0;
-      this.computeUniformU32[3] = 0;
-      this.writeStorageBuffer(this.computeUniformBuffer, 0, this.computeUniformRaw, COMPUTE_UNIFORM_BYTES);
-      const statsPass = commandEncoder.beginComputePass({ label: "NativeSceneComputeStatsPass" });
-      statsPass.setPipeline(this.computePipeline);
-      statsPass.setBindGroup(0, this.computeBindGroup);
-      statsPass.dispatchWorkgroups(Math.ceil(this.dirtyCount / COMPUTE_WORKGROUP_SIZE));
-      statsPass.end();
-      this.dirtyCount = 0;
-    }
-
-    this.autoscaleUniformU32[0] = from;
-    this.autoscaleUniformU32[1] = to;
-    this.autoscaleUniformU32[2] = 0;
-    this.autoscaleUniformU32[3] = 0;
-    this.writeStorageBuffer(this.autoscaleUniformBuffer, 0, this.autoscaleUniformRaw, AUTOSCALE_UNIFORM_BYTES);
-
-    const autoPass = commandEncoder.beginComputePass({ label: "NativeSceneAutoscalePass" });
-    autoPass.setPipeline(this.autoscaleComputePipeline);
-    autoPass.setBindGroup(0, this.autoscaleBindGroup);
-    autoPass.dispatchWorkgroups(1);
-    autoPass.end();
-
-    commandEncoder.copyBufferToBuffer(
-      this.autoscaleResultBuffer,
-      0,
-      this.autoscaleReadBuffer,
-      0,
-      AUTOSCALE_RESULT_BYTES,
-    );
-    this.device.queue.submit([commandEncoder.finish()]);
-
-    let mapped = false;
-    try {
-      await Promise.resolve(this.autoscaleReadBuffer.mapAsync(0x0001));
-      mapped = true;
-      if (this.disposed) return null;
-      const range = this.autoscaleReadBuffer.getMappedRange();
-      const f32 = new Float32Array(range);
-      const u32 = new Uint32Array(range);
-      const validCount = u32[2] ?? 0;
-      const minLowRel = f32[0];
-      const maxHighRel = f32[1];
-      if (validCount === 0 || !Number.isFinite(minLowRel) || !Number.isFinite(maxHighRel)) {
-        return null;
-      }
-      return {
-        min: minLowRel + this.priceOriginValue,
-        max: maxHighRel + this.priceOriginValue,
-      };
-    } catch {
-      return null;
-    } finally {
-      if (mapped) {
-        try { this.autoscaleReadBuffer?.unmap?.(); } catch {}
-      }
-    }
-  }
-
   beginTimestampPass(): number | null {
     if (this.disposed || !this.querySet || this.timestampSlots.length === 0) return null;
     for (let i = 0; i < this.timestampSlots.length; i++) {
@@ -2345,9 +2092,6 @@ export class WebGpuNativeScenePipeline {
       this.pixelBucketBuffer?.destroy?.();
       this.mergedRowBuffer?.destroy?.();
       this.mergedBarMaxBuffer?.destroy?.();
-      this.autoscaleUniformBuffer?.destroy?.();
-      this.autoscaleResultBuffer?.destroy?.();
-      this.autoscaleReadBuffer?.destroy?.();
       this.querySet?.destroy?.();
       for (const slot of this.timestampSlots) {
         slot.resolveBuffer?.destroy?.();

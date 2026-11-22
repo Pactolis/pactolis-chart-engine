@@ -142,6 +142,11 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
 }
 `;
 
+/**
+ * WebGPU resident heatmap (CPU-projected rects; static-frame upload skip, pan/zoom re-uploads).
+ * Cell screen rects `(x, yTop, width, height)` are projected on CPU each frame via `prepareReservedGpuCells`;
+ * log-scale intensity, 4-stop palette ramp, RGB rounding and 3-decimal alpha quantization run in WGSL.
+ */
 export class WebGpuNativeHeatmapPipeline {
   readonly renderPipeline: any;
   readonly uniformBuffer: any;

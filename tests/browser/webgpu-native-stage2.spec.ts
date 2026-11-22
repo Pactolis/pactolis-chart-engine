@@ -155,9 +155,9 @@ async function installStage2Routes(page: Page, bars: ReturnType<typeof makeStage
           bars: bars.filter((bar) => bar.t >= from && bar.t <= to).map((bar) => ({
             t: bar.t,
             cells: [
-              [60_050, 1500, 1500],
-              [60_200, 4000, 4000],
-              [60_400, 9000, 9000],
+              [60_050, 600_000, 600_000],
+              [60_200, 1_500_000, 1_500_000],
+              [60_400, 3_000_000, 3_000_000],
             ],
           })),
         },
@@ -183,7 +183,7 @@ async function probeWebGpu(page: Page): Promise<boolean> {
   });
 }
 
-test("Stage 2 SwiftShader WebGPU verifies pixel-bucket LOD, sub-pixel merged-cells LOD, GPU autoscale, and native orderbook heatmap parity", async ({ baseURL }, testInfo) => {
+test("Stage 2 SwiftShader WebGPU verifies pixel-bucket LOD, sub-pixel merged-cells LOD, and WebGPU resident heatmap parity", async ({ baseURL }, testInfo) => {
   test.setTimeout(180_000);
   const resolvedBaseURL = baseURL ?? testInfo.project.use.baseURL ?? "http://127.0.0.1:4173";
   const args = launchArgs();
@@ -217,15 +217,13 @@ test("Stage 2 SwiftShader WebGPU verifies pixel-bucket LOD, sub-pixel merged-cel
       const id = await hook.getAttribute("data-panel-id");
       if (!id) throw new Error("Missing chart panel id");
 
-      const out = await page.evaluate(async ({ id, nativeEnabled }) => {
+      const out = await page.evaluate(async ({ id }) => {
         const { getChartRuntime } = await import("/harness/chart.ts");
         const { getGpuDiagnostics } = await import("/src/core/gpu/gpuDiagnostics.ts");
         const { settings } = await import("/src/core/settings.ts");
-        const { footprintVisiblePriceRange } = await import("/src/core/model/footprintAutoscale.ts");
 
         settings.grid = false;
         const r: any = getChartRuntime(id);
-        const s = r.pipeline.series;
         const v = r.view;
 
         const blobToB64 = (blob: Blob) =>
@@ -260,24 +258,14 @@ test("Stage 2 SwiftShader WebGPU verifies pixel-bucket LOD, sub-pixel merged-cel
         const mcPath = getGpuDiagnostics().featurePaths?.scene ?? null;
         const mcPng = await blobToB64(mcFrame.blob);
 
-        let autoscaleGpu: { min: number; max: number } | null = null;
-        let autoscaleCpu: { min: number; max: number } | null = null;
-        if (nativeEnabled) {
-          autoscaleGpu = await r.currentGpuSurface.readNativeVisiblePriceRangeAsync(s, 10, 250);
-          const cpuRange = footprintVisiblePriceRange(s, { from: 10, to: 250 });
-          autoscaleCpu = cpuRange ? { min: cpuRange.minValue(), max: cpuRange.maxValue() } : null;
-        }
-
         return {
           backend: getGpuDiagnostics().active,
           pbPath,
           pbPng,
           mcPath,
           mcPng,
-          autoscaleGpu,
-          autoscaleCpu,
         };
-      }, { id, nativeEnabled });
+      }, { id });
 
       await context.close();
       return out;
@@ -292,12 +280,6 @@ test("Stage 2 SwiftShader WebGPU verifies pixel-bucket LOD, sub-pixel merged-cel
     expect(nat.pbPath).toBe("webgpu-native");
     expect(imm.mcPath).toBe("immediate-quads");
     expect(nat.mcPath).toBe("webgpu-native");
-
-    // Autoscale parity
-    expect(nat.autoscaleGpu).not.toBeNull();
-    expect(nat.autoscaleCpu).not.toBeNull();
-    expect(Math.abs(nat.autoscaleGpu!.min - nat.autoscaleCpu!.min)).toBeLessThan(0.05);
-    expect(Math.abs(nat.autoscaleGpu!.max - nat.autoscaleCpu!.max)).toBeLessThan(0.05);
 
     // Compare pixel parity for pixel-bucket and merged-cells
     const compareCtx = await browser.newContext({ baseURL: resolvedBaseURL, viewport: VIEWPORT });
