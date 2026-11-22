@@ -513,7 +513,13 @@ class ChartRuntimeImpl implements ChartRuntime, ChartInputHost {
           market: this.state.market,
           timeframe: this.state.timeframe,
         }),
+      () => this.renderer.renderedNativeFootprintText,
+      (show) => {
+        this.renderer?.setShowNotional(show);
+        this.session?.invalidate(ChartChange.Style);
+      },
     );
+    this.renderer.setShowNotional(this.overlay.showNotional);
 
     const view = this.view;
     const renderer = {
@@ -527,6 +533,13 @@ class ChartRuntimeImpl implements ChartRuntime, ChartInputHost {
           let heatmapFrame: HeatmapGpuCellFrame | null = null;
           try {
             heatmapFrame = this.prepareHeatmapGpuCells(v, s);
+            this.renderer.setShowNotional(this.overlay.showNotional);
+            const isCanvas2dHeatmapActive =
+              this.orderbookHeatmap !== null
+              && isOrderbookHeatmapMarket(this.state.market)
+              && orderbookHeatmapSettingsSource().settingsFor(this.state.market).mode !== "off"
+              && !this.heatmapGpuCoordinator.isHeatmapTexturePrototypeEnabled();
+            this.renderer.setAllowNativeFootprintText(!isCanvas2dHeatmapActive);
             this.renderer.renderLayers(v, s, this.renderCoordinator?.getGpuLayerIds() ?? new Set());
             // Density paints above the flushed candle layers and strictly before
             // this GPU callback returns, so the Session's immediate readPixels
@@ -554,6 +567,7 @@ class ChartRuntimeImpl implements ChartRuntime, ChartInputHost {
       setSurface: (nextSurface: GpuSurface) => {
         this.currentGpuSurface = nextSurface;
         this.renderer.setSurface(nextSurface);
+        this.renderer.setShowNotional(this.overlay.showNotional);
         this.heatmapGpuCoordinator.setGl(
           nextSurface.kind === "webgl2"
             ? nextSurface.getGlContext?.() ?? null
@@ -602,6 +616,7 @@ class ChartRuntimeImpl implements ChartRuntime, ChartInputHost {
       onRestoreContext: (restoredGl) => {
         this.renderer.dispose();
         this.renderer = new FootprintRenderer(this.session.getSurface());
+        this.renderer.setShowNotional(this.overlay.showNotional);
         this.heatmapGpuCoordinator.onRestoreContext(restoredGl);
         this.overlay.invalidateAxisCache();
         this.renderCoordinator.applyConfig(this.chartViewConfig());

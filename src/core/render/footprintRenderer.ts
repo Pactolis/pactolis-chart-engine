@@ -13,6 +13,7 @@ import {
   buildPixelCellBuckets,
   candleStyleFor,
   CELL_PIXEL_MERGE_HEIGHT,
+  cellTextModeFor,
   chartLodForSpacing,
   type OhlcBarLike,
   type PixelCellBucket,
@@ -21,6 +22,14 @@ import { resolveBuiltInLayerPreset, type BuiltInChartType } from "./scene/chartL
 import { isPerformanceTelemetryEnabled, recordPerformanceDuration } from "../performanceTelemetry.js";
 import { readGpuSettings } from "../gpu/gpuSettings.js";
 import { recordGpuFeatureFallback, setGpuFeaturePath } from "../gpu/gpuDiagnostics.js";
+import {
+  cellTextCacheKey,
+  formatFootprintCellText,
+  getOrCreateBarCellTextEntries,
+  parseCssColorToPackedRgba,
+  type BarCellTextCacheEntry,
+} from "./overlay/footprintCellText.js";
+import type { NativeGlyphSink } from "../gpu/gpuBackend.js";
 import {
   cellAverageTradeSize,
   cellAverageTradeSizes,
@@ -113,8 +122,12 @@ export class FootprintRenderer {
     return cached;
   }
   private readonly profileCache = new WeakMap<FootprintBar, BarProfileCache>();
+  private readonly cellTextCache = new WeakMap<FootprintBar, BarCellTextCacheEntry>();
   /** Per-chart görünüm config'i (runtime set eder); null ise global settings. */
   private chartConfig: ChartViewConfig | null = null;
+  private showNotional = true;
+  private allowNativeFootprintText = true;
+  private lastRenderedNativeFootprintText = false;
 
   constructor(surface: GpuSurface) {
     this.surface = surface;
@@ -129,6 +142,18 @@ export class FootprintRenderer {
     this.chartConfig = config;
   }
 
+  setShowNotional(show: boolean): void {
+    this.showNotional = show;
+  }
+
+  setAllowNativeFootprintText(allow: boolean): void {
+    this.allowNativeFootprintText = allow;
+  }
+
+  get renderedNativeFootprintText(): boolean {
+    return this.lastRenderedNativeFootprintText;
+  }
+
   /** Effective view config for this panel; global `settings` until one is pushed. */
   private cfg(): ChartViewConfig {
     return this.chartConfig ?? settings;
@@ -137,6 +162,7 @@ export class FootprintRenderer {
   dispose(): void {
     this.currentFrame = null;
     this.batch = { rect: () => {} };
+    this.lastRenderedNativeFootprintText = false;
   }
 
   /**
@@ -152,6 +178,7 @@ export class FootprintRenderer {
   }
 
   clear(): void {
+    this.lastRenderedNativeFootprintText = false;
     const frame = this.surface.beginFrame({ r: 0.07, g: 0.08, b: 0.1, a: 1 });
     frame.flushQuads();
     frame.end();
@@ -201,6 +228,7 @@ export class FootprintRenderer {
    * must not turn into a draw-call-per-layer architecture.
    */
   renderLayers(view: View, series: FootprintSeries, activeLayers: ReadonlySet<string>): void {
+    this.lastRenderedNativeFootprintText = false;
     const dpr = this.devicePixelRatio(view);
     if (view.area.width <= 0 || view.area.height <= 0) return;
     const telemetryEnabled = isPerformanceTelemetryEnabled();
@@ -214,6 +242,8 @@ export class FootprintRenderer {
     if (this.tryRenderNativeScene(view, series, activeLayers, dpr, step, cfg, chartType, lod, candleW, telemetryEnabled)) {
       return;
     }
+    this.lastRenderedNativeFootprintText = false;
+    setGpuFeaturePath("footprintText", "canvas2d");
     setGpuFeaturePath("scene", "immediate-quads");
 
     const clearStartedAt = telemetryEnabled ? performance.now() : null;
@@ -356,7 +386,8 @@ export class FootprintRenderer {
     }
     const canvas = this.surface.canvas as Partial<HTMLCanvasElement> | undefined;
     const ownerWin = canvas?.ownerDocument?.defaultView ?? null;
-    if (readGpuSettings(ownerWin).nativeWebGpu === false) {
+    const gpuSettings = readGpuSettings(ownerWin);
+    if (gpuSettings.nativeWebGpu === false) {
       return false;
     }
     if (view.isLogScale()) {
@@ -366,7 +397,8 @@ export class FootprintRenderer {
       return false;
     }
     const isFootprintCells = lod === "footprint" && chartType === "footprint";
-    const isMergedCells = isFootprintCells && this.rowHeight(view, step) < CELL_PIXEL_MERGE_HEIGHT;
+    const cellH = isFootprintCells ? this.rowHeight(view, step) : 0;
+    const isMergedCells = isFootprintCells && cellH < CELL_PIXEL_MERGE_HEIGHT;
     const lodMode = lod === "pixel-bucket" ? "pixel-bucket" : isMergedCells ? "merged-cells" : "standard";
 
     const clearStartedAt = telemetryEnabled ? performance.now() : null;
@@ -380,6 +412,17 @@ export class FootprintRenderer {
     if (clearStartedAt !== null) {
       recordPerformanceDuration("chart.gpu.clear.ms", performance.now() - clearStartedAt);
     }
+
+    const fpW = view.colWidth - candleW;
+    const textMode = lodMode === "standard" && isFootprintCells ? cellTextModeFor(cellH, fpW) : "none";
+    const eligibleFootprintText =
+      drawFootprint
+      && lodMode === "standard"
+      && chartType === "footprint"
+      && cfg.cellNumbers
+      && this.allowNativeFootprintText
+      && gpuSettings.nativeWebGpuText !== false
+      && textMode !== "none";
 
     const flushStartedAt = telemetryEnabled ? performance.now() : null;
     const ok = this.surface.renderNativeScene(
@@ -427,8 +470,8 @@ export class FootprintRenderer {
                   if (maxVol <= 0) continue;
                   const xLeft = view.xOfIndex(i);
                   const fpLeft = xLeft + candleW;
-                  const fpW = view.colWidth - candleW;
-                  this.drawStackedImbalance(view, bar, step, fpLeft, fpW, fpW / 2, quads);
+                  const barFpW = view.colWidth - candleW;
+                  this.drawStackedImbalance(view, bar, step, fpLeft, barFpW, barFpW / 2, quads);
                 }
               } finally {
                 if (overlayStartedAt !== null) {
@@ -437,6 +480,22 @@ export class FootprintRenderer {
               }
             }
           : undefined,
+        drawFootprintText: eligibleFootprintText
+          ? (sink) => this.emitNativeFootprintText(
+              sink,
+              view,
+              series,
+              from,
+              to,
+              candleW,
+              fpW,
+              step,
+              cfg.clusterCellData,
+              textMode === "compact",
+              cellH,
+              telemetryEnabled,
+            )
+          : undefined,
       },
     );
     if (flushStartedAt !== null) {
@@ -444,12 +503,109 @@ export class FootprintRenderer {
     }
 
     if (!ok) {
+      this.lastRenderedNativeFootprintText = false;
+      setGpuFeaturePath("footprintText", "canvas2d");
       recordGpuFeatureFallback("scene", "native_render_failed");
       return false;
     }
 
+    this.lastRenderedNativeFootprintText = ok && Boolean(this.surface.didLastNativeSceneRenderText?.());
+    setGpuFeaturePath("footprintText", this.lastRenderedNativeFootprintText ? "webgpu-sdf" : "canvas2d");
     setGpuFeaturePath("scene", "webgpu-native");
     return true;
+  }
+
+  private emitNativeFootprintText(
+    sink: NativeGlyphSink,
+    view: View,
+    series: FootprintSeries,
+    from: number,
+    to: number,
+    candleW: number,
+    fpW: number,
+    step: number,
+    mode: FootprintCellData,
+    compact: boolean,
+    cellH: number,
+    telemetryEnabled: boolean,
+  ): boolean {
+    const startedAt = telemetryEnabled ? performance.now() : null;
+    try {
+      if (to <= from) return true;
+      const fontSize = Math.min(12, cellH - 2);
+      if (!(fontSize > 0)) return true;
+
+      const half = fpW / 2;
+      const pTop = view.priceOfY(view.area.top);
+      const pBot = view.priceOfY(view.area.top + view.area.height);
+      const minVisPrice = Math.min(pTop, pBot) - step;
+      const maxVisPrice = Math.max(pTop, pBot) + step;
+      const showNotional = this.showNotional;
+      const cacheKey = cellTextCacheKey(mode, compact, showNotional, step);
+
+      for (let i = from; i < to; i++) {
+        const bar = series.at(i);
+        if (!bar) continue;
+        const fpLeft = view.xOfIndex(i) + candleW;
+        const barEntries = getOrCreateBarCellTextEntries(this.cellTextCache, bar, cacheKey);
+
+        for (const cell of bar.cells.values()) {
+          if (cell.priceBin + step < minVisPrice || cell.priceBin > maxVisPrice) continue;
+          const yMid = view.yOfPrice(cell.priceBin + step / 2);
+          if (yMid < view.area.top || yMid > view.area.top + view.area.height) continue;
+
+          let entry = barEntries?.get(cell.priceBin);
+          if (!entry) {
+            entry = formatFootprintCellText(cell, mode, compact, step, showNotional);
+            if (barEntries) {
+              barEntries.set(cell.priceBin, entry);
+            }
+          }
+
+          if (entry.centerText !== undefined) {
+            if (!sink.addText(
+              entry.centerText,
+              fpLeft + half,
+              yMid,
+              fontSize,
+              "center",
+              parseCssColorToPackedRgba(entry.centerColor!),
+              view.area,
+            )) {
+              return false;
+            }
+          } else {
+            if (!sink.addText(
+              entry.leftText!,
+              fpLeft + half - 4,
+              yMid,
+              fontSize,
+              "right",
+              parseCssColorToPackedRgba(entry.leftColor!),
+              view.area,
+            )) {
+              return false;
+            }
+            if (!sink.addText(
+              entry.rightText!,
+              fpLeft + half + 4,
+              yMid,
+              fontSize,
+              "left",
+              parseCssColorToPackedRgba(entry.rightColor!),
+              view.area,
+            )) {
+              return false;
+            }
+          }
+        }
+      }
+      return true;
+    } finally {
+      if (startedAt !== null) {
+        recordPerformanceDuration("chart.gpu.native.text.ms", performance.now() - startedAt);
+      }
+    }
   }
 
   private drawFootprintCells(

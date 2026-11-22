@@ -63,7 +63,15 @@ export type { TpoProfileHit } from "./overlay/tpoPaintHelpers.js";
 
 export class Overlay {
   /** When true, cell/HUD volumes are shown as USDT notional (qty * price). */
-  showNotional = true;
+  private _showNotional = true;
+  get showNotional(): boolean {
+    return this._showNotional;
+  }
+  set showNotional(value: boolean) {
+    if (this._showNotional === value) return;
+    this._showNotional = value;
+    this.onShowNotionalChange?.(value);
+  }
   private profileCache: VolumeProfileCacheState | null = null;
   private tpoCache: TpoCacheState | null = null;
   private priceMarkers: PriceMarker[] = [];
@@ -206,6 +214,8 @@ export class Overlay {
     private readonly getDisplayOptions?: () => ResolvedChartDisplayOptions,
     private readonly hasLiveSeriesDrawings?: () => boolean,
     private readonly isOpenBarLiveOnly?: (bar: FootprintBar) => boolean,
+    private readonly shouldSkipFootprintText?: () => boolean,
+    private readonly onShowNotionalChange?: (show: boolean) => void,
   ) {
     const self = this;
     this.hudDeps = {
@@ -341,7 +351,8 @@ export class Overlay {
       "axis",
     ];
     const transform = ctx.getTransform?.();
-    this.annotationPassCache.begin(changes, JSON.stringify([ctx.canvas.width, ctx.canvas.height, transform?.a, transform?.d, view.area, view.offsetX, view.colWidth, view.priceTop, view.pricePerPx, range, series.length, series.at(series.length - 1)?.startTime, series.config.priceStep, series.nonTailRevision, orderedLayers, asOfTime]));
+    const skipFootprintText = this.shouldSkipFootprintText?.() === true;
+    this.annotationPassCache.begin(changes, JSON.stringify([ctx.canvas.width, ctx.canvas.height, transform?.a, transform?.d, view.area, view.offsetX, view.colWidth, view.priceTop, view.pricePerPx, range, series.length, series.at(series.length - 1)?.startTime, series.config.priceStep, series.nonTailRevision, orderedLayers, asOfTime, skipFootprintText]));
     const telemetryEnabled = isPerformanceTelemetryEnabled();
     const setupStartedAt = telemetryEnabled ? performance.now() : null;
     ctx.clearRect(0, 0, ctx.canvas.width, ctx.canvas.height);
@@ -398,6 +409,7 @@ export class Overlay {
               }
               break;
             case "footprint-text":
+              if (skipFootprintText) break;
               if ((this.chartConfig ?? settings).chartType !== "tpo") canRetainTpo = false;
               this.paintRetainedAnnotationPass("closed-footprint-text", "", changes, () => {
                 drawCells(this.annotationHost, view, series, [range[0], Math.min(range[1], series.length - 1)]);
