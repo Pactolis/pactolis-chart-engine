@@ -1,12 +1,14 @@
 import type {
   GpuFrame,
   GpuLossReason,
+  GpuNativeSceneInput,
   GpuSurface,
   QuadSink,
   RGBA,
   RgbaFrame,
 } from "../gpuBackend.js";
 import type { WebGpuDeviceHandle } from "./webgpuDevice.js";
+import { WebGpuNativeScenePipeline } from "./webgpuNativeScenePipeline.js";
 import { WebGpuQuadPipeline } from "./webgpuQuadPipeline.js";
 
 export class WebGpuQuadSink implements QuadSink {
@@ -50,6 +52,8 @@ export class WebGpuSurface implements GpuSurface {
 
   private readonly ctx: any;
   private readonly pipeline: WebGpuQuadPipeline;
+  private nativePipeline: WebGpuNativeScenePipeline | null = null;
+  private nativeSceneDisabled = false;
   private readonly quadSink = new WebGpuQuadSink();
   private dpr = 1;
   private disposed = false;
@@ -152,6 +156,109 @@ export class WebGpuSurface implements GpuSurface {
     if (this.canvas.width !== bitmapWidth) this.canvas.width = bitmapWidth;
     if (this.canvas.height !== bitmapHeight) this.canvas.height = bitmapHeight;
     this.dpr = dpr > 0 ? dpr : 1;
+  }
+
+  supportsNativeScene(): boolean {
+    if (this.disposed || this.nativeSceneDisabled || this.handle.isLost()) return false;
+    const device = this.handle.device;
+    return Boolean(
+      device
+      && typeof device.createComputePipeline === "function"
+      && typeof device.createRenderPipeline === "function",
+    );
+  }
+
+  renderNativeScene(
+    clear: RGBA,
+    logicalWidth: number,
+    logicalHeight: number,
+    scene: GpuNativeSceneInput,
+  ): boolean {
+    if (!this.supportsNativeScene()) return false;
+    const device = this.handle.device;
+    if (!device) return false;
+
+    if (!this.nativePipeline) {
+      try {
+        this.nativePipeline = new WebGpuNativeScenePipeline(device, this.handle.format, {
+          supportsTimestampQuery: this.handle.supportsTimestampQuery,
+          maxBufferSize: this.handle.limits?.maxBufferSize,
+        });
+      } catch {
+        this.nativeSceneDisabled = true;
+        return false;
+      }
+    }
+
+    let currentTexture: any = null;
+    try {
+      currentTexture = this.ctx?.getCurrentTexture?.();
+      this.lastRenderedTexture = currentTexture;
+    } catch {
+      currentTexture = null;
+    }
+    if (!currentTexture) return false;
+
+    const w = logicalWidth > 0 ? logicalWidth : (this.canvas.width / this.dpr);
+    const h = logicalHeight > 0 ? logicalHeight : (this.canvas.height / this.dpr);
+    const prepared = this.nativePipeline.prepareFrame(scene, w, h);
+    if (!prepared.ok) return false;
+
+    this.quadSink.reset();
+    if (scene.drawGrid && scene.drawGridQuads) {
+      scene.drawGridQuads(this.quadSink);
+    }
+    const gridCount = this.quadSink.count;
+    if (scene.drawForegroundOverlay) {
+      scene.drawForegroundOverlay(this.quadSink);
+    }
+    const totalOverlayQuads = this.quadSink.count;
+    const fgCount = totalOverlayQuads - gridCount;
+
+    if (totalOverlayQuads > 0) {
+      this.pipeline.updateResolution(w, h);
+      this.pipeline.uploadInstances(this.quadSink.data, totalOverlayQuads);
+    }
+
+    const commandEncoder = device.createCommandEncoder({
+      label: "WebGpuNativeSceneCommandEncoder",
+    });
+
+    if (this.nativePipeline.needsComputeDispatch()) {
+      this.nativePipeline.recordComputePass(commandEncoder);
+    }
+
+    const tsSlot = this.nativePipeline.beginTimestampPass();
+    const passEncoder = commandEncoder.beginRenderPass({
+      label: "WebGpuNativeSceneRenderPass",
+      colorAttachments: [
+        {
+          view: currentTexture.createView ? currentTexture.createView() : currentTexture,
+          clearValue: { r: clear.r, g: clear.g, b: clear.b, a: clear.a },
+          loadOp: "clear",
+          storeOp: "store",
+        },
+      ],
+      ...(tsSlot !== null ? { timestampWrites: this.nativePipeline.timestampWritesFor(tsSlot) } : {}),
+    });
+
+    if (gridCount > 0) {
+      this.pipeline.recordPass(passEncoder, gridCount, 0);
+    }
+    this.nativePipeline.recordRenderPasses(passEncoder, scene, prepared);
+    if (fgCount > 0) {
+      this.pipeline.recordPass(passEncoder, fgCount, gridCount);
+    }
+
+    passEncoder.end();
+    if (tsSlot !== null) {
+      this.nativePipeline.resolveTimestampPass(commandEncoder, tsSlot);
+    }
+    device.queue.submit([commandEncoder.finish()]);
+    if (tsSlot !== null) {
+      this.nativePipeline.readbackTimestampPass(tsSlot);
+    }
+    return true;
   }
 
   beginFrame(clear: RGBA): GpuFrame {
@@ -408,6 +515,8 @@ export class WebGpuSurface implements GpuSurface {
     this.unbindDeviceLoss();
     this.lostListeners.clear();
     this.pipeline.dispose();
+    this.nativePipeline?.dispose();
+    this.nativePipeline = null;
   }
 }
 

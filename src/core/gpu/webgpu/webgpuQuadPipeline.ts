@@ -1,3 +1,5 @@
+import { incrementPerformanceCounter } from "../../performanceTelemetry.js";
+
 export const QUAD_WGSL = `
 struct Uniforms {
   resolution: vec2<f32>,
@@ -198,14 +200,15 @@ export class WebGpuQuadPipeline {
       data.byteOffset,
       byteLength,
     );
+    incrementPerformanceCounter("gpu.upload.bytes", byteLength);
   }
 
-  recordPass(passEncoder: any, instanceCount: number): void {
+  recordPass(passEncoder: any, instanceCount: number, firstInstance = 0): void {
     if (this.disposed || instanceCount <= 0) return;
     passEncoder.setPipeline(this.pipeline);
     passEncoder.setBindGroup(0, this.bindGroup);
     passEncoder.setVertexBuffer(0, this.instanceBuffer);
-    passEncoder.draw(6, instanceCount, 0, 0);
+    passEncoder.draw(6, instanceCount, 0, firstInstance);
   }
 
   dispose(): void {

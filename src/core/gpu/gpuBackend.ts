@@ -1,8 +1,34 @@
 import type { RGBA } from "../engine/gl.js";
+import type { ChartArea } from "../engine/view.js";
+import type { FootprintSeries } from "../model/footprint.js";
 
 export type { RGBA };
 
 export type GpuBackendKind = "webgpu" | "webgl2" | "canvas2d";
+
+export type GpuNativeCandleStyle = "none" | "strip" | "full";
+
+export interface GpuNativeSceneView {
+  readonly area: ChartArea;
+  readonly offsetX: number;
+  readonly colWidth: number;
+  readonly priceTop: number;
+  readonly pricePerPx: number;
+  readonly candleWidth: number;
+}
+
+export interface GpuNativeSceneInput {
+  readonly series: FootprintSeries;
+  readonly view: GpuNativeSceneView;
+  readonly candleStyle: GpuNativeCandleStyle;
+  readonly drawGrid: boolean;
+  readonly drawCandles: boolean;
+  readonly drawFootprint: boolean;
+  readonly drawHeat: boolean;
+  readonly drawPoc: boolean;
+  readonly drawGridQuads?: (quads: QuadSink) => void;
+  readonly drawForegroundOverlay?: (quads: QuadSink) => void;
+}
 
 export interface QuadSink {
   rect(x: number, y: number, w: number, h: number, c: RGBA): void;
@@ -35,6 +61,8 @@ export interface GpuSurface {
   getGlContext?(): WebGL2RenderingContext | null;
   resize(bitmapWidth: number, bitmapHeight: number, dpr?: number): void;
   beginFrame(clear: RGBA): GpuFrame;
+  supportsNativeScene?(): boolean;
+  renderNativeScene?(clear: RGBA, logicalWidth: number, logicalHeight: number, scene: GpuNativeSceneInput): boolean;
   requestCapture(): Promise<RgbaFrame>;
   onLost(listener: (reason: GpuLossReason) => void): () => void;
   dispose(): void;
