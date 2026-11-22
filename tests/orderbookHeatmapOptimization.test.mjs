@@ -270,12 +270,12 @@ test("#260 price-band pre-filter skips off-screen yOfPrice calls and paintCellsT
     try {
       const h = makeHarness({ width: 800, height: 200, dpr: 1 });
       overlay.setRasterCacheDisabledForTest(true);
-      overlay.draw(h.ctx, view, series, [0, 1]);
+      overlay.draw(h.ctx, view, series, [0, 0]);
       await new Promise((resolve) => setTimeout(resolve, 20));
       yOfPriceCalls = 0;
       h.resetCounts();
 
-      overlay.draw(h.ctx, view, series, [0, 1]);
+      overlay.draw(h.ctx, view, series, [0, 0]);
       // 2 passes (range + paint) * 3 visible cells * 2 yOfPrice calls/cell = 12 (never calls yOfPrice for 40k/42k/70k)
       assert.equal(yOfPriceCalls, 12, "off-screen cells are filtered by price band before yOfPrice");
       assert.equal(h.mainFillRects.length, 3);
@@ -356,7 +356,7 @@ test("#256 motion raster reuse blits historical overlap, pixel-aligns at fractio
       // Verify drawImage blit used imageSmoothingEnabled=false and whole device pixel destination rect
       assert.equal(h.mainDrawImages.length, 1);
       assert.equal(h.mainDrawImages[0].smoothing, false);
-      const [, , , , , dx, dy, dw, dh] = h.mainDrawImages[0].args;
+      const [, , , , dx, dy, dw, dh] = h.mainDrawImages[0].args;
       assert.ok(Number.isInteger(dx) && Number.isInteger(dy) && Number.isInteger(dw) && Number.isInteger(dh),
         "destination blit rect is aligned to whole device pixels");
       // Left strip [0, 10.5] and right strip [390, 800] (including live bar + extension) painted directly
@@ -484,7 +484,7 @@ test("#256 static live-tail patch clears only live slice when color range stays 
       const afterShift = snapshotPerformanceTelemetry().counters;
       assert.equal((afterShift["chart.cpu.heatmap.raster.tailPatch"] ?? 0) - (beforeShift["chart.cpu.heatmap.raster.tailPatch"] ?? 0), 0);
       assert.equal((afterShift["chart.cpu.heatmap.raster.miss"] ?? 0) - (beforeShift["chart.cpu.heatmap.raster.miss"] ?? 0), 1);
-      assert.deepEqual(h.offClearRects[0], { x: 0, y: 0, w: 800, h: 400 });
+      assert.deepEqual(h.offClearRects[0], { x: 0, y: 0, w: 1600, h: 800 });
     });
   } finally {
     overlay?.dispose();

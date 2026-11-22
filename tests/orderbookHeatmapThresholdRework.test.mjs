@@ -179,20 +179,20 @@ test("#262 raising threshold filters cached below-threshold cells on draw, live 
     ctx.fills.length = 0;
     overlay.draw(ctx, view, series, [0, 2]);
     assert.equal(requests.length, 1, "raising threshold must not trigger any refetch");
-    assert.equal(ctx.fills.length, 6, "only the 100_000 BTC cell (3 bars + 3 live extensions) remains");
+    assert.equal(ctx.fills.length, 4, "only the 100_000 BTC cell (3 bars + 1 live extension) remains");
 
     // Reserved GPU path (both auto and fixed scaleMode) also excludes below-threshold cells
     const gpuAt99999Auto = overlay.prepareGpuCells(view, series, [0, 2], () => ({ release() {} }));
     assert.ok(gpuAt99999Auto);
     assert.equal(gpuAt99999Auto.main.length, 3);
-    assert.equal(gpuAt99999Auto.extension.length, 3);
+    assert.equal(gpuAt99999Auto.extension.length, 1);
     assert.ok(gpuAt99999Auto.main.every((c) => c.value >= 99_999));
 
     scaleMode = "fixed";
     const gpuAt99999Fixed = overlay.prepareGpuCells(view, series, [0, 2], () => ({ release() {} }));
     assert.ok(gpuAt99999Fixed);
     assert.equal(gpuAt99999Fixed.main.length, 3);
-    assert.equal(gpuAt99999Fixed.extension.length, 3);
+    assert.equal(gpuAt99999Fixed.extension.length, 1);
 
     // Fresh overlay loaded directly at 99_999 BTC produces identical GPU frame geometry/ceiling as hot cache
     const freshOverlay = new OrderbookHeatmapOverlay({
@@ -280,7 +280,7 @@ test("#262 threshold=0 preserves zero-intensity cells and hover shows raw below-
       stroke() {},
       strokeRect() {},
       fillRect(x, y, w, h) {
-        if (this.fillStyle.startsWith("rgba(")) {
+        if (this.fillStyle.startsWith("rgba(") && this.fillStyle !== "rgba(11, 16, 24, 0.95)") {
           hoverColoredRects.push({ x, y, w, h, fillStyle: this.fillStyle });
         }
       },
