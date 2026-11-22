@@ -1,4 +1,5 @@
 import type { View } from "../../core/engine/view.js";
+import type { GpuSurface } from "../../core/gpu/gpuBackend.js";
 import type { FootprintSeries } from "../../core/model/footprint.js";
 import type { HeatmapGpuRenderer, HeatmapGpuCellFrame } from "./heatmap/gpu/heatmapGpuRenderer.js";
 import type { OrderbookHeatmapOverlay } from "../orderbook/heatmapOverlay.js";
@@ -44,6 +45,7 @@ export class ChartHeatmapGpuCoordinator {
   private heatmapGpuRenderer: HeatmapGpuRenderer | null = null;
   private heatmapGpuRendererPromise: Promise<typeof import("./heatmap/gpu/heatmapGpuRenderer.js")> | null = null;
   private heatmapGpuRendererGl: WebGL2RenderingContext | null = null;
+  private surface: GpuSurface | null = null;
   private heatmapGpuFailureLatched = false;
   private heatmapGpuUnsupportedEpisode = false;
   private heatmapGpuFrame: HeatmapGpuRenderFrame | null = null;
@@ -63,11 +65,14 @@ export class ChartHeatmapGpuCoordinator {
   set heatmapTexturePrototypeEnabled(enabled: boolean) {
     this._heatmapTexturePrototypeEnabled = enabled;
     if (enabled) {
-      void this.loadHeatmapGpuRenderer();
+      if ((this.host.backendKind ?? "webgl2") !== "webgpu") {
+        void this.loadHeatmapGpuRenderer();
+      }
     } else {
       this.heatmapGpuFrame = null;
       this.releaseHeatmapGpuLease();
       this.clearPreparedCache();
+      this.surface?.disposeNativeHeatmap?.();
       setGpuFeaturePath(HEATMAP_GPU_FEATURE, undefined);
     }
     this.host.invalidateSession();
@@ -86,7 +91,21 @@ export class ChartHeatmapGpuCoordinator {
       setGpuFeaturePath(HEATMAP_GPU_FEATURE, undefined);
       return false;
     }
-    if ((this.host.backendKind ?? "webgl2") !== "webgl2") {
+    const backend = this.host.backendKind ?? "webgl2";
+    if (backend === "webgpu") {
+      if (!this.surface?.supportsNativeHeatmap?.()) {
+        setGpuFeaturePath(HEATMAP_GPU_FEATURE, "cpu");
+        if (!this.heatmapGpuUnsupportedEpisode) {
+          recordGpuFeatureFallback(HEATMAP_GPU_FEATURE, "backend_unsupported");
+          this.heatmapGpuUnsupportedEpisode = true;
+        }
+        return false;
+      }
+      this.heatmapGpuUnsupportedEpisode = false;
+      if (!this.heatmapGpuFrame) setGpuFeaturePath(HEATMAP_GPU_FEATURE, "cpu");
+      return true;
+    }
+    if (backend !== "webgl2") {
       setGpuFeaturePath(HEATMAP_GPU_FEATURE, "cpu");
       if (!this.heatmapGpuUnsupportedEpisode) {
         recordGpuFeatureFallback(HEATMAP_GPU_FEATURE, "backend_unsupported");
@@ -113,6 +132,18 @@ export class ChartHeatmapGpuCoordinator {
     this.heatmapGpuRendererGl = gl;
   }
 
+  setSurface(surface: GpuSurface | null): void {
+    if (this.surface !== surface) {
+      this.heatmapGpuFrame = null;
+      this.releaseHeatmapGpuLease();
+      this.clearPreparedCache();
+      this.surface?.disposeNativeHeatmap?.();
+      this.heatmapGpuUnsupportedEpisode = false;
+      setGpuFeaturePath(HEATMAP_GPU_FEATURE, undefined);
+    }
+    this.surface = surface;
+  }
+
   resetFailureLatch(): void {
     this.heatmapGpuFailureLatched = false;
   }
@@ -126,6 +157,9 @@ export class ChartHeatmapGpuCoordinator {
   }
 
   whenHeatmapGpuRendererReady(): Promise<void> {
+    if ((this.host.backendKind ?? "webgl2") === "webgpu") {
+      return Promise.resolve();
+    }
     return this.loadHeatmapGpuRenderer().then(() => undefined);
   }
 
@@ -158,7 +192,17 @@ export class ChartHeatmapGpuCoordinator {
   }
 
   prepareHeatmapGpuCells(v: View, s: FootprintSeries): HeatmapGpuCellFrame | null {
-    if (!this.supportsHeatmapGpu() || this.heatmapGpuFailureLatched || !this.heatmapGpuRenderer) {
+    const backend = this.host.backendKind ?? "webgl2";
+    const isWebGpu = backend === "webgpu";
+    if (!this.supportsHeatmapGpu() || this.heatmapGpuFailureLatched) {
+      this.clearPreparedCache();
+      return null;
+    }
+    if (!isWebGpu && !this.heatmapGpuRenderer) {
+      this.clearPreparedCache();
+      return null;
+    }
+    if (isWebGpu && typeof this.surface?.reserveNativeHeatmapPayload !== "function") {
       this.clearPreparedCache();
       return null;
     }
@@ -192,12 +236,14 @@ export class ChartHeatmapGpuCoordinator {
     }
 
     this.clearPreparedCache();
-    const gpuRenderer = this.heatmapGpuRenderer;
+    const reserve = isWebGpu
+      ? (logicalBytes: number) => this.surface!.reserveNativeHeatmapPayload!(logicalBytes)
+      : (logicalBytes: number) => this.heatmapGpuRenderer!.reservePreparedPayload(logicalBytes);
     const prepared = overlay.prepareGpuCells(
       v,
       s,
       range,
-      (logicalBytes: number) => gpuRenderer.reservePreparedPayload(logicalBytes),
+      reserve,
     );
     if (!prepared || cacheKey === null) return prepared;
 
@@ -229,43 +275,76 @@ export class ChartHeatmapGpuCoordinator {
       return;
     }
     if (!frame) return;
-    const gl = this.heatmapGpuRendererGl;
-    if (!gl) {
-      frame.preparedLease?.release();
-      this.disposeHeatmapGpuRenderer();
-      this.heatmapGpuFailureLatched = true;
-      setGpuFeaturePath(HEATMAP_GPU_FEATURE, "cpu");
-      return;
-    }
-    if (!this.heatmapGpuRenderer) {
-      frame.preparedLease?.release();
-      return;
-    }
-    const range = this.host.renderer.visibleRange(v, s.length);
+    const backend = this.host.backendKind ?? "webgl2";
+    const isWebGpu = backend === "webgpu";
+    const plot = {
+      left: v.area.left,
+      top: v.area.top,
+      width: v.area.width,
+      height: v.area.height,
+      ...(v.pixelRatio !== null && v.pixelRatio > 0 ? { pixelRatio: v.pixelRatio } : {}),
+    };
+
     let ok: boolean;
-    try {
-      ok = this.heatmapGpuRenderer.renderFrame(gl, frame, {
-        left: v.area.left,
-        top: v.area.top,
-        width: v.area.width,
-        height: v.area.height,
-        ...(v.pixelRatio !== null && v.pixelRatio > 0 ? { pixelRatio: v.pixelRatio } : {}),
-      });
-    } catch (error) {
-      if (error instanceof Error && error.message === "Heatmap GPU prototype budget exceeded") {
+    if (isWebGpu) {
+      const surface = this.surface;
+      if (!surface || typeof surface.renderNativeHeatmap !== "function") {
+        frame.preparedLease?.release();
+        this.disposeHeatmapGpuRenderer();
+        this.heatmapGpuFailureLatched = true;
+        setGpuFeaturePath(HEATMAP_GPU_FEATURE, "cpu");
+        return;
+      }
+      try {
+        ok = surface.renderNativeHeatmap(frame, plot);
+      } catch (error) {
+        if (error instanceof Error && error.message === "Heatmap GPU prototype budget exceeded") {
+          frame.preparedLease?.release();
+          setGpuFeaturePath(HEATMAP_GPU_FEATURE, "cpu");
+          return;
+        }
+        throw error;
+      }
+      if (!ok) {
+        frame.preparedLease?.release();
+        this.disposeHeatmapGpuRenderer();
+        this.heatmapGpuFailureLatched = true;
+        setGpuFeaturePath(HEATMAP_GPU_FEATURE, "cpu");
+        return;
+      }
+    } else {
+      const gl = this.heatmapGpuRendererGl;
+      if (!gl) {
+        frame.preparedLease?.release();
+        this.disposeHeatmapGpuRenderer();
+        this.heatmapGpuFailureLatched = true;
+        setGpuFeaturePath(HEATMAP_GPU_FEATURE, "cpu");
+        return;
+      }
+      if (!this.heatmapGpuRenderer) {
         frame.preparedLease?.release();
         return;
       }
-      throw error;
+      try {
+        ok = this.heatmapGpuRenderer.renderFrame(gl, frame, plot);
+      } catch (error) {
+        if (error instanceof Error && error.message === "Heatmap GPU prototype budget exceeded") {
+          frame.preparedLease?.release();
+          return;
+        }
+        throw error;
+      }
+      if (!ok) {
+        frame.preparedLease?.release();
+        this.disposeHeatmapGpuRenderer();
+        this.heatmapGpuRendererGl = gl;
+        this.heatmapGpuFailureLatched = true;
+        setGpuFeaturePath(HEATMAP_GPU_FEATURE, "cpu");
+        return;
+      }
     }
-    if (!ok) {
-      frame.preparedLease?.release();
-      this.disposeHeatmapGpuRenderer();
-      this.heatmapGpuRendererGl = gl;
-      this.heatmapGpuFailureLatched = true;
-      setGpuFeaturePath(HEATMAP_GPU_FEATURE, "cpu");
-      return;
-    }
+
+    const range = this.host.renderer.visibleRange(v, s.length);
     this.heatmapGpuFrame = {
       dataKey: frame.dataKey,
       threshold: frame.threshold,
@@ -288,7 +367,7 @@ export class ChartHeatmapGpuCoordinator {
     this.heatmapGpuLease = frame.preparedLease && frame.preparedLease === this.cachedPrepareHandle
       ? null
       : (frame.preparedLease ?? null);
-    setGpuFeaturePath(HEATMAP_GPU_FEATURE, "webgl2");
+    setGpuFeaturePath(HEATMAP_GPU_FEATURE, isWebGpu ? "webgpu" : "webgl2");
   }
 
   heatmapGpuSuppressedAnnotation(v: View, s: FootprintSeries, range: [number, number]): boolean {
@@ -333,10 +412,12 @@ export class ChartHeatmapGpuCoordinator {
     this.heatmapGpuRenderer?.dispose();
     this.heatmapGpuRenderer = null;
     this.heatmapGpuRendererGl = null;
+    this.surface?.disposeNativeHeatmap?.();
   }
 
   dispose(): void {
     this.disposeHeatmapGpuRenderer();
+    this.surface = null;
   }
 
   onRestoreContext(restoredGl: WebGL2RenderingContext | null): void {

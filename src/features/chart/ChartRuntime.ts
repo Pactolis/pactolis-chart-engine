@@ -403,6 +403,7 @@ class ChartRuntimeImpl implements ChartRuntime, ChartInputHost {
       invalidateSession: () => this.invalidateSession(),
     });
     this.heatmapGpuCoordinator.setGl(gl);
+    this.heatmapGpuCoordinator.setSurface(gpuSurface);
     this.magnetController = new ChartMagnetController({
       view: this.view,
       pipeline: this.pipeline,
@@ -558,6 +559,7 @@ class ChartRuntimeImpl implements ChartRuntime, ChartInputHost {
             ? nextSurface.getGlContext?.() ?? null
             : null,
         );
+        this.heatmapGpuCoordinator.setSurface(nextSurface);
       },
     };
 
