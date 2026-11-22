@@ -509,7 +509,10 @@ async function runChartCountPass(
         const configureTextViewport = async (textMode: TextMode) => {
           const targetColWidth = textMode === "compact" ? rule.compactColWidthPx : rule.fullColWidthPx;
           for (const runtime of runtimes()) {
-            runtime.view.resetTimeScale(runtime.pipeline.series.length);
+            if (!(runtime.view.area.width > 1 && runtime.view.area.height > 1)) {
+              throw new Error(`Chart viewport area not laid out yet (${runtime.view.area.width}x${runtime.view.area.height})`);
+            }
+            (runtime as any).timeViewport?.ensurePendingLatestPlacement?.(runtime.pipeline.series.length);
             runtime.view.colWidth = targetColWidth;
             runtime.view.offsetX = runtime.view.area.width - runtime.pipeline.series.length * targetColWidth;
             runtime.view.setPriceAutoScale(false);
@@ -534,8 +537,15 @@ async function runChartCountPass(
           }
         };
 
-        // Warmup before measurement
+        // Warmup before measurement so any initial-fit viewport placement settles first
         telemetry.configurePerformanceTelemetry({ enabled: false });
+        for (let w = 0; w < 3; w++) {
+          for (const runtime of runtimes()) {
+            runtime.session.invalidate(ChartChange.Viewport);
+          }
+          await nextRaf();
+        }
+        await syncBackendWork();
         await configureTextViewport(textModes[0] as TextMode);
 
         telemetry.configurePerformanceTelemetry({ enabled: true });
