@@ -1,12 +1,17 @@
 import type {
   GpuFrame,
   GpuLossReason,
+  GpuNativeHeatmapFrame,
+  GpuNativeHeatmapPlot,
+  GpuNativeSceneInput,
   GpuSurface,
   QuadSink,
   RGBA,
   RgbaFrame,
 } from "../gpuBackend.js";
 import type { WebGpuDeviceHandle } from "./webgpuDevice.js";
+import { WebGpuNativeHeatmapPipeline } from "./webgpuNativeHeatmapPipeline.js";
+import { WebGpuNativeScenePipeline } from "./webgpuNativeScenePipeline.js";
 import { WebGpuQuadPipeline } from "./webgpuQuadPipeline.js";
 
 export class WebGpuQuadSink implements QuadSink {
@@ -50,6 +55,10 @@ export class WebGpuSurface implements GpuSurface {
 
   private readonly ctx: any;
   private readonly pipeline: WebGpuQuadPipeline;
+  private nativePipeline: WebGpuNativeScenePipeline | null = null;
+  private nativeSceneDisabled = false;
+  private nativeHeatmapPipeline: WebGpuNativeHeatmapPipeline | null = null;
+  private nativeHeatmapDisabled = false;
   private readonly quadSink = new WebGpuQuadSink();
   private dpr = 1;
   private disposed = false;
@@ -152,6 +161,174 @@ export class WebGpuSurface implements GpuSurface {
     if (this.canvas.width !== bitmapWidth) this.canvas.width = bitmapWidth;
     if (this.canvas.height !== bitmapHeight) this.canvas.height = bitmapHeight;
     this.dpr = dpr > 0 ? dpr : 1;
+  }
+
+  supportsNativeScene(): boolean {
+    if (this.disposed || this.nativeSceneDisabled || this.handle.isLost()) return false;
+    const device = this.handle.device;
+    return Boolean(
+      device
+      && typeof device.createComputePipeline === "function"
+      && typeof device.createRenderPipeline === "function",
+    );
+  }
+
+  renderNativeScene(
+    clear: RGBA,
+    logicalWidth: number,
+    logicalHeight: number,
+    scene: GpuNativeSceneInput,
+  ): boolean {
+    if (!this.supportsNativeScene()) return false;
+    const device = this.handle.device;
+    if (!device) return false;
+
+    if (!this.nativePipeline) {
+      try {
+        this.nativePipeline = new WebGpuNativeScenePipeline(device, this.handle.format, {
+          supportsTimestampQuery: this.handle.supportsTimestampQuery,
+          maxBufferSize: this.handle.limits?.maxBufferSize,
+        });
+      } catch {
+        this.nativeSceneDisabled = true;
+        return false;
+      }
+    }
+
+    let currentTexture: any = null;
+    try {
+      currentTexture = this.ctx?.getCurrentTexture?.();
+      this.lastRenderedTexture = currentTexture;
+    } catch {
+      currentTexture = null;
+    }
+    if (!currentTexture) return false;
+
+    const w = logicalWidth > 0 ? logicalWidth : (this.canvas.width / this.dpr);
+    const h = logicalHeight > 0 ? logicalHeight : (this.canvas.height / this.dpr);
+    const prepared = this.nativePipeline.prepareFrame(scene, w, h);
+    if (!prepared.ok) return false;
+
+    this.quadSink.reset();
+    if (scene.drawGrid && scene.drawGridQuads) {
+      scene.drawGridQuads(this.quadSink);
+    }
+    const gridCount = this.quadSink.count;
+    if (scene.drawForegroundOverlay) {
+      scene.drawForegroundOverlay(this.quadSink);
+    }
+    const totalOverlayQuads = this.quadSink.count;
+    const fgCount = totalOverlayQuads - gridCount;
+
+    if (totalOverlayQuads > 0) {
+      this.pipeline.updateResolution(w, h);
+      this.pipeline.uploadInstances(this.quadSink.data, totalOverlayQuads);
+    }
+
+    const commandEncoder = device.createCommandEncoder({
+      label: "WebGpuNativeSceneCommandEncoder",
+    });
+
+    const tsSlot = this.nativePipeline.beginTimestampPass();
+    const ranCompute = this.nativePipeline.needsComputeDispatch();
+    if (ranCompute) {
+      this.nativePipeline.recordComputePass(commandEncoder, tsSlot);
+    }
+
+    const passEncoder = commandEncoder.beginRenderPass({
+      label: "WebGpuNativeSceneRenderPass",
+      colorAttachments: [
+        {
+          view: currentTexture.createView ? currentTexture.createView() : currentTexture,
+          clearValue: { r: clear.r, g: clear.g, b: clear.b, a: clear.a },
+          loadOp: "clear",
+          storeOp: "store",
+        },
+      ],
+      ...(tsSlot !== null ? { timestampWrites: this.nativePipeline.timestampWritesFor(tsSlot) } : {}),
+    });
+
+    if (gridCount > 0) {
+      this.pipeline.recordPass(passEncoder, gridCount, 0);
+    }
+    this.nativePipeline.recordRenderPasses(passEncoder, scene, prepared);
+    if (fgCount > 0) {
+      this.pipeline.recordPass(passEncoder, fgCount, gridCount);
+    }
+
+    passEncoder.end();
+    if (tsSlot !== null) {
+      this.nativePipeline.resolveTimestampPass(commandEncoder, tsSlot, ranCompute);
+    }
+    device.queue.submit([commandEncoder.finish()]);
+    if (tsSlot !== null) {
+      this.nativePipeline.readbackTimestampPass(tsSlot, ranCompute);
+    }
+    return true;
+  }
+
+  supportsNativeHeatmap(): boolean {
+    if (this.disposed || this.nativeHeatmapDisabled || this.handle.isLost()) return false;
+    const device = this.handle.device;
+    return Boolean(device && typeof device.createRenderPipeline === "function");
+  }
+
+  private ensureNativeHeatmapPipeline(): WebGpuNativeHeatmapPipeline | null {
+    if (!this.supportsNativeHeatmap()) return null;
+    if (!this.nativeHeatmapPipeline) {
+      try {
+        this.nativeHeatmapPipeline = new WebGpuNativeHeatmapPipeline(
+          this.handle.device,
+          this.handle.format,
+          this.handle.limits?.maxBufferSize,
+        );
+      } catch {
+        this.nativeHeatmapDisabled = true;
+        return null;
+      }
+    }
+    return this.nativeHeatmapPipeline;
+  }
+
+  reserveNativeHeatmapPayload(logicalBytes: number): { release(): void } | null {
+    const pipeline = this.ensureNativeHeatmapPipeline();
+    if (!pipeline) return null;
+    return pipeline.reservePreparedPayload(logicalBytes);
+  }
+
+  renderNativeHeatmap(frame: GpuNativeHeatmapFrame, plot: GpuNativeHeatmapPlot): boolean {
+    const pipeline = this.ensureNativeHeatmapPipeline();
+    if (!pipeline) return false;
+
+    let targetTexture = this.lastRenderedTexture;
+    if (!targetTexture) {
+      try {
+        targetTexture = this.ctx?.getCurrentTexture?.();
+        this.lastRenderedTexture = targetTexture;
+      } catch {
+        targetTexture = null;
+      }
+    }
+    if (!targetTexture) return false;
+
+    const ok = pipeline.renderFrame(
+      targetTexture,
+      this.canvas.width,
+      this.canvas.height,
+      this.dpr,
+      frame,
+      plot,
+    );
+    if (!ok) {
+      this.disposeNativeHeatmap();
+      this.nativeHeatmapDisabled = true;
+    }
+    return ok;
+  }
+
+  disposeNativeHeatmap(): void {
+    this.nativeHeatmapPipeline?.dispose();
+    this.nativeHeatmapPipeline = null;
   }
 
   beginFrame(clear: RGBA): GpuFrame {
@@ -408,6 +585,10 @@ export class WebGpuSurface implements GpuSurface {
     this.unbindDeviceLoss();
     this.lostListeners.clear();
     this.pipeline.dispose();
+    this.nativePipeline?.dispose();
+    this.nativePipeline = null;
+    this.nativeHeatmapPipeline?.dispose();
+    this.nativeHeatmapPipeline = null;
   }
 }
 

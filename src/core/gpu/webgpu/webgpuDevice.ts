@@ -22,6 +22,7 @@ export interface WebGpuDeviceHandle {
   readonly device: any;
   readonly format: string;
   readonly limits: WebGpuLimits;
+  readonly supportsTimestampQuery?: boolean;
   isLost(): boolean;
   onLost(callback: (reason: string) => void): () => void;
   dispose(): void;
@@ -155,12 +156,24 @@ export async function requestWebGpuDevice(options?: {
         return null;
       }
 
-      const device = await adapter.requestDevice();
+      const wantsTimestampQuery = Boolean(adapter.features?.has?.("timestamp-query"));
+      let device: any = null;
+      if (wantsTimestampQuery) {
+        try {
+          device = await adapter.requestDevice({ requiredFeatures: ["timestamp-query"] });
+        } catch {
+          device = null;
+        }
+      }
+      if (!device) {
+        device = await adapter.requestDevice();
+      }
       if (!device) {
         setGpuAdapterInfo(undefined);
         emitFallback("device_request_failed");
         return null;
       }
+      const supportsTimestampQuery = Boolean(device.features?.has?.("timestamp-query"));
 
       const resolvedAdapterInfo = await readAdapterInfoSafely(adapter);
       setGpuAdapterInfo(resolvedAdapterInfo);
@@ -250,6 +263,7 @@ export async function requestWebGpuDevice(options?: {
         device,
         format,
         limits,
+        supportsTimestampQuery,
         isLost(): boolean {
           return terminalState !== "alive";
         },
