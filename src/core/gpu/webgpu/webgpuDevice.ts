@@ -44,14 +44,11 @@ function classifyWebGpuError(error: unknown): GpuErrorKind {
     return "validation";
   }
   const errObj = error as { name?: unknown; constructor?: { name?: unknown } };
-  const name = errObj.name ?? errObj.constructor?.name;
-  if (name === "GPUOutOfMemoryError") return "out-of-memory";
-  if (name === "GPUInternalError") return "internal";
-  if (name === "GPUValidationError") return "validation";
+  const errName = errObj.name;
   const ctorName = errObj.constructor?.name;
-  if (ctorName === "GPUOutOfMemoryError") return "out-of-memory";
-  if (ctorName === "GPUInternalError") return "internal";
-  if (ctorName === "GPUValidationError") return "validation";
+  if (errName === "GPUOutOfMemoryError" || ctorName === "GPUOutOfMemoryError") return "out-of-memory";
+  if (errName === "GPUInternalError" || ctorName === "GPUInternalError") return "internal";
+  if (errName === "GPUValidationError" || ctorName === "GPUValidationError") return "validation";
   return "unknown";
 }
 

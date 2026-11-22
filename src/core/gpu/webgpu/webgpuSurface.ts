@@ -55,6 +55,7 @@ export class WebGpuSurface implements GpuSurface {
   private disposed = false;
   private lastRenderedTexture: any = null;
   private readonly lostListeners = new Set<(reason: GpuLossReason) => void>();
+  private readonly captureAbortListeners = new Set<() => void>();
   private readonly unbindDeviceLoss: () => void;
   private initVerificationPromise: Promise<void> | null = null;
 
@@ -243,6 +244,7 @@ export class WebGpuSurface implements GpuSurface {
     let stagingBuffer: any = null;
     let mapped = false;
     let unbindLost: (() => void) | null = null;
+    let unbindAbort: (() => void) | null = null;
     let pushedScopes = 0;
 
     try {
@@ -306,6 +308,9 @@ export class WebGpuSurface implements GpuSurface {
         }
       }
 
+      if (this.disposed) {
+        throw new Error("WebGpuSurface: disposed during capture");
+      }
       if (this.handle.isLost()) {
         throw new Error("WebGpuSurface: device lost during capture");
       }
@@ -317,8 +322,23 @@ export class WebGpuSurface implements GpuSurface {
           reject(new Error(`WebGpuSurface: device lost during capture (${reason})`));
         });
       });
+      const abortPromise = new Promise<never>((_, reject) => {
+        const onAbort = (): void => {
+          reject(new Error("WebGpuSurface: disposed during capture"));
+        };
+        this.captureAbortListeners.add(onAbort);
+        unbindAbort = () => {
+          this.captureAbortListeners.delete(onAbort);
+        };
+        if (this.disposed) {
+          onAbort();
+        }
+      });
 
-      await Promise.race([mapPromise, lostPromise]);
+      await Promise.race([mapPromise, lostPromise, abortPromise]);
+      if (this.disposed) {
+        throw new Error("WebGpuSurface: disposed during capture");
+      }
       mapped = true;
 
       const mappedBytes = new Uint8Array(stagingBuffer.getMappedRange());
@@ -356,6 +376,9 @@ export class WebGpuSurface implements GpuSurface {
         height,
       };
     } finally {
+      if (unbindAbort) {
+        try { unbindAbort(); } catch {}
+      }
       if (unbindLost) {
         try { unbindLost(); } catch {}
       }
@@ -378,6 +401,10 @@ export class WebGpuSurface implements GpuSurface {
   dispose(): void {
     if (this.disposed) return;
     this.disposed = true;
+    for (const abort of [...this.captureAbortListeners]) {
+      try { abort(); } catch {}
+    }
+    this.captureAbortListeners.clear();
     this.unbindDeviceLoss();
     this.lostListeners.clear();
     this.pipeline.dispose();

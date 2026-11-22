@@ -82,7 +82,7 @@ export class Canvas2dSurface implements GpuSurface {
     this.contextLost = true;
   }
 
-  restoreContext(nextCtx?: CanvasRenderingContext2D | null): boolean {
+  restoreCanvas2dContext(nextCtx?: CanvasRenderingContext2D | null): boolean {
     if (this.disposed) return false;
     const resolved = nextCtx !== undefined ? nextCtx : (this.canvas.getContext?.("2d") as CanvasRenderingContext2D | null);
     if (!resolved || resolved.isContextLost?.() === true) {
@@ -103,7 +103,7 @@ export class Canvas2dSurface implements GpuSurface {
   }
 
   beginFrame(clear: RGBA): GpuFrame {
-    if (this.disposed) {
+    if (this.disposed || this.contextLost) {
       return {
         quads: this.quadSink,
         flushQuads: () => {},

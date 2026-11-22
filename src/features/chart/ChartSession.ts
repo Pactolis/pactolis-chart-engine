@@ -669,10 +669,10 @@ export class ChartSession {
   }
 
   /** Apply a measured canvas size. Returns true only when a commit actually ran. */
-  private applyContainerSize(force = false): boolean {
+  private applyContainerSize(): boolean {
     const target = this.measureContainerSize();
     if (!target) return false;
-    if (force || this.containerSizeWouldChange(target)) {
+    if (this.containerSizeWouldChange(target)) {
       // Mark the transaction unfinished BEFORE the destructive bitmap/CSS mutation: if a
       // transform or onResize throws mid-commit, the physically cleared surfaces keep
       // their repayment intent instead of silently skipping restoration on an unchanged retry.
@@ -690,6 +690,34 @@ export class ChartSession {
     }
     this.finishPendingResize();
     return true;
+  }
+
+  /**
+   * Re-apply surface backing size and Canvas2D DPR transforms after contextrestored
+   * without triggering layout/auto-fit callbacks when container bounds did not change.
+   */
+  private reapplySurfaceSizeAndDpr(): void {
+    const target = this.measureContainerSize();
+    if (!target) {
+      const dpr = this.dpr();
+      this.annotationCtx2d.setTransform(dpr, 0, 0, dpr, 0, 0);
+      this.interactionCtx2d.setTransform(dpr, 0, 0, dpr, 0, 0);
+      return;
+    }
+    if (this.containerSizeWouldChange(target)) {
+      this.applyContainerSize();
+      return;
+    }
+    const { cssWidth, cssHeight, bitmapWidth, bitmapHeight, dpr } = target;
+    for (const c of [this.gpuCanvas, this.annotationCanvas, this.interactionCanvas]) {
+      if (c.style.width !== cssWidth) c.style.width = cssWidth;
+      if (c.style.height !== cssHeight) c.style.height = cssHeight;
+      if (c.width !== bitmapWidth) c.width = bitmapWidth;
+      if (c.height !== bitmapHeight) c.height = bitmapHeight;
+    }
+    this.gpuSurface.resize(bitmapWidth, bitmapHeight, dpr);
+    this.annotationCtx2d.setTransform(dpr, 0, 0, dpr, 0, 0);
+    this.interactionCtx2d.setTransform(dpr, 0, 0, dpr, 0, 0);
   }
 
   /**
@@ -807,6 +835,22 @@ export class ChartSession {
     }
 
     if (this.gpuSurface.kind === "webgpu") {
+      const replaceWithCanvas2d = (primaryCanvas?: HTMLCanvasElement): void => {
+        const candidate = primaryCanvas ?? this.ownerDocument.createElement("canvas");
+        try {
+          this.replaceSurface(new Canvas2dSurface(candidate));
+          this.onBackendChangedCb?.("canvas2d");
+        } catch (err) {
+          try { candidate.width = 0; candidate.height = 0; } catch {}
+          try { candidate.remove?.(); } catch {}
+          if (primaryCanvas) {
+            replaceWithCanvas2d();
+            return;
+          }
+          throw err;
+        }
+      };
+
       const unbind = this.gpuSurface.onLost((reason) => {
         if (reason === "device-lost") {
           recordGpuContextEvent("lost");
@@ -832,35 +876,12 @@ export class ChartSession {
               try { fallbackCanvas.width = 0; fallbackCanvas.height = 0; } catch {}
               try { fallbackCanvas.remove?.(); } catch {}
               recordGpuFallback("webgl2", "canvas2d", "surface_init_failed");
-              const c2dCanvas = this.ownerDocument.createElement("canvas");
-              try {
-                this.replaceSurface(new Canvas2dSurface(c2dCanvas));
-                this.onBackendChangedCb?.("canvas2d");
-                return;
-              } catch (c2dErr) {
-                try { c2dCanvas.width = 0; c2dCanvas.height = 0; } catch {}
-                try { c2dCanvas.remove?.(); } catch {}
-                throw c2dErr;
-              }
+              replaceWithCanvas2d();
+              return;
             }
           }
           recordGpuFallback("webgl2", "canvas2d", "fallback_context_unavailable");
-          try {
-            this.replaceSurface(new Canvas2dSurface(fallbackCanvas));
-            this.onBackendChangedCb?.("canvas2d");
-          } catch {
-            try { fallbackCanvas.width = 0; fallbackCanvas.height = 0; } catch {}
-            try { fallbackCanvas.remove?.(); } catch {}
-            const c2dCanvas = this.ownerDocument.createElement("canvas");
-            try {
-              this.replaceSurface(new Canvas2dSurface(c2dCanvas));
-              this.onBackendChangedCb?.("canvas2d");
-            } catch (c2dErr) {
-              try { c2dCanvas.width = 0; c2dCanvas.height = 0; } catch {}
-              try { c2dCanvas.remove?.(); } catch {}
-              throw c2dErr;
-            }
-          }
+          replaceWithCanvas2d(fallbackCanvas);
         } catch (err) {
           console.error("[ChartSession] WebGPU fallback failed", err);
         }
@@ -895,9 +916,9 @@ export class ChartSession {
       };
 
       const onRestored = (): void => {
-        const surface = this.gpuSurface as { restoreContext?: () => boolean };
-        const restored = typeof surface.restoreContext === "function"
-          ? surface.restoreContext()
+        const surface = this.gpuSurface as { restoreCanvas2dContext?: () => boolean };
+        const restored = typeof surface.restoreCanvas2dContext === "function"
+          ? surface.restoreCanvas2dContext()
           : Boolean(this.gpuCanvas.getContext?.("2d"));
         if (!restored) {
           incrementPerformanceCounter("chart.gpu.contextCreateFailed");
@@ -905,7 +926,7 @@ export class ChartSession {
         }
         recordCanvas2dContextEvent("scene", "restored");
         this.gpuValid = true;
-        this.applyContainerSize(true);
+        this.reapplySurfaceSizeAndDpr();
         this.onRestoreCanvas2dContextCb?.();
         this.dirtySurfaces = ChartSurfaceDirty.All;
         this.pendingChanges = ChartChange.All;
@@ -993,84 +1014,69 @@ export class ChartSession {
   private setupOverlayContextLossHandling(): void {
     const cleanups: Array<() => void> = [];
 
-    if (this.annotationCanvas.addEventListener) {
-      const onAnnotationLost = (e: Event): void => {
+    const bindOverlaySurface = (
+      surface: "annotation" | "interaction",
+      canvas: HTMLCanvasElement,
+      setLostFlag: (lost: boolean) => void,
+      onFreshContext: (ctx: CanvasRenderingContext2D) => void,
+      onLostExtra?: () => void,
+    ): void => {
+      if (!canvas.addEventListener) return;
+      const onLost = (e: Event): void => {
         e.preventDefault?.();
-        this.annotationContextLost = true;
-        recordCanvas2dContextEvent("annotation", "lost");
-        this.rejectPendingCapture("annotation Canvas2D context was lost during capture");
+        setLostFlag(true);
+        recordCanvas2dContextEvent(surface, "lost");
+        onLostExtra?.();
       };
-      const onAnnotationRestored = (): void => {
-        const freshCtx = this.annotationCanvas.getContext?.("2d") as CanvasRenderingContext2D | null;
+      const onRestored = (): void => {
+        const freshCtx = canvas.getContext?.("2d") as CanvasRenderingContext2D | null;
         if (!freshCtx || freshCtx.isContextLost?.() === true) {
           incrementPerformanceCounter("chart.gpu.contextCreateFailed");
           return;
         }
-        this.annotationCtx2d = freshCtx;
-        this.annotationContextLost = false;
-        recordCanvas2dContextEvent("annotation", "restored");
+        setLostFlag(false);
+        recordCanvas2dContextEvent(surface, "restored");
+        onFreshContext(freshCtx);
         if (this.gpuValid) {
-          if (!this.applyContainerSize(true)) {
-            const dpr = this.dpr();
-            this.annotationCtx2d.setTransform(dpr, 0, 0, dpr, 0, 0);
-          }
+          this.reapplySurfaceSizeAndDpr();
         } else {
           const dpr = this.dpr();
-          this.annotationCtx2d.setTransform(dpr, 0, 0, dpr, 0, 0);
+          freshCtx.setTransform(dpr, 0, 0, dpr, 0, 0);
         }
-        this.onRestoreAnnotationContextCb?.(freshCtx);
         if (this.active && this.gpuValid) {
           this.dirtySurfaces = ChartSurfaceDirty.All;
           this.pendingChanges = ChartChange.All;
           this.startRaf();
         }
       };
-      this.annotationCanvas.addEventListener("contextlost", onAnnotationLost);
-      this.annotationCanvas.addEventListener("contextrestored", onAnnotationRestored);
+      canvas.addEventListener("contextlost", onLost);
+      canvas.addEventListener("contextrestored", onRestored);
       cleanups.push(() => {
-        this.annotationCanvas.removeEventListener?.("contextlost", onAnnotationLost);
-        this.annotationCanvas.removeEventListener?.("contextrestored", onAnnotationRestored);
+        canvas.removeEventListener?.("contextlost", onLost);
+        canvas.removeEventListener?.("contextrestored", onRestored);
       });
-    }
+    };
 
-    if (this.interactionCanvas.addEventListener) {
-      const onInteractionLost = (e: Event): void => {
-        e.preventDefault?.();
-        this.interactionContextLost = true;
-        recordCanvas2dContextEvent("interaction", "lost");
-      };
-      const onInteractionRestored = (): void => {
-        const freshCtx = this.interactionCanvas.getContext?.("2d") as CanvasRenderingContext2D | null;
-        if (!freshCtx || freshCtx.isContextLost?.() === true) {
-          incrementPerformanceCounter("chart.gpu.contextCreateFailed");
-          return;
-        }
+    bindOverlaySurface(
+      "annotation",
+      this.annotationCanvas,
+      (lost) => { this.annotationContextLost = lost; },
+      (freshCtx) => {
+        this.annotationCtx2d = freshCtx;
+        this.onRestoreAnnotationContextCb?.(freshCtx);
+      },
+      () => { this.rejectPendingCapture("annotation Canvas2D context was lost during capture"); },
+    );
+
+    bindOverlaySurface(
+      "interaction",
+      this.interactionCanvas,
+      (lost) => { this.interactionContextLost = lost; },
+      (freshCtx) => {
         this.interactionCtx2d = freshCtx;
-        this.interactionContextLost = false;
-        recordCanvas2dContextEvent("interaction", "restored");
-        if (this.gpuValid) {
-          if (!this.applyContainerSize(true)) {
-            const dpr = this.dpr();
-            this.interactionCtx2d.setTransform(dpr, 0, 0, dpr, 0, 0);
-          }
-        } else {
-          const dpr = this.dpr();
-          this.interactionCtx2d.setTransform(dpr, 0, 0, dpr, 0, 0);
-        }
         this.onRestoreInteractionContextCb?.(freshCtx);
-        if (this.active && this.gpuValid) {
-          this.dirtySurfaces = ChartSurfaceDirty.All;
-          this.pendingChanges = ChartChange.All;
-          this.startRaf();
-        }
-      };
-      this.interactionCanvas.addEventListener("contextlost", onInteractionLost);
-      this.interactionCanvas.addEventListener("contextrestored", onInteractionRestored);
-      cleanups.push(() => {
-        this.interactionCanvas.removeEventListener?.("contextlost", onInteractionLost);
-        this.interactionCanvas.removeEventListener?.("contextrestored", onInteractionRestored);
-      });
-    }
+      },
+    );
 
     if (cleanups.length > 0) {
       let cleaned = false;

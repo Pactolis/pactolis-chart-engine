@@ -606,9 +606,12 @@ class ChartRuntimeImpl implements ChartRuntime, ChartInputHost {
         this.session.invalidate();
       },
       onRestoreCanvas2dContext: () => {
+        this.orderbookHeatmap?.releaseRasterCache();
         this.overlay.invalidateWarmCaches();
+        this.renderCoordinator.applyConfig(this.chartViewConfig());
       },
       onRestoreAnnotationContext: (freshCtx) => {
+        this.orderbookHeatmap?.releaseRasterCache();
         this.overlay.updateContext(freshCtx);
       },
       onRestoreInteractionContext: (freshCtx) => {
@@ -617,6 +620,7 @@ class ChartRuntimeImpl implements ChartRuntime, ChartInputHost {
       },
       onLostContext: () => {
         this.overlay.invalidateAxisCache();
+        this.orderbookHeatmap?.releaseRasterCache();
         this.heatmapGpuCoordinator.onLostContext();
       },
       onBackendChanged: (backend) => this._hook.setAttribute("data-gpu-backend", backend),

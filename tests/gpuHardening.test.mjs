@@ -670,6 +670,26 @@ test("#251: ChartRuntime initial mount falls back to Canvas2D and onGpuSettingsC
     assert.equal(envAuto.panelRoot.children[0].getAttribute("data-gpu-backend"), "canvas2d");
     handleAuto.dispose();
 
+    // 1b. backend="webgl2" with null WebGL2 on initial mount falls back to Canvas2D in Node unit test
+    const envWebglNull = makeDomHarness("webgl2");
+    const surfaceWebglNull = {
+      status: "loading",
+      historyOverlay: false,
+      historyBackground: false,
+      indicatorHeaders: createIndicatorPaneHeadersModel(),
+    };
+    const handleWebglNull = mountChartRuntime(
+      envWebglNull.panelRoot,
+      { type: "chart", market: "BINANCE_FUTURES:btcusdt", timeframe: "15m", scaleMode: "linear", chartType: "candlestick", candles: true },
+      envWebglNull.services,
+      "panel-251-webgl-null",
+      surfaceWebglNull,
+    );
+    await new Promise((r) => setTimeout(r, 30));
+    assert.equal(surfaceWebglNull.status, "ready", "initial mount with backend='webgl2' and null WebGL2 must fall back to Canvas2D");
+    assert.equal(envWebglNull.panelRoot.children[0].getAttribute("data-gpu-backend"), "canvas2d");
+    handleWebglNull.dispose();
+
     // 2. backend="canvas2d" -> failed switch to "webgl2" preserves chart, retry "webgl2" succeeds, race cleans up stale canvas
     const env = makeDomHarness("canvas2d");
     const surfaceModel = {
@@ -1045,6 +1065,34 @@ test("#253: two charts sharing one WebGpuDeviceHandle isolate validation errors,
     diag = getGpuDiagnostics();
     assert.equal(diag.counters["gpu.device.destroyed"], 1);
     assert.equal(diag.counters["gpu.device.lost"], undefined);
+
+    // Part D: GPUInternalError with 2 shared charts -> internal error counter + "internal-error" fallback without gpu.device.lost
+    resetGpuDiagnosticsForTest();
+    resetSharedWebGpuDevice();
+    const { device: devD } = makeFakeWebGpuDevice();
+    setMockNavigator({
+      gpu: {
+        requestAdapter: async () => ({ requestDevice: async () => devD }),
+        getPreferredCanvasFormat: () => "rgba8unorm",
+      },
+    });
+    const handleD = await requestWebGpuDevice();
+    const chart5 = makeSessionForSharedWebGpu(handleD, doc, fakeGl, fake2d);
+    const chart6 = makeSessionForSharedWebGpu(handleD, doc, fakeGl, fake2d);
+
+    const internalErr = Object.assign(new Error("Driver internal error"), { name: "GPUInternalError" });
+    devD._triggerUncapturedError(internalErr);
+    assert.equal(handleD.isLost(), true);
+    assert.equal(chart5.getSurface().kind, "webgl2");
+    assert.equal(chart6.getSurface().kind, "webgl2");
+    diag = getGpuDiagnostics();
+    assert.equal(diag.counters["gpu.webgpu.error.internal"], 1);
+    assert.equal(diag.counters["gpu.renderError"], 1);
+    assert.equal(diag.counters["gpu.device.lost"], undefined, "internal error must not increment gpu.device.lost");
+    assert.equal(diag.counters["chart.gpu.contextLost"], undefined, "internal error must not inflate chart.gpu.contextLost");
+    assert.ok(diag.fallbacks.some((f) => f.from === "webgpu" && f.to === "webgl2" && f.reason === "internal-error"));
+    chart5.destroy();
+    chart6.destroy();
   } finally {
     restoreNavigator(originalNav);
     resetSharedWebGpuDevice();
@@ -1193,15 +1241,37 @@ test("#254: WebGpuSurface.requestCapture deterministically unmaps/destroys stagi
     resolveMap();
     surface.dispose();
   }
+
+  // 5. surface.dispose() during pending mapAsync -> immediate rejection, staging destroyed
+  {
+    let resolveMap;
+    const pendingMap = new Promise((resolve) => { resolveMap = resolve; });
+    const { surface, buffers, getUnsubCalls } = makeSurfaceWith({
+      stagingOverrides: { mapPromise: pendingMap },
+    });
+    const capturePromise = surface.requestCapture();
+    await new Promise((r) => setTimeout(r, 0));
+    surface.dispose();
+    await assert.rejects(() => capturePromise, /disposed during capture/);
+    const staging = buffers.find((b) => b.label === "WebGpuCaptureStagingBuffer");
+    assert.equal(staging.destroyed, true);
+    assert.equal(staging.unmapCalls, 0);
+    assert.equal(getUnsubCalls(), 1);
+    resolveMap();
+  }
 });
 
 // ---------------------------------------------------------------------------
 // Issue #255: Canvas2D contextlost / contextrestored (scene + overlays)
 // ---------------------------------------------------------------------------
 
-test("#255: Canvas2dSurface handles contextlost, requestCapture guard, restoreContext and listener cleanup", async () => {
+test("#255: Canvas2dSurface handles contextlost, beginFrame/requestCapture guard, restoreCanvas2dContext and listener cleanup", async () => {
   const ctxA = makeFake2dContext();
-  const ctxB = makeFake2dContext();
+  let ctxBFillCalls = 0;
+  const ctxB = {
+    ...makeFake2dContext(),
+    fillRect() { ctxBFillCalls++; },
+  };
   let activeCtx = ctxA;
   const canvas = makeWhatwgCanvas({ contexts: { "2d": () => activeCtx } });
   const surface = new Canvas2dSurface(canvas, ctxA);
@@ -1215,8 +1285,18 @@ test("#255: Canvas2dSurface handles contextlost, requestCapture guard, restoreCo
   assert.deepEqual(reasons, ["context-lost"]);
   await assert.rejects(() => surface.requestCapture(), /context is lost/);
 
+  const lostFrame = surface.beginFrame({ r: 0, g: 0, b: 0, a: 1 });
+  lostFrame.quads.rect(0, 0, 10, 10, { r: 1, g: 0, b: 0, a: 1 });
+  lostFrame.flushQuads();
+  lostFrame.end();
+  assert.equal(ctxA.transforms.length, 0, "beginFrame is a no-op while context is lost");
+
   activeCtx = ctxB;
-  assert.equal(surface.restoreContext(), true);
+  assert.equal(surface.restoreCanvas2dContext(), true);
+  const restoredFrame = surface.beginFrame({ r: 0, g: 0, b: 0, a: 1 });
+  restoredFrame.flushQuads();
+  restoredFrame.end();
+  assert.equal(ctxBFillCalls, 1, "restored context renders normally");
   const frame = await surface.requestCapture();
   assert.equal(frame.width, 640);
 
@@ -1288,6 +1368,7 @@ test("#255: ChartSession Canvas2D main scene + annotation + interaction contextl
   const c2dSurface = new Canvas2dSurface(gpuCanvas, sceneCtx);
   let counts = { gpu: 0, ann: 0, int: 0 };
   let lostCallbacks = 0;
+  let onResizeCalls = 0;
   const restoredAnnContexts = [];
   const restoredIntContexts = [];
   let warmCacheInvalidations = 0;
@@ -1310,6 +1391,7 @@ test("#255: ChartSession Canvas2D main scene + annotation + interaction contextl
     crosshair: { x: 0, y: 0, visible: false },
     onRestoreContext: () => {},
     onLostContext: () => { lostCallbacks++; },
+    onResize: () => { onResizeCalls++; },
     onRestoreCanvas2dContext: () => { warmCacheInvalidations++; },
     onRestoreAnnotationContext: (ctx) => { restoredAnnContexts.push(ctx); },
     onRestoreInteractionContext: (ctx) => { restoredIntContexts.push(ctx); },
@@ -1319,6 +1401,7 @@ test("#255: ChartSession Canvas2D main scene + annotation + interaction contextl
   session.activate();
   win.runNextFrame();
   assert.deepEqual(counts, { gpu: 1, ann: 1, int: 1 });
+  const initialResizeCalls = onResizeCalls;
 
   // 1. Main scene Canvas2D contextlost -> cancels RAF, rejects pending capture, blocks new capture
   const pendingSceneCapture = session.captureCompositePng();
@@ -1329,13 +1412,14 @@ test("#255: ChartSession Canvas2D main scene + annotation + interaction contextl
   await assert.rejects(() => pendingSceneCapture, /Canvas2D context was lost/);
   await assert.rejects(() => session.captureCompositePng(), /not renderable/);
 
-  // Main scene Canvas2D contextrestored at unchanged size -> forces DPR/transform + warm caches + ONE full invalidation
+  // Main scene Canvas2D contextrestored at unchanged size -> forces DPR/transform without spurious onResize + warm caches + ONE full invalidation
   const freshSceneCtx = makeFake2dContext();
   sceneCtx = freshSceneCtx;
   annCtx.transforms.length = 0;
   intCtx.transforms.length = 0;
   gpuCanvas.dispatchEvent("contextrestored");
   assert.equal(warmCacheInvalidations, 1);
+  assert.equal(onResizeCalls, initialResizeCalls, "unchanged-size contextrestored must not fire onResize");
   assert.deepEqual(annCtx.transforms.at(-1), [2, 0, 0, 2, 0, 0]);
   assert.deepEqual(intCtx.transforms.at(-1), [2, 0, 0, 2, 0, 0]);
   assert.equal(rafs.size, 1);
@@ -1352,11 +1436,12 @@ test("#255: ChartSession Canvas2D main scene + annotation + interaction contextl
   win.runNextFrame();
   assert.deepEqual(counts, { gpu: 3, ann: 2, int: 3 }, "annotation render skipped while annotation context lost");
 
-  // Annotation contextrestored -> fresh ctx, DPR transform, ONE full invalidation
+  // Annotation contextrestored -> fresh ctx, DPR transform without spurious onResize, ONE full invalidation
   const freshAnnCtx = makeFake2dContext();
   annCtx = freshAnnCtx;
   annotationCanvas.dispatchEvent("contextrestored");
   assert.deepEqual(restoredAnnContexts, [freshAnnCtx]);
+  assert.equal(onResizeCalls, initialResizeCalls, "unchanged-size annotation restore must not fire onResize");
   assert.deepEqual(freshAnnCtx.transforms.at(-1), [2, 0, 0, 2, 0, 0]);
   assert.equal(rafs.size, 1);
   win.runNextFrame();
@@ -1372,10 +1457,20 @@ test("#255: ChartSession Canvas2D main scene + annotation + interaction contextl
   intCtx = freshIntCtx;
   interactionCanvas.dispatchEvent("contextrestored");
   assert.deepEqual(restoredIntContexts, [freshIntCtx]);
+  assert.equal(onResizeCalls, initialResizeCalls, "unchanged-size interaction restore must not fire onResize");
   assert.deepEqual(freshIntCtx.transforms.at(-1), [2, 0, 0, 2, 0, 0]);
   assert.equal(rafs.size, 1);
   win.runNextFrame();
   assert.deepEqual(counts, { gpu: 6, ann: 5, int: 5 });
+
+  // 4. replaceSurface cleans up old Canvas2D context listeners
+  const replacementCanvas = makeWhatwgCanvas({ ownerDocument: doc, contexts: { "2d": () => freshSceneCtx } });
+  session.replaceSurface(new Canvas2dSurface(replacementCanvas, freshSceneCtx));
+  assert.equal(gpuCanvas.listenerCount("contextlost"), 0, "replaceSurface removes contextlost from previous Canvas2D canvas");
+  assert.equal(gpuCanvas.listenerCount("contextrestored"), 0, "replaceSurface removes contextrestored from previous Canvas2D canvas");
+  assert.equal(gpuCanvas.listenerOps.add, gpuCanvas.listenerOps.remove);
+  assert.equal(replacementCanvas.listenerCount("contextlost"), 1);
+  assert.equal(replacementCanvas.listenerCount("contextrestored"), 1);
 
   const diag = getGpuDiagnostics();
   assert.equal(diag.counters["chart.canvas2d.contextLost"], 3);
@@ -1388,7 +1483,7 @@ test("#255: ChartSession Canvas2D main scene + annotation + interaction contextl
   assert.equal(diag.counters["chart.canvas2d.interaction.contextRestored"], 1);
 
   session.destroy();
-  for (const c of [gpuCanvas, annotationCanvas, interactionCanvas]) {
+  for (const c of [gpuCanvas, replacementCanvas, annotationCanvas, interactionCanvas]) {
     assert.equal(c.listenerOps.add, c.listenerOps.remove, "all context listeners cleaned up on destroy");
   }
 });
