@@ -348,6 +348,8 @@ async function measureMode(
         panFrames,
         zoomFrames,
         liveFrames,
+        liveRolloverFrames,
+        liveRolloverEveryFrames,
         liveRatePerMarket,
         repetitions,
         metricNames,
