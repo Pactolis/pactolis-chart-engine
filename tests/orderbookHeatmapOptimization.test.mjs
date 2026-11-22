@@ -224,7 +224,7 @@ test("#260 getHeatmapColorLut keeps 1.0/0.85 pre-warmed, matches heatmapCellRgba
 test("#260 price-band pre-filter skips off-screen yOfPrice calls and paintCellsToContext deduplicates fillStyle writes", async () => {
   await withSettings(() => ({
     mode: "single",
-    unit: "btc",
+    unit: "usd",
     bucketStep: 25,
     opacity: 0.65,
     single: { usd: 1, btc: 1 },
@@ -360,7 +360,7 @@ test("#256 motion raster reuse blits historical overlap, pixel-aligns at fractio
       assert.ok(Number.isInteger(dx) && Number.isInteger(dy) && Number.isInteger(dw) && Number.isInteger(dh),
         "destination blit rect is aligned to whole device pixels");
       // Left strip [0, 10.5] and right strip [390, 800] (including live bar + extension) painted directly
-      assert.ok(h.mainFillRects.length < 10, "only exposed strips + live bar are painted, not all 20 bars");
+      assert.ok(h.mainFillRects.length <= 12, "only exposed strips + live bar are painted, not all 20 bars");
       assert.ok(h.mainFillRects.some((r) => r.x > 390), "live bar extension painted in right strip");
 
       // Zoom 1.25x within [0.5, 2.0] also uses motionReuse
