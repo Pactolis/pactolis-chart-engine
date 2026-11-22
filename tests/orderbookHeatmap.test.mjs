@@ -81,9 +81,9 @@ test("cells deepen with size relative to the largest visible wall", () => {
   assert.ok(heatmapIntensity(30, 20, 80) < heatmapIntensity(60, 20, 80));
   // A screen of near-threshold walls stays light instead of all turning deep.
   assert.equal(heatmapIntensity(22, 20, 22), Math.log10(1.1) / Math.log10(2));
-  assert.equal(heatmapCellColor(0), "rgba(125, 211, 252, 0.280)");
-  assert.equal(heatmapCellColor(1), "rgba(29, 78, 216, 0.950)");
-  assert.equal(heatmapCellColor(1, 0.5), "rgba(29, 78, 216, 0.475)");
+  assert.equal(heatmapCellColor(0), "rgba(18, 38, 84, 0.220)");
+  assert.equal(heatmapCellColor(1), "rgba(254, 240, 178, 0.680)");
+  assert.equal(heatmapCellColor(1, 0.5), "rgba(254, 240, 178, 0.340)");
 });
 
 function makeTestView(width = 800) {

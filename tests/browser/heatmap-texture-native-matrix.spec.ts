@@ -221,10 +221,11 @@ async function prepare(page: Page, empty: boolean, log = false): Promise<string>
  * Fixed BDD matrix; source qualification is software ANGLE only.
  * A/B: Given acknowledged fixture and default-off reference, When private opt-in,
  * Then native GPU owns density, annotation is empty, other layers survive.
- * C/D: Given subpixel CSS columns, Then native final image matches independent
- * Canvas coverage (CPU fallback allowed); next CW32 frame recovers GPU, no toggle.
- * Literal fixture: present zero; 32 BTC at 125; 64 BTC at 225; threshold 16.
- * LOG(32/16)/LOG(64/16)=.5 => fixed CSS alpha .615, EXT .277; zero .28.
+ * C/D: Given subpixel CSS columns, Then native final image keeps WebGL2 GPU
+ * ownership and matches an independent discrete pixel-center coverage oracle;
+ * next CW32 frame stays on GPU without toggling.
+ * Literal fixture: present zero; 32 BTC at 125; 64 BTC at 225; threshold 16; default opacity 0.85.
+ * LOG(32/16)/LOG(64/16)=.5 => mid-ramp turquoise CSS alpha .350, EXT .157; zero .187, peak .578.
  * Frozen source: 0637839fc2ba1e8ee9c07f9a8d13a6ca9209464e / aa45c97d9a4f71beeb9f090a4d6d7e1edb1395d3.
  */
 const scenarios = [
@@ -288,9 +289,9 @@ async function freezeOracle(page: Page, id: string, narrow: boolean, log: boolea
     // Fixed literal numeric values/colors; no observed ON color feeds this oracle.
     for (let k = -4; k <= 0; k++) {
       for (const cell of [
-        { lo: 50, hi: 100, css: "rgba(125, 211, 252, 0.28)", ext: "rgba(125, 211, 252, 0.126)" },
-        { lo: 100, hi: 150, css: "rgba(77, 145, 234, 0.615)", ext: "rgba(77, 145, 234, 0.277)" },
-        { lo: 200, hi: 250, css: "rgba(29, 78, 216, 0.95)", ext: "rgba(29, 78, 216, 0.427)" },
+        { lo: 50, hi: 100, css: "rgba(18, 38, 84, 0.187)", ext: "rgba(18, 38, 84, 0.084)" },
+        { lo: 100, hi: 150, css: "rgba(27, 140, 188, 0.350)", ext: "rgba(27, 140, 188, 0.157)" },
+        { lo: 200, hi: 250, css: "rgba(254, 240, 178, 0.578)", ext: "rgba(254, 240, 178, 0.260)" },
       ]) {
         rects.push({ x: x + k * v.colWidth, y: y(cell.hi), w: narrow ? 1 : 32,
           h: y(cell.lo) - y(cell.hi), css: cell.css });
@@ -398,6 +399,22 @@ async function expectedComposite(page: Page, oracle: Oracle, baseline: NativeFra
     return Array.from(ctx.getImageData(0, 0, 1, 1).data);
   }), { oracle, base: baseline.gpu });
 }
+async function expectedGpuPixelCenterComposite(page: Page, oracle: Oracle, baseline: NativeFrame) {
+  return page.evaluate(({ oracle, base }) => oracle.points.map(([px, py], index) => {
+    const cx = (px + 0.5) / oracle.dpr;
+    const cy = (py + 0.5) / oracle.dpr;
+    const c = document.createElement("canvas"); c.width = 1; c.height = 1;
+    const ctx = c.getContext("2d")!;
+    ctx.fillStyle = "rgba(" + base[index].slice(0, 3).join(",") + ",1)"; ctx.fillRect(0, 0, 1, 1);
+    for (const rect of oracle.rects) {
+      if (cx >= rect.x && cx < rect.x + rect.w && cy >= rect.y && cy < rect.y + rect.h) {
+        ctx.fillStyle = rect.css;
+        ctx.fillRect(0, 0, 1, 1);
+      }
+    }
+    return Array.from(ctx.getImageData(0, 0, 1, 1).data);
+  }), { oracle, base: baseline.gpu });
+}
 function pixelsNear(actual: number[][], expected: number[][], tolerance: number, message: string) {
   expect(actual.length, message).toBe(expected.length);
   actual.forEach((pixel, index) => pixel.forEach((channel, c) =>
@@ -430,11 +447,19 @@ for (const scenario of scenarios) {
       pixelsNear(wideOff.composite, wideExpected, 3, "HARNESS_NOTRUN: literal wide composite control");
       pixelsNear([wideOff.gpu[3]], [[18, 20, 26, 255]], 1, "HARNESS_NOTRUN: native background control");
       pixelsNear([wideOff.candle], [[69, 219, 158, 255]], 1, "HARNESS_NOTRUN: native candle control");
-      const qualify = (frame: NativeFrame, baseline: NativeFrame, oracle: Oracle, expected: number[][], requireGpu: boolean) => {
+      const qualify = (
+        frame: NativeFrame,
+        baseline: NativeFrame,
+        oracle: Oracle,
+        cpuExpected: number[][],
+        requireGpu: boolean,
+        gpuExpected: number[][] = cpuExpected,
+      ) => {
         expect(frame.enabled, "NATIVE_ASSERT: opt-in must remain true").toBe(true);
-        pixelsNear(frame.composite, expected, 3, "NATIVE_ASSERT: independent native final coverage");
         const gpuOwns = frame.annotation.every((p) => p[3] === 0);
-        if (requireGpu) expect(gpuOwns, "NATIVE_ASSERT: eligible wide frame requires GPU ownership").toBe(true);
+        if (requireGpu) expect(gpuOwns, "NATIVE_ASSERT: eligible frame requires GPU ownership").toBe(true);
+        const expected = gpuOwns ? gpuExpected : cpuExpected;
+        pixelsNear(frame.composite, expected, 3, "NATIVE_ASSERT: independent native final coverage");
         if (gpuOwns) pixelsNear(frame.gpu, expected, 3, "NATIVE_ASSERT: GPU density owning valid cells");
         else {
           pixelsNear(frame.annotation, oracle.annotation, 2, "NATIVE_ASSERT: CPU fallback density must be real");
@@ -450,11 +475,12 @@ for (const scenario of scenarios) {
         const narrow = await freezeOracle(page, id, true, false);
         const off = await read("narrow-default-off", narrow);
         const expected = await expectedComposite(page, narrow, off);
+        const narrowGpuExpected = await expectedGpuPixelCenterComposite(page, narrow, off);
         pixelsNear(off.annotation, narrow.annotation, 2, "HARNESS_NOTRUN: literal narrow Canvas coverage control");
         pixelsNear(off.composite, expected, 3, "HARNESS_NOTRUN: literal narrow final control");
-        console.log("native-matrix-oracle " + JSON.stringify({ title: scenario.title, oracle: narrow, expected }));
+        console.log("native-matrix-oracle " + JSON.stringify({ title: scenario.title, oracle: narrow, expected, gpuExpected: narrowGpuExpected }));
         const on = await read("narrow-private-on", narrow, true);
-        policy = qualify(on, off, narrow, expected, false);
+        policy = qualify(on, off, narrow, expected, true, narrowGpuExpected);
         await spacing(page, id, 32); // NO opt-in toggle, no private recovery mutation.
         const recovered = await read("wide-recovery-still-on", wide);
         qualify(recovered, wideOff, wide, wideExpected, true);

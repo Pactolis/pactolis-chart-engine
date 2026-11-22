@@ -20,6 +20,7 @@ export async function fetchOrderbookHeatmap(request: OrderbookHeatmapRequest, si
     to: String(request.to),
     bucketStep: String(request.bucketStep),
   });
+  if (request.sources && request.sources.length > 0) params.set("sources", request.sources.join(","));
   if (request.minUsd !== undefined) params.set("minUsd", String(request.minUsd));
   if (request.minBtc !== undefined) params.set("minBtc", String(request.minBtc));
   if (request.priceFrom !== undefined) params.set("priceFrom", String(request.priceFrom));
