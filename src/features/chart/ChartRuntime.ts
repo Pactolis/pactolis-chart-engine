@@ -519,9 +519,9 @@ class ChartRuntimeImpl implements ChartRuntime, ChartInputHost {
         this.session?.invalidate(ChartChange.Style);
       },
     );
-    this.renderer.setShowNotional(this.overlay.showNotional);
 
     const view = this.view;
+    this.renderer.setShowNotional(this.overlay.showNotional);
     const renderer = {
       render: (v: View, s: typeof series) => {
         if (this.timeViewport.ensurePendingLatestPlacement(s.length)) this._autoFit();

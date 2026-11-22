@@ -521,7 +521,7 @@ test("WebGpuSurface + FootprintRenderer + Overlay enforce zero-double-draw and f
     assert.equal(getGpuDiagnostics().featurePaths.footprintText, "canvas2d");
     renderer.setChartConfig(baseConfig);
 
-    // 7. Unsupported char fallback (Infinity volume -> "Infinity") -> returns false, falls back to canvas2d
+    // 7. Unsupported char fallback (finite scientific notional >= 1e21 -> 'e' unsupported) -> returns false, falls back to canvas2d
     const badSeries = new FootprintSeries({ intervalMs: 60_000, priceStep: 10 });
     badSeries.loadBars([{
       startTime: 1_700_000_040_000,
@@ -529,13 +529,13 @@ test("WebGpuSurface + FootprintRenderer + Overlay enforce zero-double-draw and f
       high: 60_020,
       low: 60_000,
       close: 60_020,
-      volume: Number.POSITIVE_INFINITY,
+      volume: 1e25,
       delta: 0,
-      buyVolume: Number.POSITIVE_INFINITY,
+      buyVolume: 1e25,
       sellVolume: 0,
       count: 1,
       updatedAt: 1_700_000_041_000,
-      cells: new Map([[60_000, { priceBin: 60_000, buyVol: Number.POSITIVE_INFINITY, sellVol: 0, count: 1 }]]),
+      cells: new Map([[60_000, { priceBin: 60_000, buyVol: 1e25, sellVol: 0, count: 1 }]]),
       cellRevision: 1,
     }]);
     renderer.renderLayers(view, badSeries, new Set(["grid", "candles", "footprint"]));
