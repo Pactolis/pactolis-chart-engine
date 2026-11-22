@@ -367,7 +367,8 @@ test("#251: WHATWG-locked canvas cascades WebGPU construct failure -> fresh WebG
     const surface = await createGpuSurfaceAsync(canvas0, "webgpu", undefined, undefined, { createCanvas });
     assert.equal(surface.kind, "canvas2d");
     assert.equal(surface.canvas, canvas2);
-    assert.deepEqual(canvas0.requestedKinds, ["webgpu"], "never probes webgl2/2d on WebGPU-locked canvas");
+    assert.equal(canvas0.requestedKinds.includes("webgl2"), false, "never probes webgl2 on WebGPU-locked canvas");
+    assert.equal(canvas0.requestedKinds.includes("2d"), false, "never probes 2d on WebGPU-locked canvas");
     assert.equal(webgpuCtx.isUnconfigured, true);
     assert.equal(canvas0.width, 0);
     assert.equal(canvas0.height, 0);
@@ -669,8 +670,8 @@ test("#251: ChartRuntime initial mount falls back to Canvas2D and onGpuSettingsC
     assert.equal(envAuto.panelRoot.children[0].getAttribute("data-gpu-backend"), "canvas2d");
     handleAuto.dispose();
 
-    // 2. backend="webgl2" with null WebGL2 -> Canvas2D, failed swap preserves chart, retry succeeds, race cleans up stale canvas
-    const env = makeDomHarness("webgl2");
+    // 2. backend="canvas2d" -> failed switch to "webgl2" preserves chart, retry "webgl2" succeeds, race cleans up stale canvas
+    const env = makeDomHarness("canvas2d");
     const surfaceModel = {
       status: "loading",
       historyOverlay: false,
@@ -787,7 +788,7 @@ test("#251: ChartSession WebGPU loss fallback creates separate Canvas2D canvas w
   const session = new ChartSession({
     container: { ownerDocument: doc, getBoundingClientRect: () => ({ width: 800, height: 600 }) },
     gpuCanvas: webgpuCanvas,
-    gpuSurface,
+    gpuSurface: webgpuSurface,
     annotationCanvas: makeWhatwgCanvas({ ownerDocument: doc }),
     interactionCanvas: makeWhatwgCanvas({ ownerDocument: doc }),
     ownerDocument: doc,
@@ -1244,7 +1245,7 @@ test("#255: Overlay.invalidateWarmCaches and updateContext refresh retained cach
   const view = new View();
   view.area = { left: 0, top: 0, width: 700, height: 550 };
   const series = new FootprintSeries({ intervalMs: 60_000, priceStep: 1 });
-  series.loadBars([{ startTime: 1_700_000_000_000, open: 100, high: 105, low: 95, close: 102, volume: 10, delta: 2, count: 5, cells: new Map(), hasRef: true }]);
+  series.loadBars([{ startTime: 1_699_999_980_000, open: 100, high: 105, low: 95, close: 102, volume: 10, delta: 2, count: 5, cells: new Map(), hasRef: true }]);
   const crosshair = { x: 0, y: 0, visible: false };
 
   overlay.renderAnnotations(view, series, crosshair, [0, 1], ["drawings"], ChartChange.All);

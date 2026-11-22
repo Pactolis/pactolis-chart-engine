@@ -1994,7 +1994,7 @@ async function buildChartRuntime(
   const hook = createChartTestHook(doc, panelId);
   panelRoot.appendChild(hook);
 
-  const gpuCanvas = doc.createElement("canvas");
+  let gpuCanvas = doc.createElement("canvas");
   const annotationCanvas = doc.createElement("canvas");
   const interactionCanvas = doc.createElement("canvas");
   gpuCanvas.dataset.chartSurface = "gpu-scene";
@@ -2029,20 +2029,19 @@ async function buildChartRuntime(
     throw new Error("ChartRuntime: canvas contexts unavailable");
   }
 
-  let activeGpuCanvas = gpuCanvas;
   let gpuSurface: GpuSurface;
   let gl: WebGL2RenderingContext | null = null;
 
   try {
     if (gpuSettings.backend === "canvas2d") {
-      gpuSurface = createGpuSurface(activeGpuCanvas, "canvas2d");
+      gpuSurface = createGpuSurface(gpuCanvas, "canvas2d");
     } else if (gpuSettings.backend === "webgl2" || (gpuSettings.backend === "auto" && !isWebGpuSupported())) {
-      gl = getChartWebGl2Context(activeGpuCanvas, display.webgl);
-      gpuSurface = createGpuSurface(activeGpuCanvas, gpuSettings.backend, gl);
+      gl = getChartWebGl2Context(gpuCanvas, display.webgl);
+      gpuSurface = createGpuSurface(gpuCanvas, gpuSettings.backend, gl);
       gl = gpuSurface.kind === "webgl2" ? (gpuSurface.getGlContext?.() ?? gl) : null;
     } else {
       gpuSurface = await createGpuSurfaceAsync(
-        activeGpuCanvas,
+        gpuCanvas,
         gpuSettings.backend,
         undefined,
         (c) => getChartWebGl2Context(c, display.webgl),
@@ -2060,16 +2059,16 @@ async function buildChartRuntime(
     throw err;
   }
 
-  if (gpuSurface.canvas !== activeGpuCanvas) {
+  if (gpuSurface.canvas !== gpuCanvas) {
     gpuSurface.canvas.dataset.chartSurface = "gpu-scene";
     gpuSurface.canvas.setAttribute?.("aria-hidden", "true");
-    if (activeGpuCanvas.style?.cssText) {
-      gpuSurface.canvas.style.cssText = activeGpuCanvas.style.cssText;
+    if (gpuCanvas.style?.cssText) {
+      gpuSurface.canvas.style.cssText = gpuCanvas.style.cssText;
     }
-    activeGpuCanvas.replaceWith(gpuSurface.canvas);
-    activeGpuCanvas.width = 0;
-    activeGpuCanvas.height = 0;
-    activeGpuCanvas = gpuSurface.canvas;
+    gpuCanvas.replaceWith(gpuSurface.canvas);
+    gpuCanvas.width = 0;
+    gpuCanvas.height = 0;
+    gpuCanvas = gpuSurface.canvas;
   }
   hook.setAttribute("data-gpu-backend", gpuSurface.kind);
 
@@ -2103,7 +2102,7 @@ async function buildChartRuntime(
 
   const runtime = new ChartRuntimeImpl(
     initialState, services,
-    activeGpuCanvas, annotationCanvas, interactionCanvas, gl, annotationCtx2d, interactionCtx2d,
+    gpuCanvas, annotationCanvas, interactionCanvas, gl, annotationCtx2d, interactionCtx2d,
     panelRoot, surface, pipeline, panelId, hook, display,
     gpuSurface,
   );
