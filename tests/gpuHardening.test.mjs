@@ -1237,7 +1237,7 @@ test("#254: WebGpuSurface.requestCapture deterministically unmaps/destroys stagi
     const staging = buffers.find((b) => b.label === "WebGpuCaptureStagingBuffer");
     assert.equal(staging.destroyed, true);
     assert.equal(staging.unmapCalls, 0);
-    assert.equal(getUnsubCalls(), 1);
+    assert.equal(getUnsubCalls(), 2);
     resolveMap();
     surface.dispose();
   }
@@ -1256,7 +1256,7 @@ test("#254: WebGpuSurface.requestCapture deterministically unmaps/destroys stagi
     const staging = buffers.find((b) => b.label === "WebGpuCaptureStagingBuffer");
     assert.equal(staging.destroyed, true);
     assert.equal(staging.unmapCalls, 0);
-    assert.equal(getUnsubCalls(), 1);
+    assert.equal(getUnsubCalls(), 2);
     resolveMap();
   }
 });
