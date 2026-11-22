@@ -224,11 +224,12 @@ export class WebGpuSurface implements GpuSurface {
       label: "WebGpuNativeSceneCommandEncoder",
     });
 
-    if (this.nativePipeline.needsComputeDispatch()) {
-      this.nativePipeline.recordComputePass(commandEncoder);
+    const tsSlot = this.nativePipeline.beginTimestampPass();
+    const ranCompute = this.nativePipeline.needsComputeDispatch();
+    if (ranCompute) {
+      this.nativePipeline.recordComputePass(commandEncoder, tsSlot);
     }
 
-    const tsSlot = this.nativePipeline.beginTimestampPass();
     const passEncoder = commandEncoder.beginRenderPass({
       label: "WebGpuNativeSceneRenderPass",
       colorAttachments: [
@@ -252,11 +253,11 @@ export class WebGpuSurface implements GpuSurface {
 
     passEncoder.end();
     if (tsSlot !== null) {
-      this.nativePipeline.resolveTimestampPass(commandEncoder, tsSlot);
+      this.nativePipeline.resolveTimestampPass(commandEncoder, tsSlot, ranCompute);
     }
     device.queue.submit([commandEncoder.finish()]);
     if (tsSlot !== null) {
-      this.nativePipeline.readbackTimestampPass(tsSlot);
+      this.nativePipeline.readbackTimestampPass(tsSlot, ranCompute);
     }
     return true;
   }

@@ -82,7 +82,9 @@ Bunu önlemek için:
 | **İlk yükleme** | Pipeline yeni veya seri değişti | Tüm `BarRecord` + `CellRecord` | Tüm aktif barlar (`0 .. barCount`) | `ViewUniform` (64 B) |
 | **Pan / Zoom** | Aynı `series`, `resetEpoch`, `nonTailRevision`, `barCount`, `revision` | **0 bayt** | **0 dispatch** | `ViewUniform` (64 B) |
 | **Canlı tail güncelleme** | Aynı `series`, `resetEpoch`, `nonTailRevision`, `barCount`; yalnız son bar (`tailBarIndex`) değişti ve tail headroom yeterli | Yalnız son bar `BarRecord` (32 B) + son bar hücreleri (`cellCount * 16 B`, yerinde `writeBuffer`) | Yalnız son bar (`dirtyStart = tailBarIndex, dirtyCount = 1`) | `ViewUniform` (64 B) |
-| **`resetEpoch` / yapı değişimi / taşma** | `resetEpoch` veya `nonTailRevision` artışı, küçülme veya kapasite aşımı | 2x kapasite büyümesi + tail headroom ile tam yükleme | Tüm aktif barlar (`0 .. barCount`) | `ViewUniform` (64 B) |
+| **Bar devri (Append)** | Aynı `series`, `resetEpoch`, `barCount > syncedBarCount <= barCapacity`, önek (`0 .. prevTailIdx - 1`) değişmemiş, başlangıç/prevTail `startTime` sabit ve tail headroom (`TAIL_BAR_HEADROOM = 64`, `TAIL_CELL_HEADROOM = 2048`) yeterli | Yalnız `prevTailIdx .. barCount - 1` dilimi (`appendBarCount * 32 B` + `appendCellCount * 16 B`) | Yalnız eklenen/kapanan dilim (`dirtyStart = prevTailIdx, dirtyCount = appendBarCount`) | `ViewUniform` (64 B) |
+| **`resetEpoch` / yapı değişimi / taşma** | `resetEpoch` artışı, önek mutasyonu, küçülme veya kapasite aşımı (`maxBufferSize` sığarsa) | 2x kapasite büyümesi + tail headroom ile tam yükleme | Tüm aktif barlar (`0 .. barCount`) | `ViewUniform` (64 B) |
+| **`maxBufferSize` aşımı** | Raw `barCount * 32 > maxBufferSize` veya `totalCells * 16 > maxBufferSize` | **0 bayt** (`overflowSeries` / `overflowResetEpoch` memoize edilir, yeni `resetEpoch` gelene dek O(1) fallback) | **0 dispatch** | — (`immediate-quads` fallback) |
 
 ---
 
@@ -92,8 +94,8 @@ Bunu önlemek için:
 - **`COMPUTE_STATS_WGSL` (`@compute @workgroup_size(64)`):** `dirtyStart .. dirtyStart + dirtyCount` aralığındaki her bar için `cells[cellOffset .. cellOffset + cellCount)` üzerinden `maxVol` ve `pocBinRel` değerlerini GPU'da indirger.
 - **`CANDLE_WGSL`:** Bar başına 12 vertex (`0..5` fitil, `6..11` gövde); `drawCandle` (`strip`) ve `drawFullCandle` (`full`) ile birebir piksel ve renk paritesi.
 - **`FOOTPRINT_CELL_WGSL`:** Hücre başına 18 vertex (`0..5` POC, `6..11` sell yarısı, `12..17` buy yarısı); `clippedCellRect` ve `0.12 + 0.7 * vol / maxVol` alfa formülüyle birebir parite.
-- **Tek Render Pass Sırası:** Opsiyonel grid `QuadSink` → `CANDLE_WGSL` → `FOOTPRINT_CELL_WGSL` → opsiyonel `stackedImbalance` `QuadSink` aynı `GPURenderPassEncoder` içinde çizilir ve tek `queue.submit` ile gönderilir.
-- **Opsiyonel `timestamp-query`:** Destekleyen adaptörlerde non-blocking 2-slot ring ile GPU pass süresi `chart.gpu.timestamp.ms` olarak kaydedilir.
+- **Tek Render Pass Sırası:** Opsiyonel grid `QuadSink` → `CANDLE_WGSL` → `FOOTPRINT_CELL_WGSL` → opsiyonel `stackedImbalance` `QuadSink` (`chart.gpu.native.overlay.ms`) aynı `GPURenderPassEncoder` içinde çizilir ve tek `queue.submit` ile gönderilir.
+- **Opsiyonel Compute + Render `timestamp-query`:** Destekleyen adaptörlerde non-blocking 2-slot ring (`querySet` count = 8, slot başına 4 sorgu: `0..1` render pass, `2..3` compute pass; 32 B resolve/read buffer) kullanılır. Yalnız compute dispatch çalıştığında `resolveQuerySet(..., 4)` ve `32 B` kopyalama yapılır; salt-render karelerde yalnız 2 render sorgusu (`16 B`) çözülür. Compute süresi `chart.gpu.timestamp.compute.ms`, toplam GPU süresi (`renderNs + validComputeNs`) ise `chart.gpu.timestamp.ms` olarak kaydedilir.
 
 ### Aşama 2 Yol Haritası
 - GPU üzerinde `pixel-bucket` mum ve alt-piksel hücre birleştirme (LOD compute).

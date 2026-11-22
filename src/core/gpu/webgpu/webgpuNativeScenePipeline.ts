@@ -1,5 +1,6 @@
 import type { GpuNativeSceneInput } from "../gpuBackend.js";
 import type { FootprintSeries } from "../../model/footprint.js";
+import type { FootprintBar } from "../../types.js";
 import { incrementPerformanceCounter, recordPerformanceDuration } from "../../performanceTelemetry.js";
 
 /** BarRecord: 8 x 32-bit words (32 bytes, 16-byte aligned). */
@@ -18,7 +19,8 @@ export const VIEW_UNIFORM_BYTES = VIEW_UNIFORM_WORDS * 4;
 export const COMPUTE_UNIFORM_WORDS = 4;
 export const COMPUTE_UNIFORM_BYTES = COMPUTE_UNIFORM_WORDS * 4;
 
-const TAIL_CELL_HEADROOM = 256;
+export const TAIL_BAR_HEADROOM = 64;
+export const TAIL_CELL_HEADROOM = 2048;
 const COMPUTE_WORKGROUP_SIZE = 64;
 
 export const COMPUTE_STATS_WGSL = `
@@ -418,6 +420,11 @@ export class WebGpuNativeScenePipeline {
 
   private barCellOffsets = new Uint32Array(64);
   private barCellCounts = new Uint32Array(64);
+  private syncedBarRefs: Array<FootprintBar | undefined> = [];
+  private syncedBarCellRevs = new Uint32Array(64);
+  private syncedBarOhlc = new Float64Array(64 * 4);
+  private syncedFirstStartTime = Number.NaN;
+  private syncedLastStartTime = Number.NaN;
 
   private syncedSeries: FootprintSeries | null = null;
   private syncedResetEpoch = -1;
@@ -431,6 +438,9 @@ export class WebGpuNativeScenePipeline {
   private syncedTailClose = Number.NaN;
   private syncedTailCellCount = -1;
   private tailCellOffset = 0;
+
+  private overflowSeries: FootprintSeries | null = null;
+  private overflowResetEpoch = -1;
 
   private activeBarCount = 0;
   private activeCellCount = 0;
@@ -552,8 +562,10 @@ export class WebGpuNativeScenePipeline {
       primitive: { topology: "triangle-list" },
     });
 
-    this.barCapacity = 64;
-    this.cellCapacity = 1024;
+    const maxBarsFit = Math.max(1, Math.floor(this.maxBufferSize / BAR_RECORD_BYTES));
+    const maxCellsFit = Math.max(1, Math.floor(this.maxBufferSize / CELL_RECORD_BYTES));
+    this.barCapacity = Math.min(64, maxBarsFit);
+    this.cellCapacity = Math.min(1024, maxCellsFit);
     this.barBuffer = this.allocateStorageBuffer("NativeSceneBarStorage", this.barCapacity * BAR_RECORD_BYTES);
     this.cellBuffer = this.allocateStorageBuffer("NativeSceneCellStorage", this.cellCapacity * CELL_RECORD_BYTES);
     this.rebuildBindGroups();
@@ -567,17 +579,17 @@ export class WebGpuNativeScenePipeline {
         this.querySet = device.createQuerySet({
           label: "NativeSceneTimestampQuerySet",
           type: "timestamp",
-          count: 4, // 2 slots x (begin, end)
+          count: 8, // 2 slots x 4 timestamps (render begin/end + compute begin/end)
         });
         for (let slot = 0; slot < 2; slot++) {
           const resolveBuffer = device.createBuffer({
             label: `NativeSceneTimestampResolve${slot}`,
-            size: 16,
+            size: 32,
             usage: 0x0200 | 0x0004, // QUERY_RESOLVE | COPY_SRC
           });
           const readBuffer = device.createBuffer({
             label: `NativeSceneTimestampRead${slot}`,
-            size: 16,
+            size: 32,
             usage: 0x0008 | 0x0001, // COPY_DST | MAP_READ
           });
           this.timestampSlots.push({ state: "idle", resolveBuffer, readBuffer });
@@ -631,6 +643,72 @@ export class WebGpuNativeScenePipeline {
     });
   }
 
+  private recordBarMetadata(index: number, bar: FootprintBar | undefined): void {
+    this.syncedBarRefs[index] = bar;
+    this.syncedBarCellRevs[index] = bar ? (bar.cellRevision ?? 0) : 0;
+    const ohlcBase = index * 4;
+    if (bar) {
+      this.syncedBarOhlc[ohlcBase] = bar.open;
+      this.syncedBarOhlc[ohlcBase + 1] = bar.high;
+      this.syncedBarOhlc[ohlcBase + 2] = bar.low;
+      this.syncedBarOhlc[ohlcBase + 3] = bar.close;
+    } else {
+      this.syncedBarOhlc[ohlcBase] = Number.NaN;
+      this.syncedBarOhlc[ohlcBase + 1] = Number.NaN;
+      this.syncedBarOhlc[ohlcBase + 2] = Number.NaN;
+      this.syncedBarOhlc[ohlcBase + 3] = Number.NaN;
+    }
+  }
+
+  private packStagingBar(
+    stagingBarIndex: number,
+    gpuBarIndex: number,
+    bar: FootprintBar | undefined,
+    origin: number,
+    gpuCellOffset: number,
+    stagingCellCursor: number,
+  ): number {
+    const barBase = stagingBarIndex * BAR_RECORD_WORDS;
+    if (!bar) {
+      this.barStagingF32[barBase] = 0;
+      this.barStagingF32[barBase + 1] = 0;
+      this.barStagingF32[barBase + 2] = 0;
+      this.barStagingF32[barBase + 3] = 0;
+      this.barStagingF32[barBase + 4] = 0;
+      this.barStagingF32[barBase + 5] = 0;
+      this.barStagingU32[barBase + 6] = gpuCellOffset;
+      this.barStagingU32[barBase + 7] = 0;
+      this.barCellOffsets[gpuBarIndex] = gpuCellOffset;
+      this.barCellCounts[gpuBarIndex] = 0;
+      this.recordBarMetadata(gpuBarIndex, undefined);
+      return stagingCellCursor;
+    }
+
+    const cellCount = bar.cells.size;
+    this.barStagingF32[barBase] = bar.open - origin;
+    this.barStagingF32[barBase + 1] = bar.high - origin;
+    this.barStagingF32[barBase + 2] = bar.low - origin;
+    this.barStagingF32[barBase + 3] = bar.close - origin;
+    this.barStagingF32[barBase + 4] = 0;
+    this.barStagingF32[barBase + 5] = 0;
+    this.barStagingU32[barBase + 6] = gpuCellOffset;
+    this.barStagingU32[barBase + 7] = cellCount;
+    this.barCellOffsets[gpuBarIndex] = gpuCellOffset;
+    this.barCellCounts[gpuBarIndex] = cellCount;
+    this.recordBarMetadata(gpuBarIndex, bar);
+
+    let cursor = stagingCellCursor;
+    for (const cell of bar.cells.values()) {
+      const cellBase = cursor * CELL_RECORD_WORDS;
+      this.cellStagingU32[cellBase] = gpuBarIndex;
+      this.cellStagingF32[cellBase + 1] = cell.priceBin - origin;
+      this.cellStagingF32[cellBase + 2] = cell.buyVol;
+      this.cellStagingF32[cellBase + 3] = cell.sellVol;
+      cursor++;
+    }
+    return cursor;
+  }
+
   private ensureStagingCapacity(barCount: number, cellCount: number): void {
     if (barCount * BAR_RECORD_BYTES > this.barStagingBuffer.byteLength) {
       let cap = Math.max(64, this.barStagingBuffer.byteLength / BAR_RECORD_BYTES);
@@ -642,8 +720,22 @@ export class WebGpuNativeScenePipeline {
     if (barCount > this.barCellOffsets.length) {
       let cap = Math.max(64, this.barCellOffsets.length);
       while (cap < barCount) cap *= 2;
-      this.barCellOffsets = new Uint32Array(cap);
-      this.barCellCounts = new Uint32Array(cap);
+
+      const nextOffsets = new Uint32Array(cap);
+      nextOffsets.set(this.barCellOffsets);
+      this.barCellOffsets = nextOffsets;
+
+      const nextCounts = new Uint32Array(cap);
+      nextCounts.set(this.barCellCounts);
+      this.barCellCounts = nextCounts;
+
+      const nextRevs = new Uint32Array(cap);
+      nextRevs.set(this.syncedBarCellRevs);
+      this.syncedBarCellRevs = nextRevs;
+
+      const nextOhlc = new Float64Array(cap * 4);
+      nextOhlc.set(this.syncedBarOhlc);
+      this.syncedBarOhlc = nextOhlc;
     }
     if (cellCount * CELL_RECORD_BYTES > this.cellStagingBuffer.byteLength) {
       let cap = Math.max(256, this.cellStagingBuffer.byteLength / CELL_RECORD_BYTES);
@@ -654,30 +746,31 @@ export class WebGpuNativeScenePipeline {
     }
   }
 
-  private ensureStorageCapacity(barCount: number, cellCountWithHeadroom: number): boolean {
-    const neededBarBytes = Math.max(1, barCount) * BAR_RECORD_BYTES;
-    const neededCellBytes = Math.max(1, cellCountWithHeadroom) * CELL_RECORD_BYTES;
-    if (neededBarBytes > this.maxBufferSize || neededCellBytes > this.maxBufferSize) {
+  private ensureStorageCapacity(barCount: number, totalCells: number): boolean {
+    const maxBarsFit = Math.floor(this.maxBufferSize / BAR_RECORD_BYTES);
+    const maxCellsFit = Math.floor(this.maxBufferSize / CELL_RECORD_BYTES);
+    if (barCount > maxBarsFit || totalCells > maxCellsFit) {
       return false;
     }
+
+    const targetBarCap = Math.min(maxBarsFit, Math.max(1, barCount + TAIL_BAR_HEADROOM));
+    const targetCellCap = Math.min(maxCellsFit, Math.max(1, totalCells + TAIL_CELL_HEADROOM));
 
     let reallocated = false;
     if (barCount > this.barCapacity) {
       let nextCap = Math.max(64, this.barCapacity);
-      while (nextCap < barCount) nextCap *= 2;
-      const maxBars = Math.floor(this.maxBufferSize / BAR_RECORD_BYTES);
-      nextCap = Math.min(Math.max(barCount, nextCap), maxBars);
+      while (nextCap < targetBarCap) nextCap *= 2;
+      nextCap = Math.min(Math.max(barCount, nextCap), maxBarsFit);
       this.barBuffer?.destroy?.();
       this.barCapacity = nextCap;
       this.barBuffer = this.allocateStorageBuffer("NativeSceneBarStorage", nextCap * BAR_RECORD_BYTES);
       reallocated = true;
     }
 
-    if (cellCountWithHeadroom > this.cellCapacity) {
-      let nextCap = Math.max(TAIL_CELL_HEADROOM, this.cellCapacity);
-      while (nextCap < cellCountWithHeadroom) nextCap *= 2;
-      const maxCells = Math.floor(this.maxBufferSize / CELL_RECORD_BYTES);
-      nextCap = Math.min(Math.max(cellCountWithHeadroom, nextCap), maxCells);
+    if (totalCells > this.cellCapacity) {
+      let nextCap = Math.max(1024, this.cellCapacity);
+      while (nextCap < targetCellCap) nextCap *= 2;
+      nextCap = Math.min(Math.max(totalCells, nextCap), maxCellsFit);
       this.cellBuffer?.destroy?.();
       this.cellCapacity = nextCap;
       this.cellBuffer = this.allocateStorageBuffer("NativeSceneCellStorage", nextCap * CELL_RECORD_BYTES);
@@ -696,16 +789,26 @@ export class WebGpuNativeScenePipeline {
   }
 
   private syncSeries(series: FootprintSeries): boolean {
-    const barCount = series.length;
     this.dirtyStart = 0;
     this.dirtyCount = 0;
 
+    if (this.overflowSeries === series && this.overflowResetEpoch === series.resetEpoch) {
+      return false;
+    }
+
+    const barCount = series.length;
+
     if (barCount === 0) {
+      this.overflowSeries = null;
+      this.overflowResetEpoch = -1;
       this.syncedSeries = series;
       this.syncedResetEpoch = series.resetEpoch;
       this.syncedNonTailRevision = series.nonTailRevision;
       this.syncedRevision = series.revision;
       this.syncedBarCount = 0;
+      this.syncedBarRefs.length = 0;
+      this.syncedFirstStartTime = Number.NaN;
+      this.syncedLastStartTime = Number.NaN;
       this.syncedTailCellRevision = -1;
       this.syncedTailOpen = Number.NaN;
       this.syncedTailHigh = Number.NaN;
@@ -789,6 +892,7 @@ export class WebGpuNativeScenePipeline {
 
           this.barCellOffsets[tailIdx] = this.tailCellOffset;
           this.barCellCounts[tailIdx] = tailCellsSize;
+          this.recordBarMetadata(tailIdx, tailBar);
           this.activeCellCount = this.tailCellOffset + tailCellsSize;
           this.syncedRevision = series.revision;
           this.syncedTailCellRevision = tailCellRev;
@@ -804,60 +908,134 @@ export class WebGpuNativeScenePipeline {
       }
     }
 
-    // Full rebuild path (initial load, resetEpoch, nonTailRevision, shrink, or capacity overflow).
+    // Incremental append path on bar rollover (nonTailRevision advances when a new bar opens).
+    if (
+      this.syncedSeries === series
+      && this.syncedResetEpoch === series.resetEpoch
+      && this.syncedBarCount >= 1
+      && barCount > this.syncedBarCount
+      && barCount <= this.barCapacity
+    ) {
+      const prevTailIdx = this.syncedBarCount - 1;
+      const firstBar = series.at(0);
+      const prevTailBar = series.at(prevTailIdx);
+      if (
+        firstBar?.startTime === this.syncedFirstStartTime
+        && prevTailBar?.startTime === this.syncedLastStartTime
+      ) {
+        let prefixUnchanged = true;
+        for (let i = 0; i < prevTailIdx; i++) {
+          const b = series.at(i);
+          const ohlcBase = i * 4;
+          if (
+            !b
+            || b !== this.syncedBarRefs[i]
+            || (b.cellRevision ?? 0) !== this.syncedBarCellRevs[i]
+            || b.cells.size !== this.barCellCounts[i]
+            || b.open !== this.syncedBarOhlc[ohlcBase]
+            || b.high !== this.syncedBarOhlc[ohlcBase + 1]
+            || b.low !== this.syncedBarOhlc[ohlcBase + 2]
+            || b.close !== this.syncedBarOhlc[ohlcBase + 3]
+          ) {
+            prefixUnchanged = false;
+            break;
+          }
+        }
+
+        if (prefixUnchanged) {
+          const appendBarCount = barCount - prevTailIdx;
+          let appendCellCount = 0;
+          for (let i = prevTailIdx; i < barCount; i++) {
+            const b = series.at(i);
+            if (b) appendCellCount += b.cells.size;
+          }
+
+          if (this.tailCellOffset + appendCellCount <= this.cellCapacity) {
+            this.ensureStagingCapacity(barCount, Math.max(appendCellCount, 1));
+            this.syncedBarRefs.length = barCount;
+
+            const origin = this.priceOriginValue;
+            let cellCursor = 0;
+            for (let i = prevTailIdx; i < barCount; i++) {
+              const bar = series.at(i);
+              const gpuCellOffset = this.tailCellOffset + cellCursor;
+              cellCursor = this.packStagingBar(
+                i - prevTailIdx,
+                i,
+                bar,
+                origin,
+                gpuCellOffset,
+                cellCursor,
+              );
+            }
+
+            const barSliceBytes = appendBarCount * BAR_RECORD_BYTES;
+            const cellSliceBytes = appendCellCount * CELL_RECORD_BYTES;
+            this.writeStorageBuffer(
+              this.barBuffer,
+              prevTailIdx * BAR_RECORD_BYTES,
+              this.barStagingBuffer,
+              barSliceBytes,
+            );
+            if (cellSliceBytes > 0) {
+              this.writeStorageBuffer(
+                this.cellBuffer,
+                this.tailCellOffset * CELL_RECORD_BYTES,
+                this.cellStagingBuffer,
+                cellSliceBytes,
+              );
+            }
+
+            const dataBytes = barSliceBytes + cellSliceBytes;
+            incrementPerformanceCounter("gpu.upload.bytes", dataBytes);
+            incrementPerformanceCounter("gpu.native.upload.dataBytes", dataBytes);
+
+            const lastBar = series.at(barCount - 1);
+            this.syncedNonTailRevision = series.nonTailRevision;
+            this.syncedRevision = series.revision;
+            this.syncedBarCount = barCount;
+            this.activeBarCount = barCount;
+            this.activeCellCount = this.tailCellOffset + appendCellCount;
+            this.tailCellOffset = this.barCellOffsets[barCount - 1] ?? 0;
+            this.syncedLastStartTime = lastBar?.startTime ?? Number.NaN;
+            this.syncedTailCellRevision = lastBar?.cellRevision ?? 0;
+            this.syncedTailOpen = lastBar?.open ?? Number.NaN;
+            this.syncedTailHigh = lastBar?.high ?? Number.NaN;
+            this.syncedTailLow = lastBar?.low ?? Number.NaN;
+            this.syncedTailClose = lastBar?.close ?? Number.NaN;
+            this.syncedTailCellCount = lastBar?.cells.size ?? 0;
+            this.dirtyStart = prevTailIdx;
+            this.dirtyCount = appendBarCount;
+            return true;
+          }
+        }
+      }
+    }
+
+    // Full rebuild path (initial load, resetEpoch, prefix mutation, shrink, or capacity overflow).
     let totalCells = 0;
     for (let i = 0; i < barCount; i++) {
       const bar = series.at(i);
       if (bar) totalCells += bar.cells.size;
     }
 
-    const firstLow = series.at(0)?.low ?? 0;
-    const origin = Number.isFinite(firstLow) ? firstLow : 0;
-
-    if (!this.ensureStorageCapacity(barCount, totalCells + TAIL_CELL_HEADROOM)) {
+    if (!this.ensureStorageCapacity(barCount, totalCells)) {
+      this.overflowSeries = series;
+      this.overflowResetEpoch = series.resetEpoch;
       return false;
     }
-    this.ensureStagingCapacity(barCount, totalCells);
+
+    const firstBar = series.at(0);
+    const firstLow = firstBar?.low ?? 0;
+    const origin = Number.isFinite(firstLow) ? firstLow : 0;
+
+    this.ensureStagingCapacity(barCount, Math.max(totalCells, 1));
+    this.syncedBarRefs.length = barCount;
 
     let cellCursor = 0;
     for (let i = 0; i < barCount; i++) {
       const bar = series.at(i);
-      const barBase = i * BAR_RECORD_WORDS;
-      if (!bar) {
-        this.barStagingF32[barBase] = 0;
-        this.barStagingF32[barBase + 1] = 0;
-        this.barStagingF32[barBase + 2] = 0;
-        this.barStagingF32[barBase + 3] = 0;
-        this.barStagingF32[barBase + 4] = 0;
-        this.barStagingF32[barBase + 5] = 0;
-        this.barStagingU32[barBase + 6] = cellCursor;
-        this.barStagingU32[barBase + 7] = 0;
-        this.barCellOffsets[i] = cellCursor;
-        this.barCellCounts[i] = 0;
-        continue;
-      }
-
-      const cellCount = bar.cells.size;
-      const cellOffset = cellCursor;
-      this.barStagingF32[barBase] = bar.open - origin;
-      this.barStagingF32[barBase + 1] = bar.high - origin;
-      this.barStagingF32[barBase + 2] = bar.low - origin;
-      this.barStagingF32[barBase + 3] = bar.close - origin;
-      this.barStagingF32[barBase + 4] = 0;
-      this.barStagingF32[barBase + 5] = 0;
-      this.barStagingU32[barBase + 6] = cellOffset;
-      this.barStagingU32[barBase + 7] = cellCount;
-      this.barCellOffsets[i] = cellOffset;
-      this.barCellCounts[i] = cellCount;
-
-      for (const cell of bar.cells.values()) {
-        const cellBase = cellCursor * CELL_RECORD_WORDS;
-        this.cellStagingU32[cellBase] = i;
-        this.cellStagingF32[cellBase + 1] = cell.priceBin - origin;
-        this.cellStagingF32[cellBase + 2] = cell.buyVol;
-        this.cellStagingF32[cellBase + 3] = cell.sellVol;
-        cellCursor++;
-      }
+      cellCursor = this.packStagingBar(i, i, bar, origin, cellCursor, cellCursor);
     }
 
     const barBytes = barCount * BAR_RECORD_BYTES;
@@ -872,6 +1050,8 @@ export class WebGpuNativeScenePipeline {
     incrementPerformanceCounter("gpu.native.upload.dataBytes", dataBytes);
 
     const lastBar = series.at(barCount - 1);
+    this.overflowSeries = null;
+    this.overflowResetEpoch = -1;
     this.priceOriginValue = origin;
     this.syncedSeries = series;
     this.syncedResetEpoch = series.resetEpoch;
@@ -881,6 +1061,8 @@ export class WebGpuNativeScenePipeline {
     this.activeBarCount = barCount;
     this.activeCellCount = totalCells;
     this.tailCellOffset = this.barCellOffsets[barCount - 1] ?? 0;
+    this.syncedFirstStartTime = firstBar?.startTime ?? Number.NaN;
+    this.syncedLastStartTime = lastBar?.startTime ?? Number.NaN;
     this.syncedTailCellRevision = lastBar?.cellRevision ?? 0;
     this.syncedTailOpen = lastBar?.open ?? Number.NaN;
     this.syncedTailHigh = lastBar?.high ?? Number.NaN;
@@ -961,9 +1143,20 @@ export class WebGpuNativeScenePipeline {
     return !this.disposed && this.dirtyCount > 0;
   }
 
-  recordComputePass(commandEncoder: any): void {
+  computeTimestampWritesFor(slot: number): { querySet: any; beginningOfPassWriteIndex: number; endOfPassWriteIndex: number } {
+    return {
+      querySet: this.querySet,
+      beginningOfPassWriteIndex: slot * 4 + 2,
+      endOfPassWriteIndex: slot * 4 + 3,
+    };
+  }
+
+  recordComputePass(commandEncoder: any, tsSlot: number | null = null): void {
     if (this.disposed || this.dirtyCount <= 0) return;
-    const pass = commandEncoder.beginComputePass({ label: "NativeSceneComputeStatsPass" });
+    const pass = commandEncoder.beginComputePass({
+      label: "NativeSceneComputeStatsPass",
+      ...(tsSlot !== null && this.querySet ? { timestampWrites: this.computeTimestampWritesFor(tsSlot) } : {}),
+    });
     pass.setPipeline(this.computePipeline);
     pass.setBindGroup(0, this.computeBindGroup);
     pass.dispatchWorkgroups(Math.ceil(this.dirtyCount / COMPUTE_WORKGROUP_SIZE));
@@ -1000,22 +1193,24 @@ export class WebGpuNativeScenePipeline {
   timestampWritesFor(slot: number): { querySet: any; beginningOfPassWriteIndex: number; endOfPassWriteIndex: number } {
     return {
       querySet: this.querySet,
-      beginningOfPassWriteIndex: slot * 2,
-      endOfPassWriteIndex: slot * 2 + 1,
+      beginningOfPassWriteIndex: slot * 4,
+      endOfPassWriteIndex: slot * 4 + 1,
     };
   }
 
-  resolveTimestampPass(commandEncoder: any, slotIndex: number): void {
+  resolveTimestampPass(commandEncoder: any, slotIndex: number, ranCompute = false): void {
     const slot = this.timestampSlots[slotIndex];
     if (!slot || !this.querySet) return;
     if (typeof commandEncoder.resolveQuerySet !== "function" || typeof commandEncoder.copyBufferToBuffer !== "function") {
       return;
     }
-    commandEncoder.resolveQuerySet(this.querySet, slotIndex * 2, 2, slot.resolveBuffer, 0);
-    commandEncoder.copyBufferToBuffer(slot.resolveBuffer, 0, slot.readBuffer, 0, 16);
+    const queryCount = ranCompute ? 4 : 2;
+    const byteSize = ranCompute ? 32 : 16;
+    commandEncoder.resolveQuerySet(this.querySet, slotIndex * 4, queryCount, slot.resolveBuffer, 0);
+    commandEncoder.copyBufferToBuffer(slot.resolveBuffer, 0, slot.readBuffer, 0, byteSize);
   }
 
-  readbackTimestampPass(slotIndex: number): void {
+  readbackTimestampPass(slotIndex: number, ranCompute = false): void {
     const slot = this.timestampSlots[slotIndex];
     if (!slot || slot.state !== "idle" || typeof slot.readBuffer?.mapAsync !== "function") return;
     slot.state = "mapping";
@@ -1029,9 +1224,17 @@ export class WebGpuNativeScenePipeline {
         try {
           const range = slot.readBuffer.getMappedRange();
           const values = new BigInt64Array(range);
-          const deltaNs = Number(values[1] - values[0]);
-          if (Number.isFinite(deltaNs) && deltaNs >= 0) {
-            recordPerformanceDuration("chart.gpu.timestamp.ms", deltaNs / 1_000_000);
+          const renderNs = Number(values[1] - values[0]);
+          let validComputeNs = 0;
+          if (ranCompute && values.length >= 4) {
+            const computeNs = Number(values[3] - values[2]);
+            if (Number.isFinite(computeNs) && computeNs > 0) {
+              validComputeNs = computeNs;
+              recordPerformanceDuration("chart.gpu.timestamp.compute.ms", computeNs / 1_000_000);
+            }
+          }
+          if (Number.isFinite(renderNs) && renderNs >= 0) {
+            recordPerformanceDuration("chart.gpu.timestamp.ms", (renderNs + validComputeNs) / 1_000_000);
           }
         } finally {
           try { slot.readBuffer.unmap?.(); } catch {}
@@ -1047,6 +1250,9 @@ export class WebGpuNativeScenePipeline {
     if (this.disposed) return;
     this.disposed = true;
     this.syncedSeries = null;
+    this.overflowSeries = null;
+    this.overflowResetEpoch = -1;
+    this.syncedBarRefs.length = 0;
     try {
       this.viewUniformBuffer?.destroy?.();
       this.computeUniformBuffer?.destroy?.();

@@ -382,9 +382,6 @@ export class FootprintRenderer {
       recordPerformanceDuration("chart.gpu.clear.ms", performance.now() - clearStartedAt);
     }
 
-    let candleRecorded = false;
-    let footprintRecorded = false;
-
     const flushStartedAt = telemetryEnabled ? performance.now() : null;
     const ok = this.surface.renderNativeScene(
       { r: 0.07, g: 0.08, b: 0.1, a: 1 },
@@ -421,7 +418,7 @@ export class FootprintRenderer {
           : undefined,
         drawForegroundOverlay: drawFootprint && cfg.stackedImbalance && to > from
           ? (quads) => {
-              const footprintStartedAt = telemetryEnabled ? performance.now() : null;
+              const overlayStartedAt = telemetryEnabled ? performance.now() : null;
               try {
                 for (let i = from; i < to; i++) {
                   const bar = series.at(i);
@@ -434,9 +431,8 @@ export class FootprintRenderer {
                   this.drawStackedImbalance(view, bar, step, fpLeft, fpW, fpW / 2, quads);
                 }
               } finally {
-                if (footprintStartedAt !== null) {
-                  footprintRecorded = true;
-                  recordPerformanceDuration("chart.gpu.footprint.ms", performance.now() - footprintStartedAt);
+                if (overlayStartedAt !== null) {
+                  recordPerformanceDuration("chart.gpu.native.overlay.ms", performance.now() - overlayStartedAt);
                 }
               }
             }
@@ -450,17 +446,6 @@ export class FootprintRenderer {
     if (!ok) {
       recordGpuFeatureFallback("scene", "native_render_failed");
       return false;
-    }
-
-    if (telemetryEnabled && to > from) {
-      if (drawCandles && !candleRecorded) {
-        candleRecorded = true;
-        recordPerformanceDuration("chart.gpu.candles.ms", 0);
-      }
-      if (drawFootprint && !footprintRecorded) {
-        footprintRecorded = true;
-        recordPerformanceDuration("chart.gpu.footprint.ms", 0);
-      }
     }
 
     setGpuFeaturePath("scene", "webgpu-native");

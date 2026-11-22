@@ -30,6 +30,8 @@ const {
   liveFramesPerRepetition: LIVE_FRAMES_PER_REPETITION,
   panFramesPerRepetition: PAN_FRAMES_PER_REPETITION,
   zoomFramesPerRepetition: ZOOM_FRAMES_PER_REPETITION,
+  liveRolloverFramesPerRepetition: LIVE_ROLLOVER_FRAMES_PER_REPETITION,
+  liveRolloverEveryFrames: LIVE_ROLLOVER_EVERY_FRAMES,
   repetitions: REPETITIONS,
   frozenNow: FROZEN_NOW,
   missedFrameThresholdMs: MISSED_FRAME_THRESHOLD_MS,
@@ -392,9 +394,11 @@ async function measureMode(
 
         const tracked = new Set<string>(metricNames);
         let activeBucket: Record<string, number[]> | null = null;
+        let activeRolloverBucket: Record<string, number[]> | null = null;
         (globalThis as any).__webgpuNativeBenchRecord = (name: string, durationMs: number) => {
-          if (!activeBucket || !tracked.has(name)) return;
-          (activeBucket[name] ??= []).push(durationMs);
+          if (!tracked.has(name)) return;
+          if (activeBucket) (activeBucket[name] ??= []).push(durationMs);
+          if (activeRolloverBucket) (activeRolloverBucket[name] ??= []).push(durationMs);
         };
 
         const tradeListeners = new Map<string, Set<(trade: any) => void>>();
@@ -601,6 +605,9 @@ async function measureMode(
           frameCount: number,
           stepFn: (rep: number, frame: number) => void,
           drainAfter = false,
+          options?: {
+            isRolloverFrame?: (rep: number, frame: number) => boolean;
+          },
         ) => {
           const reps: Array<{
             repetition: number;
@@ -608,16 +615,40 @@ async function measureMode(
             bucket: Record<string, number[]>;
             rafIntervalsMs: number[];
             counterDelta: Record<string, number>;
+            rolloverCount: number;
+            rolloverFrames: {
+              frameCount: number;
+              bucket: Record<string, number[]>;
+              counterDelta: Record<string, number>;
+            };
           }> = [];
           for (let rep = 0; rep < repCount; rep++) {
             const bucket: Record<string, number[]> = {};
+            const rolloverBucket: Record<string, number[]> = {};
+            const rolloverCounterDelta: Record<string, number> = {};
             const rafIntervalsMs: number[] = [];
+            const beforeLengths = runtimes().map((runtime) => runtime.pipeline.series.length);
             const beforeCounters = counterSnapshot();
             activeBucket = bucket;
+            let rolloverFrameCount = 0;
             let prevRafTs: number | null = null;
             for (let frame = 0; frame < frameCount; frame++) {
+              const trackRollover = Boolean(options?.isRolloverFrame?.(rep, frame));
+              const beforeFrameCounters = trackRollover ? counterSnapshot() : null;
+              if (trackRollover) {
+                activeRolloverBucket = rolloverBucket;
+              }
               stepFn(rep, frame);
               const rafTs = await nextRaf();
+              if (trackRollover) {
+                activeRolloverBucket = null;
+                rolloverFrameCount++;
+                const afterFrameCounters = counterSnapshot();
+                const frameDelta = diffCounters(beforeFrameCounters!, afterFrameCounters);
+                for (const [k, v] of Object.entries(frameDelta)) {
+                  rolloverCounterDelta[k] = (rolloverCounterDelta[k] ?? 0) + v;
+                }
+              }
               if (prevRafTs !== null) {
                 rafIntervalsMs.push(rafTs - prevRafTs);
               }
@@ -627,14 +658,26 @@ async function measureMode(
               for (let d = 0; d < 4; d++) await nextRaf();
             }
             activeBucket = null;
+            activeRolloverBucket = null;
             await syncBackendWork();
             const afterCounters = counterSnapshot();
+            const afterLengths = runtimes().map((runtime) => runtime.pipeline.series.length);
+            const rolloverCount = afterLengths.reduce(
+              (minDelta, len, idx) => Math.min(minDelta, len - beforeLengths[idx]),
+              Number.POSITIVE_INFINITY,
+            );
             reps.push({
               repetition: rep + 1,
               frames: frameCount,
               bucket,
               rafIntervalsMs,
               counterDelta: diffCounters(beforeCounters, afterCounters),
+              rolloverCount: Number.isFinite(rolloverCount) ? rolloverCount : 0,
+              rolloverFrames: {
+                frameCount: rolloverFrameCount,
+                bucket: rolloverBucket,
+                counterDelta: rolloverCounterDelta,
+              },
             });
           }
           return reps;
@@ -707,6 +750,55 @@ async function measureMode(
           true,
         );
 
+        // 4. LIVE-ROLLOVER (new bar every liveRolloverEveryFrames, >= 10 rollovers/rep)
+        let rolloverSeq = 1;
+        let rolloverBaseTimes = runtimes().map((runtime) => {
+          const s = runtime.pipeline.series;
+          return s.timeOfIndex(s.length - 1);
+        });
+        let rolloverBarOffset = 0;
+        let rolloverIntraOffset = 500;
+        const liveRolloverReps = await runScenario(
+          repetitions,
+          liveRolloverFrames,
+          (rep, frame) => {
+            if (frame === 0) {
+              rolloverBaseTimes = runtimes().map((runtime) => {
+                const s = runtime.pipeline.series;
+                return s.timeOfIndex(s.length - 1);
+              });
+              rolloverBarOffset = 0;
+              rolloverIntraOffset = 500;
+            } else if (frame % liveRolloverEveryFrames === 0) {
+              rolloverBarOffset += 1;
+              rolloverIntraOffset = 500;
+            } else {
+              rolloverIntraOffset = Math.min(intervalMs - 1_000, rolloverIntraOffset + 500);
+            }
+            for (let mIdx = 0; mIdx < markets.length; mIdx++) {
+              const listeners = tradeListeners.get(markets[mIdx]);
+              if (!listeners || listeners.size === 0) continue;
+              const ts = rolloverBaseTimes[mIdx] + rolloverBarOffset * intervalMs + rolloverIntraOffset;
+              for (let tIdx = 0; tIdx < 2; tIdx++) {
+                const price = 60_000 + ((rolloverSeq + tIdx) % cellsPerBar) * priceStep;
+                const trade = {
+                  price,
+                  qty: 0.35 + ((rolloverSeq + tIdx) % 4) * 0.1,
+                  time: ts,
+                  isBuyerMaker: (rolloverSeq + tIdx) % 2 === 0,
+                  id: `native-rollover-${mode}-${rep}-${rolloverSeq}`,
+                };
+                rolloverSeq++;
+                for (const cb of listeners) cb(trade);
+              }
+            }
+          },
+          true,
+          {
+            isRolloverFrame: (_rep, frame) => frame > 0 && frame % liveRolloverEveryFrames === 0,
+          },
+        );
+
         const diag = diagnostics.getGpuDiagnostics();
         const adapter = await readWebGpuAdapterIdentity(measuredAdapter);
         telemetry.configurePerformanceTelemetry({ enabled: wasEnabled });
@@ -730,7 +822,7 @@ async function measureMode(
             pngBase64: referencePngBase64 ? null : capturePngBase64,
             parity,
           },
-          rawScenarios: { pan: panReps, zoom: zoomReps, live: liveReps },
+          rawScenarios: { pan: panReps, zoom: zoomReps, live: liveReps, "live-rollover": liveRolloverReps },
         };
       },
       {
@@ -743,6 +835,8 @@ async function measureMode(
         panFrames: PAN_FRAMES_PER_REPETITION,
         zoomFrames: ZOOM_FRAMES_PER_REPETITION,
         liveFrames: LIVE_FRAMES_PER_REPETITION,
+        liveRolloverFrames: LIVE_ROLLOVER_FRAMES_PER_REPETITION,
+        liveRolloverEveryFrames: LIVE_ROLLOVER_EVERY_FRAMES,
         liveRatePerMarket: LIVE_RATE_PER_SECOND_PER_MARKET,
         repetitions: REPETITIONS,
         metricNames: [...WEBGPU_NATIVE_METRICS],
@@ -759,24 +853,56 @@ async function measureMode(
       ) as Record<MetricName, ReturnType<typeof summarizeMetricValues>>;
       const totalChartFrames = reps.reduce((sum, rep) => sum + rep.frames * MARKETS.length, 0);
       const combinedDelta: Record<string, number> = {};
+      const rolloverCombinedDelta: Record<string, number> = {};
+      let rolloverCountTotal = 0;
+      let rolloverFrameCountTotal = 0;
       for (const rep of reps) {
+        rolloverCountTotal += rep.rolloverCount;
+        rolloverFrameCountTotal += rep.rolloverFrames.frameCount;
         for (const [key, val] of Object.entries(rep.counterDelta)) {
           combinedDelta[key] = (combinedDelta[key] ?? 0) + val;
         }
+        for (const [key, val] of Object.entries(rep.rolloverFrames.counterDelta)) {
+          rolloverCombinedDelta[key] = (rolloverCombinedDelta[key] ?? 0) + val;
+        }
       }
+      const rolloverCombinedMetrics = Object.fromEntries(
+        WEBGPU_NATIVE_METRICS.map((metric) => [
+          metric,
+          summarizeMetricValues(reps.flatMap((rep) => rep.rolloverFrames.bucket[metric] ?? [])),
+        ]),
+      ) as Record<MetricName, ReturnType<typeof summarizeMetricValues>>;
+      const rolloverChartFrames = rolloverFrameCountTotal * MARKETS.length;
       return {
         repetitions: reps.map((rep) => ({
           repetition: rep.repetition,
           frames: rep.frames,
+          rolloverCount: rep.rolloverCount,
           raf: computeMissedFrameStats(rep.rafIntervalsMs, MISSED_FRAME_THRESHOLD_MS),
           uploads: computeUploadStats(rep.counterDelta, rep.frames * MARKETS.length),
           metrics: Object.fromEntries(
             WEBGPU_NATIVE_METRICS.map((metric) => [metric, summarizeMetricValues(rep.bucket[metric] ?? [])]),
           ),
+          rolloverFrames: {
+            frameCount: rep.rolloverFrames.frameCount,
+            uploads: computeUploadStats(rep.rolloverFrames.counterDelta, rep.rolloverFrames.frameCount * MARKETS.length),
+            metrics: Object.fromEntries(
+              WEBGPU_NATIVE_METRICS.map((metric) => [metric, summarizeMetricValues(rep.rolloverFrames.bucket[metric] ?? [])]),
+            ),
+          },
         })),
         combined: combinedMetrics,
         raf: computeMissedFrameStats(reps.flatMap((rep) => rep.rafIntervalsMs), MISSED_FRAME_THRESHOLD_MS),
         uploads: computeUploadStats(combinedDelta, totalChartFrames),
+        rolloverCount: rolloverCountTotal,
+        rolloverFrames: rolloverFrameCountTotal > 0
+          ? {
+              frameCount: rolloverFrameCountTotal,
+              rolloverCount: rolloverCountTotal,
+              combined: rolloverCombinedMetrics,
+              uploads: computeUploadStats(rolloverCombinedDelta, rolloverChartFrames),
+            }
+          : null,
       };
     };
 
@@ -795,6 +921,7 @@ async function measureMode(
         pan: summarizeScenario(result.rawScenarios.pan),
         zoom: summarizeScenario(result.rawScenarios.zoom),
         live: summarizeScenario(result.rawScenarios.live),
+        "live-rollover": summarizeScenario(result.rawScenarios["live-rollover"]),
       },
     };
   } finally {
@@ -803,7 +930,7 @@ async function measureMode(
   }
 }
 
-test("four-chart WebGPU immediate vs GPU-native PoC comparison across pan, zoom and live", async ({ baseURL }, testInfo) => {
+test("four-chart WebGPU immediate vs GPU-native PoC comparison across pan, zoom, live and live-rollover", async ({ baseURL }, testInfo) => {
   test.setTimeout(240_000);
   const resolvedBaseURL = baseURL ?? testInfo.project.use.baseURL ?? "http://127.0.0.1:4173";
   const reportPath = process.env.CHART_GPU_NATIVE_REPORT_PATH;
@@ -933,6 +1060,18 @@ test("four-chart WebGPU immediate vs GPU-native PoC comparison across pan, zoom 
   expect(gpuNative.scenarios.zoom.uploads.dataBytes).toBe(0);
   expect(gpuNative.scenarios.pan.uploads.totalBytes).toBeLessThan(immediate.scenarios.pan.uploads.totalBytes * 0.25);
   expect(gpuNative.scenarios.zoom.uploads.totalBytes).toBeLessThan(immediate.scenarios.zoom.uploads.totalBytes * 0.25);
+
+  for (const rep of immediate.scenarios["live-rollover"].repetitions) {
+    expect(rep.rolloverCount).toBeGreaterThanOrEqual(10);
+  }
+  for (const rep of gpuNative.scenarios["live-rollover"].repetitions) {
+    expect(rep.rolloverCount).toBeGreaterThanOrEqual(10);
+  }
+  expect(gpuNative.scenarios["live-rollover"].uploads.totalBytes).toBeLessThan(
+    immediate.scenarios["live-rollover"].uploads.totalBytes * 0.25,
+  );
+  expect(gpuNative.scenarios["live-rollover"].rolloverFrames).not.toBeNull();
+  expect(gpuNative.scenarios["live-rollover"].rolloverFrames!.uploads.dataPerFrameBytes).toBeLessThan(8_192);
 
   expect(gpuNative.capture.width).toBeGreaterThan(0);
   expect(gpuNative.capture.height).toBeGreaterThan(0);
