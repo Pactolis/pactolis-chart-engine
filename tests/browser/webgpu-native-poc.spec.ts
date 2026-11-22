@@ -224,6 +224,7 @@ async function probeWebGpuCapability(baseURL: string, variant: WebGpuVariant) {
             canvasPresentation: { supported: false, error: "adapter unavailable" },
           };
         }
+        const { readWebGpuAdapterIdentity } = await import("/harness/webgpuNativeBenchmark.mjs");
         const adapterInfo = await readWebGpuAdapterIdentity(adapter);
         const wantsTs = Boolean(adapter.features?.has?.("timestamp-query"));
         let device: any = null;
@@ -371,6 +372,7 @@ async function measureMode(
           { normalizeMondayRangeSettings },
           { DrawingManager },
           webgpuDeviceModule,
+          { readWebGpuAdapterIdentity },
         ] = await Promise.all([
           import("/harness/chart.ts"),
           import("/src/core/performanceTelemetry.ts"),
@@ -381,6 +383,7 @@ async function measureMode(
           import("/src/core/analysis/mondayRange.ts"),
           import("/src/features/drawings/drawingManager.ts"),
           import("/src/core/gpu/webgpu/webgpuDevice.ts"),
+          import("/harness/webgpuNativeBenchmark.mjs"),
         ]);
 
         const nextRaf = () =>
