@@ -1,4 +1,5 @@
 import { chromium, expect, test, type Browser, type BrowserContext, type Page } from "@playwright/test";
+import { existsSync } from "node:fs";
 import { writeFile } from "node:fs/promises";
 import { FUNCTIONAL_WEBGL_ARGS } from "./support/history.js";
 import {
@@ -64,10 +65,19 @@ function launchArgsFor(variant: WebGpuVariant = "no-vulkan-compositor"): string[
 }
 
 async function launchBrowser(args: string[]): Promise<Browser> {
+  let executablePath: string | undefined;
+  if (process.env.CHROMIUM_PATH) {
+    executablePath = process.env.CHROMIUM_PATH;
+  } else if (HARDWARE_MODE && process.platform === "win32") {
+    const fullExe = chromium.executablePath();
+    if (fullExe && existsSync(fullExe)) {
+      executablePath = fullExe;
+    }
+  }
   return chromium.launch({
     headless: true,
     args,
-    ...(process.env.CHROMIUM_PATH ? { executablePath: process.env.CHROMIUM_PATH } : {}),
+    ...(executablePath ? { executablePath } : {}),
   });
 }
 
@@ -100,10 +110,10 @@ async function installCommonRoutes(page: Page, sharedAnchorTo: number): Promise<
     const url = new URL(route.request().url());
     const from = Number(url.searchParams.get("from"));
     const to = Number(url.searchParams.get("to"));
-    const served = denseBars;
-    const meta = url.searchParams.get("includeFootprint") === "0"
-      ? { schemaVersion: 1, generatedAt: FROZEN_NOW }
-      : {
+    const includeFootprint = url.searchParams.get("includeFootprint") !== "0";
+    const served = includeFootprint ? denseBars : [];
+    const meta = includeFootprint
+      ? {
           schemaVersion: 1,
           generatedAt: FROZEN_NOW,
           footprint: { available: true, allowed: true, priceStep: PRICE_STEP },
@@ -114,7 +124,8 @@ async function installCommonRoutes(page: Page, sharedAnchorTo: number): Promise<
             coveredFrom: from,
             coveredThrough: to,
           },
-        };
+        }
+      : { schemaVersion: 1, generatedAt: FROZEN_NOW };
     return route.fulfill({
       status: 200,
       contentType: "application/json",
@@ -530,12 +541,18 @@ async function measureMode(
         }
         await syncBackendWork();
 
+        const resetAllViewports = async () => {
+          for (const runtime of runtimes()) {
+            runtime.view.resetTimeScale(runtime.pipeline.series.length);
+            runtime.session.invalidate(ChartChange.Viewport);
+          }
+          await nextRaf();
+          await syncBackendWork();
+        };
+
         // Composite capture for parity & non-empty frame check.
+        await resetAllViewports();
         const rt0 = runtimes()[0];
-        rt0.view.resetTimeScale(rt0.pipeline.series.length);
-        rt0.session.invalidate(ChartChange.Viewport);
-        await nextRaf();
-        await syncBackendWork();
         const captureFrame = await rt0.session.captureCompositePng();
         const captureView = {
           offsetX: rt0.view.offsetX,
@@ -696,9 +713,10 @@ async function measureMode(
         };
 
         // 1. PAN
+        await resetAllViewports();
         const panHalf = Math.floor(panFrames / 2);
         const panReps = await runScenario(repetitions, panFrames, (_rep, frame) => {
-          const stepX = frame < panHalf ? 6 : -6;
+          const stepX = frame < panHalf ? 6 : frame < panHalf * 2 ? -6 : 0;
           for (const runtime of runtimes()) {
             runtime.view.offsetX += stepX;
             runtime.session.invalidate(ChartChange.Viewport);
@@ -706,9 +724,10 @@ async function measureMode(
         });
 
         // 2. ZOOM
+        await resetAllViewports();
         const zoomHalf = Math.floor(zoomFrames / 2);
         const zoomReps = await runScenario(repetitions, zoomFrames, (_rep, frame) => {
-          const factor = frame < zoomHalf ? 1.03 : 1 / 1.03;
+          const factor = frame < zoomHalf ? 1.03 : frame < zoomHalf * 2 ? 1 / 1.03 : 1;
           for (const runtime of runtimes()) {
             const area = runtime.view.area;
             runtime.view.zoomX(factor, area.left + area.width * 0.5);
@@ -717,6 +736,7 @@ async function measureMode(
         });
 
         // 3. LIVE (200 trades/s/market)
+        await resetAllViewports();
         let tradeSeq = 1;
         let lastTickAt = performance.now();
         let carryTrades = 0;
@@ -763,6 +783,7 @@ async function measureMode(
         );
 
         // 4. LIVE-ROLLOVER (new bar every liveRolloverEveryFrames, >= 10 rollovers/rep)
+        await resetAllViewports();
         let rolloverSeq = 1;
         let rolloverBaseTimes = runtimes().map((runtime) => {
           const s = runtime.pipeline.series;
@@ -1106,6 +1127,10 @@ test("four-chart WebGPU immediate vs GPU-native PoC comparison across pan, zoom,
   expect(gpuNative.capture.width).toBeGreaterThan(0);
   expect(gpuNative.capture.height).toBeGreaterThan(0);
   expect(gpuNative.capture.nonBgPixels).toBeGreaterThan(500);
+  if (immediate.capture.view.colWidth >= 6) {
+    expect(immediate.scenarios.live.combined["chart.gpu.footprint.ms"].count).toBeGreaterThan(0);
+    expect(immediate.scenarios["live-rollover"].combined["chart.gpu.footprint.ms"].count).toBeGreaterThan(0);
+  }
   if (parity) {
     expect(parity.matchRatio).toBeGreaterThanOrEqual(0.98);
   }
