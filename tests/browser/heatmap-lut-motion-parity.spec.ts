@@ -9,6 +9,7 @@ test.use({ launchOptions: { args: [...FUNCTIONAL_WEBGL_ARGS] } });
 const BARS_COUNT = 60;
 const BASE_PRICE = 50_000;
 const BUCKET_STEP = 50;
+const MINUTE_MS = 60_000;
 const HOOK_SELECTOR = '[data-testid="chart-hook"]:not([data-ft-synthetic="1"])';
 
 type RuntimeProbe = {
@@ -39,8 +40,10 @@ type RuntimeProbe = {
 
 async function installFixture(page: Page): Promise<{ id: string; getHeatmapRequests: () => number }> {
   await page.setViewportSize({ width: 1200, height: 700 });
-  const bars = buildBars(BARS_COUNT).map((bar) => ({
+  const lastMinute = Math.floor(FROZEN_NOW / MINUTE_MS) * MINUTE_MS;
+  const bars = buildBars(BARS_COUNT).map((bar, index) => ({
     ...bar,
+    t: lastMinute - (BARS_COUNT - 1 - index) * MINUTE_MS,
     o: BASE_PRICE + 250,
     h: BASE_PRICE + 750,
     l: BASE_PRICE,
@@ -105,7 +108,7 @@ async function installFixture(page: Page): Promise<{ id: string; getHeatmapReque
           generatedAt: FROZEN_NOW,
           base: "BTC",
           source: q.get("source") ?? "single",
-          resolution: q.get("resolution") ?? "15m",
+          resolution: q.get("resolution") ?? "1m",
           bucketStep: Number(q.get("bucketStep") ?? BUCKET_STEP),
           from,
           to,
@@ -115,7 +118,7 @@ async function installFixture(page: Page): Promise<{ id: string; getHeatmapReque
     });
   });
 
-  await openHarness(page, `?chart=BINANCE_FUTURES:btcusdt&timeframe=15m&priceStep=${BUCKET_STEP}&priceStepResolved=0`);
+  await openHarness(page, `?chart=BINANCE_FUTURES:btcusdt&timeframe=1m&priceStep=${BUCKET_STEP}&priceStepResolved=0`);
   const hook = page.locator(HOOK_SELECTOR);
   await expect(hook).toHaveAttribute("data-history-loading", "false");
   await expect(hook).toHaveAttribute("data-series-len", String(BARS_COUNT));

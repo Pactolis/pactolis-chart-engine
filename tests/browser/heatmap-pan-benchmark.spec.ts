@@ -60,7 +60,7 @@ type RuntimeProbe = {
     bars: Map<number, { t: number; cells: Array<[number, number, number]> }>;
     chunks: Map<number, { status: string }>;
     inFlight: Set<AbortController>;
-    applyLiveTailBars(bars: Array<{ t: number; cells: Array<[number, number, number]> }>, market?: string): void;
+    invalidateLiveTail(event?: unknown): void;
     prepareGpuCells(view: View, series: FootprintSeries, range: [number, number]): {
       main: unknown[];
       extension: unknown[];
@@ -72,7 +72,13 @@ type RuntimeProbe = {
   };
 };
 
-async function setupRoutes(page: Page, bars: unknown[], heatmapBars: Array<{ t: number; cells: number[][] }>): Promise<void> {
+async function setupRoutes(
+  page: Page,
+  bars: unknown[],
+  heatmapBars: Array<{ t: number; cells: Array<[number, number, number]> }>,
+  firstTime: number,
+  lastTime: number,
+): Promise<void> {
   await page.route(/\/history(?:\?.*)?$/, (route) => {
     const q = new URL(route.request().url()).searchParams;
     const from = Number(q.get("from"));
@@ -98,10 +104,29 @@ async function setupRoutes(page: Page, bars: unknown[], heatmapBars: Array<{ t: 
     });
   });
 
+  let tailStep = 0;
+  const baseLiveCells = heatmapBars[heatmapBars.length - 1]?.cells ?? [];
   await page.route(/\/api\/orderbook\/heatmap(?:\?.*)?$/, (route) => {
     const q = new URL(route.request().url()).searchParams;
     const from = Number(q.get("from"));
     const to = Number(q.get("to"));
+    const isTailRefresh = from > firstTime && to >= lastTime;
+    const servedBars = isTailRefresh
+      ? (() => {
+          tailStep++;
+          const cells = baseLiveCells.map(([price, bid, ask], idx) => {
+            const mid = price + BUCKET_STEP / 2;
+            const btc = (bid + ask) / mid;
+            if (btc >= 10 && btc < 100) {
+              const nextBtc = 15 + ((idx * 13 + tailStep * 19) % 80);
+              const usd = Math.round(nextBtc * mid);
+              return [price, Math.floor(usd / 2), usd - Math.floor(usd / 2)] as [number, number, number];
+            }
+            return [price, bid, ask] as [number, number, number];
+          });
+          return [{ t: lastTime, cells }];
+        })()
+      : heatmapBars.filter((bar) => bar.t >= from && bar.t <= to);
     return route.fulfill({
       contentType: "application/json",
       body: JSON.stringify({
@@ -115,7 +140,7 @@ async function setupRoutes(page: Page, bars: unknown[], heatmapBars: Array<{ t: 
           bucketStep: Number(q.get("bucketStep") ?? BUCKET_STEP),
           from,
           to,
-          bars: heatmapBars.filter((bar) => bar.t >= from && bar.t <= to),
+          bars: servedBars,
         },
       }),
     });
@@ -126,7 +151,7 @@ test("#260/#256 BTC Single / $25 / 10 BTC / Auto P96 preset benchmark, motion re
   test.setTimeout(150_000);
   await page.setViewportSize({ width: 1600, height: 900 });
   const fixture = buildHeatmapPanBars();
-  await setupRoutes(page, fixture.bars, fixture.heatmapBars);
+  await setupRoutes(page, fixture.bars, fixture.heatmapBars, fixture.firstTime, fixture.lastTime);
 
   await openHarness(page);
 
@@ -302,14 +327,9 @@ test("#260/#256 BTC Single / $25 / 10 BTC / Auto P96 preset benchmark, motion re
 
       telemetry.configurePerformanceTelemetry({ enabled: true });
       const target = charts[0];
-      const s = target.pipeline.series;
-      const liveT = s.timeOfIndex(s.length - 1);
       const origNow = (target.orderbookHeatmap as unknown as { now: () => number }).now;
-      let simClock = origNow();
+      let simClock = FROZEN_NOW + 1_000;
       (target.orderbookHeatmap as unknown as { now: () => number }).now = () => simClock;
-      const baseLiveCells = (target.orderbookHeatmap.bars.get(liveT)?.cells ?? []).map(
-        (c) => [c[0], c[1], c[2]] as [number, number, number],
-      );
 
       const samplePhase = async (phase: "static" | "pan" | "zoom" | "live-book-invalidation") => {
         const hmMs: number[] = [];
@@ -335,6 +355,7 @@ test("#260/#256 BTC Single / $25 / 10 BTC / Auto P96 preset benchmark, motion re
 
         const panStepPx = cfg.panPxOneWay / Math.max(1, Math.floor(cfg.panFramesPerTrip / 2));
         for (let step = 0; step < stepCount; step++) {
+          const b = telemetry.snapshotPerformanceTelemetry();
           if (phase === "pan") {
             simClock += 16;
             const inTrip = step % cfg.panFramesPerTrip;
@@ -346,21 +367,10 @@ test("#260/#256 BTC Single / $25 / 10 BTC / Auto P96 preset benchmark, motion re
             target.view.zoomX(factor, target.view.area.left + target.view.area.width * 0.5);
           } else if (phase === "live-book-invalidation") {
             simClock += 16;
-            const cells = baseLiveCells.map(([price, bid, ask], idx) => {
-              const mid = price + cfg.bucketStep / 2;
-              const btc = (bid + ask) / mid;
-              if (btc >= 10 && btc < 100) {
-                // Keep live-tail mutations strictly inside [15, 95] BTC so P96 stays unchanged for tailPatch.
-                const nextBtc = 15 + ((idx * 13 + (step + 1) * 19) % 80);
-                const usd = Math.round(nextBtc * mid);
-                return [price, Math.floor(usd / 2), usd - Math.floor(usd / 2)] as [number, number, number];
-              }
-              return [price, bid, ask] as [number, number, number];
-            });
-            target.orderbookHeatmap.applyLiveTailBars([{ t: liveT, cells }]);
+            target.orderbookHeatmap.invalidateLiveTail();
+            await new Promise((res) => setTimeout(res, 260));
           }
 
-          const b = telemetry.snapshotPerformanceTelemetry();
           for (const r of charts) r.invalidate();
           await waitNextFrame();
           const a = telemetry.snapshotPerformanceTelemetry();
