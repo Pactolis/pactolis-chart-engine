@@ -20,6 +20,7 @@ import { dirname, join, relative, resolve, sep } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
 export const CENSUS_SPEC = "tests/browser/chart-multi-market-census.spec.ts";
+export const HEATMAP_PAN_SPEC = "tests/browser/heatmap-pan-benchmark.spec.ts";
 
 /** Files that every browser test depends on, or that decide what runs. */
 export const GLOBAL_RUNTIME = [
@@ -143,8 +144,9 @@ export function selectTests(changed, closures) {
     return all(`${file}: unclassified path`);
   }
   const census = selected.delete(CENSUS_SPEC);
+  selected.delete(HEATMAP_PAN_SPEC);
   const specs = [...selected].sort();
-  const allDefault = [...closures.keys()].filter((spec) => spec !== CENSUS_SPEC);
+  const allDefault = [...closures.keys()].filter((spec) => spec !== CENSUS_SPEC && spec !== HEATMAP_PAN_SPEC);
   const browser = specs.length === 0 ? "none" : specs.length === allDefault.length ? "all" : "list";
   return { browser, specs: browser === "list" ? specs : [], census, reasons };
 }
