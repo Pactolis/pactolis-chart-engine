@@ -87,6 +87,8 @@ Aynı `origin/main` (`5e87d84`) üzerinde Telemetry açık (`43964340730`) ve Te
 
 Sonuç: `configurePerformanceTelemetry({ enabled: true })` ölçüm yükü rAF dağılımında ihmal edilebilir düzeydedir (`Δ <= 0.1 ms`).
 
+> **Kapsam Notu (`Refs #258`):** Bu bölümdeki `#50` ve `#89` ölçümleri tüm backend'lerin ortak immediate-mode `QuadSink.rect` (CPU geometri üretimi + kare başı tam yükleme) yolunu ölçer; gerçek GPU-native WebGPU mimari karşılaştırması değildir. GPU-native WebGPU tasarımı için `md/WEBGPU_GPU_NATIVE_ARCHITECTURE.md` dosyasına bakınız.
+
 ---
 
 ## 3. SwiftShader / Donanım GPU Çarpanı ve CI Kapılarının Kalibrasyonu
@@ -129,3 +131,5 @@ Sabit matris 15.000 ve 40.000 görünür heatmap hücresi, 1 ve 8 chart, varsay�
 #88 kararı ölçümden önce sabitlenmiştir: gerçek donanımda pan, live ve crosshair senaryolarının **üçünde de** WebGPU `chart.gpu.flush.ms` ortalaması WebGL2'nin en fazla 2 katı olursa `GO`; herhangi birinde 2 katı aşarsa `NO-GO, P3 kalır`. NO-GO gerekçesi raporda WebGPU'nun opt-in olması, #200 tek-submit koordinatörünün ölçülüp reddedilmesi ve yaklaşık 0,1 ms/chart-frame mutlak fark olarak yer alır. Yazılım renderer, software/fallback WebGPU adapter veya adapter yokluğu `HARDWARE_INVALID` döndürür; GO/NO-GO üretilmez.
 
 CI tam performans koşusunu çalıştırmaz veya sonuçtan gate üretmez. `--list` ve `--dry-run` iki suite'in senaryolarını, ortak fixture parametrelerini ve karar kurallarını ölçüm başlatmadan gösterir. Node unit testleri GO, NO-GO ve hardware-invalid değerlendirmelerini sahte ölçümlerle doğrular. Gerçek renderer koşusu sahibi tarafından yukarıdaki tek komutla, donanım GPU'su bulunan sistemde çalıştırılır ve raporlar #74/#88 issue'larına eklenir.
+
+> **Kapsam Notu (`Refs #258`):** Yukarıdaki `#74` ve `#88` WebGPU vs WebGL2 flush kıyasları, üç backend'in ortak immediate-mode `QuadSink.rect` (CPU geometri üretimi + kare başı tam vertex/instance yüklemesi) yolunu ölçer; kalıcı storage buffer ve compute geçişli GPU-native WebGPU mimari karşılaştırması değildir. GPU-native WebGPU mimarisi için `md/WEBGPU_GPU_NATIVE_ARCHITECTURE.md` ve `npm run benchmark:webgpu-native` akışına bakınız.

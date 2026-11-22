@@ -8,6 +8,7 @@ export interface GpuSettings {
   readonly backend: GpuBackendPreference;
   readonly residentHeatmap: boolean;
   readonly asyncCapture: boolean;
+  readonly nativeWebGpu?: boolean;
 }
 
 export interface GpuSettingsSource {
@@ -19,6 +20,7 @@ export const DEFAULT_GPU_SETTINGS: GpuSettings = Object.freeze({
   backend: "webgl2",
   residentHeatmap: false,
   asyncCapture: false,
+  nativeWebGpu: false,
 });
 
 let configuredSource: GpuSettingsSource | null = null;
@@ -63,6 +65,18 @@ function parseUrlGpuParam(search?: string): GpuBackendPreference | null {
   return null;
 }
 
+function parseUrlBoolParam(search: string | undefined, names: readonly string[]): boolean | null {
+  if (!search) return null;
+  for (const name of names) {
+    const match = new RegExp(`[?&]${name}=([a-z0-9_-]+)`, "i").exec(search);
+    if (!match) continue;
+    const val = match[1].toLowerCase();
+    if (val === "1" || val === "true") return true;
+    if (val === "0" || val === "false") return false;
+  }
+  return null;
+}
+
 export function readGpuSettings(win?: { location?: { search?: string } } | null): GpuSettings {
   if (!cachedBaseSettings) {
     cachedBaseSettings = configuredSource ? configuredSource.read() : DEFAULT_GPU_SETTINGS;
@@ -77,10 +91,12 @@ export function readGpuSettings(win?: { location?: { search?: string } } | null)
   }
 
   const override = parseUrlGpuParam(search);
-  if (override) {
+  const nativeOverride = parseUrlBoolParam(search, ["webgpuNative", "gpuNative"]);
+  if (override || nativeOverride !== null) {
     return {
       ...base,
-      backend: override,
+      ...(override ? { backend: override } : {}),
+      ...(nativeOverride !== null ? { nativeWebGpu: nativeOverride } : {}),
     };
   }
 

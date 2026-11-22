@@ -19,6 +19,8 @@ import {
 } from "./chartLod.js";
 import { resolveBuiltInLayerPreset, type BuiltInChartType } from "./scene/chartLayerPreset.js";
 import { isPerformanceTelemetryEnabled, recordPerformanceDuration } from "../performanceTelemetry.js";
+import { readGpuSettings } from "../gpu/gpuSettings.js";
+import { recordGpuFeatureFallback, setGpuFeaturePath } from "../gpu/gpuDiagnostics.js";
 import {
   cellAverageTradeSize,
   cellAverageTradeSizes,
@@ -203,6 +205,17 @@ export class FootprintRenderer {
     if (view.area.width <= 0 || view.area.height <= 0) return;
     const telemetryEnabled = isPerformanceTelemetryEnabled();
 
+    const step = series.config.priceStep;
+    const cfg = this.cfg();
+    const chartType = cfg.chartType;
+    const lod = chartLodForSpacing(view.colWidth);
+    const candleW = view.candleStripWidth();
+
+    if (this.tryRenderNativeScene(view, series, activeLayers, dpr, step, cfg, chartType, lod, candleW, telemetryEnabled)) {
+      return;
+    }
+    setGpuFeaturePath("scene", "immediate-quads");
+
     const clearStartedAt = telemetryEnabled ? performance.now() : null;
     let frame: GpuFrame;
     try {
@@ -215,7 +228,6 @@ export class FootprintRenderer {
     this.currentFrame = frame;
     this.batch = frame.quads;
 
-    const step = series.config.priceStep;
     const [from, to] = this.visibleRange(view, series.length);
     const timeScale = TimeScaleModel.fromSeries(series);
     if (DEBUG_RENDER) {
@@ -255,11 +267,6 @@ export class FootprintRenderer {
       }
       return;
     }
-
-    const candleW = view.candleStripWidth();
-    const cfg = this.cfg();
-    const chartType = cfg.chartType;
-    const lod = chartLodForSpacing(view.colWidth);
 
     if (activeLayers.has("candles")) {
       const candlesStartedAt = telemetryEnabled ? performance.now() : null;
@@ -330,6 +337,119 @@ export class FootprintRenderer {
         recordPerformanceDuration("chart.gpu.flush.ms", performance.now() - flushStartedAt);
       }
     }
+  }
+
+  private tryRenderNativeScene(
+    view: View,
+    series: FootprintSeries,
+    activeLayers: ReadonlySet<string>,
+    dpr: number,
+    step: number,
+    cfg: ChartViewConfig,
+    chartType: BuiltInChartType,
+    lod: ReturnType<typeof chartLodForSpacing>,
+    candleW: number,
+    telemetryEnabled: boolean,
+  ): boolean {
+    if (!this.surface.supportsNativeScene?.() || typeof this.surface.renderNativeScene !== "function") {
+      return false;
+    }
+    const canvas = this.surface.canvas as Partial<HTMLCanvasElement> | undefined;
+    const ownerWin = canvas?.ownerDocument?.defaultView ?? null;
+    if (!readGpuSettings(ownerWin).nativeWebGpu) {
+      return false;
+    }
+    if (view.isLogScale() || lod === "pixel-bucket") {
+      return false;
+    }
+    if (chartType !== "candlestick" && chartType !== "footprint") {
+      return false;
+    }
+    const isFootprintCells = lod === "footprint" && chartType === "footprint";
+    if (isFootprintCells && this.rowHeight(view, step) < CELL_PIXEL_MERGE_HEIGHT) {
+      return false;
+    }
+
+    const clearStartedAt = telemetryEnabled ? performance.now() : null;
+    const drawGrid = settings.grid && activeLayers.has("grid");
+    const candleStyle = candleStyleFor(lod, chartType, cfg.candles);
+    const drawCandles = activeLayers.has("candles") && candleStyle !== "none";
+    const drawFootprint = isFootprintCells && activeLayers.has("footprint");
+    const [from, to] = this.visibleRange(view, series.length);
+    const w = (this.surface.canvas.width ?? 0) / dpr || (view.area.left + view.area.width);
+    const h = (this.surface.canvas.height ?? 0) / dpr || (view.area.top + view.area.height);
+    if (clearStartedAt !== null) {
+      recordPerformanceDuration("chart.gpu.clear.ms", performance.now() - clearStartedAt);
+    }
+
+    const flushStartedAt = telemetryEnabled ? performance.now() : null;
+    const ok = this.surface.renderNativeScene(
+      { r: 0.07, g: 0.08, b: 0.1, a: 1 },
+      w,
+      h,
+      {
+        series,
+        view: {
+          area: view.area,
+          offsetX: view.offsetX,
+          colWidth: view.colWidth,
+          priceTop: view.priceTop,
+          pricePerPx: view.pricePerPx,
+          candleWidth: candleW,
+        },
+        candleStyle,
+        drawGrid,
+        drawCandles,
+        drawFootprint,
+        drawHeat: cfg.heat,
+        drawPoc: cfg.poc,
+        drawGridQuads: drawGrid
+          ? (quads) => {
+              const gridStartedAt = telemetryEnabled ? performance.now() : null;
+              try {
+                const timeScale = TimeScaleModel.fromSeries(series);
+                drawTimeGrid(quads, view, timeScale.marks(view));
+              } finally {
+                if (gridStartedAt !== null) {
+                  recordPerformanceDuration("chart.gpu.grid.ms", performance.now() - gridStartedAt);
+                }
+              }
+            }
+          : undefined,
+        drawForegroundOverlay: drawFootprint && cfg.stackedImbalance && to > from
+          ? (quads) => {
+              const overlayStartedAt = telemetryEnabled ? performance.now() : null;
+              try {
+                for (let i = from; i < to; i++) {
+                  const bar = series.at(i);
+                  if (!bar) continue;
+                  const { maxVol } = this.heatStats(bar, step);
+                  if (maxVol <= 0) continue;
+                  const xLeft = view.xOfIndex(i);
+                  const fpLeft = xLeft + candleW;
+                  const fpW = view.colWidth - candleW;
+                  this.drawStackedImbalance(view, bar, step, fpLeft, fpW, fpW / 2, quads);
+                }
+              } finally {
+                if (overlayStartedAt !== null) {
+                  recordPerformanceDuration("chart.gpu.native.overlay.ms", performance.now() - overlayStartedAt);
+                }
+              }
+            }
+          : undefined,
+      },
+    );
+    if (flushStartedAt !== null) {
+      recordPerformanceDuration("chart.gpu.flush.ms", performance.now() - flushStartedAt);
+    }
+
+    if (!ok) {
+      recordGpuFeatureFallback("scene", "native_render_failed");
+      return false;
+    }
+
+    setGpuFeaturePath("scene", "webgpu-native");
+    return true;
   }
 
   private drawFootprintCells(
@@ -525,12 +645,13 @@ export class FootprintRenderer {
     step: number,
     fpLeft: number,
     fpW: number,
-    halfW: number
+    halfW: number,
+    sink: QuadSink = this.batch,
   ): void {
     const cache = this.imbalanceStats(bar, step);
     if (!cache) return;
-    this.markRuns(view, bar, cache.cells, step, cache.buyImb, fpLeft + fpW - 2, 2, IMB_BUY);
-    this.markRuns(view, bar, cache.cells, step, cache.sellImb, fpLeft, 2, IMB_SELL);
+    this.markRuns(view, bar, cache.cells, step, cache.buyImb, fpLeft + fpW - 2, 2, IMB_BUY, sink);
+    this.markRuns(view, bar, cache.cells, step, cache.sellImb, fpLeft, 2, IMB_SELL, sink);
     void halfW;
   }
 
@@ -572,7 +693,8 @@ export class FootprintRenderer {
     flags: boolean[],
     x: number,
     w: number,
-    color: RGBA
+    color: RGBA,
+    sink: QuadSink = this.batch,
   ): void {
     const flushRun = (end: number, run: number): void => {
       if (run < IMB_STACK) return;
@@ -580,7 +702,7 @@ export class FootprintRenderer {
         const rect = this.clippedCellRect(view, bar, cells[j].priceBin, step);
         if (!rect) continue;
         const rowH = rect.height > 1 ? rect.height - 1 : rect.height;
-        this.batch.rect(x, rect.yTop, w, rowH, color);
+        sink.rect(x, rect.yTop, w, rowH, color);
       }
     };
     let run = 0;
