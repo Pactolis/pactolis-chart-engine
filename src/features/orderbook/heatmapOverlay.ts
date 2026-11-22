@@ -850,7 +850,8 @@ export class OrderbookHeatmapOverlay {
 
       // Streaming CPU path: two passes (range resolution, then paint) with an O(1)-held
       // payload. It never builds or reuses the whole-visible collection list.
-      const collectRangeValues = this.needsRangeValues(frame.settings, frame.threshold);
+      const fixedCeiling = this.resolveFixedCeiling(frame.settings);
+      const collectRangeValues = this.needsRangeValues(frame.threshold, fixedCeiling);
       this.scratchValueCount = 0;
       let cells = 0;
       this.forEachVisibleCell(view, series, frame, null, ({ value }) => {
@@ -861,6 +862,7 @@ export class OrderbookHeatmapOverlay {
         this.scratchValues.subarray(0, this.scratchValueCount),
         frame.settings,
         frame.threshold,
+        fixedCeiling,
       );
       this.scratchValueCount = 0;
       this.visibleFloor = resolved.floor;
@@ -1014,24 +1016,20 @@ export class OrderbookHeatmapOverlay {
     this.scratchValues[this.scratchValueCount++] = value;
   }
 
-  private needsRangeValues(settings: OrderbookHeatmapSettings, threshold: number): boolean {
-    if (threshold > 0 && settings.scaleMode === "fixed") {
-      const fixedCeiling = settings.fixedCeiling?.[settings.unit];
-      if (fixedCeiling !== undefined && Number.isFinite(fixedCeiling) && fixedCeiling > 0) {
-        return false;
-      }
-    }
-    return true;
+  private resolveFixedCeiling(settings: OrderbookHeatmapSettings): number | undefined {
+    return settings.scaleMode === "fixed" ? settings.fixedCeiling?.[settings.unit] : undefined;
+  }
+
+  private needsRangeValues(threshold: number, fixedCeiling: number | undefined): boolean {
+    return !(threshold > 0 && fixedCeiling !== undefined && Number.isFinite(fixedCeiling) && fixedCeiling > 0);
   }
 
   private resolveRangeForValues(
     values: ArrayLike<number>,
     settings: OrderbookHeatmapSettings,
     threshold: number,
+    fixedCeiling: number | undefined = this.resolveFixedCeiling(settings),
   ): { floor: number; ceiling: number; opacity: number } {
-    const fixedCeiling = settings.scaleMode === "fixed"
-      ? settings.fixedCeiling?.[settings.unit]
-      : undefined;
     const { floor, ceiling } = resolveHeatmapColorRange({
       values,
       threshold,
@@ -1195,7 +1193,8 @@ export class OrderbookHeatmapOverlay {
     const right = view.area.left + view.area.width;
     const { top, height } = view.area;
     const step = preamble.settings.bucketStep;
-    const collectRangeValues = this.needsRangeValues(preamble.settings, preamble.threshold);
+    const fixedCeiling = this.resolveFixedCeiling(preamble.settings);
+    const collectRangeValues = this.needsRangeValues(preamble.threshold, fixedCeiling);
     let mainCount = 0;
     let extCount = 0;
     this.scratchValueCount = 0;
@@ -1221,6 +1220,7 @@ export class OrderbookHeatmapOverlay {
       this.scratchValues.subarray(0, this.scratchValueCount),
       preamble.settings,
       preamble.threshold,
+      fixedCeiling,
     );
     this.scratchValueCount = 0;
     this.visibleFloor = resolved.floor;
@@ -1353,7 +1353,8 @@ export class OrderbookHeatmapOverlay {
       return this.lastCollected;
     }
     const visible: Array<{ x: number; yTop: number; cellHeight: number; value: number; live: boolean }> = [];
-    const collectRangeValues = this.needsRangeValues(frame.settings, frame.threshold);
+    const fixedCeiling = this.resolveFixedCeiling(frame.settings);
+    const collectRangeValues = this.needsRangeValues(frame.threshold, fixedCeiling);
     this.scratchValueCount = 0;
     this.forEachVisibleCell(view, series, frame, cellLimit, (cell) => {
       visible.push(cell);
@@ -1363,6 +1364,7 @@ export class OrderbookHeatmapOverlay {
       this.scratchValues.subarray(0, this.scratchValueCount),
       frame.settings,
       frame.threshold,
+      fixedCeiling,
     );
     this.scratchValueCount = 0;
     this.visibleFloor = resolved.floor;
