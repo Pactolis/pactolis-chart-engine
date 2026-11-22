@@ -404,6 +404,11 @@ export abstract class DrawingState extends DrawingNotifications {
     this.changed();
   }
 
+  get canUndo(): boolean { return this.undoStack.length > 0; }
+  get canRedo(): boolean { return this.redoStack.length > 0; }
+  get undoCount(): number { return this.undoStack.length; }
+  get redoCount(): number { return this.redoStack.length; }
+
   undo(): void {
     const prev = this.undoStack.pop();
     if (!prev) return;
@@ -418,6 +423,7 @@ export abstract class DrawingState extends DrawingNotifications {
     if (!next) return;
     this.undoStack.push(structuredClone(this.drawings));
     this.drawings = next;
+    this.pruneSelection();
     this.changed();
   }
 
