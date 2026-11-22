@@ -9,7 +9,7 @@ import {
   HEATMAP_PAN_FIXTURE,
   summarizeHeatmapSamples,
 } from "../../harness/heatmapPanBenchmark.mjs";
-import { FUNCTIONAL_WEBGL_ARGS } from "./support/history.js";
+import { FUNCTIONAL_WEBGL_ARGS, openHarness } from "./support/history.js";
 
 const HARDWARE_MODE = process.env.CHART_GPU_BENCHMARK_MODE === "hardware";
 const HARDWARE_LAUNCH_ARGS = [
@@ -128,8 +128,7 @@ test("#260/#256 BTC Single / $25 / 10 BTC / Auto P96 preset benchmark, motion re
   const fixture = buildHeatmapPanBars();
   await setupRoutes(page, fixture.bars, fixture.heatmapBars);
 
-  await page.goto("/harness/blank.html");
-  await page.waitForFunction(() => (window as Window & { __chartHarnessReady?: boolean }).__chartHarnessReady === true);
+  await openHarness(page);
 
   const report = await page.evaluate(async (cfg) => {
     const [
@@ -416,32 +415,55 @@ test("#260/#256 BTC Single / $25 / 10 BTC / Auto P96 preset benchmark, motion re
         const gpuFrame = r.orderbookHeatmap.prepareGpuCells(r.view, r.pipeline.series, [0, cfg.barsCount - 1]);
         if (annotation && ctx2d && gpuFrame && gpuFrame.main.length > 0 && gpuFrame.extension.length > 0) {
           const dpr = window.devicePixelRatio || 1;
-          const normalCell = gpuFrame.main[Math.floor(gpuFrame.main.length / 2)] as {
+          const area = r.view.area;
+          const lastClose = cfg.basePrice + Math.floor(cfg.levelsPerBar / 2) * cfg.bucketStep + 50;
+          const minDistFromClose = 3 * cfg.bucketStep;
+          const isSafeCell = (cell: { x: number; yTop: number; width: number; height: number }) => {
+            const cx = cell.x + cell.width * 0.5;
+            const cy = cell.yTop + cell.height * 0.5;
+            const price = r.view.priceOfY(cy);
+            return (
+              cell.width >= 2 &&
+              cell.height >= 2 &&
+              cx >= area.left + 8 &&
+              cx <= area.left + area.width - 8 &&
+              cy >= area.top + 8 &&
+              cy <= area.top + area.height - 8 &&
+              Math.abs(price - lastClose) >= minDistFromClose
+            );
+          };
+          const safeMain = (gpuFrame.main as Array<{ x: number; yTop: number; width: number; height: number; value: number }>)
+            .filter(isSafeCell);
+          const safeExt = (gpuFrame.extension as Array<{ x: number; yTop: number; width: number; height: number; value: number }>)
+            .filter(isSafeCell);
+          const normalCell = safeMain[Math.floor(safeMain.length / 2)] ?? gpuFrame.main[Math.floor(gpuFrame.main.length / 2)] as {
             x: number; yTop: number; width: number; height: number; value: number;
           };
-          const liveCell = gpuFrame.extension[Math.floor(gpuFrame.extension.length / 2)] as {
+          const liveCell = safeExt[Math.floor(safeExt.length / 2)] ?? gpuFrame.extension[Math.floor(gpuFrame.extension.length / 2)] as {
             x: number; yTop: number; width: number; height: number; value: number;
           };
           const samplePixel = (cell: { x: number; yTop: number; width: number; height: number }) => {
-            const px = Math.min(annotation.width - 1, Math.max(0, Math.round((cell.x + cell.width * 0.5) * dpr)));
-            const py = Math.min(annotation.height - 1, Math.max(0, Math.round((cell.yTop + cell.height * 0.5) * dpr)));
+            const px = Math.min(annotation.width - 1, Math.max(0, Math.floor((cell.x + cell.width * 0.5) * dpr)));
+            const py = Math.min(annotation.height - 1, Math.max(0, Math.floor((cell.yTop + cell.height * 0.5) * dpr)));
             const data = ctx2d.getImageData(px, py, 1, 1).data;
             return [data[0], data[1], data[2], data[3]];
           };
-          const expectedPremul = (value: number, alphaScale: number) => {
+          const expectedStraightRgba = (value: number, alphaScale: number) => {
             const k = heatmapIntensity(value, gpuFrame.floor, gpuFrame.ceiling);
             const rgba = heatmapCellRgba(k, alphaScale, cond.opacity);
-            return [
-              Math.round(rgba.r * rgba.a),
-              Math.round(rgba.g * rgba.a),
-              Math.round(rgba.b * rgba.a),
-              Math.round(rgba.a * 255),
-            ];
+            const ref = document.createElement("canvas");
+            ref.width = 1;
+            ref.height = 1;
+            const refCtx = ref.getContext("2d")!;
+            refCtx.fillStyle = `rgba(${rgba.r}, ${rgba.g}, ${rgba.b}, ${rgba.a.toFixed(3)})`;
+            refCtx.fillRect(0, 0, 1, 1);
+            const data = refCtx.getImageData(0, 0, 1, 1).data;
+            return [data[0], data[1], data[2], data[3]];
           };
           const actualNormal = samplePixel(normalCell);
-          const expectedNormal = expectedPremul(normalCell.value, 1);
+          const expectedNormal = expectedStraightRgba(normalCell.value, 1);
           const actualLive = samplePixel(liveCell);
-          const expectedLive = expectedPremul(liveCell.value, 0.45);
+          const expectedLive = expectedStraightRgba(liveCell.value, 0.45);
           const maxDiff = (a: number[], b: number[]) => Math.max(...a.map((v, idx) => Math.abs(v - b[idx])));
           const normalDeltaMax = maxDiff(actualNormal, expectedNormal);
           const liveExtDeltaMax = maxDiff(actualLive, expectedLive);

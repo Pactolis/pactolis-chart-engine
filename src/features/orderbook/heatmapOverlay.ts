@@ -1060,6 +1060,12 @@ export class OrderbookHeatmapOverlay {
     );
   }
 
+  /**
+   * Reuses the cached historical raster during pan/zoom (`viewportMoving === true`).
+   * Trade-offs while moving:
+   * - In Auto (P96) mode, cached `floor`/`ceiling` are held until motion settles and full redraw updates them.
+   * - `0.5-2x` zoom blitting (`imageSmoothingEnabled = false`) is transient until the post-quiet full rebuild runs.
+   */
   private tryMotionRasterReuse(
     ctx: CanvasRenderingContext2D,
     view: View,

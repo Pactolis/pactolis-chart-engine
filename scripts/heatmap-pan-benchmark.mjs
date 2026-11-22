@@ -112,7 +112,7 @@ async function main() {
     cliPath,
     "test",
     "tests/browser/heatmap-pan-benchmark.spec.ts",
-    "--project=default",
+    "--project=heatmap-pan-benchmark",
     "--workers=1",
   ], {
     cwd: ROOT,
