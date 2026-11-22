@@ -390,6 +390,7 @@
     "check:browser": "tsc -p tsconfig.browser.json",
     "test:browser": "playwright test",
     "harness": "vite",
+    "benchmark:footprint-text": "node scripts/footprint-text-gate-benchmark.mjs",
     "benchmark:gpu": "node scripts/gpu-heatmap-benchmark.mjs",
     "benchmark:heatmap-pan": "node scripts/heatmap-pan-benchmark.mjs",
     "benchmark:webgpu-native": "node scripts/webgpu-native-benchmark.mjs",
