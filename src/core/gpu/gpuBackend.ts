@@ -25,7 +25,9 @@ export type GpuLossReason =
   | "context-restore-timeout"
   | "device-lost"
   | "create-failed"
-  | "validation-failed";
+  | "validation-failed"
+  | "out-of-memory"
+  | "internal-error";
 
 export interface GpuSurface {
   readonly kind: GpuBackendKind;

@@ -55,7 +55,9 @@ export class WebGpuSurface implements GpuSurface {
   private disposed = false;
   private lastRenderedTexture: any = null;
   private readonly lostListeners = new Set<(reason: GpuLossReason) => void>();
+  private readonly captureAbortListeners = new Set<() => void>();
   private readonly unbindDeviceLoss: () => void;
+  private initVerificationPromise: Promise<void> | null = null;
 
   constructor(
     public readonly canvas: HTMLCanvasElement,
@@ -63,19 +65,68 @@ export class WebGpuSurface implements GpuSurface {
     pipeline?: WebGpuQuadPipeline,
   ) {
     this.ctx = canvas.getContext ? canvas.getContext("webgpu") : null;
-    if (this.ctx && typeof this.ctx.configure === "function") {
-      this.ctx.configure({
-        device: handle.device,
-        format: handle.format,
-        alphaMode: "premultiplied",
-        usage: 0x0010 | 0x0001, // GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.COPY_SRC
-      });
+    const device = handle.device;
+    const hasErrorScope =
+      !pipeline
+      && typeof device?.pushErrorScope === "function"
+      && typeof device?.popErrorScope === "function";
+
+    let pushedScopes = 0;
+    if (hasErrorScope) {
+      try {
+        device.pushErrorScope("out-of-memory");
+        pushedScopes++;
+        device.pushErrorScope("validation");
+        pushedScopes++;
+      } catch {
+        while (pushedScopes > 0) {
+          pushedScopes--;
+          try { Promise.resolve(device.popErrorScope()).catch(() => {}); } catch {}
+        }
+      }
     }
 
-    this.pipeline = pipeline ?? new WebGpuQuadPipeline(handle.device, handle.format);
+    try {
+      if (this.ctx && typeof this.ctx.configure === "function") {
+        this.ctx.configure({
+          device,
+          format: handle.format,
+          alphaMode: "premultiplied",
+          usage: 0x0010 | 0x0001, // GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.COPY_SRC
+        });
+      }
+
+      this.pipeline = pipeline ?? new WebGpuQuadPipeline(device, handle.format);
+    } finally {
+      if (pushedScopes > 0) {
+        const pops: Array<Promise<any>> = [];
+        while (pushedScopes > 0) {
+          pushedScopes--;
+          try {
+            pops.push(Promise.resolve(device.popErrorScope()).catch(() => null));
+          } catch {
+            pops.push(Promise.resolve(null));
+          }
+        }
+        this.initVerificationPromise = Promise.all(pops).then((errors) => {
+          const err = errors.find((item) => item != null);
+          if (err) {
+            throw new Error(`WebGpuSurface init failed: ${err.message ?? String(err)}`);
+          }
+        });
+        this.initVerificationPromise.catch(() => {});
+      }
+    }
 
     this.unbindDeviceLoss = handle.onLost((reason) => {
-      const mappedReason: GpuLossReason = reason === "validation-failed" ? "validation-failed" : "device-lost";
+      const mappedReason: GpuLossReason =
+        reason === "out-of-memory"
+          ? "out-of-memory"
+          : reason === "internal-error"
+            ? "internal-error"
+            : reason === "validation-failed"
+              ? "validation-failed"
+              : "device-lost";
       for (const listener of [...this.lostListeners]) {
         try {
           listener(mappedReason);
@@ -84,6 +135,12 @@ export class WebGpuSurface implements GpuSurface {
         }
       }
     });
+  }
+
+  async verifyInit(): Promise<void> {
+    if (this.initVerificationPromise) {
+      await this.initVerificationPromise;
+    }
   }
 
   getDeviceHandle(): WebGpuDeviceHandle {
@@ -159,6 +216,9 @@ export class WebGpuSurface implements GpuSurface {
     if (this.disposed) {
       throw new Error("WebGpuSurface: cannot capture disposed surface");
     }
+    if (this.handle.isLost()) {
+      throw new Error("WebGpuSurface: device is lost");
+    }
     const width = this.canvas.width;
     const height = this.canvas.height;
     if (width <= 0 || height <= 0) {
@@ -177,70 +237,158 @@ export class WebGpuSurface implements GpuSurface {
     const bytesPerRow = Math.ceil(unpaddedBytesPerRow / align) * align;
     const bufferSize = bytesPerRow * height;
 
-    const stagingBuffer = device.createBuffer({
-      label: "WebGpuCaptureStagingBuffer",
-      size: bufferSize,
-      usage: 0x0008 | 0x0001, // GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ
-    });
+    const hasErrorScope =
+      typeof device.pushErrorScope === "function"
+      && typeof device.popErrorScope === "function";
 
-    const commandEncoder = device.createCommandEncoder({
-      label: "WebGpuCaptureCommandEncoder",
-    });
+    let stagingBuffer: any = null;
+    let mapped = false;
+    let unbindLost: (() => void) | null = null;
+    let unbindAbort: (() => void) | null = null;
+    let pushedScopes = 0;
 
-    commandEncoder.copyTextureToBuffer(
-      { texture },
-      {
-        buffer: stagingBuffer,
-        bytesPerRow,
-        rowsPerImage: height,
-      },
-      {
+    try {
+      if (hasErrorScope) {
+        try {
+          device.pushErrorScope("out-of-memory");
+          pushedScopes++;
+          device.pushErrorScope("validation");
+          pushedScopes++;
+        } catch {
+          while (pushedScopes > 0) {
+            pushedScopes--;
+            try { Promise.resolve(device.popErrorScope()).catch(() => {}); } catch {}
+          }
+        }
+      }
+
+      const scopePops: Array<Promise<any>> = [];
+      try {
+        stagingBuffer = device.createBuffer({
+          label: "WebGpuCaptureStagingBuffer",
+          size: bufferSize,
+          usage: 0x0008 | 0x0001, // GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ
+        });
+
+        const commandEncoder = device.createCommandEncoder({
+          label: "WebGpuCaptureCommandEncoder",
+        });
+
+        commandEncoder.copyTextureToBuffer(
+          { texture },
+          {
+            buffer: stagingBuffer,
+            bytesPerRow,
+            rowsPerImage: height,
+          },
+          {
+            width,
+            height,
+            depthOrArrayLayers: 1,
+          },
+        );
+
+        device.queue.submit([commandEncoder.finish()]);
+      } finally {
+        while (pushedScopes > 0) {
+          pushedScopes--;
+          try {
+            scopePops.push(Promise.resolve(device.popErrorScope()).catch(() => null));
+          } catch {
+            scopePops.push(Promise.resolve(null));
+          }
+        }
+      }
+
+      if (scopePops.length > 0) {
+        const errors = await Promise.all(scopePops);
+        const scopeErr = errors.find((item) => item != null);
+        if (scopeErr) {
+          throw new Error(`WebGpuSurface capture failed: ${scopeErr.message ?? String(scopeErr)}`);
+        }
+      }
+
+      if (this.disposed) {
+        throw new Error("WebGpuSurface: disposed during capture");
+      }
+      if (this.handle.isLost()) {
+        throw new Error("WebGpuSurface: device lost during capture");
+      }
+
+      const mapPromise = Promise.resolve(stagingBuffer.mapAsync(0x0001)); // GPUMapMode.READ
+      void mapPromise.catch(() => {});
+      const lostPromise = new Promise<never>((_, reject) => {
+        unbindLost = this.handle.onLost((reason) => {
+          reject(new Error(`WebGpuSurface: device lost during capture (${reason})`));
+        });
+      });
+      const abortPromise = new Promise<never>((_, reject) => {
+        const onAbort = (): void => {
+          reject(new Error("WebGpuSurface: disposed during capture"));
+        };
+        this.captureAbortListeners.add(onAbort);
+        unbindAbort = () => {
+          this.captureAbortListeners.delete(onAbort);
+        };
+        if (this.disposed) {
+          onAbort();
+        }
+      });
+
+      await Promise.race([mapPromise, lostPromise, abortPromise]);
+      if (this.disposed) {
+        throw new Error("WebGpuSurface: disposed during capture");
+      }
+      mapped = true;
+
+      const mappedBytes = new Uint8Array(stagingBuffer.getMappedRange());
+      const out = new Uint8ClampedArray(width * height * 4);
+      const isBgra = this.handle.format === "bgra8unorm";
+
+      for (let row = 0; row < height; row++) {
+        const srcRowOffset = row * bytesPerRow;
+        const dstRowOffset = row * unpaddedBytesPerRow;
+
+        if (isBgra) {
+          for (let x = 0; x < width; x++) {
+            const srcPixel = srcRowOffset + x * 4;
+            const dstPixel = dstRowOffset + x * 4;
+            const b = mappedBytes[srcPixel];
+            const g = mappedBytes[srcPixel + 1];
+            const r = mappedBytes[srcPixel + 2];
+            const a = mappedBytes[srcPixel + 3];
+            out[dstPixel] = r;
+            out[dstPixel + 1] = g;
+            out[dstPixel + 2] = b;
+            out[dstPixel + 3] = a;
+          }
+        } else {
+          out.set(
+            mappedBytes.subarray(srcRowOffset, srcRowOffset + unpaddedBytesPerRow),
+            dstRowOffset,
+          );
+        }
+      }
+
+      return {
+        data: out,
         width,
         height,
-        depthOrArrayLayers: 1,
-      },
-    );
-
-    device.queue.submit([commandEncoder.finish()]);
-
-    await stagingBuffer.mapAsync(0x0001); // GPUMapMode.READ
-    const mapped = new Uint8Array(stagingBuffer.getMappedRange());
-    const out = new Uint8ClampedArray(width * height * 4);
-    const isBgra = this.handle.format === "bgra8unorm";
-
-    for (let row = 0; row < height; row++) {
-      const srcRowOffset = row * bytesPerRow;
-      const dstRowOffset = row * unpaddedBytesPerRow;
-
-      if (isBgra) {
-        for (let x = 0; x < width; x++) {
-          const srcPixel = srcRowOffset + x * 4;
-          const dstPixel = dstRowOffset + x * 4;
-          const b = mapped[srcPixel];
-          const g = mapped[srcPixel + 1];
-          const r = mapped[srcPixel + 2];
-          const a = mapped[srcPixel + 3];
-          out[dstPixel] = r;
-          out[dstPixel + 1] = g;
-          out[dstPixel + 2] = b;
-          out[dstPixel + 3] = a;
-        }
-      } else {
-        out.set(
-          mapped.subarray(srcRowOffset, srcRowOffset + unpaddedBytesPerRow),
-          dstRowOffset,
-        );
+      };
+    } finally {
+      if (unbindAbort) {
+        try { unbindAbort(); } catch {}
+      }
+      if (unbindLost) {
+        try { unbindLost(); } catch {}
+      }
+      if (mapped && stagingBuffer) {
+        try { stagingBuffer.unmap?.(); } catch {}
+      }
+      if (stagingBuffer) {
+        try { stagingBuffer.destroy?.(); } catch {}
       }
     }
-
-    stagingBuffer.unmap();
-    stagingBuffer.destroy();
-
-    return {
-      data: out,
-      width,
-      height,
-    };
   }
 
   onLost(listener: (reason: GpuLossReason) => void): () => void {
@@ -253,6 +401,10 @@ export class WebGpuSurface implements GpuSurface {
   dispose(): void {
     if (this.disposed) return;
     this.disposed = true;
+    for (const abort of [...this.captureAbortListeners]) {
+      try { abort(); } catch {}
+    }
+    this.captureAbortListeners.clear();
     this.unbindDeviceLoss();
     this.lostListeners.clear();
     this.pipeline.dispose();
