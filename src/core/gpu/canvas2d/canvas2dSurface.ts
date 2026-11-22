@@ -24,7 +24,12 @@ function formatCssRgba(c: RGBA): string {
 export class Canvas2dQuadSink implements QuadSink {
   private lastCss = "";
 
-  constructor(private readonly ctx: CanvasRenderingContext2D) {}
+  constructor(private ctx: CanvasRenderingContext2D) {}
+
+  updateContext(nextCtx: CanvasRenderingContext2D): void {
+    this.ctx = nextCtx;
+    this.reset();
+  }
 
   rect(x: number, y: number, w: number, h: number, c: RGBA): void {
     const css = formatCssRgba(c);
@@ -47,15 +52,47 @@ export class Canvas2dSurface implements GpuSurface {
   private dpr = 1;
   private disposed = false;
   private inFrame = false;
+  private contextLost = false;
+  private readonly lostListeners = new Set<(reason: GpuLossReason) => void>();
+  private contextLostBound = false;
+
+  private readonly handleContextLost = (e: Event): void => {
+    e.preventDefault?.();
+    this.contextLost = true;
+    for (const listener of [...this.lostListeners]) {
+      try {
+        listener("context-lost");
+      } catch (err) {
+        console.error("[Canvas2dSurface] onLost listener error", err);
+      }
+    }
+  };
 
   constructor(
     public readonly canvas: HTMLCanvasElement,
-    private readonly ctx: CanvasRenderingContext2D = canvas.getContext("2d") as CanvasRenderingContext2D,
+    private ctx: CanvasRenderingContext2D = canvas.getContext("2d") as CanvasRenderingContext2D,
   ) {
     if (!this.ctx) {
       throw new Error("Canvas2dSurface: failed to acquire 2D rendering context");
     }
     this.quadSink = new Canvas2dQuadSink(this.ctx);
+  }
+
+  markContextLost(): void {
+    this.contextLost = true;
+  }
+
+  restoreContext(nextCtx?: CanvasRenderingContext2D | null): boolean {
+    if (this.disposed) return false;
+    const resolved = nextCtx !== undefined ? nextCtx : (this.canvas.getContext?.("2d") as CanvasRenderingContext2D | null);
+    if (!resolved || resolved.isContextLost?.() === true) {
+      return false;
+    }
+    this.ctx = resolved;
+    this.quadSink.updateContext(resolved);
+    this.inFrame = false;
+    this.contextLost = false;
+    return true;
   }
 
   resize(bitmapWidth: number, bitmapHeight: number, dpr = 1): void {
@@ -99,6 +136,9 @@ export class Canvas2dSurface implements GpuSurface {
     if (this.disposed) {
       throw new Error("Canvas2dSurface: cannot capture disposed surface");
     }
+    if (this.contextLost || this.ctx.isContextLost?.() === true) {
+      throw new Error("Canvas2dSurface: context is lost");
+    }
     const width = this.canvas.width;
     const height = this.canvas.height;
     if (width <= 0 || height <= 0) {
@@ -112,14 +152,30 @@ export class Canvas2dSurface implements GpuSurface {
     };
   }
 
-  onLost(_listener: (reason: GpuLossReason) => void): () => void {
-    // 2D canvas contexts do not experience context-loss in HTML5 specifications.
-    return () => {};
+  onLost(listener: (reason: GpuLossReason) => void): () => void {
+    if (this.disposed) return () => {};
+    if (!this.contextLostBound && this.canvas.addEventListener) {
+      this.canvas.addEventListener("contextlost", this.handleContextLost);
+      this.contextLostBound = true;
+    }
+    this.lostListeners.add(listener);
+    return () => {
+      this.lostListeners.delete(listener);
+      if (this.lostListeners.size === 0 && this.contextLostBound && this.canvas.removeEventListener) {
+        this.canvas.removeEventListener("contextlost", this.handleContextLost);
+        this.contextLostBound = false;
+      }
+    };
   }
 
   dispose(): void {
     if (this.disposed) return;
     this.disposed = true;
+    if (this.contextLostBound && this.canvas.removeEventListener) {
+      this.canvas.removeEventListener("contextlost", this.handleContextLost);
+      this.contextLostBound = false;
+    }
+    this.lostListeners.clear();
     if (this.inFrame) {
       this.inFrame = false;
       try {

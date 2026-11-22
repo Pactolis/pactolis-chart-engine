@@ -44,7 +44,12 @@ import {
 import type { GpuSurface } from "../../core/gpu/gpuBackend.js";
 import { Canvas2dSurface } from "../../core/gpu/canvas2d/canvas2dSurface.js";
 import { WebGl2Surface } from "../../core/gpu/webgl2/webgl2Surface.js";
-import { recordGpuContextEvent, recordGpuFallback, recordGpuFrame } from "../../core/gpu/gpuDiagnostics.js";
+import {
+  recordCanvas2dContextEvent,
+  recordGpuContextEvent,
+  recordGpuFallback,
+  recordGpuFrame,
+} from "../../core/gpu/gpuDiagnostics.js";
 import { readGpuSettings } from "../../core/gpu/gpuSettings.js";
 
 const CONTEXT_RESTORE_TIMEOUT_MS = 5000;
@@ -91,6 +96,12 @@ export interface ChartSessionOptions {
   crosshair: Crosshair;
   /** Called when the GPU needs to be fully rebuilt (context restored or first setup). */
   onRestoreContext: (gl: WebGL2RenderingContext) => void;
+  /** Called when a Canvas2D main scene context is restored. */
+  onRestoreCanvas2dContext?: () => void;
+  /** Called when the annotation Canvas2D context is restored with a fresh context. */
+  onRestoreAnnotationContext?: (ctx: CanvasRenderingContext2D) => void;
+  /** Called when the interaction Canvas2D context is restored with a fresh context. */
+  onRestoreInteractionContext?: (ctx: CanvasRenderingContext2D) => void;
   /** Called when the GPU context is lost, after the session already cancelled RAF, marked GPU invalid, cleared dirty state and rejected any pending capture; symmetric to onRestoreContext. */
   onLostContext?: () => void;
   onBackendChanged?: (backend: string) => void;
@@ -130,8 +141,10 @@ export class ChartSession {
   private readonly annotationCanvas: HTMLCanvasElement;
   private readonly interactionCanvas: HTMLCanvasElement;
   private ownerDocument: Document;
-  private readonly annotationCtx2d: CanvasRenderingContext2D;
-  private readonly interactionCtx2d: CanvasRenderingContext2D;
+  private annotationCtx2d: CanvasRenderingContext2D;
+  private interactionCtx2d: CanvasRenderingContext2D;
+  private annotationContextLost = false;
+  private interactionContextLost = false;
   private readonly renderer: ChartSessionRenderer;
   private readonly annotationRenderer: ChartSessionAnnotation;
   private readonly interactionRenderer: ChartSessionInteraction;
@@ -139,6 +152,9 @@ export class ChartSession {
   private readonly series: FootprintSeries;
   private readonly crosshair: Crosshair;
   private readonly onRestoreContextCb: (gl: WebGL2RenderingContext) => void;
+  private readonly onRestoreCanvas2dContextCb?: () => void;
+  private readonly onRestoreAnnotationContextCb?: (ctx: CanvasRenderingContext2D) => void;
+  private readonly onRestoreInteractionContextCb?: (ctx: CanvasRenderingContext2D) => void;
   private readonly onLostContextCb?: () => void;
   private readonly onBackendChangedCb?: (backend: string) => void;
   private readonly onResizeCb?: (w: number, h: number, dpr: number) => void;
@@ -211,6 +227,9 @@ export class ChartSession {
     this.series = opts.series;
     this.crosshair = opts.crosshair;
     this.onRestoreContextCb = opts.onRestoreContext;
+    this.onRestoreCanvas2dContextCb = opts.onRestoreCanvas2dContext;
+    this.onRestoreAnnotationContextCb = opts.onRestoreAnnotationContext;
+    this.onRestoreInteractionContextCb = opts.onRestoreInteractionContext;
     this.onLostContextCb = opts.onLostContext;
     this.onBackendChangedCb = opts.onBackendChanged;
     this.onResizeCb = opts.onResize;
@@ -221,6 +240,7 @@ export class ChartSession {
 
     this.lifecycle.start();
     this.setupContextLossHandling();
+    this.setupOverlayContextLossHandling();
     this.setupResizeObserver();
     this.lifecycle.add(() => {
       this.disposeDprWatcher?.();
@@ -304,6 +324,14 @@ export class ChartSession {
     }
 
     this.gpuSurface.dispose();
+    if (prevCanvas !== nextCanvas) {
+      try {
+        prevCanvas.width = 0;
+        prevCanvas.height = 0;
+      } catch {
+        // ignore mock canvas error
+      }
+    }
     this.gpuSurface = nextSurface;
     this.gpuCanvas = nextCanvas;
     if (nextSurface.kind === "webgl2") {
@@ -348,7 +376,7 @@ export class ChartSession {
   }
 
   captureCompositePng(): Promise<NativeCaptureFrame> {
-    if (!this.active || !this.gpuValid) {
+    if (!this.active || !this.gpuValid || this.annotationContextLost) {
       return Promise.reject(new ChartCaptureError("CAPTURE_FAILED", "chart session is not renderable"));
     }
     if (this.pendingCapture) {
@@ -458,7 +486,9 @@ export class ChartSession {
           );
           if (this.gpuSurface.kind === "canvas2d") {
             const ctx2d = this.gpuCanvas.getContext("2d");
-            if (!ctx2d) throw new ChartCaptureError("CAPTURE_FAILED", "Canvas2D context unavailable for capture");
+            if (!ctx2d || ctx2d.isContextLost?.() === true) {
+              throw new ChartCaptureError("CAPTURE_FAILED", "Canvas2D context unavailable for capture");
+            }
             const imgData = ctx2d.getImageData(0, 0, captureSize.width, captureSize.height);
             capturePixels = imgData.data;
           } else if (this.gl && typeof this.gl.readPixels === "function") {
@@ -476,7 +506,7 @@ export class ChartSession {
       }
     }
     const range = this.renderer.visibleRange(this.view, this.series.length);
-    if (dirty & ChartSurfaceDirty.Annotation) {
+    if ((dirty & ChartSurfaceDirty.Annotation) && !this.annotationContextLost) {
       incrementPerformanceCounter("chart.surface.annotation.draw");
       const drawStartedAt = telemetryEnabled ? performance.now() : null;
       try {
@@ -487,7 +517,7 @@ export class ChartSession {
         }
       }
     }
-    if (dirty & ChartSurfaceDirty.Interaction) {
+    if ((dirty & ChartSurfaceDirty.Interaction) && !this.interactionContextLost) {
       incrementPerformanceCounter("chart.surface.interaction.draw");
       const drawStartedAt = telemetryEnabled ? performance.now() : null;
       try {
@@ -515,6 +545,10 @@ export class ChartSession {
     recordGpuFrame(this.gpuSurface.kind, renderMs, intervalMs);
 
     if (this.pendingCapture && (dirty & ChartSurfaceDirty.Annotation)) {
+      if (this.annotationContextLost) {
+        this.rejectPendingCapture("annotation Canvas2D context was lost during capture");
+        return;
+      }
       const pending = this.pendingCapture;
       this.pendingCapture = null;
       if (useAsyncCapture) {
@@ -527,6 +561,9 @@ export class ChartSession {
               this.annotationCanvas.height,
             );
             const frame = await this.gpuSurface.requestCapture();
+            if (this.annotationContextLost) {
+              throw new ChartCaptureError("CAPTURE_FAILED", "annotation Canvas2D context was lost during capture");
+            }
             const captureFrame = await encodeGpuAndAnnotationPng(
               this.ownerDocument,
               frame.data,
@@ -534,6 +571,9 @@ export class ChartSession {
               frame.height,
               this.annotationCanvas,
             );
+            if (this.annotationContextLost) {
+              throw new ChartCaptureError("CAPTURE_FAILED", "annotation Canvas2D context was lost during capture");
+            }
             pending.resolve(captureFrame);
           } catch (err) {
             pending.reject(err);
@@ -629,10 +669,10 @@ export class ChartSession {
   }
 
   /** Apply a measured canvas size. Returns true only when a commit actually ran. */
-  private applyContainerSize(): boolean {
+  private applyContainerSize(force = false): boolean {
     const target = this.measureContainerSize();
     if (!target) return false;
-    if (this.containerSizeWouldChange(target)) {
+    if (force || this.containerSizeWouldChange(target)) {
       // Mark the transaction unfinished BEFORE the destructive bitmap/CSS mutation: if a
       // transform or onResize throws mid-commit, the physically cleared surfaces keep
       // their repayment intent instead of silently skipping restoration on an unchanged retry.
@@ -768,7 +808,9 @@ export class ChartSession {
 
     if (this.gpuSurface.kind === "webgpu") {
       const unbind = this.gpuSurface.onLost((reason) => {
-        recordGpuContextEvent("lost");
+        if (reason === "device-lost") {
+          recordGpuContextEvent("lost");
+        }
         this.cancelRaf();
         this.pendingLiveUpdateStartedAt = null;
         this.gpuValid = false;
@@ -782,25 +824,108 @@ export class ChartSession {
           const fallbackCanvas = this.ownerDocument.createElement("canvas");
           const fallbackGl = getChartWebGl2Context(fallbackCanvas, this.webglOptions);
           if (fallbackGl) {
-            this.replaceSurface(new WebGl2Surface(fallbackCanvas, fallbackGl));
-            this.onBackendChangedCb?.("webgl2");
-          } else {
-            recordGpuFallback("webgl2", "canvas2d", "fallback_context_unavailable");
+            try {
+              this.replaceSurface(new WebGl2Surface(fallbackCanvas, fallbackGl));
+              this.onBackendChangedCb?.("webgl2");
+              return;
+            } catch {
+              try { fallbackCanvas.width = 0; fallbackCanvas.height = 0; } catch {}
+              try { fallbackCanvas.remove?.(); } catch {}
+              recordGpuFallback("webgl2", "canvas2d", "surface_init_failed");
+              const c2dCanvas = this.ownerDocument.createElement("canvas");
+              try {
+                this.replaceSurface(new Canvas2dSurface(c2dCanvas));
+                this.onBackendChangedCb?.("canvas2d");
+                return;
+              } catch (c2dErr) {
+                try { c2dCanvas.width = 0; c2dCanvas.height = 0; } catch {}
+                try { c2dCanvas.remove?.(); } catch {}
+                throw c2dErr;
+              }
+            }
+          }
+          recordGpuFallback("webgl2", "canvas2d", "fallback_context_unavailable");
+          try {
             this.replaceSurface(new Canvas2dSurface(fallbackCanvas));
             this.onBackendChangedCb?.("canvas2d");
+          } catch {
+            try { fallbackCanvas.width = 0; fallbackCanvas.height = 0; } catch {}
+            try { fallbackCanvas.remove?.(); } catch {}
+            const c2dCanvas = this.ownerDocument.createElement("canvas");
+            try {
+              this.replaceSurface(new Canvas2dSurface(c2dCanvas));
+              this.onBackendChangedCb?.("canvas2d");
+            } catch (c2dErr) {
+              try { c2dCanvas.width = 0; c2dCanvas.height = 0; } catch {}
+              try { c2dCanvas.remove?.(); } catch {}
+              throw c2dErr;
+            }
           }
         } catch (err) {
           console.error("[ChartSession] WebGPU fallback failed", err);
         }
       });
 
-      this.cleanupContextListeners = unbind;
-      this.lifecycle.add(unbind);
+      let cleaned = false;
+      const cleanup = () => {
+        if (cleaned) return;
+        cleaned = true;
+        unbind();
+      };
+      this.cleanupContextListeners = cleanup;
+      this.lifecycle.add(cleanup);
       return;
     }
 
     const canvas = this.gpuCanvas;
     if (!canvas.addEventListener) return;
+
+    if (this.gpuSurface.kind === "canvas2d") {
+      const onLost = (e: Event): void => {
+        e.preventDefault?.();
+        recordCanvas2dContextEvent("scene", "lost");
+        (this.gpuSurface as { markContextLost?: () => void }).markContextLost?.();
+        this.cancelRaf();
+        this.pendingLiveUpdateStartedAt = null;
+        this.gpuValid = false;
+        this.dirtySurfaces = ChartSurfaceDirty.None;
+        this.pendingChanges = ChartChange.None;
+        this.rejectPendingCapture("Canvas2D context was lost during capture");
+        this.onLostContextCb?.();
+      };
+
+      const onRestored = (): void => {
+        const surface = this.gpuSurface as { restoreContext?: () => boolean };
+        const restored = typeof surface.restoreContext === "function"
+          ? surface.restoreContext()
+          : Boolean(this.gpuCanvas.getContext?.("2d"));
+        if (!restored) {
+          incrementPerformanceCounter("chart.gpu.contextCreateFailed");
+          return;
+        }
+        recordCanvas2dContextEvent("scene", "restored");
+        this.gpuValid = true;
+        this.applyContainerSize(true);
+        this.onRestoreCanvas2dContextCb?.();
+        this.dirtySurfaces = ChartSurfaceDirty.All;
+        this.pendingChanges = ChartChange.All;
+        if (this.active) this.startRaf();
+      };
+
+      canvas.addEventListener("contextlost", onLost);
+      canvas.addEventListener("contextrestored", onRestored);
+
+      let cleaned = false;
+      const cleanup = () => {
+        if (cleaned) return;
+        cleaned = true;
+        canvas.removeEventListener?.("contextlost", onLost);
+        canvas.removeEventListener?.("contextrestored", onRestored);
+      };
+      this.cleanupContextListeners = cleanup;
+      this.lifecycle.add(cleanup);
+      return;
+    }
 
     const onLost = (e: Event): void => {
       e.preventDefault();
@@ -850,7 +975,10 @@ export class ChartSession {
     canvas.addEventListener("webglcontextlost", onLost);
     canvas.addEventListener("webglcontextrestored", onRestored);
 
+    let cleaned = false;
     const cleanup = () => {
+      if (cleaned) return;
+      cleaned = true;
       if (this.restoreTimeoutId) {
         clearTimeout(this.restoreTimeoutId);
         this.restoreTimeoutId = null;
@@ -860,6 +988,98 @@ export class ChartSession {
     };
     this.cleanupContextListeners = cleanup;
     this.lifecycle.add(cleanup);
+  }
+
+  private setupOverlayContextLossHandling(): void {
+    const cleanups: Array<() => void> = [];
+
+    if (this.annotationCanvas.addEventListener) {
+      const onAnnotationLost = (e: Event): void => {
+        e.preventDefault?.();
+        this.annotationContextLost = true;
+        recordCanvas2dContextEvent("annotation", "lost");
+        this.rejectPendingCapture("annotation Canvas2D context was lost during capture");
+      };
+      const onAnnotationRestored = (): void => {
+        const freshCtx = this.annotationCanvas.getContext?.("2d") as CanvasRenderingContext2D | null;
+        if (!freshCtx || freshCtx.isContextLost?.() === true) {
+          incrementPerformanceCounter("chart.gpu.contextCreateFailed");
+          return;
+        }
+        this.annotationCtx2d = freshCtx;
+        this.annotationContextLost = false;
+        recordCanvas2dContextEvent("annotation", "restored");
+        if (this.gpuValid) {
+          if (!this.applyContainerSize(true)) {
+            const dpr = this.dpr();
+            this.annotationCtx2d.setTransform(dpr, 0, 0, dpr, 0, 0);
+          }
+        } else {
+          const dpr = this.dpr();
+          this.annotationCtx2d.setTransform(dpr, 0, 0, dpr, 0, 0);
+        }
+        this.onRestoreAnnotationContextCb?.(freshCtx);
+        if (this.active && this.gpuValid) {
+          this.dirtySurfaces = ChartSurfaceDirty.All;
+          this.pendingChanges = ChartChange.All;
+          this.startRaf();
+        }
+      };
+      this.annotationCanvas.addEventListener("contextlost", onAnnotationLost);
+      this.annotationCanvas.addEventListener("contextrestored", onAnnotationRestored);
+      cleanups.push(() => {
+        this.annotationCanvas.removeEventListener?.("contextlost", onAnnotationLost);
+        this.annotationCanvas.removeEventListener?.("contextrestored", onAnnotationRestored);
+      });
+    }
+
+    if (this.interactionCanvas.addEventListener) {
+      const onInteractionLost = (e: Event): void => {
+        e.preventDefault?.();
+        this.interactionContextLost = true;
+        recordCanvas2dContextEvent("interaction", "lost");
+      };
+      const onInteractionRestored = (): void => {
+        const freshCtx = this.interactionCanvas.getContext?.("2d") as CanvasRenderingContext2D | null;
+        if (!freshCtx || freshCtx.isContextLost?.() === true) {
+          incrementPerformanceCounter("chart.gpu.contextCreateFailed");
+          return;
+        }
+        this.interactionCtx2d = freshCtx;
+        this.interactionContextLost = false;
+        recordCanvas2dContextEvent("interaction", "restored");
+        if (this.gpuValid) {
+          if (!this.applyContainerSize(true)) {
+            const dpr = this.dpr();
+            this.interactionCtx2d.setTransform(dpr, 0, 0, dpr, 0, 0);
+          }
+        } else {
+          const dpr = this.dpr();
+          this.interactionCtx2d.setTransform(dpr, 0, 0, dpr, 0, 0);
+        }
+        this.onRestoreInteractionContextCb?.(freshCtx);
+        if (this.active && this.gpuValid) {
+          this.dirtySurfaces = ChartSurfaceDirty.All;
+          this.pendingChanges = ChartChange.All;
+          this.startRaf();
+        }
+      };
+      this.interactionCanvas.addEventListener("contextlost", onInteractionLost);
+      this.interactionCanvas.addEventListener("contextrestored", onInteractionRestored);
+      cleanups.push(() => {
+        this.interactionCanvas.removeEventListener?.("contextlost", onInteractionLost);
+        this.interactionCanvas.removeEventListener?.("contextrestored", onInteractionRestored);
+      });
+    }
+
+    if (cleanups.length > 0) {
+      let cleaned = false;
+      this.lifecycle.add(() => {
+        if (cleaned) return;
+        cleaned = true;
+        for (const fn of cleanups) fn();
+      });
+    }
   }
 }
 

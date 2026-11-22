@@ -114,6 +114,23 @@ export function recordGpuDeviceLoss(): void {
   incrementPerformanceCounter("gpu.device.lost");
 }
 
+/** Intentional WebGPU device destruction via handle disposal. */
+export function recordGpuDeviceDestroyed(): void {
+  counters["gpu.device.destroyed"] = (counters["gpu.device.destroyed"] ?? 0) + 1;
+  incrementPerformanceCounter("gpu.device.destroyed");
+}
+
+export type GpuErrorKind = "validation" | "out-of-memory" | "internal" | "unknown";
+
+/** Uncaptured GPU error classification (distinct from device loss). */
+export function recordGpuError(backend: string, kind: GpuErrorKind): void {
+  const backendKey = `gpu.${backend}.error.${kind}`;
+  counters[backendKey] = (counters[backendKey] ?? 0) + 1;
+  incrementPerformanceCounter(backendKey);
+  counters["gpu.renderError"] = (counters["gpu.renderError"] ?? 0) + 1;
+  incrementPerformanceCounter("gpu.renderError");
+}
+
 /** Per-chart context event, including each chart affected by a shared device loss. */
 export function recordGpuContextEvent(kind: "lost" | "restored" | "createFailed"): void {
   let counterKey: string;
@@ -126,6 +143,20 @@ export function recordGpuContextEvent(kind: "lost" | "restored" | "createFailed"
   }
   counters[counterKey] = (counters[counterKey] ?? 0) + 1;
   incrementPerformanceCounter(counterKey);
+}
+
+/** Per-surface Canvas2D context loss/restoration counter. */
+export function recordCanvas2dContextEvent(
+  surface: "scene" | "annotation" | "interaction",
+  kind: "lost" | "restored",
+): void {
+  const suffix = kind === "lost" ? "contextLost" : "contextRestored";
+  const totalKey = `chart.canvas2d.${suffix}`;
+  const surfaceKey = `chart.canvas2d.${surface}.${suffix}`;
+  counters[totalKey] = (counters[totalKey] ?? 0) + 1;
+  incrementPerformanceCounter(totalKey);
+  counters[surfaceKey] = (counters[surfaceKey] ?? 0) + 1;
+  incrementPerformanceCounter(surfaceKey);
 }
 
 export function setGpuAdapterInfo(info: GpuAdapterInfo | undefined): void {

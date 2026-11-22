@@ -1,5 +1,13 @@
 import { incrementPerformanceCounter } from "../../performanceTelemetry.js";
-import { recordGpuDeviceLoss, recordGpuFallback, setGpuAdapterInfo } from "../gpuDiagnostics.js";
+import {
+  recordGpuDeviceDestroyed,
+  recordGpuDeviceLoss,
+  recordGpuError,
+  recordGpuFallback,
+  setGpuAdapterInfo,
+  type GpuAdapterInfo,
+  type GpuErrorKind,
+} from "../gpuDiagnostics.js";
 import type { ChartPowerPreference } from "../../model/chartDisplayOptions.js";
 import { isWebGpuSupported } from "../gpuSettings.js";
 export { isWebGpuSupported } from "../gpuSettings.js";
@@ -23,11 +31,98 @@ let sharedHandle: WebGpuDeviceHandle | null = null;
 let sharedDevicePromise: Promise<WebGpuDeviceHandle | null> | null = null;
 let sharedPowerPreference: ChartPowerPreference = "default";
 
+function classifyWebGpuError(error: unknown): GpuErrorKind {
+  if (!error || typeof error !== "object") return "unknown";
+  const g = globalThis as Record<string, any>;
+  if (typeof g.GPUOutOfMemoryError === "function" && error instanceof g.GPUOutOfMemoryError) {
+    return "out-of-memory";
+  }
+  if (typeof g.GPUInternalError === "function" && error instanceof g.GPUInternalError) {
+    return "internal";
+  }
+  if (typeof g.GPUValidationError === "function" && error instanceof g.GPUValidationError) {
+    return "validation";
+  }
+  const errObj = error as { name?: unknown; constructor?: { name?: unknown } };
+  const name = errObj.name ?? errObj.constructor?.name;
+  if (name === "GPUOutOfMemoryError") return "out-of-memory";
+  if (name === "GPUInternalError") return "internal";
+  if (name === "GPUValidationError") return "validation";
+  const ctorName = errObj.constructor?.name;
+  if (ctorName === "GPUOutOfMemoryError") return "out-of-memory";
+  if (ctorName === "GPUInternalError") return "internal";
+  if (ctorName === "GPUValidationError") return "validation";
+  return "unknown";
+}
+
+async function readAdapterInfoSafely(adapter: any): Promise<GpuAdapterInfo | undefined> {
+  let info: any = undefined;
+  try {
+    info = adapter?.info;
+  } catch {
+    info = undefined;
+  }
+
+  if (!info && typeof adapter?.requestAdapterInfo === "function") {
+    try {
+      info = await adapter.requestAdapterInfo();
+    } catch {
+      info = undefined;
+    }
+  }
+
+  let vendor: string | undefined;
+  let architecture: string | undefined;
+  let description: string | undefined;
+  let infoFallback: unknown = undefined;
+  let adapterFallback: unknown = undefined;
+
+  try {
+    vendor = typeof info?.vendor === "string" ? info.vendor : undefined;
+    architecture = typeof info?.architecture === "string" ? info.architecture : undefined;
+    description = typeof info?.description === "string" ? info.description : undefined;
+    infoFallback = info?.isFallbackAdapter;
+  } catch {
+    // Metadata access error must never break requestDevice()
+  }
+
+  try {
+    adapterFallback = adapter?.isFallbackAdapter;
+  } catch {
+    adapterFallback = undefined;
+  }
+
+  const isFallbackAdapter =
+    typeof infoFallback === "boolean"
+      ? infoFallback
+      : typeof adapterFallback === "boolean"
+        ? adapterFallback
+        : undefined;
+
+  const hasText =
+    (typeof vendor === "string" && vendor.trim().length > 0) ||
+    (typeof architecture === "string" && architecture.trim().length > 0) ||
+    (typeof description === "string" && description.trim().length > 0);
+
+  if (!hasText && typeof isFallbackAdapter !== "boolean") {
+    return undefined;
+  }
+
+  return {
+    ...(vendor !== undefined ? { vendor } : {}),
+    ...(architecture !== undefined ? { architecture } : {}),
+    ...(description !== undefined ? { description } : {}),
+    ...(isFallbackAdapter !== undefined ? { isFallbackAdapter } : {}),
+  };
+}
+
 export async function requestWebGpuDevice(options?: {
   powerPreference?: ChartPowerPreference;
   forceNew?: boolean;
+  onFallback?: (reason: string) => void;
 }): Promise<WebGpuDeviceHandle | null> {
   if (!isWebGpuSupported()) {
+    setGpuAdapterInfo(undefined);
     return null;
   }
 
@@ -42,6 +137,14 @@ export async function requestWebGpuDevice(options?: {
     return sharedDevicePromise;
   }
 
+  const emitFallback = (reason: string): void => {
+    if (options?.onFallback) {
+      options.onFallback(reason);
+    } else {
+      recordGpuFallback("webgpu", "webgl2", reason);
+    }
+  };
+
   const acquirePromise = (async (): Promise<WebGpuDeviceHandle | null> => {
     try {
       const gpu = (navigator as any).gpu;
@@ -50,54 +153,29 @@ export async function requestWebGpuDevice(options?: {
         : gpu.requestAdapter());
 
       if (!adapter) {
-        recordGpuFallback("webgpu", "webgl2", "adapter_request_failed");
+        setGpuAdapterInfo(undefined);
+        emitFallback("adapter_request_failed");
         return null;
-      }
-
-      if (typeof adapter.requestAdapterInfo === "function") {
-        try {
-          const info = await adapter.requestAdapterInfo();
-          setGpuAdapterInfo({
-            vendor: info.vendor,
-            architecture: info.architecture,
-            description: info.description,
-            isFallbackAdapter: adapter.isFallbackAdapter,
-          });
-        } catch {
-          setGpuAdapterInfo({
-            isFallbackAdapter: adapter.isFallbackAdapter,
-          });
-        }
-      } else if (adapter.info) {
-        setGpuAdapterInfo({
-          vendor: adapter.info.vendor,
-          architecture: adapter.info.architecture,
-          description: adapter.info.description,
-          isFallbackAdapter: adapter.isFallbackAdapter,
-        });
-      } else {
-        setGpuAdapterInfo({
-          isFallbackAdapter: adapter.isFallbackAdapter,
-        });
       }
 
       const device = await adapter.requestDevice();
       if (!device) {
-        recordGpuFallback("webgpu", "webgl2", "device_request_failed");
+        setGpuAdapterInfo(undefined);
+        emitFallback("device_request_failed");
         return null;
       }
+
+      const resolvedAdapterInfo = await readAdapterInfoSafely(adapter);
+      setGpuAdapterInfo(resolvedAdapterInfo);
 
       const format = typeof gpu.getPreferredCanvasFormat === "function"
         ? gpu.getPreferredCanvasFormat()
         : "rgba8unorm";
 
-      let lost = false;
+      let terminalState: "alive" | "lost" | "destroyed" = "alive";
       const lostListeners = new Set<(reason: string) => void>();
 
-      const handleLoss = (reason: string): void => {
-        if (lost) return;
-        lost = true;
-        recordGpuDeviceLoss();
+      const clearSharedIfOwned = (): void => {
         if (sharedHandle === handle) {
           sharedHandle = null;
           sharedPowerPreference = "default";
@@ -105,6 +183,9 @@ export async function requestWebGpuDevice(options?: {
         if (sharedDevicePromise === acquirePromise) {
           sharedDevicePromise = null;
         }
+      };
+
+      const notifyLostListeners = (reason: string): void => {
         for (const listener of [...lostListeners]) {
           try {
             listener(reason);
@@ -114,19 +195,47 @@ export async function requestWebGpuDevice(options?: {
         }
       };
 
+      const onUncapturedError = (event: any): void => {
+        if (terminalState !== "alive") return;
+        const kind = classifyWebGpuError(event?.error);
+        recordGpuError("webgpu", kind);
+        if (kind === "validation" || kind === "unknown") {
+          console.error("[WebGPU] uncaptured error", event?.error);
+          return;
+        }
+        terminalState = "lost";
+        try {
+          device.removeEventListener?.("uncapturederror", onUncapturedError);
+        } catch {
+          // mock safety
+        }
+        clearSharedIfOwned();
+        notifyLostListeners(kind === "out-of-memory" ? "out-of-memory" : "internal-error");
+      };
+
+      const handleDeviceLost = (): void => {
+        if (terminalState !== "alive") return;
+        terminalState = "lost";
+        try {
+          device.removeEventListener?.("uncapturederror", onUncapturedError);
+        } catch {
+          // mock safety
+        }
+        recordGpuDeviceLoss();
+        clearSharedIfOwned();
+        notifyLostListeners("device-lost");
+      };
+
       if (device.lost && typeof device.lost.then === "function") {
-        device.lost.then((info: any) => {
-          handleLoss(info?.reason ?? "device-lost");
+        device.lost.then(() => {
+          handleDeviceLost();
         }).catch(() => {
-          handleLoss("device-lost");
+          handleDeviceLost();
         });
       }
 
       if (device.addEventListener) {
-        device.addEventListener("uncapturederror", (event: any) => {
-          console.error("[WebGPU] uncaptured error", event?.error);
-          handleLoss("validation-failed");
-        });
+        device.addEventListener("uncapturederror", onUncapturedError);
       }
 
       const limits: WebGpuLimits = {
@@ -140,7 +249,7 @@ export async function requestWebGpuDevice(options?: {
         format,
         limits,
         isLost(): boolean {
-          return lost;
+          return terminalState !== "alive";
         },
         onLost(callback: (reason: string) => void): () => void {
           lostListeners.add(callback);
@@ -149,17 +258,23 @@ export async function requestWebGpuDevice(options?: {
           };
         },
         dispose(): void {
-          lost = true;
+          if (terminalState === "destroyed") return;
+          const wasAlive = terminalState === "alive";
+          terminalState = "destroyed";
+          try {
+            device.removeEventListener?.("uncapturederror", onUncapturedError);
+          } catch {
+            // mock safety
+          }
+          if (wasAlive) {
+            recordGpuDeviceDestroyed();
+          }
           lostListeners.clear();
+          clearSharedIfOwned();
           try {
             device.destroy?.();
           } catch {
             // device might already be destroyed or mock
-          }
-          if (sharedHandle === handle) {
-            sharedHandle = null;
-            sharedDevicePromise = null;
-            sharedPowerPreference = "default";
           }
         },
       };
@@ -169,9 +284,10 @@ export async function requestWebGpuDevice(options?: {
         sharedPowerPreference = requestedPref;
       }
       return handle;
-    } catch (error) {
+    } catch {
+      setGpuAdapterInfo(undefined);
       incrementPerformanceCounter("chart.gpu.contextCreateFailed");
-      recordGpuFallback("webgpu", "webgl2", "device_creation_exception");
+      emitFallback("device_creation_exception");
       return null;
     }
   })();

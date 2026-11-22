@@ -747,7 +747,7 @@ test("WebGpuSurface requestCapture strips 256-byte pitch padding and converts BG
   surface.dispose();
 });
 
-test("Device loss and uncapturederror triggers onLost and updates GpuDiagnostics", async () => {
+test("Device loss and uncapturederror follow #253 classification and update GpuDiagnostics", async () => {
   resetGpuDiagnosticsForTest();
   const { device } = makeFakeWebGpuDevice("rgba8unorm");
 
@@ -777,12 +777,23 @@ test("Device loss and uncapturederror triggers onLost and updates GpuDiagnostics
       lossReason = reason;
     });
 
-    // Trigger uncapturederror -> validation failure
+    // Trigger uncapturederror (non-OOM/non-internal) -> isolated error, device stays alive
     device._triggerUncapturedError(new Error("Shader parse failed"));
-    assert.equal(lossReason, "validation-failed");
+    assert.equal(lossReason, null);
+    assert.equal(handle.isLost(), false);
+
+    let diag = getGpuDiagnostics();
+    assert.equal(diag.counters["gpu.webgpu.error.unknown"], 1);
+    assert.equal(diag.counters["gpu.renderError"], 1);
+    assert.equal(diag.counters["gpu.device.lost"], undefined);
+
+    // Real device.lost triggers loss listeners and increments gpu.device.lost
+    device._triggerLost({ reason: "destroyed" });
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    assert.equal(lossReason, "device-lost");
     assert.equal(handle.isLost(), true);
 
-    const diag = getGpuDiagnostics();
+    diag = getGpuDiagnostics();
     assert.equal(diag.counters["gpu.device.lost"], 1);
     assert.equal(diag.counters["chart.gpu.contextLost"], undefined, "a device without charts has no affected chart contexts");
   } finally {

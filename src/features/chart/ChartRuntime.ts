@@ -561,6 +561,8 @@ class ChartRuntimeImpl implements ChartRuntime, ChartInputHost {
       },
     };
 
+    let activeInteractionCtx2d = interactionCtx2d;
+
     this.session = new ChartSession({
       container: panelRoot,
       gpuCanvas,
@@ -589,7 +591,7 @@ class ChartRuntimeImpl implements ChartRuntime, ChartInputHost {
             r,
             this.renderCoordinator?.getInteractionLayerOrder() ?? [],
           );
-          this.indicatorController.renderInteraction(interactionCtx2d, v, s, r, c);
+          this.indicatorController.renderInteraction(activeInteractionCtx2d, v, s, r, c);
         },
       },
       view,
@@ -602,6 +604,16 @@ class ChartRuntimeImpl implements ChartRuntime, ChartInputHost {
         this.overlay.invalidateAxisCache();
         this.renderCoordinator.applyConfig(this.chartViewConfig());
         this.session.invalidate();
+      },
+      onRestoreCanvas2dContext: () => {
+        this.overlay.invalidateWarmCaches();
+      },
+      onRestoreAnnotationContext: (freshCtx) => {
+        this.overlay.updateContext(freshCtx);
+      },
+      onRestoreInteractionContext: (freshCtx) => {
+        activeInteractionCtx2d = freshCtx;
+        this.overlay.updateInteractionContext(freshCtx);
       },
       onLostContext: () => {
         this.overlay.invalidateAxisCache();
@@ -1469,6 +1481,7 @@ class ChartRuntimeImpl implements ChartRuntime, ChartInputHost {
     this.pipeline.dispose();
     this.indicatorController.dispose();
     for (const element of this.ownedElements) element.remove();
+    this.currentGpuSurface.canvas.remove?.();
     this.surface.historyOverlay = false;
     this.surface.historyBackground = false;
     // The host-wide drawing manager remembers the last chart that drew; let go of this one.
@@ -2004,48 +2017,59 @@ async function buildChartRuntime(
   const annotationCtx2d = annotationCanvas.getContext("2d");
   const interactionCtx2d = interactionCanvas.getContext("2d");
 
+  const cleanupMountDom = (): void => {
+    hook.remove();
+    gpuCanvas.remove();
+    annotationCanvas.remove();
+    interactionCanvas.remove();
+  };
+
+  if (!annotationCtx2d || !interactionCtx2d) {
+    cleanupMountDom();
+    throw new Error("ChartRuntime: canvas contexts unavailable");
+  }
+
+  let activeGpuCanvas = gpuCanvas;
   let gpuSurface: GpuSurface;
   let gl: WebGL2RenderingContext | null = null;
 
-  if (gpuSettings.backend === "canvas2d") {
-    if (!annotationCtx2d || !interactionCtx2d) {
-      hook.remove();
-      gpuCanvas.remove();
-      annotationCanvas.remove();
-      interactionCanvas.remove();
-      throw new Error("ChartRuntime: canvas contexts unavailable");
+  try {
+    if (gpuSettings.backend === "canvas2d") {
+      gpuSurface = createGpuSurface(activeGpuCanvas, "canvas2d");
+    } else if (gpuSettings.backend === "webgl2" || (gpuSettings.backend === "auto" && !isWebGpuSupported())) {
+      gl = getChartWebGl2Context(activeGpuCanvas, display.webgl);
+      gpuSurface = createGpuSurface(activeGpuCanvas, gpuSettings.backend, gl);
+      gl = gpuSurface.kind === "webgl2" ? (gpuSurface.getGlContext?.() ?? gl) : null;
+    } else {
+      gpuSurface = await createGpuSurfaceAsync(
+        activeGpuCanvas,
+        gpuSettings.backend,
+        undefined,
+        (c) => getChartWebGl2Context(c, display.webgl),
+        { powerPreference: display.webgl.powerPreference },
+      );
+      gl = gpuSurface.kind === "webgl2" ? (gpuSurface.getGlContext?.() ?? null) : null;
+      if (!gl && gpuSurface.kind === "webgl2") {
+        incrementPerformanceCounter("chart.gpu.contextCreateFailed");
+        gpuSurface.dispose();
+        throw new Error("ChartRuntime: canvas contexts unavailable");
+      }
     }
-    gpuSurface = createGpuSurface(gpuCanvas, "canvas2d");
-  } else if (gpuSettings.backend === "webgl2" || (gpuSettings.backend === "auto" && !isWebGpuSupported())) {
-    gl = getChartWebGl2Context(gpuCanvas, display.webgl);
-    if (!gl || !annotationCtx2d || !interactionCtx2d) {
-      if (!gl) incrementPerformanceCounter("chart.gpu.contextCreateFailed");
-      hook.remove();
-      gpuCanvas.remove();
-      annotationCanvas.remove();
-      interactionCanvas.remove();
-      throw new Error("ChartRuntime: canvas contexts unavailable");
+  } catch (err) {
+    cleanupMountDom();
+    throw err;
+  }
+
+  if (gpuSurface.canvas !== activeGpuCanvas) {
+    gpuSurface.canvas.dataset.chartSurface = "gpu-scene";
+    gpuSurface.canvas.setAttribute?.("aria-hidden", "true");
+    if (activeGpuCanvas.style?.cssText) {
+      gpuSurface.canvas.style.cssText = activeGpuCanvas.style.cssText;
     }
-    gpuSurface = createGpuSurface(gpuCanvas, "webgl2", gl);
-  } else {
-    gpuSurface = await createGpuSurfaceAsync(
-      gpuCanvas,
-      gpuSettings.backend,
-      undefined,
-      (c) => getChartWebGl2Context(c, display.webgl),
-      { powerPreference: display.webgl.powerPreference },
-    );
-    if (gpuSurface.kind === "webgl2") {
-      gl = gpuSurface.getGlContext?.() ?? null;
-    }
-    if (!annotationCtx2d || !interactionCtx2d || (!gl && gpuSurface.kind === "webgl2")) {
-      if (!gl && gpuSurface.kind === "webgl2") incrementPerformanceCounter("chart.gpu.contextCreateFailed");
-      hook.remove();
-      gpuCanvas.remove();
-      annotationCanvas.remove();
-      interactionCanvas.remove();
-      throw new Error("ChartRuntime: canvas contexts unavailable");
-    }
+    activeGpuCanvas.replaceWith(gpuSurface.canvas);
+    activeGpuCanvas.width = 0;
+    activeGpuCanvas.height = 0;
+    activeGpuCanvas = gpuSurface.canvas;
   }
   hook.setAttribute("data-gpu-backend", gpuSurface.kind);
 
@@ -2079,38 +2103,63 @@ async function buildChartRuntime(
 
   const runtime = new ChartRuntimeImpl(
     initialState, services,
-    gpuCanvas, annotationCanvas, interactionCanvas, gl, annotationCtx2d, interactionCtx2d,
+    activeGpuCanvas, annotationCanvas, interactionCanvas, gl, annotationCtx2d, interactionCtx2d,
     panelRoot, surface, pipeline, panelId, hook, display,
     gpuSurface,
   );
   runtime.setResidentHeatmapEnabled(gpuSettings.residentHeatmap);
 
   let currentBackendPref = gpuSettings.backend;
+  let swapRequestId = 0;
+  const cleanupDetachedCanvas = (canvas: HTMLCanvasElement | null | undefined): void => {
+    if (!canvas) return;
+    try { canvas.width = 0; } catch {}
+    try { canvas.height = 0; } catch {}
+    try { canvas.remove?.(); } catch {}
+  };
   const unbindGpuSettings = onGpuSettingsChange(async () => {
     if (runtime.getDiagnostics().disposed) return;
     const nextSettings = readGpuSettings(doc.defaultView);
     runtime.setResidentHeatmapEnabled(nextSettings.residentHeatmap);
 
     if (nextSettings.backend === currentBackendPref) {
+      swapRequestId++;
       runtime.session.invalidateSurface(ChartSurfaceDirty.All);
       return;
     }
 
-    currentBackendPref = nextSettings.backend;
+    const requestId = ++swapRequestId;
+    const nextCanvas = doc.createElement("canvas");
+    let nextSurface: GpuSurface | null = null;
     try {
-      const nextCanvas = doc.createElement("canvas");
-      const nextSurface = await createGpuSurfaceAsync(
+      nextSurface = await createGpuSurfaceAsync(
         nextCanvas,
         nextSettings.backend,
         undefined,
         (c) => getChartWebGl2Context(c, display.webgl),
         { powerPreference: runtime.displayOptions.webgl.powerPreference },
       );
+      if (runtime.getDiagnostics().disposed || requestId !== swapRequestId) {
+        const createdCanvas = nextSurface.canvas;
+        try { nextSurface.dispose(); } catch {}
+        cleanupDetachedCanvas(createdCanvas);
+        if (nextCanvas !== createdCanvas) cleanupDetachedCanvas(nextCanvas);
+        return;
+      }
       runtime.session.replaceSurface(nextSurface, (canvasNext: HTMLCanvasElement, canvasPrev: HTMLCanvasElement) => {
         canvasPrev.replaceWith(canvasNext);
-        hook.setAttribute("data-gpu-backend", nextSurface.kind);
+        canvasPrev.width = 0;
+        canvasPrev.height = 0;
+        hook.setAttribute("data-gpu-backend", nextSurface!.kind);
       });
+      currentBackendPref = nextSettings.backend;
     } catch (err) {
+      if (nextSurface) {
+        const createdCanvas = nextSurface.canvas;
+        try { nextSurface.dispose(); } catch {}
+        cleanupDetachedCanvas(createdCanvas);
+      }
+      cleanupDetachedCanvas(nextCanvas);
       console.error("[ChartRuntime] onGpuSettingsChange failed to replace surface", err);
     }
   });

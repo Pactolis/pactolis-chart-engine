@@ -36,6 +36,8 @@ export class AnnotationPassCache<T> {
   clear(): void {
     for (const { canvas } of this.entries.values()) { canvas.width = 0; canvas.height = 0; }
     this.entries.clear();
+    this.frameKey = "";
+    this.sameGeometry = false;
     this.bytes = 0;
   }
 

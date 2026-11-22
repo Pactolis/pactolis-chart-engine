@@ -187,7 +187,7 @@ export class Overlay {
       rect: { top: number; height: number }
     ) => void,
     private readonly isMainChartSuppressed?: () => boolean,
-    private readonly interactionCtx?: CanvasRenderingContext2D,
+    private interactionCtx?: CanvasRenderingContext2D,
     private readonly drawInteractionForeground?: (ctx: CanvasRenderingContext2D, view: View, series: FootprintSeries) => void,
     /** Orderbook heatmap cells, drawn under every other annotation. */
     private readonly drawOrderbookHeatmap?: (
@@ -279,6 +279,25 @@ export class Overlay {
   /** Clear cached axis offscreen bitmaps so the next render rebuilds them from fresh state. */
   invalidateAxisCache(): void {
     this.axisCache.invalidate();
+  }
+
+  /** Invalidate all warm retained annotation/profile/TPO/axis caches after context restoration. */
+  invalidateWarmCaches(): void {
+    this.axisCache.invalidate();
+    this.annotationPassCache.clear();
+    this.profileCache = null;
+    this.tpoCache = null;
+  }
+
+  /** Replace the annotation 2D context after context restoration and drop warm caches. */
+  updateContext(ctx: CanvasRenderingContext2D): void {
+    this.ctx = ctx;
+    this.invalidateWarmCaches();
+  }
+
+  /** Replace the interaction 2D context after context restoration. */
+  updateInteractionContext(ctx: CanvasRenderingContext2D): void {
+    this.interactionCtx = ctx;
   }
 
   /** Release offscreen axis canvases and transient overlay buffers. */
