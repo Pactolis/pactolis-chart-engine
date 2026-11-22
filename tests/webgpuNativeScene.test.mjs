@@ -293,8 +293,8 @@ function makeView({ colWidth = 20, offsetX = 0, priceTop = 60_100, pricePerPx = 
 
 test("gpuSettings supports nativeWebGpu default, backward compatibility and URL overrides", () => {
   resetGpuSettingsForTest();
-  assert.equal(DEFAULT_GPU_SETTINGS.nativeWebGpu, false);
-  assert.equal(readGpuSettings(null).nativeWebGpu, false);
+  assert.equal(DEFAULT_GPU_SETTINGS.nativeWebGpu, true);
+  assert.equal(readGpuSettings(null).nativeWebGpu, true);
 
   configureGpuSettingsSource({
     read: () => ({ backend: "webgpu", residentHeatmap: false, asyncCapture: false }),
@@ -807,9 +807,10 @@ test("FootprintRenderer routes to renderNativeScene when eligible and falls back
   settings.grid = true;
 
   try {
+    resetGpuSettingsForTest();
     const mock = makeFakeNativeWebGpuDevice();
     const ctx = makeFakeWebGpuContext("rgba8unorm");
-    let searchQuery = "?gpu=webgpu&webgpuNative=1";
+    let searchQuery = "?gpu=webgpu";
     const canvas = {
       width: 800,
       height: 600,
@@ -861,8 +862,29 @@ test("FootprintRenderer routes to renderNativeScene when eligible and falls back
     assert.ok(metricsSnap["chart.gpu.native.overlay.ms"]?.count >= 1, "native path records chart.gpu.native.overlay.ms");
     assert.ok(metricsSnap["chart.gpu.flush.ms"]?.count >= 1);
 
-    // 2. nativeWebGpu=0 -> immediate-quads
+    // 2. Host source omitting nativeWebGpu (undefined) -> defaults to webgpu-native
+    configureGpuSettingsSource({
+      read: () => ({ backend: "webgpu", residentHeatmap: false, asyncCapture: false }),
+      onChange: () => () => {},
+    });
+    searchQuery = "?gpu=webgpu";
+    renderer.renderLayers(view, series, new Set(["grid", "candles", "footprint"]));
+    assert.equal(getGpuDiagnostics().featurePaths.scene, "webgpu-native");
+
+    // 2b. Host source with explicit nativeWebGpu: false -> immediate-quads
+    configureGpuSettingsSource({
+      read: () => ({ backend: "webgpu", residentHeatmap: false, asyncCapture: false, nativeWebGpu: false }),
+      onChange: () => () => {},
+    });
+    renderer.renderLayers(view, series, new Set(["grid", "candles", "footprint"]));
+    assert.equal(getGpuDiagnostics().featurePaths.scene, "immediate-quads");
+
+    // 2c. Explicit URL opt-out (?webgpuNative=0 / ?gpuNative=0) -> immediate-quads
+    resetGpuSettingsForTest();
     searchQuery = "?gpu=webgpu&webgpuNative=0";
+    renderer.renderLayers(view, series, new Set(["grid", "candles", "footprint"]));
+    assert.equal(getGpuDiagnostics().featurePaths.scene, "immediate-quads");
+    searchQuery = "?gpu=webgpu&gpuNative=0";
     renderer.renderLayers(view, series, new Set(["grid", "candles", "footprint"]));
     assert.equal(getGpuDiagnostics().featurePaths.scene, "immediate-quads");
 
@@ -904,6 +926,7 @@ test("FootprintRenderer routes to renderNativeScene when eligible and falls back
 
     surface.dispose();
   } finally {
+    resetGpuSettingsForTest();
     settings.grid = prevGrid;
     configurePerformanceTelemetry({ enabled: prevTelemetry });
     resetPerformanceTelemetry();
