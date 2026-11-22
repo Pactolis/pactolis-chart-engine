@@ -987,7 +987,11 @@ test("four-chart WebGPU immediate vs GPU-native PoC comparison across pan, zoom,
 
   if (!webgpuProbe.ok) {
     if (HARDWARE_MODE) {
-      const assessment = buildWebGpuNativeAssessment({ hardwareValid: false, fixture: ACTIVE_FIXTURE });
+      const assessment = buildWebGpuNativeAssessment({
+        hardwareValid: false,
+        timestampQuerySupported: false,
+        fixture: ACTIVE_FIXTURE,
+      });
       await writeReport({
         schemaVersion: 1,
         issue: "#258",
@@ -1033,14 +1037,22 @@ test("four-chart WebGPU immediate vs GPU-native PoC comparison across pan, zoom,
     hardwareValid = false;
   }
 
-  const assessment = buildWebGpuNativeAssessment({ hardwareValid, immediate, gpuNative, parity, fixture: ACTIVE_FIXTURE });
+  const timestampQuerySupported = Boolean(gpuNative.timestampQuerySupported || webgpuProbe.timestampQuerySupported);
+  const assessment = buildWebGpuNativeAssessment({
+    hardwareValid,
+    timestampQuerySupported,
+    immediate,
+    gpuNative,
+    parity,
+    fixture: ACTIVE_FIXTURE,
+  });
   const report = {
     schemaVersion: 1,
     issue: "#258",
     fixture: ACTIVE_FIXTURE,
     hardwareValid,
     hardwareInvalidReasons,
-    timestampQuerySupported: Boolean(gpuNative.timestampQuerySupported || webgpuProbe.timestampQuerySupported),
+    timestampQuerySupported,
     presentation: presentationMode,
     environment,
     webgpuProbe,

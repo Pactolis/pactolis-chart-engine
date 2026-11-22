@@ -34,12 +34,15 @@ export const WEBGPU_NATIVE_PROFILES = Object.freeze({
 
 export const WEBGPU_NATIVE_DEFAULT_DECISION_RULE = Object.freeze({
   name: "webgpu-native-default-go",
-  minP95SpeedupRatio: 0.80,
+  maxP95Ratio: 0.80,
   maxRolloverP99RegressionRatio: 1.05,
+  maxGpuTimestampP95Ms: 4.0,
+  requireNoMissedFrameRegression: true,
   minParityMatchRatio: 0.99,
   requireZeroPanZoomDataUpload: true,
   requireZeroFallbacks: true,
-  recommendedProfile: "large",
+  requiredProfile: "large",
+  requiredDeviceClasses: Object.freeze(["dgpu", "igpu"]),
 });
 
 function parseBoundedFixtureInt(raw, fallback, min, max, label) {
@@ -177,7 +180,17 @@ function summarizeRolloverFrames(scenarioEntry) {
   };
 }
 
-function evaluateDefaultGate({ hardwareValid, incomplete, immediate, gpuNative, parity, comparisons, zeroPanZoomUpload, fixture }) {
+function evaluateDefaultGate({
+  hardwareValid,
+  timestampQuerySupported = false,
+  incomplete,
+  immediate,
+  gpuNative,
+  parity,
+  comparisons,
+  zeroPanZoomUpload,
+  fixture,
+}) {
   const profile = fixture?.profile ?? "standard";
   const rule = WEBGPU_NATIVE_DEFAULT_DECISION_RULE;
 
@@ -191,6 +204,20 @@ function evaluateDefaultGate({ hardwareValid, incomplete, immediate, gpuNative, 
     };
   }
 
+  const meetsLargeProfile =
+    profile === rule.requiredProfile
+    && (fixture?.barCount ?? 0) >= WEBGPU_NATIVE_PROFILES.large.barCount
+    && (fixture?.cellsPerBar ?? 0) >= WEBGPU_NATIVE_PROFILES.large.cellsPerBar;
+  if (!meetsLargeProfile) {
+    return {
+      rule,
+      profile,
+      decision: "NOT_EVALUATED_PROFILE",
+      passed: false,
+      checks: [],
+    };
+  }
+
   const rolloverComp = comparisons.find((c) => c.scenario === "live-rollover");
   const hasRolloverP99 = Boolean(
     rolloverComp?.immediate?.rolloverFrames?.frameRender?.count > 0
@@ -199,8 +226,27 @@ function evaluateDefaultGate({ hardwareValid, incomplete, immediate, gpuNative, 
     && Number.isFinite(rolloverComp.gpuNative.rolloverFrames.frameRender.p99Ms),
   );
   const hasParity = Boolean(parity && Number.isFinite(parity.matchRatio));
+  const hasAllTimestamps = comparisons.every(
+    (c) => (c.gpuNative?.timestamp?.count ?? 0) > 0 && Number.isFinite(c.gpuNative?.timestamp?.p95Ms),
+  ) && Boolean(
+    (rolloverComp?.gpuNative?.rolloverFrames?.timestamp?.count ?? 0) > 0
+    && Number.isFinite(rolloverComp?.gpuNative?.rolloverFrames?.timestamp?.p95Ms),
+  );
+  const hasAllRafSamples = ["pan", "zoom", "live"].every((scenario) => {
+    const comp = comparisons.find((c) => c.scenario === scenario);
+    return (comp?.immediate?.raf?.sampleCount ?? 0) > 0 && (comp?.gpuNative?.raf?.sampleCount ?? 0) > 0;
+  });
 
-  if (incomplete || !immediate || !gpuNative || !hasRolloverP99 || !hasParity) {
+  if (
+    incomplete
+    || !immediate
+    || !gpuNative
+    || timestampQuerySupported !== true
+    || !hasRolloverP99
+    || !hasParity
+    || !hasAllTimestamps
+    || !hasAllRafSamples
+  ) {
     return {
       rule,
       profile,
@@ -219,12 +265,43 @@ function evaluateDefaultGate({ hardwareValid, incomplete, immediate, gpuNative, 
       ? round6(natP95 / immP95)
       : null;
     checks.push({
-      name: `${scenario}.p95Speedup`,
-      passed: ratioVal !== null && ratioVal <= rule.minP95SpeedupRatio,
+      name: `${scenario}.p95Ratio`,
+      passed: ratioVal !== null && ratioVal <= rule.maxP95Ratio,
       actual: ratioVal,
-      threshold: `<= ${rule.minP95SpeedupRatio}x immediate p95Ms`,
+      threshold: `<= ${rule.maxP95Ratio}x immediate p95Ms`,
     });
   }
+
+  for (const scenario of ["pan", "zoom", "live"]) {
+    const comp = comparisons.find((c) => c.scenario === scenario);
+    const immMissed = comp.immediate.raf.missedFrameRatio;
+    const natMissed = comp.gpuNative.raf.missedFrameRatio;
+    checks.push({
+      name: `${scenario}.missedFrameRatio`,
+      passed: Number.isFinite(natMissed) && Number.isFinite(immMissed) && natMissed <= immMissed,
+      actual: round6(natMissed),
+      threshold: `<= ${round6(immMissed)} (immediate)`,
+    });
+  }
+
+  for (const scenario of WEBGPU_NATIVE_SCENARIOS) {
+    const comp = comparisons.find((c) => c.scenario === scenario);
+    const tsP95 = comp.gpuNative.timestamp.p95Ms;
+    checks.push({
+      name: `${scenario}.gpuTimestampP95`,
+      passed: Number.isFinite(tsP95) && tsP95 <= rule.maxGpuTimestampP95Ms,
+      actual: round6(tsP95),
+      threshold: `<= ${rule.maxGpuTimestampP95Ms} ms`,
+    });
+  }
+
+  const rolloverTsP95 = rolloverComp.gpuNative.rolloverFrames.timestamp.p95Ms;
+  checks.push({
+    name: "live-rollover.rolloverGpuTimestampP95",
+    passed: Number.isFinite(rolloverTsP95) && rolloverTsP95 <= rule.maxGpuTimestampP95Ms,
+    actual: round6(rolloverTsP95),
+    threshold: `<= ${rule.maxGpuTimestampP95Ms} ms`,
+  });
 
   const immRollP99 = rolloverComp.immediate.rolloverFrames.frameRender.p99Ms;
   const natRollP99 = rolloverComp.gpuNative.rolloverFrames.frameRender.p99Ms;
@@ -286,6 +363,7 @@ function evaluateDefaultGate({ hardwareValid, incomplete, immediate, gpuNative, 
 
 export function buildWebGpuNativeAssessment({
   hardwareValid,
+  timestampQuerySupported = false,
   immediate,
   gpuNative,
   parity = null,
@@ -368,6 +446,7 @@ export function buildWebGpuNativeAssessment({
       comparisons,
       defaultGate: evaluateDefaultGate({
         hardwareValid: false,
+        timestampQuerySupported,
         incomplete: true,
         immediate,
         gpuNative,
@@ -390,6 +469,7 @@ export function buildWebGpuNativeAssessment({
       comparisons,
       defaultGate: evaluateDefaultGate({
         hardwareValid: true,
+        timestampQuerySupported,
         incomplete: true,
         immediate,
         gpuNative,
@@ -414,6 +494,7 @@ export function buildWebGpuNativeAssessment({
     comparisons,
     defaultGate: evaluateDefaultGate({
       hardwareValid: true,
+      timestampQuerySupported,
       incomplete: false,
       immediate,
       gpuNative,
@@ -546,14 +627,25 @@ export function formatWebGpuNativeMarkdown(report) {
 
   if (report?.defaultGate) {
     const gate = report.defaultGate;
+    const reqProfile = gate.rule?.requiredProfile ?? WEBGPU_NATIVE_DEFAULT_DECISION_RULE.requiredProfile;
+    const reqDevices = (gate.rule?.requiredDeviceClasses ?? WEBGPU_NATIVE_DEFAULT_DECISION_RULE.requiredDeviceClasses).join(" + ");
     lines.push(
       "",
       "## Varsayılan Bayrak (`nativeWebGpu`) Karar Kuralı (`defaultGate`)",
       "",
-      `- Kural: \`${gate.rule?.name ?? WEBGPU_NATIVE_DEFAULT_DECISION_RULE.name}\` (önerilen profil: \`${gate.rule?.recommendedProfile ?? "large"}\`)`,
+      `- Kural: \`${gate.rule?.name ?? WEBGPU_NATIVE_DEFAULT_DECISION_RULE.name}\` (gerekli profil: \`${reqProfile}\` >= ${WEBGPU_NATIVE_PROFILES.large.barCount}×${WEBGPU_NATIVE_PROFILES.large.cellsPerBar}; gerekli donanım sınıfları: \`${reqDevices}\` — en az 1 dGPU ve 1 iGPU'da \`DEFAULT_GO\` gerektirir)`,
       `- Değerlendirilen profil: \`${gate.profile ?? profileName}\``,
       `- Kapı Kararı: **${gate.decision}** (\`passed=${Boolean(gate.passed)}\`)`,
     );
+    if (gate.decision === "NOT_EVALUATED_PROFILE") {
+      lines.push(
+        `- Not: \`NOT_EVALUATED_PROFILE\` — varsayılan \`nativeWebGpu\` kapısı yalnız tam \`${reqProfile}\` profili (>= ${WEBGPU_NATIVE_PROFILES.large.barCount} bar × ${WEBGPU_NATIVE_PROFILES.large.cellsPerBar} hücre) üzerinde değerlendirilir.`,
+      );
+    } else if (gate.decision === "NOT_EVALUATED_INCOMPLETE") {
+      lines.push(
+        "- Not: `NOT_EVALUATED_INCOMPLETE` — `timestamp-query` (`chart.gpu.timestamp.ms`), rAF örneği, rollover p99 veya görsel parite verisi eksik olduğu için kapı kararı üretilmedi.",
+      );
+    }
     if (Array.isArray(gate.checks) && gate.checks.length > 0) {
       lines.push(
         "",

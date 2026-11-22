@@ -987,8 +987,11 @@ test("webgpuNativeBenchmark helpers compute missedFrameRatio, upload stats, hard
     }])),
   });
 
+  const largeResolvedForGate = resolveWebGpuNativeFixture({ profile: "large" });
   const measured = buildWebGpuNativeAssessment({
     hardwareValid: true,
+    timestampQuerySupported: true,
+    fixture: largeResolvedForGate,
     immediate: makeMode(3.0, 500_000, 500_000, false),
     gpuNative: makeMode(0.5, 8_960, 12_000, true),
     parity: { matchRatio: 1 },
@@ -997,8 +1000,19 @@ test("webgpuNativeBenchmark helpers compute missedFrameRatio, upload stats, hard
   assert.equal(measured.defaultGate.decision, "DEFAULT_GO");
   assert.equal(measured.defaultGate.passed, true);
   assert.equal(invalidAssessment.defaultGate.decision, "NOT_EVALUATED_HARDWARE_INVALID");
+  const standardProfileAssessment = buildWebGpuNativeAssessment({
+    hardwareValid: true,
+    timestampQuerySupported: true,
+    fixture: resolveWebGpuNativeFixture({ profile: "standard" }),
+    immediate: makeMode(3.0, 500_000, 500_000, false),
+    gpuNative: makeMode(0.5, 8_960, 12_000, true),
+    parity: { matchRatio: 1 },
+  });
+  assert.equal(standardProfileAssessment.decision, "MEASURED");
+  assert.equal(standardProfileAssessment.defaultGate.decision, "NOT_EVALUATED_PROFILE");
   const md = formatWebGpuNativeMarkdown({
     runId: "test-run",
+    fixture: largeResolvedForGate,
     hardwareValid: true,
     timestampQuerySupported: true,
     presentation: "real",
@@ -1012,6 +1026,7 @@ test("webgpuNativeBenchmark helpers compute missedFrameRatio, upload stats, hard
   assert.match(md, /Bar Devri \(Rollover\) Kareleri Özeti/);
   assert.match(md, /Telemetri Notu:/);
   assert.match(md, /defaultGate/);
+  assert.match(md, /dgpu \+ igpu/);
   assert.match(md, /DEFAULT_GO/);
 
   assert.equal(parseBenchmarkCliArgs(["--list"]).list, true);
@@ -1024,6 +1039,10 @@ test("webgpuNativeBenchmark supports large profile, bounded custom fixtures, and
   assert.deepEqual(WEBGPU_NATIVE_PROFILES.standard, { name: "standard", barCount: 600, cellsPerBar: 40, fitColumns: 60 });
   assert.deepEqual(WEBGPU_NATIVE_PROFILES.large, { name: "large", barCount: 2500, cellsPerBar: 120, fitColumns: 120 });
   assert.equal(WEBGPU_NATIVE_DEFAULT_DECISION_RULE.name, "webgpu-native-default-go");
+  assert.equal(WEBGPU_NATIVE_DEFAULT_DECISION_RULE.maxP95Ratio, 0.80);
+  assert.equal(WEBGPU_NATIVE_DEFAULT_DECISION_RULE.maxGpuTimestampP95Ms, 4.0);
+  assert.equal(WEBGPU_NATIVE_DEFAULT_DECISION_RULE.requiredProfile, "large");
+  assert.deepEqual(WEBGPU_NATIVE_DEFAULT_DECISION_RULE.requiredDeviceClasses, ["dgpu", "igpu"]);
 
   const defaultResolved = resolveWebGpuNativeFixture();
   assert.equal(defaultResolved.profile, "standard");
@@ -1071,7 +1090,20 @@ test("webgpuNativeBenchmark supports large profile, bounded custom fixtures, and
   assert.throws(() => parseBenchmarkCliArgs(["--bars", "50"]));
   assert.throws(() => parseBenchmarkCliArgs(["--cells"]));
 
-  const buildReportMode = (frameMean, { fallbacks = [], rolloverP99Multiplier = 1.2, isNative = false } = {}) => ({
+  const buildReportMode = (
+    frameMean,
+    {
+      fallbacks = [],
+      rolloverP99Multiplier = 1.2,
+      isNative = false,
+      tsP95Ms = 0.6,
+      tsCount = 10,
+      rolloverTsP95Ms = 0.6,
+      rolloverTsCount = 26,
+      missedFrameRatio = 0,
+      rafSampleCount = 58,
+    } = {},
+  ) => ({
     featurePaths: { scene: isNative ? "webgpu-native" : "immediate-quads" },
     fallbacks,
     scenarios: Object.fromEntries(WEBGPU_NATIVE_SCENARIOS.map((s) => [s, {
@@ -1079,9 +1111,9 @@ test("webgpuNativeBenchmark supports large profile, bounded custom fixtures, and
         "chart.frame.render.ms": { count: 10, meanMs: frameMean, p50Ms: frameMean, p95Ms: frameMean * 1.2, p99Ms: frameMean * 1.3 },
         "chart.surface.gpu.draw.ms": { count: 10, meanMs: frameMean * 0.5, p50Ms: frameMean * 0.5, p95Ms: frameMean * 0.7, p99Ms: frameMean * 0.8 },
         "chart.gpu.flush.ms": { count: 10, meanMs: 0.1, p50Ms: 0.1, p95Ms: 0.15, p99Ms: 0.2 },
-        "chart.gpu.timestamp.ms": { count: 10, meanMs: 0.4, p50Ms: 0.4, p95Ms: 0.6, p99Ms: 0.7 },
+        "chart.gpu.timestamp.ms": { count: tsCount, meanMs: tsP95Ms * 0.8, p50Ms: tsP95Ms * 0.8, p95Ms: tsP95Ms, p99Ms: tsP95Ms * 1.1 },
       },
-      raf: computeMissedFrameStats([16.6], 20),
+      raf: { sampleCount: rafSampleCount, missedCount: 0, missedFrameRatio, maxIntervalMs: 17, p95IntervalMs: 16.7 },
       uploads: computeUploadStats({
         "gpu.upload.bytes": isNative ? 8_000 : 500_000,
         "gpu.native.upload.dataBytes": isNative && (s === "live" || s === "live-rollover") ? 4_000 : 0,
@@ -1095,6 +1127,7 @@ test("webgpuNativeBenchmark supports large profile, bounded custom fixtures, and
               rolloverCount: 26,
               combined: {
                 "chart.frame.render.ms": { count: 26, meanMs: frameMean, p50Ms: frameMean, p95Ms: frameMean * 1.1, p99Ms: frameMean * rolloverP99Multiplier },
+                "chart.gpu.timestamp.ms": { count: rolloverTsCount, meanMs: rolloverTsP95Ms * 0.8, p50Ms: rolloverTsP95Ms * 0.8, p95Ms: rolloverTsP95Ms, p99Ms: rolloverTsP95Ms * 1.1 },
               },
               uploads: computeUploadStats({
                 "gpu.upload.bytes": isNative ? 30_000 : 1_000_000,
@@ -1109,51 +1142,132 @@ test("webgpuNativeBenchmark supports large profile, bounded custom fixtures, and
 
   const goAssess = buildWebGpuNativeAssessment({
     hardwareValid: true,
+    timestampQuerySupported: true,
     fixture: largeResolved,
-    immediate: buildReportMode(4.0, { isNative: false }),
-    gpuNative: buildReportMode(2.0, { isNative: true }),
+    immediate: buildReportMode(4.0, { isNative: false, missedFrameRatio: 0.02 }),
+    gpuNative: buildReportMode(2.0, { isNative: true, missedFrameRatio: 0.01 }),
     parity: { matchRatio: 0.995 },
   });
   assert.equal(goAssess.defaultGate.profile, "large");
   assert.equal(goAssess.defaultGate.decision, "DEFAULT_GO");
   assert.equal(goAssess.defaultGate.passed, true);
 
-  const slowAssess = buildWebGpuNativeAssessment({
+  // Standard and shrunken large profiles -> NOT_EVALUATED_PROFILE
+  assert.equal(buildWebGpuNativeAssessment({
     hardwareValid: true,
+    timestampQuerySupported: true,
+    fixture: defaultResolved,
+    immediate: buildReportMode(4.0, { isNative: false }),
+    gpuNative: buildReportMode(2.0, { isNative: true }),
+    parity: { matchRatio: 0.995 },
+  }).defaultGate.decision, "NOT_EVALUATED_PROFILE");
+
+  assert.equal(buildWebGpuNativeAssessment({
+    hardwareValid: true,
+    timestampQuerySupported: true,
+    fixture: resolveWebGpuNativeFixture({ profile: "large", barCount: 500 }),
+    immediate: buildReportMode(4.0, { isNative: false }),
+    gpuNative: buildReportMode(2.0, { isNative: true }),
+    parity: { matchRatio: 0.995 },
+  }).defaultGate.decision, "NOT_EVALUATED_PROFILE");
+
+  // Missing timestamp-query, timestamp count, or rAF sampleCount -> NOT_EVALUATED_INCOMPLETE
+  assert.equal(buildWebGpuNativeAssessment({
+    hardwareValid: true,
+    timestampQuerySupported: false,
     fixture: largeResolved,
     immediate: buildReportMode(4.0, { isNative: false }),
-    gpuNative: buildReportMode(3.8, { isNative: true }), // p95 ratio 0.95 > 0.80 -> NO_GO
+    gpuNative: buildReportMode(2.0, { isNative: true }),
+    parity: { matchRatio: 0.995 },
+  }).defaultGate.decision, "NOT_EVALUATED_INCOMPLETE");
+
+  assert.equal(buildWebGpuNativeAssessment({
+    hardwareValid: true,
+    timestampQuerySupported: true,
+    fixture: largeResolved,
+    immediate: buildReportMode(4.0, { isNative: false }),
+    gpuNative: buildReportMode(2.0, { isNative: true, tsCount: 0 }),
+    parity: { matchRatio: 0.995 },
+  }).defaultGate.decision, "NOT_EVALUATED_INCOMPLETE");
+
+  assert.equal(buildWebGpuNativeAssessment({
+    hardwareValid: true,
+    timestampQuerySupported: true,
+    fixture: largeResolved,
+    immediate: buildReportMode(4.0, { isNative: false }),
+    gpuNative: buildReportMode(2.0, { isNative: true, rafSampleCount: 0 }),
+    parity: { matchRatio: 0.995 },
+  }).defaultGate.decision, "NOT_EVALUATED_INCOMPLETE");
+
+  assert.equal(buildWebGpuNativeAssessment({
+    hardwareValid: true,
+    timestampQuerySupported: true,
+    fixture: largeResolved,
+    immediate: buildReportMode(4.0, { isNative: false }),
+    gpuNative: buildReportMode(2.0, { isNative: true }),
+    parity: null,
+  }).defaultGate.decision, "NOT_EVALUATED_INCOMPLETE");
+
+  // p95 > 0.80x -> DEFAULT_NO_GO
+  const slowAssess = buildWebGpuNativeAssessment({
+    hardwareValid: true,
+    timestampQuerySupported: true,
+    fixture: largeResolved,
+    immediate: buildReportMode(4.0, { isNative: false }),
+    gpuNative: buildReportMode(3.8, { isNative: true }),
     parity: { matchRatio: 0.995 },
   });
   assert.equal(slowAssess.defaultGate.decision, "DEFAULT_NO_GO");
   assert.equal(slowAssess.defaultGate.passed, false);
 
-  const lowParityAssess = buildWebGpuNativeAssessment({
+  // GPU timestamp p95 > 4.0ms (scenario or rollover) -> DEFAULT_NO_GO
+  assert.equal(buildWebGpuNativeAssessment({
     hardwareValid: true,
+    timestampQuerySupported: true,
+    fixture: largeResolved,
+    immediate: buildReportMode(4.0, { isNative: false }),
+    gpuNative: buildReportMode(2.0, { isNative: true, tsP95Ms: 4.5 }),
+    parity: { matchRatio: 0.995 },
+  }).defaultGate.decision, "DEFAULT_NO_GO");
+
+  assert.equal(buildWebGpuNativeAssessment({
+    hardwareValid: true,
+    timestampQuerySupported: true,
+    fixture: largeResolved,
+    immediate: buildReportMode(4.0, { isNative: false }),
+    gpuNative: buildReportMode(2.0, { isNative: true, rolloverTsP95Ms: 4.2 }),
+    parity: { matchRatio: 0.995 },
+  }).defaultGate.decision, "DEFAULT_NO_GO");
+
+  // missedFrameRatio regression -> DEFAULT_NO_GO
+  assert.equal(buildWebGpuNativeAssessment({
+    hardwareValid: true,
+    timestampQuerySupported: true,
+    fixture: largeResolved,
+    immediate: buildReportMode(4.0, { isNative: false, missedFrameRatio: 0.01 }),
+    gpuNative: buildReportMode(2.0, { isNative: true, missedFrameRatio: 0.05 }),
+    parity: { matchRatio: 0.995 },
+  }).defaultGate.decision, "DEFAULT_NO_GO");
+
+  // Parity < 0.99 -> DEFAULT_NO_GO
+  assert.equal(buildWebGpuNativeAssessment({
+    hardwareValid: true,
+    timestampQuerySupported: true,
     fixture: largeResolved,
     immediate: buildReportMode(4.0, { isNative: false }),
     gpuNative: buildReportMode(2.0, { isNative: true }),
-    parity: { matchRatio: 0.985 }, // < 0.99 -> NO_GO
-  });
-  assert.equal(lowParityAssess.defaultGate.decision, "DEFAULT_NO_GO");
+    parity: { matchRatio: 0.985 },
+  }).defaultGate.decision, "DEFAULT_NO_GO");
 
-  const fallbackAssess = buildWebGpuNativeAssessment({
+  // Non-empty fallbacks -> DEFAULT_NO_GO
+  assert.equal(buildWebGpuNativeAssessment({
     hardwareValid: true,
+    timestampQuerySupported: true,
     fixture: largeResolved,
     immediate: buildReportMode(4.0, { isNative: false }),
     gpuNative: buildReportMode(2.0, { isNative: true, fallbacks: ["maxBufferSize"] }),
     parity: { matchRatio: 0.995 },
-  });
-  assert.equal(fallbackAssess.defaultGate.decision, "DEFAULT_NO_GO");
-
-  const incompleteAssess = buildWebGpuNativeAssessment({
-    hardwareValid: true,
-    fixture: largeResolved,
-    immediate: buildReportMode(4.0, { isNative: false }),
-    gpuNative: buildReportMode(2.0, { isNative: true }),
-    parity: null,
-  });
-  assert.equal(incompleteAssess.defaultGate.decision, "NOT_EVALUATED_INCOMPLETE");
+  }).defaultGate.decision, "DEFAULT_NO_GO");
 
   const largeMd = formatWebGpuNativeMarkdown({
     runId: "large-run",
@@ -1167,6 +1281,7 @@ test("webgpuNativeBenchmark supports large profile, bounded custom fixtures, and
   assert.match(largeMd, /Profil: \*\*large\*\*/);
   assert.match(largeMd, /2500 bar × 120 hücre, fit=120/);
   assert.match(largeMd, /Varsayılan Bayrak/);
+  assert.match(largeMd, /dgpu \+ igpu/);
   assert.match(largeMd, /DEFAULT_GO/);
 });
 

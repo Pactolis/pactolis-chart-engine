@@ -138,10 +138,15 @@ Bu koşullardan herhangi biri sağlanmadığında (`log` ölçek, `footprintProf
 
 `nativeWebGpu` bayrağının varsayılan olarak açılıp açılmaması (`DEFAULT_GO` / `DEFAULT_NO_GO`), donanım üzerinde çalıştırılan kıyas koşusunun `defaultGate` kapısı ile değerlendirilir:
 
-- **Büyük sahne profili (`large`):** `2.500 bar × 120 hücre` (`fitColumns = 120`, grafik başına `300.000`, `4` grafikte toplam `1.200.000` hücre):
+- **Büyük sahne profili (`requiredProfile: "large"`):** `>= 2.500 bar × 120 hücre` (`fitColumns = 120`, grafik başına `300.000`, `4` grafikte toplam `1.200.000` hücre):
   - Komut: `npm run benchmark:webgpu-native:large -- --output-dir gpu-rapor`
+  - `standard` profili (`600 × 40`) veya küçültülmüş `large` fixture'lar varsayılan kapı için **`NOT_EVALUATED_PROFILE`** üretir (`DEFAULT_GO` verilemez).
+  - `timestamp-query` desteği yoksa veya timestamp / rAF örneği eksikse **`NOT_EVALUATED_INCOMPLETE`** üretilir.
 - **`WEBGPU_NATIVE_DEFAULT_DECISION_RULE` (`DEFAULT_GO` koşulları):**
-  1. `pan`, `zoom` ve `live` senaryolarında `gpu-native` `chart.frame.render.ms` `p95Ms <= immediate p95Ms * 0.80`
-  2. `live-rollover` rollover karelerinde `frame.render` `p99Ms <= immediate p99Ms * 1.05` ve upload tasarrufu sağlanması
-  3. `pan` ve `zoom` senaryolarında `gpu.native.upload.dataBytes = 0`
-  4. Görsel parite `matchRatio >= 0.99` (kanal toleransı `<= 2`) ve `fallbacks.length === 0`
+  1. `pan`, `zoom` ve `live` senaryolarında `gpu-native` `chart.frame.render.ms` `maxP95Ratio <= 0.80` (`p95Ms <= immediate p95Ms * 0.80`)
+  2. `pan`, `zoom` ve `live` senaryolarında `missedFrameRatio` regresyonu olmaması (`gpuNative.raf.missedFrameRatio <= immediate.raf.missedFrameRatio`)
+  3. Tüm senaryolarda ve rollover karelerinde `chart.gpu.timestamp.ms` (`render + compute` toplam GPU pass süresi) `p95Ms <= 4.0 ms/grafik`
+  4. `live-rollover` rollover karelerinde `frame.render` `p99Ms <= immediate p99Ms * 1.05` ve upload tasarrufu sağlanması
+  5. `pan` ve `zoom` senaryolarında `gpu.native.upload.dataBytes = 0`
+  6. Görsel parite `matchRatio >= 0.99` (kanal toleransı `<= 2`) ve `fallbacks.length === 0`
+  7. Varsayılanın açılması için **en az bir dGPU ve bir iGPU (`requiredDeviceClasses: ["dgpu", "igpu"]`)** üzerinde `DEFAULT_GO` doğrulanması zorunludur.

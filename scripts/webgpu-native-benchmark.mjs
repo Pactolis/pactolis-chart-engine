@@ -217,6 +217,7 @@ async function main() {
         presentation: "unavailable",
         ...buildWebGpuNativeAssessment({
           hardwareValid: false,
+          timestampQuerySupported: false,
           fixture: options.fixture,
           measurementError: childError,
         }),
