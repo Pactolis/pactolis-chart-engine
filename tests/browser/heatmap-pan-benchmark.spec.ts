@@ -158,6 +158,7 @@ test("#260/#256 BTC Single / $25 / 10 BTC / Auto P96 preset benchmark, motion re
   const report = await page.evaluate(async (cfg) => {
     const [
       harness,
+      { createHarnessServices },
       telemetry,
       { settings },
       { probeGpuRenderer },
@@ -165,6 +166,7 @@ test("#260/#256 BTC Single / $25 / 10 BTC / Auto P96 preset benchmark, motion re
       { heatmapCellRgba, heatmapIntensity },
     ] = await Promise.all([
       import("/harness/chart.ts"),
+      import("/harness/services.ts"),
       import("/src/core/performanceTelemetry.ts"),
       import("/src/core/settings.ts"),
       import("/harness/gpuHeatmapBenchmark.ts"),
@@ -230,7 +232,7 @@ test("#260/#256 BTC Single / $25 / 10 BTC / Auto P96 preset benchmark, motion re
         roots.push(root);
         const panelId = `pan-bench-${chartCount}-${i}`;
         panelIds.push(panelId);
-        const services = harness.createHarnessServices({ priceStep: cfg.bucketStep, priceStepResolved: false });
+        const services = createHarnessServices({ priceStep: cfg.bucketStep, priceStepResolved: false });
         handles.push(harness.mountChart(
           root,
           { type: "chart", market: cfg.market, timeframe: cfg.timeframe, scaleMode: "linear", chartType: "candlestick", candles: true } as ChartPanelState,
@@ -242,8 +244,11 @@ test("#260/#256 BTC Single / $25 / 10 BTC / Auto P96 preset benchmark, motion re
 
       await waitNextFrame();
       await waitNextFrame();
-      const charts = panelIds.map((id) => harness.getChartRuntime(id) as unknown as RuntimeProbe);
-      await waitUntil(() => charts.every((r) => r && r.pipeline.series.length === cfg.barsCount), "history settlement");
+      let charts: RuntimeProbe[] = [];
+      await waitUntil(() => {
+        charts = panelIds.map((id) => harness.getChartRuntime(id) as unknown as RuntimeProbe);
+        return charts.every((r) => r && r.pipeline.series.length === cfg.barsCount);
+      }, "history settlement");
 
       harness.updateOrderbookHeatmapSettings({
         mode: "single",
@@ -348,6 +353,8 @@ test("#260/#256 BTC Single / $25 / 10 BTC / Auto P96 preset benchmark, motion re
         // Ensure raster cache is settled on baseViews before static or live-tail phases
         if (phase === "static" || phase === "live-book-invalidation") {
           restoreViews();
+          for (const r of charts) r.invalidate();
+          await waitNextFrame();
           simClock += 250;
           for (const r of charts) r.invalidate();
           await waitNextFrame();
@@ -367,8 +374,17 @@ test("#260/#256 BTC Single / $25 / 10 BTC / Auto P96 preset benchmark, motion re
             target.view.zoomX(factor, target.view.area.left + target.view.area.width * 0.5);
           } else if (phase === "live-book-invalidation") {
             simClock += 16;
+            const overlayProbe = target.orderbookHeatmap as unknown as { barsRevision?: number };
+            const prevRev = overlayProbe.barsRevision ?? 0;
             target.orderbookHeatmap.invalidateLiveTail();
-            await new Promise((res) => setTimeout(res, 260));
+            if (cond.mode !== "off") {
+              await waitUntil(
+                () => (overlayProbe.barsRevision ?? 0) > prevRev && target.orderbookHeatmap.inFlight.size === 0,
+                `live tail refresh step=${step}`,
+              );
+            } else {
+              await new Promise((res) => setTimeout(res, 220));
+            }
           }
 
           for (const r of charts) r.invalidate();
