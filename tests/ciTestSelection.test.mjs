@@ -1,11 +1,11 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
-import { CENSUS_SPEC, selectTests, specClosures } from "../scripts/select-ci-tests.mjs";
+import { CENSUS_SPEC, HEATMAP_PAN_SPEC, selectTests, specClosures } from "../scripts/select-ci-tests.mjs";
 
 const root = fileURLToPath(new URL("..", import.meta.url));
 const closures = specClosures(root);
-const defaultSpecs = [...closures.keys()].filter((spec) => spec !== CENSUS_SPEC);
+const defaultSpecs = [...closures.keys()].filter((spec) => spec !== CENSUS_SPEC && spec !== HEATMAP_PAN_SPEC);
 
 test("every browser spec reaches itself and the census spec reaches the harness", () => {
   assert.ok(closures.size > 1);
@@ -31,6 +31,13 @@ test("a changed census spec runs census only", () => {
   const result = selectTests([CENSUS_SPEC], closures);
   assert.equal(result.browser, "none");
   assert.equal(result.census, true);
+});
+
+test("a changed heatmap pan benchmark spec stays excluded from the default browser project", () => {
+  const result = selectTests([HEATMAP_PAN_SPEC], closures);
+  assert.equal(result.browser, "none");
+  assert.deepEqual(result.specs, []);
+  assert.equal(result.census, false);
 });
 
 test("engine source runs every browser test, including harness-driven specs (ChartRuntime regression)", () => {
