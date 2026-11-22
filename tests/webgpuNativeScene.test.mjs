@@ -314,20 +314,24 @@ test("requestWebGpuDevice negotiates optional timestamp-query and falls back saf
     // 1. Adapter supports timestamp-query and grants it
     const tsRequests = [];
     const devWithTs = makeFakeNativeWebGpuDevice({ timestampQuery: true }).device;
-    globalThis.navigator = {
-      gpu: {
-        getPreferredCanvasFormat: () => "rgba8unorm",
-        async requestAdapter() {
-          return {
-            features: new Set(["timestamp-query"]),
-            async requestDevice(desc) {
-              tsRequests.push(desc ?? null);
-              return devWithTs;
-            },
-          };
+    Object.defineProperty(globalThis, "navigator", {
+      configurable: true,
+      writable: true,
+      value: {
+        gpu: {
+          getPreferredCanvasFormat: () => "rgba8unorm",
+          async requestAdapter() {
+            return {
+              features: new Set(["timestamp-query"]),
+              async requestDevice(desc) {
+                tsRequests.push(desc ?? null);
+                return devWithTs;
+              },
+            };
+          },
         },
       },
-    };
+    });
     const handleTs = await requestWebGpuDevice({ forceNew: true });
     assert.ok(handleTs);
     assert.equal(handleTs.supportsTimestampQuery, true);
@@ -336,23 +340,27 @@ test("requestWebGpuDevice negotiates optional timestamp-query and falls back saf
     // 2. Adapter reports timestamp-query, but requestDevice({ requiredFeatures }) throws -> falls back to plain requestDevice()
     const fallbackRequests = [];
     const devWithoutTs = makeFakeNativeWebGpuDevice({ timestampQuery: false }).device;
-    globalThis.navigator = {
-      gpu: {
-        getPreferredCanvasFormat: () => "rgba8unorm",
-        async requestAdapter() {
-          return {
-            features: new Set(["timestamp-query"]),
-            async requestDevice(desc) {
-              fallbackRequests.push(desc ?? null);
-              if (desc?.requiredFeatures) {
-                throw new Error("timestamp-query disallowed");
-              }
-              return devWithoutTs;
-            },
-          };
+    Object.defineProperty(globalThis, "navigator", {
+      configurable: true,
+      writable: true,
+      value: {
+        gpu: {
+          getPreferredCanvasFormat: () => "rgba8unorm",
+          async requestAdapter() {
+            return {
+              features: new Set(["timestamp-query"]),
+              async requestDevice(desc) {
+                fallbackRequests.push(desc ?? null);
+                if (desc?.requiredFeatures) {
+                  throw new Error("timestamp-query disallowed");
+                }
+                return devWithoutTs;
+              },
+            };
+          },
         },
       },
-    };
+    });
     const handleFallback = await requestWebGpuDevice({ forceNew: true });
     assert.ok(handleFallback);
     assert.equal(handleFallback.supportsTimestampQuery, false);
@@ -428,8 +436,8 @@ test("WebGpuNativeScenePipeline enforces 32B/16B layouts, priceOrigin precision,
     assert.equal(mock.computeDispatches.length, 1);
     assert.equal(mock.computeDispatches[0].x, 1);
 
-    const barStorage = mock.buffers.find((b) => b.label === "NativeSceneBarStorage");
-    const cellStorage = mock.buffers.find((b) => b.label === "NativeSceneCellStorage");
+    const barStorage = mock.buffers.find((b) => b.label === "NativeSceneBarStorage" && !b.destroyed);
+    const cellStorage = mock.buffers.find((b) => b.label === "NativeSceneCellStorage" && !b.destroyed);
     const bar0F32 = new Float32Array(barStorage.data.buffer, 0, 8);
     assert.ok(Math.abs(bar0F32[0] - 0.01) < 1e-6, "bar0 openRel preserves 0.01 precision relative to priceOrigin");
     const cell1F32 = new Float32Array(cellStorage.data.buffer, 16, 4);
@@ -584,7 +592,8 @@ test("WebGpuNativeScenePipeline timestamp-query 2-slot ring records chart.gpu.ti
     const tsMetric = snapshotPerformanceTelemetry().metrics["chart.gpu.timestamp.ms"];
     assert.ok(tsMetric);
     assert.equal(tsMetric.count, 2);
-    assert.ok(Math.abs(tsMetric.meanMs - 2.5) < 1e-6);
+    assert.ok(Math.abs(tsMetric.totalMs / tsMetric.count - 2.5) < 1e-6);
+    assert.ok(Math.abs(tsMetric.p50Ms - 2.5) < 1e-6);
 
     surface.dispose();
     assert.equal(mock.querySets[0].destroyed, true);

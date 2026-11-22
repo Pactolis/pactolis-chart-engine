@@ -553,7 +553,7 @@ export class WebGpuNativeScenePipeline {
     });
 
     this.barCapacity = 64;
-    this.cellCapacity = TAIL_CELL_HEADROOM;
+    this.cellCapacity = 1024;
     this.barBuffer = this.allocateStorageBuffer("NativeSceneBarStorage", this.barCapacity * BAR_RECORD_BYTES);
     this.cellBuffer = this.allocateStorageBuffer("NativeSceneCellStorage", this.cellCapacity * CELL_RECORD_BYTES);
     this.rebuildBindGroups();
