@@ -356,7 +356,7 @@ export class FootprintRenderer {
     }
     const canvas = this.surface.canvas as Partial<HTMLCanvasElement> | undefined;
     const ownerWin = canvas?.ownerDocument?.defaultView ?? null;
-    if (!readGpuSettings(ownerWin).nativeWebGpu) {
+    if (readGpuSettings(ownerWin).nativeWebGpu === false) {
       return false;
     }
     if (view.isLogScale()) {
