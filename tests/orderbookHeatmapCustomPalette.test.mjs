@@ -863,3 +863,572 @@ test("projectCanonicalHeatmapTailBar matches BE #532 wire shape, HeatmapBuilder 
     }
   });
 });
+
+function createMulberry32(seed) {
+  let a = seed >>> 0;
+  return () => {
+    a |= 0;
+    a = (a + 0x6d2b79f5) | 0;
+    let t = Math.imul(a ^ (a >>> 15), 1 | a);
+    t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  };
+}
+
+function generateLogNormalValues(count, seed) {
+  const rand = createMulberry32(seed);
+  const out = new Float64Array(count);
+  for (let i = 0; i < count; i++) {
+    const u1 = Math.max(1e-12, rand());
+    const u2 = rand();
+    const z = Math.sqrt(-2 * Math.log(u1)) * Math.cos(2 * Math.PI * u2);
+    out[i] = Math.exp(14 + z * 1.35);
+  }
+  return out;
+}
+
+function referenceSortedColorRange({ values, threshold, scaleMode = "auto", fixedCeiling, contrast = "medium" }) {
+  const [floorQ, ceilingQ] = HEATMAP_AUTO_PERCENTILES[contrast] ?? HEATMAP_AUTO_PERCENTILES.medium;
+  const positive = [];
+  for (let i = 0; i < values.length; i++) {
+    const value = values[i];
+    if (Number.isFinite(value) && value > 0) positive.push(value);
+  }
+  positive.sort((a, b) => a - b);
+  const pct = (q) => {
+    if (positive.length === 0) return 0;
+    if (positive.length === 1) return positive[0];
+    const index = (positive.length - 1) * q;
+    const lo = Math.floor(index);
+    const hi = Math.ceil(index);
+    if (lo === hi) return positive[lo];
+    return positive[lo] + (positive[hi] - positive[lo]) * (index - lo);
+  };
+  const safeThreshold = Number.isFinite(threshold) && threshold > 0 ? threshold : 0;
+  if (scaleMode === "fixed" && fixedCeiling !== undefined && Number.isFinite(fixedCeiling) && fixedCeiling > 0) {
+    const floor = safeThreshold > 0 ? safeThreshold : (positive.length > 0 ? Math.min(pct(floorQ), fixedCeiling / 2) : 0);
+    const ceiling = floor > 0 ? Math.max(fixedCeiling, floor * 2) : fixedCeiling;
+    return { floor, ceiling };
+  }
+  if (positive.length === 0) {
+    return { floor: safeThreshold, ceiling: safeThreshold > 0 ? safeThreshold * 10 : 0 };
+  }
+  const pFloor = pct(floorQ);
+  const pCeiling = pct(ceilingQ);
+  const floor = safeThreshold > 0 ? safeThreshold : pFloor;
+  const ceiling = Math.max(pCeiling, floor * 2);
+  return { floor, ceiling };
+}
+
+function makeWebGlMock() {
+  const uniformValues = new Map();
+  const modelled = {
+    canvas: { ownerDocument: { defaultView: { devicePixelRatio: 1 } } },
+    drawingBufferWidth: 800,
+    drawingBufferHeight: 600,
+    MAX_TEXTURE_SIZE: 0x0d33,
+    getParameter: () => 4096,
+    getShaderParameter: () => true,
+    getProgramParameter: () => true,
+    getShaderInfoLog: () => "",
+    getProgramInfoLog: () => "",
+    getAttribLocation: (_p, name) => ["a_unit", "a_rect", "a_texel", "a_alphaScale"].indexOf(name),
+    getUniformLocation: (_p, name) => ({ name }),
+    uniform1f: (loc, v) => { uniformValues.set(loc.name, v); },
+    drawArraysInstanced: () => {},
+  };
+  const gl = new Proxy(modelled, {
+    get(target, key) {
+      if (key in target) return target[key];
+      if (typeof key !== "string") return undefined;
+      return /^[A-Z0-9_]+$/.test(key) ? 0 : () => ({});
+    },
+  });
+  return { gl, uniformValues };
+}
+
+test("resolveHeatmapColorRange never calls Array.prototype.sort, avoids scanning in fixed mode, and honors inPlace", (t) => {
+  let sortCalls = 0;
+  const origSort = Array.prototype.sort;
+  t.mock.method(Array.prototype, "sort", function (...args) {
+    sortCalls++;
+    return origSort.apply(this, args);
+  });
+
+  const sampleArr = [80_000_000, 500_000, 25_000_000, 0, 5_000_000, -10, Number.NaN];
+  const sampleArrCopy = [...sampleArr];
+  const sampleF64 = Float64Array.from(sampleArr);
+  const sampleF64Copy = Float64Array.from(sampleArr);
+
+  const rAuto = resolveHeatmapColorRange({ values: sampleArr, threshold: 0, scaleMode: "auto" });
+  const rAutoThreshold = resolveHeatmapColorRange({ values: sampleArr, threshold: 1_000_000, scaleMode: "auto" });
+  const rFixedZero = resolveHeatmapColorRange({ values: sampleArr, threshold: 0, scaleMode: "fixed", fixedCeiling: 50_000_000 });
+  const rInPlaceFalse = resolveHeatmapColorRange({ values: sampleF64, threshold: 0, inPlace: false });
+  assert.deepEqual(sampleArr, sampleArrCopy, "default inPlace=false does not mutate array input");
+  assert.deepEqual(Array.from(sampleF64), Array.from(sampleF64Copy), "default inPlace=false does not mutate Float64Array");
+
+  const rInPlaceTrue = resolveHeatmapColorRange({ values: sampleF64, threshold: 0, inPlace: true });
+  assert.deepEqual(rInPlaceTrue, rAuto);
+  assert.deepEqual(rInPlaceFalse, rAuto);
+  assert.ok(rAutoThreshold.floor === 1_000_000 && rAutoThreshold.ceiling > 1_000_000);
+  assert.ok(rFixedZero.floor > 0 && rFixedZero.ceiling === 50_000_000);
+
+  // O(1) fixed mode with threshold > 0 and finite fixedCeiling > 0 must not scan values at all
+  const unindexedValues = {
+    length: 5,
+    get 0() { throw new Error("fixed O(1) fast path must not read values"); },
+    [Symbol.iterator]() { throw new Error("fixed O(1) fast path must not iterate values"); },
+  };
+  const rFixedO1 = resolveHeatmapColorRange({
+    values: unindexedValues,
+    threshold: 100,
+    scaleMode: "fixed",
+    fixedCeiling: 500,
+  });
+  assert.deepEqual(rFixedO1, { floor: 100, ceiling: 500 });
+  assert.equal(sortCalls, 0, "resolveHeatmapColorRange must never invoke Array.prototype.sort");
+});
+
+test("prepareGpuCells resolves color range once per frame without double collection or Array.prototype.sort", async (t) => {
+  let sortCalls = 0;
+  const origSort = Array.prototype.sort;
+  t.mock.method(Array.prototype, "sort", function (...args) {
+    sortCalls++;
+    return origSort.apply(this, args);
+  });
+
+  let contrastReads = 0;
+  let fixedCeilingReads = 0;
+  let modeScale = "auto";
+  await withSettings(() => ({
+    mode: "single",
+    unit: "usd",
+    bucketStep: 50,
+    single: { usd: 1_000_000, btc: 10 },
+    aggregated: { usd: 2_000_000, btc: 20 },
+    scaleMode: modeScale,
+    get contrast() {
+      contrastReads++;
+      return "medium";
+    },
+    get fixedCeiling() {
+      fixedCeilingReads++;
+      return { usd: 50_000_000, btc: 500 };
+    },
+  }), async () => {
+    const series = makeSeries(3);
+    const view = makeView();
+    const overlay = new OrderbookHeatmapOverlay({
+      fetch: async (req) => ({
+        schemaVersion: 1,
+        generatedAt: 1003 * MINUTE,
+        base: "BTC",
+        source: req.source,
+        resolution: req.resolution,
+        bucketStep: req.bucketStep,
+        from: req.from,
+        to: req.to,
+        bars: [
+          { t: 1000 * MINUTE, cells: [[50_000, 1_500_000, 500_000], [50_050, 8_000_000, 2_000_000]] },
+          { t: 1001 * MINUTE, cells: [[50_000, 3_000_000, 1_000_000], [50_050, 25_000_000, 5_000_000]] },
+        ],
+      }),
+      invalidate: () => {},
+      getMarket: () => MARKET,
+      now: () => 1003 * MINUTE,
+    });
+    try {
+      overlay.prepareGpuCells(view, series, [0, 2], () => ({ release() {} }));
+      await new Promise((resolve) => setTimeout(resolve, 20));
+
+      contrastReads = 0;
+      fixedCeilingReads = 0;
+      sortCalls = 0;
+      const autoFrame = overlay.prepareGpuCells(view, series, [0, 2], () => ({ release() {} }));
+      assert.ok(autoFrame && autoFrame.main.length === 4);
+      assert.equal(contrastReads, 1, "auto mode prepareGpuCells must resolve range exactly once per frame");
+      assert.equal(sortCalls, 0);
+
+      modeScale = "fixed";
+      contrastReads = 0;
+      fixedCeilingReads = 0;
+      sortCalls = 0;
+      const fixedFrame = overlay.prepareGpuCells(view, series, [0, 2], () => ({ release() {} }));
+      assert.ok(fixedFrame && fixedFrame.main.length === 4);
+      assert.equal(fixedFrame.ceiling, 50_000_000);
+      assert.equal(fixedCeilingReads, 1, "fixed mode prepareGpuCells must resolve range exactly once per frame");
+      assert.equal(sortCalls, 0);
+    } finally {
+      overlay.dispose();
+    }
+  });
+});
+
+test("OrderbookHeatmapOverlay.draw and drawHover with threshold=0 produce distinct colors without saturating to peak yellow", async () => {
+  for (const mode of ["single", "custom"]) {
+    const settings = {
+      mode,
+      unit: "usd",
+      bucketStep: 50,
+      single: { usd: 0, btc: 0 },
+      aggregated: { usd: 0, btc: 0 },
+      custom: { usd: 0, btc: 0 },
+      customSources: ["binance:usd_perp"],
+      opacity: 0.85,
+      scaleMode: "auto",
+      contrast: "medium",
+    };
+    await withSettings(() => settings, async () => {
+      const series = makeSeries(3);
+      const view = makeView();
+      const bar1Cells = [
+        [50_000, 0, 0],
+        [50_050, 500_000, 0],
+        [50_100, 5_000_000, 0],
+        [50_150, 25_000_000, 0],
+        [50_200, 80_000_000, 0],
+      ];
+      const overlay = new OrderbookHeatmapOverlay({
+        fetch: async (req) => ({
+          schemaVersion: 1,
+          generatedAt: 1003 * MINUTE,
+          base: "BTC",
+          source: req.source,
+          resolution: req.resolution,
+          bucketStep: req.bucketStep,
+          from: req.from,
+          to: req.to,
+          bars: [
+            { t: 1000 * MINUTE, cells: [[49_700, 100_000, 0], [49_750, 200_000, 0], [49_800, 300_000, 0]] },
+            { t: 1001 * MINUTE, cells: bar1Cells },
+          ],
+        }),
+        invalidate: () => {},
+        getMarket: () => MARKET,
+        now: () => 1003 * MINUTE,
+      });
+      try {
+        const rects = [];
+        const ctx = {
+          fillStyle: "",
+          strokeStyle: "",
+          lineWidth: 1,
+          font: "",
+          textAlign: "",
+          textBaseline: "",
+          save() {},
+          restore() {},
+          beginPath() {},
+          rect() {},
+          roundRect() {},
+          clip() {},
+          fillRect(x, y, w, h) { rects.push({ fillStyle: this.fillStyle, x, y, w, h }); },
+          strokeRect() {},
+          fillText() {},
+          moveTo() {},
+          lineTo() {},
+          stroke() {},
+          fill() {},
+        };
+
+        overlay.draw(ctx, view, series, [0, 2]);
+        await new Promise((resolve) => setTimeout(resolve, 20));
+        rects.length = 0;
+
+        overlay.draw(ctx, view, series, [0, 2]);
+        const bar1X = view.xOfIndex(1);
+        const bar1Rects = rects.filter((r) => r.x === bar1X);
+        assert.equal(bar1Rects.length, 5, `${mode}: expected 5 painted cells on bar 1`);
+
+        const colorByPrice = new Map();
+        for (const [price] of bar1Cells) {
+          const yTop = view.yOfPrice(price + 50);
+          const match = bar1Rects.find((r) => Math.abs(r.y - yTop) < 1e-6);
+          assert.ok(match, `${mode}: missing painted rect for price ${price}`);
+          colorByPrice.set(price, match.fillStyle);
+        }
+
+        const k0Color = heatmapCellColor(0, 1, 0.85);
+        const peakColor = heatmapCellColor(1, 1, 0.85);
+        assert.equal(colorByPrice.get(50_000), k0Color, `${mode}: value=0 must get k=0 color`);
+        assert.equal(new Set(colorByPrice.values()).size, 5, `${mode}: all 5 values [0, 500k, 5M, 25M, 80M] must have distinct colors`);
+        for (const p of [50_000, 50_050, 50_100, 50_150]) {
+          assert.notEqual(colorByPrice.get(p), peakColor, `${mode}: price ${p} must not saturate to peak yellow`);
+        }
+
+        // Hover over bar 1 with threshold=0: positive cells shaded distinctly without saturating
+        const crosshair = { x: bar1X + 5, y: view.yOfPrice(50_125), visible: true };
+        overlay.drawHover(ctx, view, series, crosshair);
+        await new Promise((resolve) => setTimeout(resolve, 150));
+        rects.length = 0;
+        overlay.drawHover(ctx, view, series, crosshair);
+        assert.equal(rects.length, 4, `${mode}: drawHover shades the 4 positive cells and skips value=0`);
+        assert.equal(new Set(rects.map((r) => r.fillStyle)).size, 4, `${mode}: drawHover shades positive cells distinctly`);
+        assert.ok(rects.filter((r) => r.fillStyle === peakColor).length <= 1, `${mode}: drawHover does not saturate lower cells`);
+      } finally {
+        overlay.dispose();
+      }
+    });
+  }
+});
+
+test("prepareGpuCells + HeatmapGpuRenderer.renderFrame support threshold=0 and floor=0 shader branch", async () => {
+  await withSettings(() => ({
+    mode: "single",
+    unit: "usd",
+    bucketStep: 50,
+    single: { usd: 0, btc: 0 },
+    aggregated: { usd: 0, btc: 0 },
+    opacity: 0.85,
+    scaleMode: "auto",
+    contrast: "medium",
+  }), async () => {
+    const series = makeSeries(3);
+    const view = makeView();
+    const overlay = new OrderbookHeatmapOverlay({
+      fetch: async (req) => ({
+        schemaVersion: 1,
+        generatedAt: 1003 * MINUTE,
+        base: "BTC",
+        source: req.source,
+        resolution: req.resolution,
+        bucketStep: req.bucketStep,
+        from: req.from,
+        to: req.to,
+        bars: [
+          { t: 1000 * MINUTE, cells: [[49_700, 100_000, 0], [49_750, 200_000, 0], [49_800, 300_000, 0]] },
+          { t: 1001 * MINUTE, cells: [[50_000, 0, 0], [50_050, 500_000, 0], [50_100, 5_000_000, 0], [50_150, 25_000_000, 0], [50_200, 80_000_000, 0]] },
+        ],
+      }),
+      invalidate: () => {},
+      getMarket: () => MARKET,
+      now: () => 1003 * MINUTE,
+    });
+    const { gl, uniformValues } = makeWebGlMock();
+    const renderer = new HeatmapGpuRenderer();
+    try {
+      overlay.prepareGpuCells(view, series, [0, 2], () => ({ release() {} }));
+      await new Promise((resolve) => setTimeout(resolve, 20));
+
+      const frame = overlay.prepareGpuCells(view, series, [0, 2], () => ({ release() {} }));
+      assert.ok(frame);
+      assert.equal(frame.threshold, 0);
+      assert.ok(frame.floor > 0);
+      assert.ok(frame.ceiling > frame.floor);
+
+      const ok = renderer.renderFrame(gl, frame, { left: 0, top: 0, width: 800, height: 400 });
+      assert.equal(ok, true);
+      assert.equal(uniformValues.get("u_floor"), frame.floor);
+      const expectedLogSpan = Math.log10(Math.max(frame.ceiling, frame.floor * 2) / frame.floor);
+      assert.ok(Math.abs(uniformValues.get("u_logSpan") - expectedLogSpan) < 1e-6);
+
+      // Shader intensity parity with CPU heatmapIntensity for frame.floor / frame.ceiling
+      const uFloor = uniformValues.get("u_floor");
+      const uLogSpan = uniformValues.get("u_logSpan");
+      for (const value of [0, 500_000, 5_000_000, 25_000_000, 80_000_000]) {
+        const cpuK = heatmapIntensity(value, frame.floor, frame.ceiling);
+        const gpuK = value <= 0
+          ? 0
+          : Math.min(1, Math.max(0, Math.log2(value / uFloor) * 0.30102999566398120 / uLogSpan));
+        assert.ok(Math.abs(cpuK - gpuK) < 1e-12, `intensity parity mismatch for value=${value}`);
+      }
+
+      // Direct floor=0, ceiling=100 branch (u_floor <= 0 && u_logSpan > 0)
+      const directOk = renderer.renderFrame(gl, {
+        main: [{ x: 0, yTop: 10, width: 10, height: 10, value: 25 }],
+        extension: [],
+        threshold: 0,
+        floor: 0,
+        ceiling: 100,
+        opacity: 0.85,
+        dataKey: "direct-zero-floor",
+      }, { left: 0, top: 0, width: 800, height: 400 });
+      assert.equal(directOk, true);
+      assert.equal(uniformValues.get("u_floor"), 0);
+      assert.equal(uniformValues.get("u_logSpan"), 100);
+      const directCpuK = heatmapIntensity(25, 0, 100);
+      const directGpuK = Math.min(1, Math.max(0, Math.log2(1 + (25 / 100) * 100) * 0.30102999566398120 / 2.0043213737826426));
+      assert.ok(Math.abs(directCpuK - directGpuK) < 1e-12);
+    } finally {
+      renderer.dispose();
+      overlay.dispose();
+    }
+  });
+});
+
+test("3-way quickselect resolveHeatmapColorRange is bit-identical to sorted reference across distributions and edge cases", () => {
+  const datasets = [
+    ["15k-lognormal", generateLogNormalValues(15_000, 1337)],
+    ["40k-lognormal", generateLogNormalValues(40_000, 7331)],
+    ["10k-all-equal", Float64Array.from({ length: 10_000 }, () => 42_000)],
+    ["10k-reverse", Float64Array.from({ length: 10_000 }, (_, i) => 10_000 - i)],
+    ["single-element", [123.45]],
+    ["two-desc", [500, 100]],
+    ["two-asc", [100, 500]],
+    ["non-positive-non-finite", [0, -5, -0, Number.NaN, Number.POSITIVE_INFINITY, Number.NEGATIVE_INFINITY]],
+    ["mixed-dirty", [0, -10, Number.NaN, 50, Number.POSITIVE_INFINITY, 10, 200, 50, Number.NEGATIVE_INFINITY, 0.25]],
+    ["empty", []],
+  ];
+
+  for (const [label, values] of datasets) {
+    for (const contrast of ["low", "medium", "high"]) {
+      for (const threshold of [0, 25]) {
+        for (const scaleMode of ["auto", "fixed"]) {
+          const fixedCeiling = scaleMode === "fixed" ? 500_000 : undefined;
+          const expected = referenceSortedColorRange({ values, threshold, scaleMode, fixedCeiling, contrast });
+          const actualCopy = resolveHeatmapColorRange({ values, threshold, scaleMode, fixedCeiling, contrast, inPlace: false });
+          assert.deepEqual(actualCopy, expected, `copy mismatch (${label}, ${contrast}, t=${threshold}, ${scaleMode})`);
+
+          const f64 = Float64Array.from(values);
+          const actualInPlace = resolveHeatmapColorRange({ values: f64, threshold, scaleMode, fixedCeiling, contrast, inPlace: true });
+          assert.deepEqual(actualInPlace, expected, `inPlace mismatch (${label}, ${contrast}, t=${threshold}, ${scaleMode})`);
+        }
+      }
+    }
+  }
+});
+
+test("deterministic pan/zoom benchmark (15k x 60f and 40k x 30f) reports p50/p95 ms without regression", async () => {
+  function percentileMs(samples, q) {
+    const sorted = [...samples].sort((a, b) => a - b);
+    const idx = Math.min(sorted.length - 1, Math.floor((sorted.length - 1) * q));
+    return sorted[idx];
+  }
+
+  async function runScenario(label, barCount, cellsPerBar, frames, seed) {
+    const totalBars = barCount + frames + 5;
+    const series = makeSeries(totalBars);
+    const view = new View();
+    view.area = { left: 0, top: 0, width: 2000, height: 1000 };
+    view.colWidth = 8;
+    view.priceTop = 60_000;
+    view.pricePerPx = 10;
+    view.pixelRatio = 1;
+
+    const rawValues = generateLogNormalValues(barCount * cellsPerBar, seed);
+    const bars = Array.from({ length: totalBars }, (_, b) => {
+      const cells = Array.from({ length: cellsPerBar }, (__, c) => {
+        const val = rawValues[((b * cellsPerBar + c) % rawValues.length)];
+        return [50_000 + c * 25, val, 0];
+      });
+      return { t: (1000 + b) * MINUTE, cells };
+    });
+
+    const scratchF64 = new Float64Array(rawValues.length);
+    const naiveSamples = [];
+    const quickAutoSamples = [];
+    const fixedO1Samples = [];
+    const prepareAutoSamples = [];
+    const prepareFixedSamples = [];
+
+    // Warmup
+    for (let w = 0; w < 5; w++) {
+      scratchF64.set(rawValues);
+      resolveHeatmapColorRange({ values: scratchF64, threshold: 0, scaleMode: "auto", inPlace: true });
+      resolveHeatmapColorRange({ values: scratchF64, threshold: 1_000_000, scaleMode: "fixed", fixedCeiling: 50_000_000, inPlace: true });
+      referenceSortedColorRange({ values: rawValues, threshold: 0, scaleMode: "auto" });
+    }
+
+    for (let f = 0; f < frames; f++) {
+      const t0 = performance.now();
+      const rNaive = referenceSortedColorRange({ values: rawValues, threshold: 0, scaleMode: "auto" });
+      naiveSamples.push(performance.now() - t0);
+
+      scratchF64.set(rawValues);
+      const t1 = performance.now();
+      const rQuick = resolveHeatmapColorRange({ values: scratchF64, threshold: 0, scaleMode: "auto", inPlace: true });
+      quickAutoSamples.push(performance.now() - t1);
+      assert.deepEqual(rQuick, rNaive);
+
+      const t2 = performance.now();
+      const rFixed = resolveHeatmapColorRange({
+        values: rawValues,
+        threshold: 1_000_000,
+        scaleMode: "fixed",
+        fixedCeiling: 50_000_000,
+      });
+      fixedO1Samples.push(performance.now() - t2);
+      assert.deepEqual(rFixed, { floor: 1_000_000, ceiling: 50_000_000 });
+    }
+
+    let currentScaleMode = "auto";
+    let currentThreshold = 0;
+    await withSettings(() => ({
+      mode: "single",
+      unit: "usd",
+      bucketStep: 25,
+      single: { usd: currentThreshold, btc: 0 },
+      aggregated: { usd: currentThreshold, btc: 0 },
+      scaleMode: currentScaleMode,
+      fixedCeiling: { usd: 50_000_000, btc: 500 },
+      contrast: "medium",
+    }), async () => {
+      const overlay = new OrderbookHeatmapOverlay({
+        fetch: async (req) => ({
+          schemaVersion: 1,
+          generatedAt: 1000 * MINUTE,
+          base: "BTC",
+          source: req.source,
+          resolution: req.resolution,
+          bucketStep: req.bucketStep,
+          from: req.from,
+          to: req.to,
+          bars,
+        }),
+        invalidate: () => {},
+        getMarket: () => MARKET,
+        now: () => 1000 * MINUTE,
+      });
+      try {
+        overlay.prepareGpuCells(view, series, [0, barCount - 1], () => ({ release() {} }));
+        await new Promise((resolve) => setTimeout(resolve, 20));
+
+        // Warmup overlay prepare
+        for (let w = 0; w < 3; w++) {
+          overlay.prepareGpuCells(view, series, [w, w + barCount - 1], () => ({ release() {} }));
+        }
+
+        for (let f = 0; f < frames; f++) {
+          view.offsetX = -f * view.colWidth;
+          const t3 = performance.now();
+          const frame = overlay.prepareGpuCells(view, series, [f, f + barCount - 1], () => ({ release() {} }));
+          prepareAutoSamples.push(performance.now() - t3);
+          assert.ok(frame && frame.main.length === barCount * cellsPerBar);
+        }
+
+        currentScaleMode = "fixed";
+        currentThreshold = 1_000_000;
+        for (let f = 0; f < frames; f++) {
+          view.offsetX = -f * view.colWidth;
+          const t4 = performance.now();
+          const frame = overlay.prepareGpuCells(view, series, [f, f + barCount - 1], () => ({ release() {} }));
+          prepareFixedSamples.push(performance.now() - t4);
+          assert.ok(frame && frame.main.length === barCount * cellsPerBar);
+        }
+      } finally {
+        overlay.dispose();
+      }
+    });
+
+    const stats = (arr) => ({ p50: percentileMs(arr, 0.5), p95: percentileMs(arr, 0.95) });
+    const sNaive = stats(naiveSamples);
+    const sQuick = stats(quickAutoSamples);
+    const sFixed = stats(fixedO1Samples);
+    const sPrepAuto = stats(prepareAutoSamples);
+    const sPrepFixed = stats(prepareFixedSamples);
+
+    console.log(
+      `[HEATMAP_BENCH ${label}] naiveSort_p50=${sNaive.p50.toFixed(3)}ms p95=${sNaive.p95.toFixed(3)}ms | ` +
+      `quickselect_p50=${sQuick.p50.toFixed(3)}ms p95=${sQuick.p95.toFixed(3)}ms | ` +
+      `fixedO1_p50=${sFixed.p50.toFixed(3)}ms p95=${sFixed.p95.toFixed(3)}ms | ` +
+      `prepareAuto_p50=${sPrepAuto.p50.toFixed(3)}ms p95=${sPrepAuto.p95.toFixed(3)}ms | ` +
+      `prepareFixed_p50=${sPrepFixed.p50.toFixed(3)}ms p95=${sPrepFixed.p95.toFixed(3)}ms`,
+    );
+    assert.ok(sFixed.p50 < sNaive.p50, `${label}: O(1) fixed range must beat naiveSort p50`);
+    assert.ok(sQuick.p95 < 250 && sPrepAuto.p95 < 500, `${label}: bounded latency check`);
+  }
+
+  await runScenario("15k_x_60f", 100, 150, 60, 4242);
+  await runScenario("40k_x_30f", 200, 200, 30, 9001);
+});
+
