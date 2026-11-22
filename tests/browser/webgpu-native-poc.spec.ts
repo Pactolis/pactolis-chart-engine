@@ -60,7 +60,7 @@ async function launchBrowser(args: string[]): Promise<Browser> {
   });
 }
 
-async function installCommonRoutes(page: Page): Promise<void> {
+async function installCommonRoutes(page: Page, sharedAnchorTo: number): Promise<void> {
   await page.route("**/*", (route) => {
     const url = new URL(route.request().url());
     return ["127.0.0.1", "localhost"].includes(url.hostname) ? route.continue() : route.abort("blockedbyclient");
@@ -84,15 +84,12 @@ async function installCommonRoutes(page: Page): Promise<void> {
     await route.fulfill({ status: response.status(), headers, body: patched });
   });
 
-  let denseBars: ReturnType<typeof buildDenseFootprintBars> | null = null;
+  const denseBars = buildDenseFootprintBars(sharedAnchorTo);
   await page.route(/\/history(?:\?|$)/, (route) => {
     const url = new URL(route.request().url());
     const from = Number(url.searchParams.get("from"));
     const to = Number(url.searchParams.get("to"));
-    if (!denseBars) {
-      denseBars = buildDenseFootprintBars(Number.isFinite(to) ? to : FROZEN_NOW);
-    }
-    const served = denseBars.filter((bar) => bar.t >= from && bar.t <= to);
+    const served = denseBars;
     const meta = url.searchParams.get("includeFootprint") === "0"
       ? { schemaVersion: 1, generatedAt: FROZEN_NOW }
       : {
@@ -169,14 +166,14 @@ async function installWebGpuOffscreenPresentInitScript(page: Page): Promise<void
   });
 }
 
-async function probeWebGpuCapability(baseURL: string, variant: WebGpuVariant) {
+async function probeWebGpuCapability(baseURL: string, variant: WebGpuVariant, sharedAnchorTo: number) {
   const args = launchArgsFor(variant);
   let browser: Browser | undefined;
   try {
     browser = await launchBrowser(args);
     const context = await browser.newContext({ baseURL, viewport: VIEWPORT });
     const page = await context.newPage();
-    await installCommonRoutes(page);
+    await installCommonRoutes(page, sharedAnchorTo);
     await page.goto("/harness/blank.html");
     const result = await page.evaluate(async () => {
       const rafCheck = await Promise.race([
@@ -322,6 +319,7 @@ async function measureMode(
   mode: NativeMode,
   args: string[],
   presentationMode: "real" | "offscreen-substitute",
+  sharedAnchorTo: number,
   referencePngBase64: string | null = null,
 ) {
   const browser = await launchBrowser(args);
@@ -329,7 +327,7 @@ async function measureMode(
   try {
     context = await browser.newContext({ baseURL, viewport: VIEWPORT });
     const page = await context.newPage();
-    await installCommonRoutes(page);
+    await installCommonRoutes(page, sharedAnchorTo);
     if (presentationMode === "offscreen-substitute") {
       await installWebGpuOffscreenPresentInitScript(page);
     }
@@ -517,8 +515,12 @@ async function measureMode(
         await syncBackendWork();
 
         // Composite capture for parity & non-empty frame check.
-        const captureFrame = await runtimes()[0].session.captureCompositePng();
         const rt0 = runtimes()[0];
+        rt0.view.resetTimeScale(rt0.pipeline.series.length);
+        rt0.session.invalidate(ChartChange.Viewport);
+        await nextRaf();
+        await syncBackendWork();
+        const captureFrame = await rt0.session.captureCompositePng();
         const captureView = {
           offsetX: rt0.view.offsetX,
           colWidth: rt0.view.colWidth,
@@ -805,11 +807,12 @@ test("four-chart WebGPU immediate vs GPU-native PoC comparison across pan, zoom 
   test.setTimeout(240_000);
   const resolvedBaseURL = baseURL ?? testInfo.project.use.baseURL ?? "http://127.0.0.1:4173";
   const reportPath = process.env.CHART_GPU_NATIVE_REPORT_PATH;
+  const sharedAnchorTo = Date.now();
 
-  const primaryProbe = await probeWebGpuCapability(resolvedBaseURL, "no-vulkan-compositor");
+  const primaryProbe = await probeWebGpuCapability(resolvedBaseURL, "no-vulkan-compositor", sharedAnchorTo);
   let webgpuProbe = primaryProbe;
   if (shouldTryWebGpuVulkan(primaryProbe, HARDWARE_MODE)) {
-    const fallbackProbe = await probeWebGpuCapability(resolvedBaseURL, "vulkan-compositor");
+    const fallbackProbe = await probeWebGpuCapability(resolvedBaseURL, "vulkan-compositor", sharedAnchorTo);
     webgpuProbe = selectWebGpuProbe(primaryProbe, fallbackProbe, HARDWARE_MODE);
   }
 
@@ -862,12 +865,13 @@ test("four-chart WebGPU immediate vs GPU-native PoC comparison across pan, zoom 
     test.skip(true, `WebGPU adapter unavailable in runtime (${webgpuProbe.reason ?? "unknown"})`);
   }
 
-  const immediate = await measureMode(resolvedBaseURL, "immediate", webgpuProbe.args, presentationMode, null);
+  const immediate = await measureMode(resolvedBaseURL, "immediate", webgpuProbe.args, presentationMode, sharedAnchorTo, null);
   const gpuNative = await measureMode(
     resolvedBaseURL,
     "gpu-native",
     webgpuProbe.args,
     presentationMode,
+    sharedAnchorTo,
     immediate.capture.pngBase64,
   );
   // Strip large raw PNG base64 before serializing report.
