@@ -1237,9 +1237,10 @@ test("#254: WebGpuSurface.requestCapture deterministically unmaps/destroys stagi
     const staging = buffers.find((b) => b.label === "WebGpuCaptureStagingBuffer");
     assert.equal(staging.destroyed, true);
     assert.equal(staging.unmapCalls, 0);
-    assert.equal(getUnsubCalls(), 2);
+    assert.equal(getUnsubCalls(), 1);
     resolveMap();
     surface.dispose();
+    assert.equal(getUnsubCalls(), 2);
   }
 
   // 5. surface.dispose() during pending mapAsync -> immediate rejection, staging destroyed
