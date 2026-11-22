@@ -234,7 +234,7 @@ test("the live price label carries its caption on a regular chart and sits in th
   expect(compact.some((draw) => draw.surface === "annotation" && /^\d{5}(\.\d+)?$/.test(draw.text))).toBe(true);
 });
 
-test("a mount that gets no WebGL2 context is counted as a creation failure and leaves no canvases", async ({ page }) => {
+test("a mount that gets no WebGL2 context counts a creation failure and falls back to Canvas2D, leaving no canvases when 2D also fails", async ({ page }) => {
   await openHarness(page);
   const result = await page.evaluate(async () => {
     const [{ mountChart, createChartSurfaceModel }, { createHarnessServices }, telemetry] = await Promise.all([
@@ -242,32 +242,61 @@ test("a mount that gets no WebGL2 context is counted as a creation failure and l
       import("/harness/services.ts"),
       import("/src/core/performanceTelemetry.ts"),
     ]);
-    // A phone at its WebGL context limit answers getContext("webgl2") with null.
     const original = HTMLCanvasElement.prototype.getContext;
-    HTMLCanvasElement.prototype.getContext = function (this: HTMLCanvasElement, kind: string, ...rest: unknown[]) {
-      return kind === "webgl2" ? null : (original as (...args: unknown[]) => unknown).call(this, kind, ...rest);
-    } as typeof original;
     const wasEnabled = telemetry.isPerformanceTelemetryEnabled();
     telemetry.configurePerformanceTelemetry({ enabled: true });
     const failures = () => telemetry.snapshotPerformanceTelemetry().counters["chart.gpu.contextCreateFailed"] ?? 0;
-    const before = failures();
     try {
-      const surface = createChartSurfaceModel();
-      const root = document.createElement("div");
-      root.style.cssText = "position:fixed;inset:0;overflow:hidden;";
-      document.body.appendChild(root);
-      mountChart(root, {
+      // 1. WebGL2 unavailable -> counted as creation failure and falls back to Canvas2D (#251)
+      HTMLCanvasElement.prototype.getContext = function (this: HTMLCanvasElement, kind: string, ...rest: unknown[]) {
+        return kind === "webgl2" ? null : (original as (...args: unknown[]) => unknown).call(this, kind, ...rest);
+      } as typeof original;
+      const beforeFallback = failures();
+      const fallbackSurface = createChartSurfaceModel();
+      const fallbackRoot = document.createElement("div");
+      fallbackRoot.style.cssText = "position:fixed;inset:0;overflow:hidden;";
+      document.body.appendChild(fallbackRoot);
+      const fallbackHandle = mountChart(fallbackRoot, {
         type: "chart", market: "BINANCE_FUTURES:btcusdt", timeframe: "15m", scaleMode: "linear", chartType: "footprint", candles: true,
-      } as never, createHarnessServices() as never, "no-webgl2", surface);
-      const deadline = Date.now() + 10_000;
-      while (surface.status !== "failed" && Date.now() < deadline) await new Promise((resolve) => setTimeout(resolve, 20));
-      return { status: surface.status, failures: failures() - before, canvases: root.querySelectorAll("canvas").length };
+      } as never, createHarnessServices() as never, "no-webgl2-fallback", fallbackSurface);
+      const fallbackDeadline = Date.now() + 10_000;
+      while (fallbackSurface.status === "loading" && Date.now() < fallbackDeadline) await new Promise((resolve) => setTimeout(resolve, 20));
+      const fallbackBackend = fallbackRoot.querySelector('[data-testid="chart-hook"]')?.getAttribute("data-gpu-backend");
+      const fallbackResult = {
+        status: fallbackSurface.status,
+        failures: failures() - beforeFallback,
+        canvases: fallbackRoot.querySelectorAll("canvas").length,
+        backend: fallbackBackend,
+      };
+      fallbackHandle.dispose();
+      fallbackRoot.remove();
+
+      // 2. All contexts unavailable -> status becomes "failed" and leaves no canvases
+      HTMLCanvasElement.prototype.getContext = function () { return null; } as typeof original;
+      const failedSurface = createChartSurfaceModel();
+      const failedRoot = document.createElement("div");
+      failedRoot.style.cssText = "position:fixed;inset:0;overflow:hidden;";
+      document.body.appendChild(failedRoot);
+      const failedHandle = mountChart(failedRoot, {
+        type: "chart", market: "BINANCE_FUTURES:btcusdt", timeframe: "15m", scaleMode: "linear", chartType: "footprint", candles: true,
+      } as never, createHarnessServices() as never, "no-contexts-at-all", failedSurface);
+      const failedDeadline = Date.now() + 10_000;
+      while (failedSurface.status === "loading" && Date.now() < failedDeadline) await new Promise((resolve) => setTimeout(resolve, 20));
+      const failedResult = {
+        status: failedSurface.status,
+        canvases: failedRoot.querySelectorAll("canvas").length,
+      };
+      failedHandle.dispose();
+      failedRoot.remove();
+
+      return { fallbackResult, failedResult };
     } finally {
       HTMLCanvasElement.prototype.getContext = original;
       telemetry.configurePerformanceTelemetry({ enabled: wasEnabled });
     }
   });
-  expect(result).toEqual({ status: "failed", failures: 1, canvases: 0 });
+  expect(result.fallbackResult).toEqual({ status: "ready", failures: 1, canvases: 3, backend: "canvas2d" });
+  expect(result.failedResult).toEqual({ status: "failed", canvases: 0 });
 });
 
 test.describe("on a phone", () => {
