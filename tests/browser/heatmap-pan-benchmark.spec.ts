@@ -333,7 +333,7 @@ test("#260/#256 BTC Single / $25 / 10 BTC / Auto P96 preset benchmark, motion re
       telemetry.configurePerformanceTelemetry({ enabled: true });
       const target = charts[0];
       const origNow = (target.orderbookHeatmap as unknown as { now: () => number }).now;
-      let simClock = FROZEN_NOW + 1_000;
+      let simClock = cfg.frozenNow + 1_000;
       (target.orderbookHeatmap as unknown as { now: () => number }).now = () => simClock;
 
       const samplePhase = async (phase: "static" | "pan" | "zoom" | "live-book-invalidation") => {
@@ -542,6 +542,7 @@ test("#260/#256 BTC Single / $25 / 10 BTC / Auto P96 preset benchmark, motion re
     zoomFrames: ZOOM_FRAMES,
     liveTailFrames: LIVE_TAIL_FRAMES,
     staticFrames: STATIC_FRAMES,
+    frozenNow: FROZEN_NOW,
   });
 
   const guardrail = evaluateHeatmapPanHardwareGuardrail(report.rendererProbe, HARDWARE_MODE);
