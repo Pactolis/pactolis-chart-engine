@@ -947,121 +947,128 @@ function makeWebGlMock() {
   return { gl, uniformValues };
 }
 
-test("resolveHeatmapColorRange never calls Array.prototype.sort, avoids scanning in fixed mode, and honors inPlace", (t) => {
+test("resolveHeatmapColorRange never calls Array.prototype.sort, avoids scanning in fixed mode, and honors inPlace", () => {
   let sortCalls = 0;
   const origSort = Array.prototype.sort;
-  t.mock.method(Array.prototype, "sort", function (...args) {
+  Array.prototype.sort = function (...args) {
     sortCalls++;
     return origSort.apply(this, args);
-  });
-
-  const sampleArr = [80_000_000, 500_000, 25_000_000, 0, 5_000_000, -10, Number.NaN];
-  const sampleArrCopy = [...sampleArr];
-  const sampleF64 = Float64Array.from(sampleArr);
-  const sampleF64Copy = Float64Array.from(sampleArr);
-
-  const rAuto = resolveHeatmapColorRange({ values: sampleArr, threshold: 0, scaleMode: "auto" });
-  const rAutoThreshold = resolveHeatmapColorRange({ values: sampleArr, threshold: 1_000_000, scaleMode: "auto" });
-  const rFixedZero = resolveHeatmapColorRange({ values: sampleArr, threshold: 0, scaleMode: "fixed", fixedCeiling: 50_000_000 });
-  const rInPlaceFalse = resolveHeatmapColorRange({ values: sampleF64, threshold: 0, inPlace: false });
-  assert.deepEqual(sampleArr, sampleArrCopy, "default inPlace=false does not mutate array input");
-  assert.deepEqual(Array.from(sampleF64), Array.from(sampleF64Copy), "default inPlace=false does not mutate Float64Array");
-
-  const rInPlaceTrue = resolveHeatmapColorRange({ values: sampleF64, threshold: 0, inPlace: true });
-  assert.deepEqual(rInPlaceTrue, rAuto);
-  assert.deepEqual(rInPlaceFalse, rAuto);
-  assert.ok(rAutoThreshold.floor === 1_000_000 && rAutoThreshold.ceiling > 1_000_000);
-  assert.ok(rFixedZero.floor > 0 && rFixedZero.ceiling === 50_000_000);
-
-  // O(1) fixed mode with threshold > 0 and finite fixedCeiling > 0 must not scan values at all
-  const unindexedValues = {
-    length: 5,
-    get 0() { throw new Error("fixed O(1) fast path must not read values"); },
-    [Symbol.iterator]() { throw new Error("fixed O(1) fast path must not iterate values"); },
   };
-  const rFixedO1 = resolveHeatmapColorRange({
-    values: unindexedValues,
-    threshold: 100,
-    scaleMode: "fixed",
-    fixedCeiling: 500,
-  });
-  assert.deepEqual(rFixedO1, { floor: 100, ceiling: 500 });
-  assert.equal(sortCalls, 0, "resolveHeatmapColorRange must never invoke Array.prototype.sort");
+  try {
+    const sampleArr = [80_000_000, 500_000, 25_000_000, 0, 5_000_000, -10, Number.NaN];
+    const sampleArrCopy = [...sampleArr];
+    const sampleF64 = Float64Array.from(sampleArr);
+    const sampleF64Copy = Float64Array.from(sampleArr);
+
+    const rAuto = resolveHeatmapColorRange({ values: sampleArr, threshold: 0, scaleMode: "auto" });
+    const rAutoThreshold = resolveHeatmapColorRange({ values: sampleArr, threshold: 1_000_000, scaleMode: "auto" });
+    const rFixedZero = resolveHeatmapColorRange({ values: sampleArr, threshold: 0, scaleMode: "fixed", fixedCeiling: 50_000_000 });
+    const rInPlaceFalse = resolveHeatmapColorRange({ values: sampleF64, threshold: 0, inPlace: false });
+    assert.deepEqual(sampleArr, sampleArrCopy, "default inPlace=false does not mutate array input");
+    assert.deepEqual(Array.from(sampleF64), Array.from(sampleF64Copy), "default inPlace=false does not mutate Float64Array");
+
+    const rInPlaceTrue = resolveHeatmapColorRange({ values: sampleF64, threshold: 0, inPlace: true });
+    assert.deepEqual(rInPlaceTrue, rAuto);
+    assert.deepEqual(rInPlaceFalse, rAuto);
+    assert.ok(rAutoThreshold.floor === 1_000_000 && rAutoThreshold.ceiling > 1_000_000);
+    assert.ok(rFixedZero.floor > 0 && rFixedZero.ceiling === 50_000_000);
+
+    // O(1) fixed mode with threshold > 0 and finite fixedCeiling > 0 must not scan values at all
+    const unindexedValues = {
+      length: 5,
+      get 0() { throw new Error("fixed O(1) fast path must not read values"); },
+      [Symbol.iterator]() { throw new Error("fixed O(1) fast path must not iterate values"); },
+    };
+    const rFixedO1 = resolveHeatmapColorRange({
+      values: unindexedValues,
+      threshold: 100,
+      scaleMode: "fixed",
+      fixedCeiling: 500,
+    });
+    assert.deepEqual(rFixedO1, { floor: 100, ceiling: 500 });
+    assert.equal(sortCalls, 0, "resolveHeatmapColorRange must never invoke Array.prototype.sort");
+  } finally {
+    Array.prototype.sort = origSort;
+  }
 });
 
-test("prepareGpuCells resolves color range once per frame without double collection or Array.prototype.sort", async (t) => {
+test("prepareGpuCells resolves color range once per frame without double collection or Array.prototype.sort", async () => {
   let sortCalls = 0;
   const origSort = Array.prototype.sort;
-  t.mock.method(Array.prototype, "sort", function (...args) {
+  Array.prototype.sort = function (...args) {
     sortCalls++;
     return origSort.apply(this, args);
-  });
+  };
 
   let contrastReads = 0;
   let fixedCeilingReads = 0;
   let modeScale = "auto";
-  await withSettings(() => ({
-    mode: "single",
-    unit: "usd",
-    bucketStep: 50,
-    single: { usd: 1_000_000, btc: 10 },
-    aggregated: { usd: 2_000_000, btc: 20 },
-    scaleMode: modeScale,
-    get contrast() {
-      contrastReads++;
-      return "medium";
-    },
-    get fixedCeiling() {
-      fixedCeilingReads++;
-      return { usd: 50_000_000, btc: 500 };
-    },
-  }), async () => {
-    const series = makeSeries(3);
-    const view = makeView();
-    const overlay = new OrderbookHeatmapOverlay({
-      fetch: async (req) => ({
-        schemaVersion: 1,
-        generatedAt: 1003 * MINUTE,
-        base: "BTC",
-        source: req.source,
-        resolution: req.resolution,
-        bucketStep: req.bucketStep,
-        from: req.from,
-        to: req.to,
-        bars: [
-          { t: 1000 * MINUTE, cells: [[50_000, 1_500_000, 500_000], [50_050, 8_000_000, 2_000_000]] },
-          { t: 1001 * MINUTE, cells: [[50_000, 3_000_000, 1_000_000], [50_050, 25_000_000, 5_000_000]] },
-        ],
-      }),
-      invalidate: () => {},
-      getMarket: () => MARKET,
-      now: () => 1003 * MINUTE,
+  try {
+    await withSettings(() => ({
+      mode: "single",
+      unit: "usd",
+      bucketStep: 50,
+      single: { usd: 1_000_000, btc: 10 },
+      aggregated: { usd: 2_000_000, btc: 20 },
+      scaleMode: modeScale,
+      get contrast() {
+        contrastReads++;
+        return "medium";
+      },
+      get fixedCeiling() {
+        fixedCeilingReads++;
+        return { usd: 50_000_000, btc: 500 };
+      },
+    }), async () => {
+      const series = makeSeries(3);
+      const view = makeView();
+      const overlay = new OrderbookHeatmapOverlay({
+        fetch: async (req) => ({
+          schemaVersion: 1,
+          generatedAt: 1003 * MINUTE,
+          base: "BTC",
+          source: req.source,
+          resolution: req.resolution,
+          bucketStep: req.bucketStep,
+          from: req.from,
+          to: req.to,
+          bars: [
+            { t: 1000 * MINUTE, cells: [[50_000, 1_500_000, 500_000], [50_050, 8_000_000, 2_000_000]] },
+            { t: 1001 * MINUTE, cells: [[50_000, 3_000_000, 1_000_000], [50_050, 25_000_000, 5_000_000]] },
+          ],
+        }),
+        invalidate: () => {},
+        getMarket: () => MARKET,
+        now: () => 1003 * MINUTE,
+      });
+      try {
+        overlay.prepareGpuCells(view, series, [0, 2], () => ({ release() {} }));
+        await new Promise((resolve) => setTimeout(resolve, 20));
+
+        contrastReads = 0;
+        fixedCeilingReads = 0;
+        sortCalls = 0;
+        const autoFrame = overlay.prepareGpuCells(view, series, [0, 2], () => ({ release() {} }));
+        assert.ok(autoFrame && autoFrame.main.length === 4);
+        assert.equal(contrastReads, 1, "auto mode prepareGpuCells must resolve range exactly once per frame");
+        assert.equal(sortCalls, 0);
+
+        modeScale = "fixed";
+        contrastReads = 0;
+        fixedCeilingReads = 0;
+        sortCalls = 0;
+        const fixedFrame = overlay.prepareGpuCells(view, series, [0, 2], () => ({ release() {} }));
+        assert.ok(fixedFrame && fixedFrame.main.length === 4);
+        assert.equal(fixedFrame.ceiling, 50_000_000);
+        assert.equal(fixedCeilingReads, 1, "fixed mode prepareGpuCells must resolve range exactly once per frame");
+        assert.equal(sortCalls, 0);
+      } finally {
+        overlay.dispose();
+      }
     });
-    try {
-      overlay.prepareGpuCells(view, series, [0, 2], () => ({ release() {} }));
-      await new Promise((resolve) => setTimeout(resolve, 20));
-
-      contrastReads = 0;
-      fixedCeilingReads = 0;
-      sortCalls = 0;
-      const autoFrame = overlay.prepareGpuCells(view, series, [0, 2], () => ({ release() {} }));
-      assert.ok(autoFrame && autoFrame.main.length === 4);
-      assert.equal(contrastReads, 1, "auto mode prepareGpuCells must resolve range exactly once per frame");
-      assert.equal(sortCalls, 0);
-
-      modeScale = "fixed";
-      contrastReads = 0;
-      fixedCeilingReads = 0;
-      sortCalls = 0;
-      const fixedFrame = overlay.prepareGpuCells(view, series, [0, 2], () => ({ release() {} }));
-      assert.ok(fixedFrame && fixedFrame.main.length === 4);
-      assert.equal(fixedFrame.ceiling, 50_000_000);
-      assert.equal(fixedCeilingReads, 1, "fixed mode prepareGpuCells must resolve range exactly once per frame");
-      assert.equal(sortCalls, 0);
-    } finally {
-      overlay.dispose();
-    }
-  });
+  } finally {
+    Array.prototype.sort = origSort;
+  }
 });
 
 test("OrderbookHeatmapOverlay.draw and drawHover with threshold=0 produce distinct colors without saturating to peak yellow", async () => {
@@ -1101,6 +1108,7 @@ test("OrderbookHeatmapOverlay.draw and drawHover with threshold=0 produce distin
           bars: [
             { t: 1000 * MINUTE, cells: [[49_700, 100_000, 0], [49_750, 200_000, 0], [49_800, 300_000, 0]] },
             { t: 1001 * MINUTE, cells: bar1Cells },
+            { t: 1002 * MINUTE, cells: [[49_700, 100_000, 0]] },
           ],
         }),
         invalidate: () => {},
