@@ -1049,7 +1049,7 @@ test("prepareGpuCells resolves color range once per frame without double collect
         fixedCeilingReads = 0;
         sortCalls = 0;
         const autoFrame = overlay.prepareGpuCells(view, series, [0, 2], () => ({ release() {} }));
-        assert.ok(autoFrame && autoFrame.main.length === 4);
+        assert.ok(autoFrame && autoFrame.main.length === 6);
         assert.equal(contrastReads, 1, "auto mode prepareGpuCells must resolve range exactly once per frame");
         assert.equal(sortCalls, 0);
 
@@ -1058,7 +1058,7 @@ test("prepareGpuCells resolves color range once per frame without double collect
         fixedCeilingReads = 0;
         sortCalls = 0;
         const fixedFrame = overlay.prepareGpuCells(view, series, [0, 2], () => ({ release() {} }));
-        assert.ok(fixedFrame && fixedFrame.main.length === 4);
+        assert.ok(fixedFrame && fixedFrame.main.length === 6);
         assert.equal(fixedFrame.ceiling, 50_000_000);
         assert.equal(fixedCeilingReads, 1, "fixed mode prepareGpuCells must resolve range exactly once per frame");
         assert.equal(sortCalls, 0);

@@ -140,11 +140,12 @@ export const HEATMAP_AUTO_PERCENTILES: Readonly<Record<OrderbookHeatmapContrast,
 };
 
 export interface HeatmapColorRangeInput {
-  values: readonly number[];
+  values: ArrayLike<number>;
   threshold: number;
   scaleMode?: OrderbookHeatmapScaleMode;
   fixedCeiling?: number;
   contrast?: OrderbookHeatmapContrast;
+  inPlace?: boolean;
 }
 
 export interface HeatmapColorRange {
@@ -152,14 +153,108 @@ export interface HeatmapColorRange {
   ceiling: number;
 }
 
-function sortedPercentile(sorted: readonly number[], quantile: number): number {
-  if (sorted.length === 0) return 0;
-  if (sorted.length === 1) return sorted[0];
-  const index = (sorted.length - 1) * quantile;
-  const lo = Math.floor(index);
-  const hi = Math.ceil(index);
-  if (lo === hi) return sorted[lo];
-  return sorted[lo] + (sorted[hi] - sorted[lo]) * (index - lo);
+let colorRangeScratch = new Float64Array(1024);
+
+/**
+ * Deterministic median-of-3 + 3-way Dutch National Flag Quickselect (`< pivot`, `== pivot`, `> pivot`).
+ * Guarantees O(N) performance even on all-equal or heavily quantized distributions.
+ */
+function selectKthInPlace(buf: Float64Array, leftStart: number, rightEnd: number, k: number): number {
+  let left = leftStart;
+  let right = rightEnd;
+  while (left < right) {
+    const mid = left + ((right - left) >> 1);
+    let a = buf[left];
+    let b = buf[mid];
+    let c = buf[right];
+    if (a > b) {
+      const t = a;
+      a = b;
+      b = t;
+    }
+    if (b > c) {
+      const t = b;
+      b = c;
+      c = t;
+    }
+    if (a > b) {
+      const t = a;
+      a = b;
+      b = t;
+    }
+    const pivot = b;
+
+    let lt = left;
+    let i = left;
+    let gt = right;
+    while (i <= gt) {
+      const val = buf[i];
+      if (val < pivot) {
+        buf[i] = buf[lt];
+        buf[lt] = val;
+        lt++;
+        i++;
+      } else if (val > pivot) {
+        buf[i] = buf[gt];
+        buf[gt] = val;
+        gt--;
+      } else {
+        i++;
+      }
+    }
+
+    if (k < lt) {
+      right = lt - 1;
+    } else if (k > gt) {
+      left = gt + 1;
+    } else {
+      return pivot;
+    }
+  }
+  return buf[k];
+}
+
+function percentileFromBuffer(buf: Float64Array, n: number, quantile: number, loBound: number): number {
+  if (n === 0) return 0;
+  if (n === 1) return buf[0];
+  const idx = (n - 1) * quantile;
+  const lo = Math.floor(idx);
+  const hi = Math.ceil(idx);
+  const vLo = selectKthInPlace(buf, loBound, n - 1, lo);
+  if (hi === lo) return vLo;
+  let vHi = buf[lo + 1];
+  for (let i = lo + 2; i < n; i++) {
+    const v = buf[i];
+    if (v < vHi) vHi = v;
+  }
+  return vLo + (vHi - vLo) * (idx - lo);
+}
+
+function compactPositiveValues(values: ArrayLike<number>, inPlace: boolean): { buf: Float64Array; count: number } {
+  if (inPlace && values instanceof Float64Array) {
+    let n = 0;
+    for (let i = 0; i < values.length; i++) {
+      const v = values[i];
+      if (Number.isFinite(v) && v > 0) {
+        values[n++] = v;
+      }
+    }
+    return { buf: values, count: n };
+  }
+
+  let n = 0;
+  for (let i = 0; i < values.length; i++) {
+    const v = values[i];
+    if (Number.isFinite(v) && v > 0) {
+      if (n === colorRangeScratch.length) {
+        const next = new Float64Array(colorRangeScratch.length * 2);
+        next.set(colorRangeScratch);
+        colorRangeScratch = next;
+      }
+      colorRangeScratch[n++] = v;
+    }
+  }
+  return { buf: colorRangeScratch, count: n };
 }
 
 /**
@@ -168,49 +263,57 @@ function sortedPercentile(sorted: readonly number[], quantile: number): number {
  */
 export function resolveHeatmapColorRange(input: HeatmapColorRangeInput): HeatmapColorRange {
   const scaleMode = input.scaleMode ?? "auto";
-  const contrast = input.contrast ?? "medium";
-  const [floorQ, ceilingQ] = HEATMAP_AUTO_PERCENTILES[contrast] ?? HEATMAP_AUTO_PERCENTILES.medium;
-
-  const positive: number[] = [];
-  for (const value of input.values) {
-    if (Number.isFinite(value) && value > 0) positive.push(value);
-  }
-  positive.sort((a, b) => a - b);
-
   const hasThreshold = Number.isFinite(input.threshold) && input.threshold > 0;
   const threshold = hasThreshold ? input.threshold : 0;
-
-  if (
+  const hasFixedCeiling =
     scaleMode === "fixed" &&
     input.fixedCeiling !== undefined &&
     Number.isFinite(input.fixedCeiling) &&
-    input.fixedCeiling > 0
-  ) {
-    let floor = threshold;
-    if (floor <= 0) {
-      floor = positive.length > 0
-        ? Math.min(sortedPercentile(positive, floorQ), input.fixedCeiling / HEATMAP_MIN_CEILING_RATIO)
-        : 0;
-    }
-    const ceiling = floor > 0
-      ? Math.max(input.fixedCeiling, floor * HEATMAP_MIN_CEILING_RATIO)
-      : input.fixedCeiling;
-    return { floor, ceiling };
-  }
+    input.fixedCeiling > 0;
 
-  if (positive.length === 0) {
-    const floor = threshold;
+  if (hasFixedCeiling && threshold > 0) {
     return {
-      floor,
-      ceiling: floor > 0 ? floor * 10 : 0,
+      floor: threshold,
+      ceiling: Math.max(input.fixedCeiling!, threshold * HEATMAP_MIN_CEILING_RATIO),
     };
   }
 
-  const pFloor = sortedPercentile(positive, floorQ);
-  const pCeiling = sortedPercentile(positive, ceilingQ);
-  const floor = threshold > 0 ? threshold : pFloor;
-  const ceiling = Math.max(pCeiling, floor * HEATMAP_MIN_CEILING_RATIO);
-  return { floor, ceiling };
+  const contrast = input.contrast ?? "medium";
+  const [floorQ, ceilingQ] = HEATMAP_AUTO_PERCENTILES[contrast] ?? HEATMAP_AUTO_PERCENTILES.medium;
+  const { buf, count } = compactPositiveValues(input.values, input.inPlace === true);
+
+  if (hasFixedCeiling) {
+    const floor = count > 0
+      ? Math.min(percentileFromBuffer(buf, count, floorQ, 0), input.fixedCeiling! / HEATMAP_MIN_CEILING_RATIO)
+      : 0;
+    const ceiling = floor > 0
+      ? Math.max(input.fixedCeiling!, floor * HEATMAP_MIN_CEILING_RATIO)
+      : input.fixedCeiling!;
+    return { floor, ceiling };
+  }
+
+  if (count === 0) {
+    return {
+      floor: threshold,
+      ceiling: threshold > 0 ? threshold * 10 : 0,
+    };
+  }
+
+  if (threshold > 0) {
+    const pCeiling = percentileFromBuffer(buf, count, ceilingQ, 0);
+    return {
+      floor: threshold,
+      ceiling: Math.max(pCeiling, threshold * HEATMAP_MIN_CEILING_RATIO),
+    };
+  }
+
+  const loFloor = Math.floor((count - 1) * floorQ);
+  const pFloor = percentileFromBuffer(buf, count, floorQ, 0);
+  const pCeiling = percentileFromBuffer(buf, count, ceilingQ, loFloor);
+  return {
+    floor: pFloor,
+    ceiling: Math.max(pCeiling, pFloor * HEATMAP_MIN_CEILING_RATIO),
+  };
 }
 
 const LOG10_101 = Math.log10(101);

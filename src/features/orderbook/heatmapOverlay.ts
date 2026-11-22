@@ -215,7 +215,8 @@ export class OrderbookHeatmapOverlay {
   private visibleFloor = 0;
   private visibleCeiling = 0;
   private visibleOpacity = 0.85;
-  private scratchPositiveValues: number[] = [];
+  private scratchValues = new Float64Array(1024);
+  private scratchValueCount = 0;
   private explicitVisible = true;
   private rasterCacheDisabledForTest = false;
   private lastRasterViewportKey = "";
@@ -559,6 +560,10 @@ export class OrderbookHeatmapOverlay {
     this.liveTailRequestKey = "";
     this.releaseVisibilityTracking();
     this.canonicalTailBars.clear();
+    this.scratchValueCount = 0;
+    if (this.scratchValues.length > 65_536) {
+      this.scratchValues = new Float64Array(1024);
+    }
     this.reset("");
   }
 
@@ -845,14 +850,19 @@ export class OrderbookHeatmapOverlay {
 
       // Streaming CPU path: two passes (range resolution, then paint) with an O(1)-held
       // payload. It never builds or reuses the whole-visible collection list.
-      this.scratchPositiveValues.length = 0;
+      const collectRangeValues = this.needsRangeValues(frame.settings, frame.threshold);
+      this.scratchValueCount = 0;
       let cells = 0;
       this.forEachVisibleCell(view, series, frame, null, ({ value }) => {
         cells++;
-        if (value > 0) this.scratchPositiveValues.push(value);
+        if (collectRangeValues && value > 0) this.pushScratchValue(value);
       });
-      const resolved = this.resolveRangeForValues(this.scratchPositiveValues, frame.settings, frame.threshold);
-      this.scratchPositiveValues.length = 0;
+      const resolved = this.resolveRangeForValues(
+        this.scratchValues.subarray(0, this.scratchValueCount),
+        frame.settings,
+        frame.threshold,
+      );
+      this.scratchValueCount = 0;
       this.visibleFloor = resolved.floor;
       this.visibleCeiling = resolved.ceiling;
       this.visibleThreshold = frame.threshold;
@@ -995,8 +1005,27 @@ export class OrderbookHeatmapOverlay {
     ctx.restore();
   }
 
+  private pushScratchValue(value: number): void {
+    if (this.scratchValueCount === this.scratchValues.length) {
+      const next = new Float64Array(this.scratchValues.length * 2);
+      next.set(this.scratchValues);
+      this.scratchValues = next;
+    }
+    this.scratchValues[this.scratchValueCount++] = value;
+  }
+
+  private needsRangeValues(settings: OrderbookHeatmapSettings, threshold: number): boolean {
+    if (threshold > 0 && settings.scaleMode === "fixed") {
+      const fixedCeiling = settings.fixedCeiling?.[settings.unit];
+      if (fixedCeiling !== undefined && Number.isFinite(fixedCeiling) && fixedCeiling > 0) {
+        return false;
+      }
+    }
+    return true;
+  }
+
   private resolveRangeForValues(
-    values: readonly number[],
+    values: ArrayLike<number>,
     settings: OrderbookHeatmapSettings,
     threshold: number,
   ): { floor: number; ceiling: number; opacity: number } {
@@ -1009,6 +1038,7 @@ export class OrderbookHeatmapOverlay {
       scaleMode: settings.scaleMode,
       fixedCeiling,
       contrast: settings.contrast,
+      inPlace: true,
     });
     return {
       floor,
@@ -1149,7 +1179,7 @@ export class OrderbookHeatmapOverlay {
     if (!preamble) return null;
     const startedAt = isPerformanceTelemetryEnabled() ? performance.now() : null;
     try {
-      return this.prepareReservedGpuCells(preamble, view, series, range, reserve);
+      return this.prepareReservedGpuCells(preamble, view, series, reserve);
     } finally {
       if (startedAt !== null) recordPerformanceDuration("chart.gpu.heatmap.prepare.ms", performance.now() - startedAt);
     }
@@ -1160,15 +1190,15 @@ export class OrderbookHeatmapOverlay {
     preamble: HeatmapFramePreamble,
     view: View,
     series: FootprintSeries,
-    range: [number, number],
     reserve: (logicalBytes: number) => { release(): void } | null,
   ): HeatmapGpuCellFrame | null {
     const right = view.area.left + view.area.width;
     const { top, height } = view.area;
     const step = preamble.settings.bucketStep;
+    const collectRangeValues = this.needsRangeValues(preamble.settings, preamble.threshold);
     let mainCount = 0;
     let extCount = 0;
-    this.scratchPositiveValues.length = 0;
+    this.scratchValueCount = 0;
     for (let index = preamble.first; index <= preamble.last; index++) {
       const live = !this.isReplayActive() && index === series.length - 1;
       const bar = (live ? liveHeatmapSubBar : lastHeatmapSubBar)(
@@ -1179,14 +1209,20 @@ export class OrderbookHeatmapOverlay {
         const yTop = view.yOfPrice(cell[0] + step);
         const yBottom = view.yOfPrice(cell[0]);
         if (yBottom < top || yTop > top + height) continue;
-        const value = heatmapValueInUnit(heatmapCellUsd(cell), cell[0], step, preamble.settings.unit);
-        if (value > 0) this.scratchPositiveValues.push(value);
+        if (collectRangeValues) {
+          const value = heatmapValueInUnit(heatmapCellUsd(cell), cell[0], step, preamble.settings.unit);
+          if (value > 0) this.pushScratchValue(value);
+        }
         mainCount++;
         if (live && x + view.colWidth < right) extCount++;
       }
     }
-    const resolved = this.resolveRangeForValues(this.scratchPositiveValues, preamble.settings, preamble.threshold);
-    this.scratchPositiveValues.length = 0;
+    const resolved = this.resolveRangeForValues(
+      this.scratchValues.subarray(0, this.scratchValueCount),
+      preamble.settings,
+      preamble.threshold,
+    );
+    this.scratchValueCount = 0;
     this.visibleFloor = resolved.floor;
     this.visibleCeiling = resolved.ceiling;
     this.visibleThreshold = preamble.threshold;
@@ -1210,8 +1246,9 @@ export class OrderbookHeatmapOverlay {
     const lease = reserve(logicalBytes);
     if (!lease) return null;
     try {
-      const visible = this.collectVisibleCells(view, series, range, GPU_MAX_PREPARED_CELLS);
-      if (!visible || visible.length !== mainCount || visible.length >= GPU_MAX_PREPARED_CELLS) {
+      const visible: Array<{ x: number; yTop: number; cellHeight: number; value: number; live: boolean }> = [];
+      this.forEachVisibleCell(view, series, preamble, GPU_MAX_PREPARED_CELLS, (cell) => visible.push(cell));
+      if (visible.length !== mainCount || visible.length >= GPU_MAX_PREPARED_CELLS) {
         lease.release();
         return null;
       }
@@ -1316,13 +1353,18 @@ export class OrderbookHeatmapOverlay {
       return this.lastCollected;
     }
     const visible: Array<{ x: number; yTop: number; cellHeight: number; value: number; live: boolean }> = [];
-    this.scratchPositiveValues.length = 0;
+    const collectRangeValues = this.needsRangeValues(frame.settings, frame.threshold);
+    this.scratchValueCount = 0;
     this.forEachVisibleCell(view, series, frame, cellLimit, (cell) => {
       visible.push(cell);
-      if (cell.value > 0) this.scratchPositiveValues.push(cell.value);
+      if (collectRangeValues && cell.value > 0) this.pushScratchValue(cell.value);
     });
-    const resolved = this.resolveRangeForValues(this.scratchPositiveValues, frame.settings, frame.threshold);
-    this.scratchPositiveValues.length = 0;
+    const resolved = this.resolveRangeForValues(
+      this.scratchValues.subarray(0, this.scratchValueCount),
+      frame.settings,
+      frame.threshold,
+    );
+    this.scratchValueCount = 0;
     this.visibleFloor = resolved.floor;
     this.visibleCeiling = resolved.ceiling;
     this.visibleThreshold = frame.threshold;
