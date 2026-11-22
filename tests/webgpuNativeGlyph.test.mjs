@@ -204,7 +204,7 @@ function makeTestSeries(priceStep = 10) {
       cellRevision: idx + 1,
     };
   });
-  series.replaceAll(bars);
+  series.loadBars(bars);
   return series;
 }
 
@@ -523,7 +523,7 @@ test("WebGpuSurface + FootprintRenderer + Overlay enforce zero-double-draw and f
 
     // 7. Unsupported char fallback (Infinity volume -> "Infinity") -> returns false, falls back to canvas2d
     const badSeries = new FootprintSeries({ intervalMs: 60_000, priceStep: 10 });
-    badSeries.replaceAll([{
+    badSeries.loadBars([{
       startTime: 1_700_000_040_000,
       open: 60_010,
       high: 60_020,
