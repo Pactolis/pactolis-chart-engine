@@ -16,7 +16,7 @@ export default defineConfig({
   projects: [
     // The multi-chart census and its endurance profile take most of the run; CI
     // gives them their own job. PR CI runs the core census scenarios (#61).
-    { name: "default", testIgnore: ["**/chart-multi-market-census.spec.ts"] },
+    { name: "default", testIgnore: ["**/chart-multi-market-census.spec.ts", "**/heatmap-pan-benchmark.spec.ts"] },
     { name: "heatmap-pan-benchmark", testMatch: ["**/heatmap-pan-benchmark.spec.ts"] },
     {
       name: "census",
