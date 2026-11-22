@@ -473,7 +473,7 @@ test("WebGpuSurface + FootprintRenderer + Overlay enforce zero-double-draw and f
     assert.ok((snapshotPerformanceTelemetry().metrics["chart.gpu.native.text.ms"]?.count ?? 0) >= 1);
 
     overlayCtx.fillTextCalls.length = 0;
-    overlay.renderAnnotations(view, series, { x: 0, y: 0, visible: false }, [0, 3], ["footprint-text"], ChartChange.Viewport);
+    overlay.renderAnnotations(view, series, { x: 0, y: 0, visible: true }, [0, 3], ["footprint-text"], ChartChange.Viewport);
     assert.equal(overlayCtx.fillTextCalls.length, 0, "zero double-draw when webgpu-sdf rendered text");
 
     // 2. ?webgpuText=0 opt-out -> canvas2d text fallback while keeping webgpu-native scene
@@ -484,7 +484,7 @@ test("WebGpuSurface + FootprintRenderer + Overlay enforce zero-double-draw and f
     assert.equal(renderer.renderedNativeFootprintText, false);
 
     overlayCtx.fillTextCalls.length = 0;
-    overlay.renderAnnotations(view, series, { x: 0, y: 0, visible: false }, [0, 3], ["footprint-text"], ChartChange.Style);
+    overlay.renderAnnotations(view, series, { x: 0, y: 0, visible: true }, [0, 3], ["footprint-text"], ChartChange.Style);
     assert.ok(overlayCtx.fillTextCalls.length > 0, "Canvas2D drawCells runs when webgpuText=0");
 
     // 3. nativeWebGpuText: false via source -> canvas2d
@@ -593,10 +593,10 @@ test("WebGpuSurface + FootprintRenderer + Overlay enforce zero-double-draw and f
     flipOverlay.showNotional = false;
     assert.deepEqual(notionalEvents, [false]);
     overlayCtx.fillTextCalls.length = 0;
-    flipOverlay.renderAnnotations(view, series, { x: 0, y: 0, visible: false }, [0, 3], ["footprint-text"], ChartChange.Viewport);
+    flipOverlay.renderAnnotations(view, series, { x: 0, y: 0, visible: true }, [0, 3], ["footprint-text"], ChartChange.Viewport);
     assert.equal(overlayCtx.fillTextCalls.length, 0);
     skipTextFlag = false;
-    flipOverlay.renderAnnotations(view, series, { x: 0, y: 0, visible: false }, [0, 3], ["footprint-text"], ChartChange.DataTail);
+    flipOverlay.renderAnnotations(view, series, { x: 0, y: 0, visible: true }, [0, 3], ["footprint-text"], ChartChange.DataTail);
     assert.ok(overlayCtx.fillTextCalls.length > 0, "DataTail draws Canvas2D cells when skipFootprintText flips false");
   } finally {
     resetGpuSettingsForTest();
