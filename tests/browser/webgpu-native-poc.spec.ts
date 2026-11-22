@@ -518,6 +518,16 @@ async function measureMode(
 
         // Composite capture for parity & non-empty frame check.
         const captureFrame = await runtimes()[0].session.captureCompositePng();
+        const rt0 = runtimes()[0];
+        const captureView = {
+          offsetX: rt0.view.offsetX,
+          colWidth: rt0.view.colWidth,
+          priceTop: rt0.view.priceTop,
+          pricePerPx: rt0.view.pricePerPx,
+          area: { ...rt0.view.area },
+          firstTime: rt0.pipeline.series.at(0)?.startTime ?? null,
+          lastTime: rt0.pipeline.series.at(rt0.pipeline.series.length - 1)?.startTime ?? null,
+        };
         const blobToBase64 = async (blob: Blob) => {
           const buf = new Uint8Array(await blob.arrayBuffer());
           let bin = "";
@@ -548,23 +558,25 @@ async function measureMode(
           }
         }
 
-        let parity: { matchRatio: number; maxChannelDiff: number; totalPixels: number } | null = null;
+        let parity: { matchRatio: number; maxChannelDiff: number; meanAbsDiff: number; totalPixels: number } | null = null;
         if (referencePngBase64) {
           const decodedRef = await decodePngRgba(referencePngBase64);
           if (decodedRef.width === decodedCurrent.width && decodedRef.height === decodedCurrent.height) {
             const totalPixels = decodedCurrent.width * decodedCurrent.height;
             let matched = 0;
             let maxDiff = 0;
+            let sumDiff = 0;
             for (let i = 0; i < decodedCurrent.data.length; i += 4) {
               const dr = Math.abs(decodedCurrent.data[i] - decodedRef.data[i]);
               const dg = Math.abs(decodedCurrent.data[i + 1] - decodedRef.data[i + 1]);
               const db = Math.abs(decodedCurrent.data[i + 2] - decodedRef.data[i + 2]);
               const da = Math.abs(decodedCurrent.data[i + 3] - decodedRef.data[i + 3]);
               const d = Math.max(dr, dg, db, da);
+              sumDiff += (dr + dg + db + da) / 4;
               if (d > maxDiff) maxDiff = d;
               if (d <= 2) matched++;
             }
-            parity = { matchRatio: matched / totalPixels, maxChannelDiff: maxDiff, totalPixels };
+            parity = { matchRatio: matched / totalPixels, maxChannelDiff: maxDiff, meanAbsDiff: sumDiff / totalPixels, totalPixels };
           }
         }
 
@@ -712,6 +724,7 @@ async function measureMode(
             height: captureFrame.height,
             bytes: captureFrame.bytes,
             nonBgPixels,
+            view: captureView,
             pngBase64: referencePngBase64 ? null : capturePngBase64,
             parity,
           },
@@ -876,7 +889,7 @@ test("four-chart WebGPU immediate vs GPU-native PoC comparison across pan, zoom 
   }
 
   const assessment = buildWebGpuNativeAssessment({ hardwareValid, immediate, gpuNative });
-  await writeReport({
+  const report = {
     schemaVersion: 1,
     issue: "#258",
     hardwareValid,
@@ -889,7 +902,19 @@ test("four-chart WebGPU immediate vs GPU-native PoC comparison across pan, zoom 
     gpuNative,
     parity,
     ...assessment,
-  });
+  };
+  console.log("WEBGPU_NATIVE_POC_EVIDENCE", JSON.stringify({
+    decision: report.decision,
+    hardwareValid: report.hardwareValid,
+    timestampQuerySupported: report.timestampQuerySupported,
+    parity: report.parity,
+    immediateCaptureView: immediate.capture.view,
+    nativeCaptureView: gpuNative.capture.view,
+    immediateFeaturePaths: immediate.featurePaths,
+    nativeFeaturePaths: gpuNative.featurePaths,
+    comparisons: assessment.comparisons,
+  }));
+  await writeReport(report);
 
   expect(immediate.active).toBe("webgpu");
   expect(immediate.panelBackends).toEqual(["webgpu", "webgpu", "webgpu", "webgpu"]);
