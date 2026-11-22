@@ -91,3 +91,108 @@ test("Canvas2D scene and overlay contextlost/contextrestored recover in mounted 
   expect(result.counters["chart.canvas2d.interaction.contextLost"]).toBe(1);
   expect(result.counters["chart.canvas2d.interaction.contextRestored"]).toBe(1);
 });
+
+test("WebGPU verifyInit scoped error on ?gpu=webgpu initial mount falls back to connected WebGL2 canvas", async ({ page }) => {
+  await page.addInitScript(() => {
+    const locked = new WeakMap<HTMLCanvasElement, string>();
+    const origGetContext = HTMLCanvasElement.prototype.getContext;
+    HTMLCanvasElement.prototype.getContext = function (
+      this: HTMLCanvasElement,
+      contextId: string,
+      options?: unknown,
+    ) {
+      const prev = locked.get(this);
+      if (prev && prev !== contextId) return null;
+      if (contextId === "webgpu") {
+        locked.set(this, "webgpu");
+        return {
+          configure() {},
+          unconfigure() {},
+          getCurrentTexture() {
+            return { createView() { return {}; } };
+          },
+        } as unknown as RenderingContext;
+      }
+      const ctx = (origGetContext as (id: string, opts?: unknown) => RenderingContext | null).call(this, contextId, options);
+      if (ctx && !prev) locked.set(this, contextId);
+      return ctx;
+    } as typeof HTMLCanvasElement.prototype.getContext;
+
+    const errorScopeStack: string[] = [];
+    const mockDevice = {
+      features: new Set<string>(),
+      limits: { maxBufferSize: 268435456, maxTextureDimension2D: 8192 },
+      lost: new Promise(() => {}),
+      addEventListener() {},
+      removeEventListener() {},
+      destroy() {},
+      pushErrorScope(filter: string) {
+        errorScopeStack.push(filter);
+      },
+      async popErrorScope() {
+        const filter = errorScopeStack.pop();
+        return filter === "validation" ? { message: "Mock WebGPU validation error during shader init" } : null;
+      },
+      createShaderModule() { return {}; },
+      createBuffer() { return { destroy() {}, unmap() {} }; },
+      createBindGroupLayout() { return {}; },
+      createBindGroup() { return {}; },
+      createPipelineLayout() { return {}; },
+      createRenderPipeline() { return {}; },
+      createTexture() { return { createView() { return {}; }, destroy() {} }; },
+      createCommandEncoder() {
+        return {
+          beginRenderPass() {
+            return { setPipeline() {}, setBindGroup() {}, setVertexBuffer() {}, draw() {}, end() {} };
+          },
+          copyTextureToBuffer() {},
+          finish() { return {}; },
+        };
+      },
+      queue: { writeBuffer() {}, submit() {} },
+    };
+
+    Object.defineProperty(navigator, "gpu", {
+      configurable: true,
+      value: {
+        getPreferredCanvasFormat: () => "rgba8unorm",
+        requestAdapter: async () => ({
+          info: { vendor: "mock", architecture: "test", isFallbackAdapter: false },
+          requestDevice: async () => mockDevice,
+        }),
+      },
+    });
+  });
+
+  await installHistory(page, { bars: buildBars(60) });
+  await openHarness(page, "?chart=BINANCE_FUTURES:btcusdt&timeframe=15m&gpu=webgpu");
+  await expect(page.locator('[data-testid="chart-hook"]')).toHaveAttribute("data-history-loading", "false");
+  await expect(page.locator('[data-testid="chart-hook"]')).toHaveAttribute("data-gpu-backend", "webgl2");
+
+  const state = await page.evaluate(async () => {
+    const { getGpuDiagnostics } = await import("/src/core/gpu/gpuDiagnostics.ts");
+    const harness = await import("/harness/chart.ts");
+    const runtime = harness.listChartRuntimes()[0];
+    const sceneCanvases = [...document.querySelectorAll('canvas[data-chart-surface="gpu-scene"]')];
+    const annotationCanvas = document.querySelector('canvas[data-chart-surface="annotation"]');
+    const capture = await runtime.session.captureCompositePng();
+    return {
+      sceneCount: sceneCanvases.length,
+      connected: sceneCanvases[0]?.isConnected ?? false,
+      nextSiblingIsAnnotation: sceneCanvases[0]?.nextElementSibling === annotationCanvas,
+      surfaceKind: runtime.session.getSurface().kind,
+      captureBytes: capture.bytes,
+      diag: getGpuDiagnostics(),
+    };
+  });
+
+  expect(state.sceneCount).toBe(1);
+  expect(state.connected).toBe(true);
+  expect(state.nextSiblingIsAnnotation).toBe(true);
+  expect(state.surfaceKind).toBe("webgl2");
+  expect(state.captureBytes).toBeGreaterThan(0);
+  expect(state.diag.active).toBe("webgl2");
+  expect(state.diag.fallbacks).toContainEqual(
+    expect.objectContaining({ from: "webgpu", to: "webgl2", reason: "surface_init_failed" }),
+  );
+});

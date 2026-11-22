@@ -2069,7 +2069,11 @@ async function buildChartRuntime(
     if (gpuCanvas.style?.cssText) {
       gpuSurface.canvas.style.cssText = gpuCanvas.style.cssText;
     }
-    gpuCanvas.replaceWith(gpuSurface.canvas);
+    if (gpuCanvas.parentNode) {
+      gpuCanvas.replaceWith(gpuSurface.canvas);
+    } else {
+      panelRoot.insertBefore(gpuSurface.canvas, annotationCanvas);
+    }
     gpuCanvas.width = 0;
     gpuCanvas.height = 0;
     gpuCanvas = gpuSurface.canvas;
@@ -2155,6 +2159,9 @@ async function buildChartRuntime(
         canvasPrev.height = 0;
         hook.setAttribute("data-gpu-backend", nextSurface!.kind);
       });
+      if (nextSurface.canvas !== nextCanvas) {
+        cleanupDetachedCanvas(nextCanvas);
+      }
       currentBackendPref = nextSettings.backend;
     } catch (err) {
       if (nextSurface) {

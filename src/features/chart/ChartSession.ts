@@ -902,8 +902,7 @@ export class ChartSession {
     if (!canvas.addEventListener) return;
 
     if (this.gpuSurface.kind === "canvas2d") {
-      const onLost = (e: Event): void => {
-        e.preventDefault?.();
+      const onLost = (_e: Event): void => {
         recordCanvas2dContextEvent("scene", "lost");
         (this.gpuSurface as { markContextLost?: () => void }).markContextLost?.();
         this.cancelRaf();
@@ -1022,8 +1021,7 @@ export class ChartSession {
       onLostExtra?: () => void,
     ): void => {
       if (!canvas.addEventListener) return;
-      const onLost = (e: Event): void => {
-        e.preventDefault?.();
+      const onLost = (_e: Event): void => {
         setLostFlag(true);
         recordCanvas2dContextEvent(surface, "lost");
         onLostExtra?.();

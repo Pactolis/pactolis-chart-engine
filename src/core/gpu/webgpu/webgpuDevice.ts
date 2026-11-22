@@ -208,6 +208,11 @@ export async function requestWebGpuDevice(options?: {
         }
         clearSharedIfOwned();
         notifyLostListeners(kind === "out-of-memory" ? "out-of-memory" : "internal-error");
+        try {
+          device.destroy?.();
+        } catch {
+          // device might already be destroyed or mock
+        }
       };
 
       const handleDeviceLost = (): void => {

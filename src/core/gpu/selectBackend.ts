@@ -13,7 +13,7 @@ import type { ChartPowerPreference } from "../model/chartDisplayOptions.js";
 
 type PendingFallback = { from: string; to: string; reason: string };
 
-function cleanupCanvas(canvas: HTMLCanvasElement, webgpuCtx?: any): void {
+function cleanupCanvas(canvas: HTMLCanvasElement, webgpuCtx?: any, removeFromDom = false): void {
   try {
     webgpuCtx?.unconfigure?.();
   } catch {
@@ -25,10 +25,12 @@ function cleanupCanvas(canvas: HTMLCanvasElement, webgpuCtx?: any): void {
   } catch {
     // ignore
   }
-  try {
-    canvas.remove?.();
-  } catch {
-    // ignore
+  if (removeFromDom) {
+    try {
+      canvas.remove?.();
+    } catch {
+      // ignore
+    }
   }
 }
 
@@ -112,7 +114,7 @@ export function createGpuSurface(
             commitSelectionDiagnostics(preference, "webgpu", pendingFallbacks, false, limits);
             return surface;
           } catch {
-            cleanupCanvas(canvas, webgpuCtx);
+            cleanupCanvas(canvas, webgpuCtx, false);
             pendingFallbacks.push({ from: "webgpu", to: "webgl2", reason: "surface_init_failed" });
           }
         }
@@ -147,12 +149,12 @@ export function createGpuSurface(
         commitSelectionDiagnostics(preference, "webgl2", pendingFallbacks, false);
         return surface;
       } catch {
-        cleanupCanvas(webglCanvas);
+        cleanupCanvas(webglCanvas, undefined, webglCanvas !== canvas);
         pendingFallbacks.push({ from: "webgl2", to: "canvas2d", reason: "surface_init_failed" });
         contextCreateFailed = true;
       }
     } else {
-      if (webglCanvas !== canvas) cleanupCanvas(webglCanvas);
+      if (webglCanvas !== canvas) cleanupCanvas(webglCanvas, undefined, true);
       pendingFallbacks.push({ from: "webgl2", to: "canvas2d", reason: "context_unavailable" });
       contextCreateFailed = true;
     }
@@ -190,10 +192,10 @@ export function createGpuSurface(
         commitSelectionDiagnostics(preference, "canvas2d", pendingFallbacks, contextCreateFailed);
         return surface;
       } catch {
-        if (c2dCanvas !== canvas) cleanupCanvas(c2dCanvas);
+        if (c2dCanvas !== canvas) cleanupCanvas(c2dCanvas, undefined, true);
       }
     } else if (c2dCanvas !== canvas) {
-      cleanupCanvas(c2dCanvas);
+      cleanupCanvas(c2dCanvas, undefined, true);
     }
   }
 
@@ -262,7 +264,7 @@ export async function createGpuSurfaceAsync(
       }
       if (canvasLocked) {
         webgpuSurfaceInitFailed = true;
-        cleanupCanvas(canvas, webgpuCtx);
+        cleanupCanvas(canvas, webgpuCtx, false);
       }
     }
 
@@ -306,12 +308,12 @@ export async function createGpuSurfaceAsync(
         commitSelectionDiagnostics(preference, "webgl2", pendingFallbacks, false);
         return surface;
       } catch {
-        cleanupCanvas(webglCanvas);
+        cleanupCanvas(webglCanvas, undefined, webglCanvas !== canvas);
         pendingFallbacks.push({ from: "webgl2", to: "canvas2d", reason: "surface_init_failed" });
         contextCreateFailed = true;
       }
     } else {
-      if (webglCanvas !== canvas) cleanupCanvas(webglCanvas);
+      if (webglCanvas !== canvas) cleanupCanvas(webglCanvas, undefined, true);
       pendingFallbacks.push({ from: "webgl2", to: "canvas2d", reason: "context_unavailable" });
       contextCreateFailed = true;
     }
@@ -348,10 +350,10 @@ export async function createGpuSurfaceAsync(
         commitSelectionDiagnostics(preference, "canvas2d", pendingFallbacks, contextCreateFailed);
         return surface;
       } catch {
-        if (c2dCanvas !== canvas) cleanupCanvas(c2dCanvas);
+        if (c2dCanvas !== canvas) cleanupCanvas(c2dCanvas, undefined, true);
       }
     } else if (c2dCanvas !== canvas) {
-      cleanupCanvas(c2dCanvas);
+      cleanupCanvas(c2dCanvas, undefined, true);
     }
   }
 

@@ -87,6 +87,7 @@ function makeFakeWebGpuDevice(opts = {}) {
   const device = {
     format,
     destroyed: false,
+    destroyCalls: 0,
     limits: { maxBufferSize: 268435456, maxTextureDimension2D: 8192 },
     lost: lostPromise,
     _triggerLost(info = { reason: "destroyed" }) {
@@ -172,6 +173,7 @@ function makeFakeWebGpuDevice(opts = {}) {
     },
     destroy() {
       this.destroyed = true;
+      this.destroyCalls++;
     },
   };
 
@@ -372,7 +374,7 @@ test("#251: WHATWG-locked canvas cascades WebGPU construct failure -> fresh WebG
     assert.equal(webgpuCtx.isUnconfigured, true);
     assert.equal(canvas0.width, 0);
     assert.equal(canvas0.height, 0);
-    assert.equal(canvas0.removed, true);
+    assert.equal(canvas0.removed, false, "caller-owned canvas0 must not be removed from DOM before replaceWith");
 
     assert.deepEqual(canvas1.requestedKinds, ["webgl2"], "never probes 2d on WebGL2-locked canvas");
     assert.equal(canvas1.width, 0);
@@ -442,14 +444,14 @@ test("#251: ChartRuntime initial mount falls back to Canvas2D and onGpuSettingsC
   const originalNav = Object.getOwnPropertyDescriptor(globalThis, "navigator");
   const originalWindow = globalThis.window;
 
-  function makeDomHarness(initialMode = "webgl2") {
+  function makeDomHarness(initialMode = "webgl2", deviceOpts = {}) {
     let settingsState = { ...DEFAULT_GPU_SETTINGS, backend: initialMode };
     const settingsListeners = new Set();
     let webglAvailable = false;
     let canvasFactoryOverride = null;
 
     const fakeGl = makeFakeGl();
-    const { device } = makeFakeWebGpuDevice();
+    const { device } = makeFakeWebGpuDevice(deviceOpts);
     const fakeWebGpuCtx = makeFakeWebGpuContext(device);
 
     const docListeners = new Map();
@@ -505,6 +507,14 @@ test("#251: ChartRuntime initial mount falls back to Canvas2D and onGpuSettingsC
           return child;
         },
         append(...nodes) { for (const n of nodes) el.appendChild(n); },
+        insertBefore(child, refNode) {
+          child.parentNode = el;
+          child.parentElement = el;
+          const idx = refNode ? children.indexOf(refNode) : -1;
+          if (idx >= 0) children.splice(idx, 0, child);
+          else children.push(child);
+          return child;
+        },
         replaceWith(next) {
           if (el.parentNode) {
             const idx = el.parentNode.children.indexOf(el);
@@ -753,6 +763,44 @@ test("#251: ChartRuntime initial mount falls back to Canvas2D and onGpuSettingsC
     assert.equal(staleWebGpuCanvas.removed, true, "stale async canvas removed");
 
     handle.dispose();
+
+    // 3. backend="webgpu" initial mount with verifyInit scoped error keeps connected WebGL2 gpu-scene before annotation
+    resetSharedWebGpuDevice();
+    const envMountFallback = makeDomHarness("webgpu", {
+      withErrorScopes: true,
+      scopedInitError: { filter: "validation", error: { message: "Mock WebGPU init validation failure" } },
+    });
+    envMountFallback.setWebglAvailable(true);
+    setMockNavigator({
+      gpu: {
+        requestAdapter: async () => ({ requestDevice: async () => envMountFallback.device }),
+        getPreferredCanvasFormat: () => "rgba8unorm",
+      },
+    });
+    const surfaceMountFallback = {
+      status: "loading",
+      historyOverlay: false,
+      historyBackground: false,
+      indicatorHeaders: createIndicatorPaneHeadersModel(),
+    };
+    const handleMountFallback = mountChartRuntime(
+      envMountFallback.panelRoot,
+      { type: "chart", market: "BINANCE_FUTURES:btcusdt", timeframe: "15m", scaleMode: "linear", chartType: "candlestick", candles: true },
+      envMountFallback.services,
+      "panel-251-webgpu-mount-fallback",
+      surfaceMountFallback,
+    );
+    await new Promise((r) => setTimeout(r, 30));
+    assert.equal(surfaceMountFallback.status, "ready");
+    assert.equal(envMountFallback.panelRoot.children[0].getAttribute("data-gpu-backend"), "webgl2");
+    const sceneCanvases = envMountFallback.panelRoot.children.filter((c) => c.dataset?.chartSurface === "gpu-scene");
+    assert.equal(sceneCanvases.length, 1, "panelRoot must contain exactly one connected gpu-scene canvas");
+    assert.equal(sceneCanvases[0].parentNode, envMountFallback.panelRoot);
+    assert.equal(envMountFallback.panelRoot.children[1], sceneCanvases[0], "fallback gpu-scene canvas stays connected before annotation");
+    assert.equal(envMountFallback.panelRoot.children[2].dataset?.chartSurface, "annotation");
+    assert.equal(envMountFallback.createdCanvases[0].width, 0);
+    assert.equal(envMountFallback.createdCanvases[0].height, 0);
+    handleMountFallback.dispose();
   } finally {
     restoreNavigator(originalNav);
     globalThis.window = originalWindow;
@@ -1006,11 +1054,16 @@ test("#253: two charts sharing one WebGpuDeviceHandle isolate validation errors,
     const oomErr = Object.assign(new Error("Out of GPU memory"), { name: "GPUOutOfMemoryError" });
     devA._triggerUncapturedError(oomErr);
     assert.equal(handleA.isLost(), true);
+    assert.equal(devA.destroyed, true, "OOM must destroy the WebGPU device");
+    assert.equal(devA.destroyCalls, 1);
+    devA._triggerLost({ reason: "destroyed" });
+    await Promise.resolve();
+    await Promise.resolve();
     assert.equal(chart1.getSurface().kind, "webgl2");
     assert.equal(chart2.getSurface().kind, "webgl2");
     diag = getGpuDiagnostics();
     assert.equal(diag.counters["gpu.webgpu.error.out-of-memory"], 1);
-    assert.equal(diag.counters["gpu.device.lost"], undefined, "OOM must not increment gpu.device.lost");
+    assert.equal(diag.counters["gpu.device.lost"], undefined, "OOM + destroyed settle must not increment gpu.device.lost");
     assert.equal(diag.counters["chart.gpu.contextLost"], undefined, "OOM must not inflate chart.gpu.contextLost");
     chart1.destroy();
     chart2.destroy();
@@ -1083,12 +1136,17 @@ test("#253: two charts sharing one WebGpuDeviceHandle isolate validation errors,
     const internalErr = Object.assign(new Error("Driver internal error"), { name: "GPUInternalError" });
     devD._triggerUncapturedError(internalErr);
     assert.equal(handleD.isLost(), true);
+    assert.equal(devD.destroyed, true, "internal error must destroy the WebGPU device");
+    assert.equal(devD.destroyCalls, 1);
+    devD._triggerLost({ reason: "destroyed" });
+    await Promise.resolve();
+    await Promise.resolve();
     assert.equal(chart5.getSurface().kind, "webgl2");
     assert.equal(chart6.getSurface().kind, "webgl2");
     diag = getGpuDiagnostics();
     assert.equal(diag.counters["gpu.webgpu.error.internal"], 1);
     assert.equal(diag.counters["gpu.renderError"], 1);
-    assert.equal(diag.counters["gpu.device.lost"], undefined, "internal error must not increment gpu.device.lost");
+    assert.equal(diag.counters["gpu.device.lost"], undefined, "internal error + destroyed settle must not increment gpu.device.lost");
     assert.equal(diag.counters["chart.gpu.contextLost"], undefined, "internal error must not inflate chart.gpu.contextLost");
     assert.ok(diag.fallbacks.some((f) => f.from === "webgpu" && f.to === "webgl2" && f.reason === "internal-error"));
     chart5.destroy();
@@ -1282,7 +1340,7 @@ test("#255: Canvas2dSurface handles contextlost, beginFrame/requestCapture guard
   assert.equal(canvas.listenerCount("contextlost"), 1);
 
   const ev = canvas.dispatchEvent("contextlost");
-  assert.equal(ev.defaultPrevented, true);
+  assert.equal(ev.defaultPrevented, false, "Canvas2D contextlost must NOT call preventDefault (WHATWG spec)");
   assert.deepEqual(reasons, ["context-lost"]);
   await assert.rejects(() => surface.requestCapture(), /context is lost/);
 
@@ -1407,7 +1465,8 @@ test("#255: ChartSession Canvas2D main scene + annotation + interaction contextl
   // 1. Main scene Canvas2D contextlost -> cancels RAF, rejects pending capture, blocks new capture
   const pendingSceneCapture = session.captureCompositePng();
   assert.equal(rafs.size, 1);
-  gpuCanvas.dispatchEvent("contextlost");
+  const sceneLostEv = gpuCanvas.dispatchEvent("contextlost");
+  assert.equal(sceneLostEv.defaultPrevented, false, "scene Canvas2D contextlost must NOT call preventDefault");
   assert.equal(rafs.size, 0);
   assert.equal(lostCallbacks, 1);
   await assert.rejects(() => pendingSceneCapture, /Canvas2D context was lost/);
@@ -1430,7 +1489,8 @@ test("#255: ChartSession Canvas2D main scene + annotation + interaction contextl
 
   // 2. Annotation contextlost -> rejects pending capture, blocks capture, skips annotation draw
   const pendingAnnCapture = session.captureCompositePng();
-  annotationCanvas.dispatchEvent("contextlost");
+  const annLostEv = annotationCanvas.dispatchEvent("contextlost");
+  assert.equal(annLostEv.defaultPrevented, false, "annotation Canvas2D contextlost must NOT call preventDefault");
   await assert.rejects(() => pendingAnnCapture, /annotation Canvas2D context was lost/);
   await assert.rejects(() => session.captureCompositePng(), /not renderable/);
   session.invalidate(ChartChange.All);
@@ -1449,7 +1509,8 @@ test("#255: ChartSession Canvas2D main scene + annotation + interaction contextl
   assert.deepEqual(counts, { gpu: 4, ann: 3, int: 4 });
 
   // 3. Interaction contextlost / contextrestored
-  interactionCanvas.dispatchEvent("contextlost");
+  const intLostEv = interactionCanvas.dispatchEvent("contextlost");
+  assert.equal(intLostEv.defaultPrevented, false, "interaction Canvas2D contextlost must NOT call preventDefault");
   session.invalidate(ChartChange.All);
   win.runNextFrame();
   assert.deepEqual(counts, { gpu: 5, ann: 4, int: 4 }, "interaction render skipped while interaction context lost");

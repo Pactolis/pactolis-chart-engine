@@ -56,8 +56,7 @@ export class Canvas2dSurface implements GpuSurface {
   private readonly lostListeners = new Set<(reason: GpuLossReason) => void>();
   private contextLostBound = false;
 
-  private readonly handleContextLost = (e: Event): void => {
-    e.preventDefault?.();
+  private readonly handleContextLost = (_e: Event): void => {
     this.contextLost = true;
     for (const listener of [...this.lostListeners]) {
       try {
