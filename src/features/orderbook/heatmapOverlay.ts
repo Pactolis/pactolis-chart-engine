@@ -28,8 +28,10 @@ import type {
 } from "./heatmapContracts.js";
 import {
   HEATMAP_HOVER_SPAN,
+  HEATMAP_MIN_CEILING_RATIO,
   HEATMAP_WINDOW_MAX_BARS,
   formatHeatmapValue,
+  getHeatmapColorLut,
   heatmapCellUsd,
   heatmapChunkEnd,
   heatmapChunkStart,
@@ -391,6 +393,19 @@ export class OrderbookHeatmapOverlay {
     });
   }
 
+  private bumpBarsRevision(bars?: readonly OrderbookHeatmapBar[], allowLiveOnly = false): void {
+    this.barsRevision++;
+    if (
+      allowLiveOnly &&
+      this.lastSeriesLiveBarTime > Number.NEGATIVE_INFINITY &&
+      bars !== undefined &&
+      bars.every((bar) => bar.t >= this.lastSeriesLiveBarTime)
+    ) {
+      return;
+    }
+    this.historicalBarsRevision++;
+  }
+
   private reprojectCanonicalTailBars(settings: OrderbookHeatmapSettings, tier: HeatmapTier): void {
     if (this.canonicalTailBars.size === 0) return;
     const projected: OrderbookHeatmapBar[] = [];
@@ -399,7 +414,7 @@ export class OrderbookHeatmapOverlay {
     }
     mergeHeatmapBars(this.bars, projected);
     this.canonicalProjectionKey = this.canonicalProjectionKeyFor(settings, tier);
-    this.barsRevision++;
+    this.bumpBarsRevision(projected, true);
   }
 
   private syncCanonicalTailProjection(settings: OrderbookHeatmapSettings, tier: HeatmapTier): void {
@@ -440,7 +455,7 @@ export class OrderbookHeatmapOverlay {
       }
       if (barsToMerge && barsToMerge.length > 0) {
         mergeHeatmapBars(this.bars, barsToMerge);
-        this.barsRevision++;
+        this.bumpBarsRevision(barsToMerge, true);
         // Mark current live chunk as refreshed if loaded
         const liveChunkStart = heatmapChunkStart(now, this.currentTier);
         const existing = this.chunks.get(liveChunkStart);
@@ -521,7 +536,7 @@ export class OrderbookHeatmapOverlay {
       if (liveSettings.mode === "custom" && tier.name === "1m" && this.canonicalTailBars.size > 0 && this.isLiveTailHealthy(this.now())) {
         this.reprojectCanonicalTailBars(liveSettings, tier);
       } else {
-        this.barsRevision++;
+        this.bumpBarsRevision(response.bars, refreshFrom > chunkStart);
       }
       this.chunks.set(chunkStart, {
         status: "ready",
@@ -609,8 +624,9 @@ export class OrderbookHeatmapOverlay {
     this.lastCollectedKey = "";
     this.lastCollected = null;
     this.lastCollectedRange = null;
+    this.lastSeriesLiveBarTime = Number.NEGATIVE_INFINITY;
     this.releaseRasterCache();
-    this.barsRevision++;
+    this.bumpBarsRevision();
   }
 
   private baseRequest(tier: HeatmapTier): Pick<OrderbookHeatmapRequest, "source" | "sources" | "resolution" | "bucketStep"> {
@@ -700,6 +716,9 @@ export class OrderbookHeatmapOverlay {
     this.rasterCacheCeiling = 0;
     this.rasterCacheThreshold = 0;
     this.rasterCacheOpacity = 0.85;
+    this.rasterCacheDataSig = "";
+    this.rasterCacheView = null;
+    this.rasterCacheHistRightCss = 0;
     if (this.rasterCacheCanvas) {
       try {
         this.rasterCacheCanvas.width = 0;
@@ -809,6 +828,7 @@ export class OrderbookHeatmapOverlay {
       const canvasWidth = ctx.canvas?.width ?? 0;
       const canvasHeight = ctx.canvas?.height ?? 0;
       const rasterKey = `${this.frameCacheKey(view, series, frame)}|${canvasWidth}|${canvasHeight}`;
+      const rasterDataSig = this.rasterDataSignature(view, series, frame, canvasWidth, canvasHeight);
       const viewportKey = `${view.offsetX}|${view.colWidth}|${view.priceTop}|${view.pricePerPx}`;
       const now = this.now();
       if (this.lastRasterViewportKey && this.lastRasterViewportKey !== viewportKey) {
@@ -827,6 +847,10 @@ export class OrderbookHeatmapOverlay {
       const canUseRasterCache = rasterEligible && !viewportMoving;
       if (rasterEligible && viewportMoving) {
         incrementPerformanceCounter("chart.cpu.heatmap.raster.skip");
+        const transform = this.resolveCtxTransform(ctx, view);
+        if (this.tryMotionRasterReuse(ctx, view, series, frame, rasterDataSig, canvasWidth, canvasHeight, transform)) {
+          return;
+        }
       }
       if (!rasterEligible && (this.rasterCacheCanvas || this.rasterReservedBytes > 0)) {
         this.releaseRasterCache();
@@ -854,7 +878,7 @@ export class OrderbookHeatmapOverlay {
       const collectRangeValues = this.needsRangeValues(frame.threshold, fixedCeiling);
       this.scratchValueCount = 0;
       let cells = 0;
-      this.forEachVisibleCell(view, series, frame, null, ({ value }) => {
+      this.forEachVisibleCell(view, series, frame, null, (_x, _yTop, _cellHeight, value) => {
         cells++;
         if (collectRangeValues && value > 0) this.pushScratchValue(value);
       });
@@ -883,35 +907,39 @@ export class OrderbookHeatmapOverlay {
       }
 
       if (canUseRasterCache) {
+        const transform = this.resolveCtxTransform(ctx, view);
+        if (
+          this.tryStaticLiveTailPatch(
+            ctx,
+            view,
+            series,
+            frame,
+            rasterKey,
+            rasterDataSig,
+            canvasWidth,
+            canvasHeight,
+            transform,
+            resolved,
+          )
+        ) {
+          return;
+        }
         const offCtx = this.ensureRasterCacheCanvas(ctx.canvas.ownerDocument, canvasWidth, canvasHeight);
         if (offCtx) {
           offCtx.save();
           offCtx.setTransform?.(1, 0, 0, 1, 0, 0);
           offCtx.clearRect(0, 0, canvasWidth, canvasHeight);
-          const transform = typeof ctx.getTransform === "function" ? ctx.getTransform() : null;
-          if (transform && Number.isFinite(transform.a) && Number.isFinite(transform.d)) {
-            offCtx.setTransform?.(
-              transform.a,
-              transform.b,
-              transform.c,
-              transform.d,
-              transform.e,
-              transform.f,
-            );
-          } else {
-            const dpr = view.pixelRatio !== null && view.pixelRatio !== undefined && view.pixelRatio > 0
-              ? view.pixelRatio
-              : 1;
-            offCtx.setTransform?.(dpr, 0, 0, dpr, 0, 0);
-          }
+          offCtx.setTransform?.(
+            transform.a,
+            transform.b,
+            transform.c,
+            transform.d,
+            transform.e,
+            transform.f,
+          );
           this.paintCellsToContext(offCtx, view, series, frame);
           offCtx.restore();
-          this.lastRasterKey = rasterKey;
-          this.rasterCacheHasCells = true;
-          this.rasterCacheFloor = resolved.floor;
-          this.rasterCacheCeiling = resolved.ceiling;
-          this.rasterCacheThreshold = frame.threshold;
-          this.rasterCacheOpacity = resolved.opacity;
+          this.recordRasterCacheMeta(view, series, rasterKey, rasterDataSig, resolved, frame.threshold, transform);
           this.blitRasterCache(ctx);
           incrementPerformanceCounter("chart.cpu.heatmap.raster.miss");
           return;
@@ -923,6 +951,362 @@ export class OrderbookHeatmapOverlay {
     } finally {
       if (startedAt !== null) recordPerformanceDuration("chart.cpu.heatmap.draw.ms", performance.now() - startedAt);
     }
+  }
+
+  private resolveCtxTransform(ctx: CanvasRenderingContext2D, view: View): {
+    a: number;
+    b: number;
+    c: number;
+    d: number;
+    e: number;
+    f: number;
+  } {
+    const transform = typeof ctx.getTransform === "function" ? ctx.getTransform() : null;
+    if (
+      transform &&
+      Number.isFinite(transform.a) &&
+      Number.isFinite(transform.b) &&
+      Number.isFinite(transform.c) &&
+      Number.isFinite(transform.d) &&
+      Number.isFinite(transform.e) &&
+      Number.isFinite(transform.f)
+    ) {
+      return {
+        a: transform.a,
+        b: transform.b,
+        c: transform.c,
+        d: transform.d,
+        e: transform.e,
+        f: transform.f,
+      };
+    }
+    const dpr = view.pixelRatio !== null && view.pixelRatio !== undefined && view.pixelRatio > 0
+      ? view.pixelRatio
+      : 1;
+    return { a: dpr, b: 0, c: 0, d: dpr, e: 0, f: 0 };
+  }
+
+  private rasterDataSignature(
+    view: View,
+    series: FootprintSeries,
+    frame: HeatmapFramePreamble,
+    canvasWidth: number,
+    canvasHeight: number,
+  ): string {
+    const opacity = resolveOrderbookHeatmapOpacity(frame.settings.opacity);
+    const scaleMode = frame.settings.scaleMode ?? "auto";
+    const fixedCeiling = scaleMode === "fixed" ? (frame.settings.fixedCeiling?.[frame.settings.unit] ?? 0) : 0;
+    const contrast = frame.settings.contrast ?? "medium";
+    const replayActive = this.isReplayActive();
+    const priceScaleMode = view.priceScaleMode ?? 0;
+    return `${this.dataKey}|${frame.settings.unit}|${frame.threshold}|${opacity}|${scaleMode}|${fixedCeiling}|${contrast}|${this.historicalBarsRevision}|${series.length}|${replayActive}|${priceScaleMode}|${canvasWidth}|${canvasHeight}`;
+  }
+
+  private recordRasterCacheMeta(
+    view: View,
+    series: FootprintSeries,
+    rasterKey: string,
+    rasterDataSig: string,
+    resolved: { floor: number; ceiling: number; opacity: number },
+    threshold: number,
+    transform: { a: number; d: number; e: number; f: number },
+  ): void {
+    const replayActive = this.isReplayActive();
+    const areaRight = view.area.left + view.area.width;
+    const oldLiveX = series.length > 0 ? view.xOfIndex(series.length - 1) : areaRight;
+    this.lastRasterKey = rasterKey;
+    this.rasterCacheHasCells = true;
+    this.rasterCacheFloor = resolved.floor;
+    this.rasterCacheCeiling = resolved.ceiling;
+    this.rasterCacheThreshold = threshold;
+    this.rasterCacheOpacity = resolved.opacity;
+    this.rasterCacheDataSig = rasterDataSig;
+    this.rasterCacheHistRightCss = !replayActive && series.length > 0 ? Math.min(areaRight, oldLiveX) : areaRight;
+    this.rasterCacheView = {
+      offsetX: view.offsetX,
+      colWidth: view.colWidth,
+      priceTop: view.priceTop,
+      pricePerPx: view.pricePerPx,
+      areaLeft: view.area.left,
+      areaTop: view.area.top,
+      areaWidth: view.area.width,
+      areaHeight: view.area.height,
+      transformA: transform.a,
+      transformD: transform.d,
+      transformE: transform.e,
+      transformF: transform.f,
+    };
+  }
+
+  private rasterCacheViewMatches(
+    view: View,
+    transform: { a: number; b: number; c: number; d: number; e: number; f: number },
+  ): boolean {
+    const cached = this.rasterCacheView;
+    if (!cached || transform.b !== 0 || transform.c !== 0) return false;
+    return (
+      cached.offsetX === view.offsetX &&
+      cached.colWidth === view.colWidth &&
+      cached.priceTop === view.priceTop &&
+      cached.pricePerPx === view.pricePerPx &&
+      cached.areaLeft === view.area.left &&
+      cached.areaTop === view.area.top &&
+      cached.areaWidth === view.area.width &&
+      cached.areaHeight === view.area.height &&
+      cached.transformA === transform.a &&
+      cached.transformD === transform.d &&
+      cached.transformE === transform.e &&
+      cached.transformF === transform.f
+    );
+  }
+
+  /**
+   * Reuses the cached historical raster during pan/zoom (`viewportMoving === true`).
+   * Trade-offs while moving:
+   * - In Auto (P96) mode, cached `floor`/`ceiling` are held until motion settles and full redraw updates them.
+   * - `0.5-2x` zoom blitting (`imageSmoothingEnabled = false`) is transient until the post-quiet full rebuild runs.
+   */
+  private tryMotionRasterReuse(
+    ctx: CanvasRenderingContext2D,
+    view: View,
+    series: FootprintSeries,
+    frame: HeatmapFramePreamble,
+    rasterDataSig: string,
+    canvasWidth: number,
+    canvasHeight: number,
+    transform: { a: number; b: number; c: number; d: number; e: number; f: number },
+  ): boolean {
+    const cachedView = this.rasterCacheView;
+    const isLog = typeof view.isLogScale === "function" && view.isLogScale();
+    if (
+      !this.rasterCacheCanvas ||
+      !this.rasterCacheHasCells ||
+      isLog ||
+      this.rasterCacheDataSig !== rasterDataSig ||
+      !cachedView ||
+      transform.b !== 0 ||
+      transform.c !== 0 ||
+      !(transform.a > 0 && transform.d > 0) ||
+      !(cachedView.colWidth > 0 && view.colWidth > 0) ||
+      !(cachedView.pricePerPx > 0 && view.pricePerPx > 0) ||
+      this.rasterCacheCanvas.width !== canvasWidth ||
+      this.rasterCacheCanvas.height !== canvasHeight ||
+      cachedView.transformA !== transform.a ||
+      cachedView.transformD !== transform.d ||
+      cachedView.transformE !== transform.e ||
+      cachedView.transformF !== transform.f
+    ) {
+      return false;
+    }
+
+    const scaleX = view.colWidth / cachedView.colWidth;
+    const scaleY = cachedView.pricePerPx / view.pricePerPx;
+    if (
+      !Number.isFinite(scaleX) ||
+      !Number.isFinite(scaleY) ||
+      scaleX < 0.5 ||
+      scaleX > 2.0 ||
+      scaleY < 0.5 ||
+      scaleY > 2.0
+    ) {
+      return false;
+    }
+
+    const { left: areaLeft, top: areaTop, width: areaWidth, height: areaHeight } = view.area;
+    if (!(areaWidth > 0 && areaHeight > 0)) return false;
+    const areaRight = areaLeft + areaWidth;
+    const areaBottom = areaTop + areaHeight;
+    const oldHistLeft = cachedView.areaLeft;
+    const oldHistRight = this.rasterCacheHistRightCss;
+    if (!(oldHistRight > oldHistLeft)) return false;
+
+    const mappedLeftCss = areaLeft + view.offsetX + ((oldHistLeft - cachedView.areaLeft - cachedView.offsetX) / cachedView.colWidth) * view.colWidth;
+    const mappedRightCss = areaLeft + view.offsetX + ((oldHistRight - cachedView.areaLeft - cachedView.offsetX) / cachedView.colWidth) * view.colWidth;
+    const mappedTopCss = areaTop + (view.priceTop - cachedView.priceTop) / view.pricePerPx;
+    const mappedBottomCss = areaTop + (view.priceTop - (cachedView.priceTop - cachedView.areaHeight * cachedView.pricePerPx)) / view.pricePerPx;
+
+    const rawDestLeft = Math.max(areaLeft, mappedLeftCss);
+    const rawDestRight = Math.min(areaRight, mappedRightCss);
+    const rawDestTop = Math.max(areaTop, mappedTopCss);
+    const rawDestBottom = Math.min(areaBottom, mappedBottomCss);
+
+    const { a, d, e, f } = transform;
+    const pxLeft = Math.ceil(rawDestLeft * a + e);
+    const pxRight = Math.floor(rawDestRight * a + e);
+    const pxTop = Math.ceil(rawDestTop * d + f);
+    const pxBottom = Math.floor(rawDestBottom * d + f);
+    const pxWidth = pxRight - pxLeft;
+    const pxHeight = pxBottom - pxTop;
+    if (!(pxWidth > 0 && pxHeight > 0)) return false;
+
+    const destLeft = (pxLeft - e) / a;
+    const destRight = (pxRight - e) / a;
+    const destTop = (pxTop - f) / d;
+    const destBottom = (pxBottom - f) / d;
+    const destWidth = destRight - destLeft;
+    const destHeight = destBottom - destTop;
+    if (destWidth < areaWidth * 0.25 || destHeight < areaHeight * 0.25) return false;
+
+    const srcLeftCss = cachedView.areaLeft + cachedView.offsetX + (destLeft - areaLeft - view.offsetX) / scaleX;
+    const srcRightCss = cachedView.areaLeft + cachedView.offsetX + (destRight - areaLeft - view.offsetX) / scaleX;
+    const srcTopCss = cachedView.areaTop + (cachedView.priceTop - view.priceTop) / cachedView.pricePerPx + (destTop - areaTop) / scaleY;
+    const srcBottomCss = cachedView.areaTop + (cachedView.priceTop - view.priceTop) / cachedView.pricePerPx + (destBottom - areaTop) / scaleY;
+
+    const sxRaw = srcLeftCss * cachedView.transformA + cachedView.transformE;
+    const syRaw = srcTopCss * cachedView.transformD + cachedView.transformF;
+    const swRaw = (srcRightCss - srcLeftCss) * cachedView.transformA;
+    const shRaw = (srcBottomCss - srcTopCss) * cachedView.transformD;
+    if (!(swRaw > 0 && shRaw > 0)) return false;
+    const sx = Math.max(0, sxRaw);
+    const sy = Math.max(0, syRaw);
+    const sw = Math.min(canvasWidth - sx, swRaw - (sx - sxRaw));
+    const sh = Math.min(canvasHeight - sy, shRaw - (sy - syRaw));
+    if (!(sw > 0 && sh > 0)) return false;
+
+    const fixedCeiling = this.resolveFixedCeiling(frame.settings);
+    if (
+      frame.settings.scaleMode === "fixed" &&
+      frame.threshold > 0 &&
+      fixedCeiling !== undefined &&
+      Number.isFinite(fixedCeiling) &&
+      fixedCeiling > 0
+    ) {
+      this.visibleFloor = frame.threshold;
+      this.visibleCeiling = Math.max(fixedCeiling, frame.threshold * HEATMAP_MIN_CEILING_RATIO);
+    } else {
+      this.visibleFloor = this.rasterCacheFloor;
+      this.visibleCeiling = this.rasterCacheCeiling;
+    }
+    this.visibleThreshold = frame.threshold;
+    this.visibleOpacity = this.rasterCacheOpacity;
+
+    ctx.save();
+    ctx.setTransform?.(1, 0, 0, 1, 0, 0);
+    ctx.beginPath();
+    ctx.rect(pxLeft, pxTop, pxWidth, pxHeight);
+    ctx.clip();
+    ctx.imageSmoothingEnabled = false;
+    ctx.drawImage(this.rasterCacheCanvas, sx, sy, sw, sh, pxLeft, pxTop, pxWidth, pxHeight);
+    ctx.restore();
+
+    const colPad = view.colWidth < 1 ? 1 : 0;
+    if (destLeft > areaLeft) {
+      const bFirst = Math.max(frame.first, Math.floor(view.indexOfX(areaLeft - colPad)) - 1);
+      const bLast = Math.min(frame.last, Math.ceil(view.indexOfX(destLeft)));
+      this.paintCellsToContext(ctx, view, series, frame, bFirst, bLast, {
+        left: areaLeft,
+        top: areaTop,
+        width: destLeft - areaLeft,
+        height: areaHeight,
+      });
+    }
+    if (destRight < areaRight) {
+      const bFirst = Math.max(frame.first, Math.floor(view.indexOfX(destRight - colPad)) - 1);
+      const bLast = frame.last;
+      this.paintCellsToContext(ctx, view, series, frame, bFirst, bLast, {
+        left: destRight,
+        top: areaTop,
+        width: areaRight - destRight,
+        height: areaHeight,
+      });
+    }
+    if (destTop > areaTop) {
+      const bFirst = Math.max(frame.first, Math.floor(view.indexOfX(destLeft - colPad)) - 1);
+      const bLast = Math.min(frame.last, Math.ceil(view.indexOfX(destRight)));
+      this.paintCellsToContext(ctx, view, series, frame, bFirst, bLast, {
+        left: destLeft,
+        top: areaTop,
+        width: destRight - destLeft,
+        height: destTop - areaTop,
+      });
+    }
+    if (destBottom < areaBottom) {
+      const bFirst = Math.max(frame.first, Math.floor(view.indexOfX(destLeft - colPad)) - 1);
+      const bLast = Math.min(frame.last, Math.ceil(view.indexOfX(destRight)));
+      this.paintCellsToContext(ctx, view, series, frame, bFirst, bLast, {
+        left: destLeft,
+        top: destBottom,
+        width: destRight - destLeft,
+        height: areaBottom - destBottom,
+      });
+    }
+
+    incrementPerformanceCounter("chart.cpu.heatmap.raster.direct");
+    incrementPerformanceCounter("chart.cpu.heatmap.raster.motionReuse");
+    return true;
+  }
+
+  private tryStaticLiveTailPatch(
+    ctx: CanvasRenderingContext2D,
+    view: View,
+    series: FootprintSeries,
+    frame: HeatmapFramePreamble,
+    rasterKey: string,
+    rasterDataSig: string,
+    canvasWidth: number,
+    canvasHeight: number,
+    transform: { a: number; b: number; c: number; d: number; e: number; f: number },
+    resolved: { floor: number; ceiling: number; opacity: number },
+  ): boolean {
+    if (
+      !this.rasterCacheCanvas ||
+      !this.rasterCacheHasCells ||
+      this.isReplayActive() ||
+      series.length === 0 ||
+      this.rasterCacheDataSig !== rasterDataSig ||
+      !this.rasterCacheViewMatches(view, transform) ||
+      this.rasterCacheCanvas.width !== canvasWidth ||
+      this.rasterCacheCanvas.height !== canvasHeight
+    ) {
+      return false;
+    }
+    if (
+      Math.abs(resolved.floor - this.rasterCacheFloor) > 1e-6 ||
+      Math.abs(resolved.ceiling - this.rasterCacheCeiling) > 1e-6
+    ) {
+      return false;
+    }
+
+    const liveIndex = series.length - 1;
+    const { left, top, width, height } = view.area;
+    const right = left + width;
+    const liveX = view.xOfIndex(liveIndex);
+    if (liveX < left) return false;
+
+    this.visibleFloor = this.rasterCacheFloor;
+    this.visibleCeiling = this.rasterCacheCeiling;
+
+    if (liveX < right) {
+      const offCtx = this.ensureRasterCacheCanvas(ctx.canvas.ownerDocument, canvasWidth, canvasHeight);
+      if (!offCtx) return false;
+      const { a, d, e, f } = transform;
+      const pxClearLeft = Math.max(Math.floor(left * a + e), Math.floor(liveX * a + e));
+      const clearLeftCss = (pxClearLeft - e) / a;
+      const clearWidthCss = right - clearLeftCss;
+      if (clearWidthCss > 0) {
+        const patchFirst = liveIndex > frame.first && (clearLeftCss < liveX || view.colWidth < 1)
+          ? liveIndex - 1
+          : liveIndex;
+        offCtx.save();
+        offCtx.setTransform?.(a, 0, 0, d, e, f);
+        offCtx.beginPath();
+        offCtx.rect(clearLeftCss, top, clearWidthCss, height);
+        offCtx.clip();
+        offCtx.clearRect(clearLeftCss, top, clearWidthCss, height);
+        this.paintCellsToContext(offCtx, view, series, frame, patchFirst, liveIndex, {
+          left: clearLeftCss,
+          top,
+          width: clearWidthCss,
+          height,
+        });
+        offCtx.restore();
+      }
+    }
+
+    this.lastRasterKey = rasterKey;
+    this.blitRasterCache(ctx);
+    incrementPerformanceCounter("chart.cpu.heatmap.raster.tailPatch");
+    return true;
   }
 
   private ensureRasterCacheCanvas(
@@ -969,6 +1353,9 @@ export class OrderbookHeatmapOverlay {
     }
     this.lastRasterKey = "";
     this.rasterCacheHasCells = false;
+    this.rasterCacheDataSig = "";
+    this.rasterCacheView = null;
+    this.rasterCacheHistRightCss = 0;
 
     let canvas = this.rasterCacheCanvas;
     if (!canvas) {
@@ -1050,23 +1437,77 @@ export class OrderbookHeatmapOverlay {
     view: View,
     series: FootprintSeries,
     frame: HeatmapFramePreamble,
+    barFirst = frame.first,
+    barLast = frame.last,
+    clipRect?: { left: number; top: number; width: number; height: number },
   ): void {
     const { left, top, width, height } = view.area;
     const right = left + width;
+    const clipLeft = clipRect ? clipRect.left : left;
+    const clipTop = clipRect ? clipRect.top : top;
+    const clipWidth = clipRect ? clipRect.width : width;
+    const clipHeight = clipRect ? clipRect.height : height;
+    if (!(clipWidth > 0 && clipHeight > 0) || barLast < barFirst) return;
+
+    const mainLut = getHeatmapColorLut(1, this.visibleOpacity);
+    const liveLut = getHeatmapColorLut(0.45, this.visibleOpacity);
+    const floor = this.visibleFloor;
+    const ceiling = this.visibleCeiling;
+    const colWidth = view.colWidth;
+    const drawWidth = Math.max(1, colWidth);
+    const hasPositiveFloor = floor > 0;
+    const effectiveCeiling = hasPositiveFloor ? Math.max(ceiling, floor * HEATMAP_MIN_CEILING_RATIO) : ceiling;
+    const logSpan = hasPositiveFloor ? Math.log10(effectiveCeiling / floor) : 0;
+    const log10_101 = Math.log10(101);
+    let lastFillStyle = "";
+
     targetCtx.save();
     targetCtx.beginPath();
-    targetCtx.rect(left, top, width, height);
+    targetCtx.rect(clipLeft, clipTop, clipWidth, clipHeight);
     targetCtx.clip();
-    this.forEachVisibleCell(view, series, frame, null, ({ x, yTop, cellHeight, value, live }) => {
-      const intensity = heatmapIntensity(value, this.visibleFloor, this.visibleCeiling);
-      targetCtx.fillStyle = heatmapCellColor(intensity, 1, this.visibleOpacity);
-      targetCtx.fillRect(x, yTop, Math.max(1, view.colWidth), cellHeight);
-      // The live bar's walls continue across the empty space right of the last candle.
-      if (live && x + view.colWidth < right) {
-        targetCtx.fillStyle = heatmapCellColor(intensity, 0.45, this.visibleOpacity);
-        targetCtx.fillRect(x + view.colWidth, yTop, right - x - view.colWidth, cellHeight);
-      }
-    });
+    this.forEachVisibleCell(
+      view,
+      series,
+      frame,
+      null,
+      (x, yTop, cellHeight, value, live) => {
+        let k = 0;
+        if (value > 0) {
+          if (hasPositiveFloor) {
+            if (logSpan > 0) {
+              const ratio = Math.log10(value / floor) / logSpan;
+              k = ratio <= 0 ? 0 : ratio >= 1 ? 1 : ratio;
+            }
+          } else if (ceiling > 0) {
+            const ratio = Math.log10(1 + (value / ceiling) * 100) / log10_101;
+            k = ratio <= 0 ? 0 : ratio >= 1 ? 1 : ratio;
+          } else {
+            const ratio = Math.log10(1 + value) / 8;
+            k = ratio <= 0 ? 0 : ratio >= 1 ? 1 : ratio;
+          }
+        }
+        const q = Math.round(k * 1000);
+        const mainColor = mainLut[q];
+        if (mainColor !== lastFillStyle) {
+          targetCtx.fillStyle = mainColor;
+          lastFillStyle = mainColor;
+        }
+        targetCtx.fillRect(x, yTop, drawWidth, cellHeight);
+        // The live bar's walls continue across the empty space right of the last candle.
+        if (live && x + colWidth < right) {
+          const liveColor = liveLut[q];
+          if (liveColor !== lastFillStyle) {
+            targetCtx.fillStyle = liveColor;
+            lastFillStyle = liveColor;
+          }
+          targetCtx.fillRect(x + colWidth, yTop, right - x - colWidth, cellHeight);
+        }
+      },
+      barFirst,
+      barLast,
+      clipTop,
+      clipHeight,
+    );
     targetCtx.restore();
   }
 
@@ -1096,6 +1537,7 @@ export class OrderbookHeatmapOverlay {
       }
       return null;
     }
+    this.lastSeriesLiveBarTime = series.timeOfIndex(series.length - 1);
     const tier = heatmapTierFor(series.config.intervalMs);
     this.currentTier = tier;
     const settings = this.settings;
@@ -1120,36 +1562,55 @@ export class OrderbookHeatmapOverlay {
   }
 
   /**
-   * Streams the visible density cells through `visit` without retaining a
-   * whole-visible list; only the transient per-cell object exists. Returns
-   * the visible ceiling. With `cellLimit` the scan stops as soon as the
-   * limit is reached (bounded known payload before any list allocation).
+   * Streams the visible density cells through `visit` with primitive args (zero
+   * per-cell object allocations). Returns the visible ceiling. With `cellLimit`
+   * the scan stops as soon as the limit is reached.
    */
   private forEachVisibleCell(
     view: View,
     series: FootprintSeries,
     frame: { settings: OrderbookHeatmapSettings; tier: HeatmapTier; threshold: number; first: number; last: number },
     cellLimit: number | null,
-    visit: (cell: { x: number; yTop: number; cellHeight: number; value: number; live: boolean }) => void,
+    visit: (x: number, yTop: number, cellHeight: number, value: number, live: boolean) => void,
+    barFirst = frame.first,
+    barLast = frame.last,
+    clipTop = view.area.top,
+    clipHeight = view.area.height,
   ): number {
     const step = frame.settings.bucketStep;
-    const { top, height } = view.area;
+    const clipBottom = clipTop + clipHeight;
+    let minVisPrice = Number.NEGATIVE_INFINITY;
+    let maxVisPrice = Number.POSITIVE_INFINITY;
+    if (typeof view.priceOfY === "function") {
+      const pTop = view.priceOfY(clipTop);
+      const pBottom = view.priceOfY(clipBottom);
+      if (Number.isFinite(pTop) && Number.isFinite(pBottom)) {
+        minVisPrice = Math.min(pTop, pBottom);
+        maxVisPrice = Math.max(pTop, pBottom);
+      }
+    }
+    const threshold = frame.threshold;
+    const unit = frame.settings.unit;
+    const liveIndex = this.isReplayActive() ? -1 : series.length - 1;
     let ceiling = 0;
     let emitted = 0;
-    for (let index = frame.first; index <= frame.last; index++) {
-      const live = !this.isReplayActive() && index === series.length - 1;
+    for (let index = barFirst; index <= barLast; index++) {
+      const live = index === liveIndex;
       const bar = (live ? liveHeatmapSubBar : lastHeatmapSubBar)(
         this.bars, series.timeOfIndex(index), series.timeOfIndex(index + 1), frame.tier);
       if (!bar || bar.cells.length === 0) continue;
       const x = view.xOfIndex(index);
       for (const cell of bar.cells) {
-        const yTop = view.yOfPrice(cell[0] + step);
-        const yBottom = view.yOfPrice(cell[0]);
-        if (yBottom < top || yTop > top + height) continue;
-        const value = heatmapValueInUnit(heatmapCellUsd(cell), cell[0], step, frame.settings.unit);
+        const priceStart = cell[0];
+        if (priceStart + step < minVisPrice || priceStart > maxVisPrice) continue;
+        const yTop = view.yOfPrice(priceStart + step);
+        const yBottom = view.yOfPrice(priceStart);
+        if (yBottom < clipTop || yTop > clipBottom) continue;
+        const value = heatmapValueInUnit(heatmapCellUsd(cell), priceStart, step, unit);
+        if (threshold > 0 && value < threshold) continue;
         if (value > ceiling) ceiling = value;
         if (cellLimit !== null && emitted >= cellLimit) return ceiling;
-        visit({ x, yTop, cellHeight: Math.max(1, yBottom - yTop), value, live });
+        visit(x, yTop, Math.max(1, yBottom - yTop), value, live);
         emitted++;
       }
     }
@@ -1195,6 +1656,16 @@ export class OrderbookHeatmapOverlay {
     const step = preamble.settings.bucketStep;
     const fixedCeiling = this.resolveFixedCeiling(preamble.settings);
     const collectRangeValues = this.needsRangeValues(preamble.threshold, fixedCeiling);
+    let minVisPrice = Number.NEGATIVE_INFINITY;
+    let maxVisPrice = Number.POSITIVE_INFINITY;
+    if (typeof view.priceOfY === "function") {
+      const pTop = view.priceOfY(top);
+      const pBottom = view.priceOfY(top + height);
+      if (Number.isFinite(pTop) && Number.isFinite(pBottom)) {
+        minVisPrice = Math.min(pTop, pBottom);
+        maxVisPrice = Math.max(pTop, pBottom);
+      }
+    }
     let mainCount = 0;
     let extCount = 0;
     this.scratchValueCount = 0;
@@ -1205,12 +1676,15 @@ export class OrderbookHeatmapOverlay {
       if (!bar || bar.cells.length === 0) continue;
       const x = view.xOfIndex(index);
       for (const cell of bar.cells) {
-        const yTop = view.yOfPrice(cell[0] + step);
-        const yBottom = view.yOfPrice(cell[0]);
+        const priceStart = cell[0];
+        if (priceStart + step < minVisPrice || priceStart > maxVisPrice) continue;
+        const yTop = view.yOfPrice(priceStart + step);
+        const yBottom = view.yOfPrice(priceStart);
         if (yBottom < top || yTop > top + height) continue;
-        if (collectRangeValues) {
-          const value = heatmapValueInUnit(heatmapCellUsd(cell), cell[0], step, preamble.settings.unit);
-          if (value > 0) this.pushScratchValue(value);
+        if (preamble.threshold > 0 || collectRangeValues) {
+          const value = heatmapValueInUnit(heatmapCellUsd(cell), priceStart, step, preamble.settings.unit);
+          if (preamble.threshold > 0 && value < preamble.threshold) continue;
+          if (collectRangeValues && value > 0) this.pushScratchValue(value);
         }
         mainCount++;
         if (live && x + view.colWidth < right) extCount++;
@@ -1247,7 +1721,9 @@ export class OrderbookHeatmapOverlay {
     if (!lease) return null;
     try {
       const visible: Array<{ x: number; yTop: number; cellHeight: number; value: number; live: boolean }> = [];
-      this.forEachVisibleCell(view, series, preamble, GPU_MAX_PREPARED_CELLS, (cell) => visible.push(cell));
+      this.forEachVisibleCell(view, series, preamble, GPU_MAX_PREPARED_CELLS, (x, yTop, cellHeight, value, live) => {
+        visible.push({ x, yTop, cellHeight, value, live });
+      });
       if (visible.length !== mainCount || visible.length >= GPU_MAX_PREPARED_CELLS) {
         lease.release();
         return null;
@@ -1314,6 +1790,9 @@ export class OrderbookHeatmapOverlay {
   private visibleThreshold = 0;
   /** Bumped whenever acknowledged book data merges; part of the collection memo key. */
   private barsRevision = 0;
+  /** Bumped only when non-live historical bars or resets/evictions change. */
+  private historicalBarsRevision = 0;
+  private lastSeriesLiveBarTime = Number.NEGATIVE_INFINITY;
   /** Same-frame collection memo: one visible list per frame shared by the GPU prepare and the legacy draw. */
   private lastCollectedKey = "";
   private lastCollected: Array<{ x: number; yTop: number; cellHeight: number; value: number; live: boolean }> | null = null;
@@ -1326,6 +1805,22 @@ export class OrderbookHeatmapOverlay {
   private rasterCacheCeiling = 0;
   private rasterCacheThreshold = 0;
   private rasterCacheOpacity = 0.85;
+  private rasterCacheDataSig = "";
+  private rasterCacheView: {
+    offsetX: number;
+    colWidth: number;
+    priceTop: number;
+    pricePerPx: number;
+    areaLeft: number;
+    areaTop: number;
+    areaWidth: number;
+    areaHeight: number;
+    transformA: number;
+    transformD: number;
+    transformE: number;
+    transformF: number;
+  } | null = null;
+  private rasterCacheHistRightCss = 0;
 
   private frameCacheKey(view: View, series: FootprintSeries, frame: HeatmapFramePreamble): string {
     const opacity = resolveOrderbookHeatmapOpacity(frame.settings.opacity);
@@ -1356,9 +1851,9 @@ export class OrderbookHeatmapOverlay {
     const fixedCeiling = this.resolveFixedCeiling(frame.settings);
     const collectRangeValues = this.needsRangeValues(frame.threshold, fixedCeiling);
     this.scratchValueCount = 0;
-    this.forEachVisibleCell(view, series, frame, cellLimit, (cell) => {
-      visible.push(cell);
-      if (collectRangeValues && cell.value > 0) this.pushScratchValue(cell.value);
+    this.forEachVisibleCell(view, series, frame, cellLimit, (x, yTop, cellHeight, value, live) => {
+      visible.push({ x, yTop, cellHeight, value, live });
+      if (collectRangeValues && value > 0) this.pushScratchValue(value);
     });
     const resolved = this.resolveRangeForValues(
       this.scratchValues.subarray(0, this.scratchValueCount),
@@ -1415,7 +1910,7 @@ export class OrderbookHeatmapOverlay {
     }
 
     if (evictedAny) {
-      this.barsRevision++;
+      this.bumpBarsRevision();
     }
   }
 
@@ -1476,7 +1971,7 @@ export class OrderbookHeatmapOverlay {
         if (liveSettings.mode === "custom" && tier.name === "1m" && this.canonicalTailBars.size > 0 && this.isLiveTailHealthy(this.now())) {
           this.reprojectCanonicalTailBars(liveSettings, tier);
         } else {
-          this.barsRevision++;
+          this.bumpBarsRevision(response.bars, refreshFrom > chunkStart);
         }
         this.chunks.set(chunkStart, {
           status: "ready",

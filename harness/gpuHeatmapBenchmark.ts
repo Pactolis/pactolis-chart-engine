@@ -302,8 +302,8 @@ export async function runGpuHeatmapBenchmark(input: GpuHeatmapBenchmarkInput): P
   updateOrderbookHeatmapSettings({
     unit: "btc",
     bucketStep: input.bucketStep,
-    single: { usd: 1, btc: 1 },
-    aggregated: { usd: 1, btc: 1 },
+    single: { usd: 0, btc: 0.05 },
+    aggregated: { usd: 0, btc: 0.05 },
   });
   setOrderbookHeatmapModeFor(MARKET, "single");
 

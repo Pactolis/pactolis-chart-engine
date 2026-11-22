@@ -202,8 +202,8 @@ test("15,000-cell SwiftShader benchmark and CPU raster cache budget / GPU takeov
     updateOrderbookHeatmapSettings({
       unit: "btc",
       bucketStep,
-      single: { usd: 1, btc: 1 },
-      aggregated: { usd: 1, btc: 1 },
+      single: { usd: 0, btc: 0.05 },
+      aggregated: { usd: 0, btc: 0.05 },
     });
     setOrderbookHeatmapModeFor("BINANCE_FUTURES:btcusdt", "single");
 

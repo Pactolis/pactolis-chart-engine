@@ -400,19 +400,44 @@ const HEATMAP_COLOR_LUT_DEFAULT_LIVE: readonly string[] = Array.from({ length: 1
   formatHeatmapRgba(heatmapCellRgba(q / 1000, 0.45, 0.85)),
 );
 
+const HEATMAP_COLOR_LUT_CACHE_MAX_ENTRIES = 16;
+const heatmapColorLutCache = new Map<string, readonly string[]>();
+
+/**
+ * Returns a 1001-entry RGBA string lookup table for `(alphaScale, opacity)`.
+ * `1.0` and `0.85` at `alphaScale` `1` / `0.45` stay pre-warmed; all other
+ * `(alphaScale, clampedOpacity)` pairs share a bounded 16-entry FIFO cache.
+ */
+export function getHeatmapColorLut(alphaScale = 1, opacity = 1): readonly string[] {
+  const safeAlphaScale = Number.isFinite(alphaScale) ? (alphaScale <= 0 ? 0 : alphaScale) : 1;
+  const rawClampedOpacity = Math.min(1, Math.max(0, Number.isFinite(opacity) ? opacity : 1));
+  const clampedOpacity = rawClampedOpacity === 0 ? 0 : rawClampedOpacity;
+  if (clampedOpacity === 1) {
+    if (safeAlphaScale === 1) return HEATMAP_COLOR_LUT_FULL;
+    if (safeAlphaScale === 0.45) return HEATMAP_COLOR_LUT_LIVE;
+  } else if (clampedOpacity === 0.85) {
+    if (safeAlphaScale === 1) return HEATMAP_COLOR_LUT_DEFAULT_FULL;
+    if (safeAlphaScale === 0.45) return HEATMAP_COLOR_LUT_DEFAULT_LIVE;
+  }
+  const key = `${safeAlphaScale}|${clampedOpacity}`;
+  const cached = heatmapColorLutCache.get(key);
+  if (cached) return cached;
+  if (heatmapColorLutCache.size >= HEATMAP_COLOR_LUT_CACHE_MAX_ENTRIES) {
+    const oldestKey = heatmapColorLutCache.keys().next().value;
+    if (oldestKey !== undefined) heatmapColorLutCache.delete(oldestKey);
+  }
+  const lut: readonly string[] = Array.from({ length: 1001 }, (_, q) =>
+    formatHeatmapRgba(heatmapCellRgba(q / 1000, safeAlphaScale, clampedOpacity)),
+  );
+  heatmapColorLutCache.set(key, lut);
+  return lut;
+}
+
 /** Fill color for a cell of the given intensity; `alphaScale` fades it (the live bar's extension) and `opacity` applies user opacity. */
 export function heatmapCellColor(intensity: number, alphaScale = 1, opacity = 1): string {
   const k = Math.min(1, Math.max(0, Number.isFinite(intensity) ? intensity : 0));
-  const clampedOpacity = Math.min(1, Math.max(0, Number.isFinite(opacity) ? opacity : 1));
   const q = Math.round(k * 1000);
-  if (clampedOpacity === 1) {
-    if (alphaScale === 1) return HEATMAP_COLOR_LUT_FULL[q];
-    if (alphaScale === 0.45) return HEATMAP_COLOR_LUT_LIVE[q];
-  } else if (clampedOpacity === 0.85) {
-    if (alphaScale === 1) return HEATMAP_COLOR_LUT_DEFAULT_FULL[q];
-    if (alphaScale === 0.45) return HEATMAP_COLOR_LUT_DEFAULT_LIVE[q];
-  }
-  return formatHeatmapRgba(heatmapCellRgba(k, alphaScale, clampedOpacity));
+  return getHeatmapColorLut(alphaScale, opacity)[q];
 }
 
 export function formatHeatmapValue(value: number, unit: "usd" | "btc"): string {

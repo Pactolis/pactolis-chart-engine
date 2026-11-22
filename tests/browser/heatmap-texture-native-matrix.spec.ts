@@ -87,9 +87,8 @@ async function prepare(page: Page, empty: boolean, log = false): Promise<string>
         resolution: "15m", bucketStep: 50, from, to,
         bars: bars.filter((bar) => bar.t >= from && bar.t <= to).map((bar) => ({
           t: bar.t,
-          // Independent numeric oracle: 4000/125=32 BTC; 14400/225=64 BTC.
-          // The explicit zero cell is PRESENT, not an absent bucket.
-          cells: empty ? [] : [[50, 0, 0], [100, 2000, 2000], [200, 7200, 7200]],
+          // Independent numeric oracle: 1200/75=16 BTC (exact threshold floor, k=0); 4000/125=32 BTC; 14400/225=64 BTC.
+          cells: empty ? [] : [[50, 600, 600], [100, 2000, 2000], [200, 7200, 7200]],
         })),
       },
     }) });
@@ -224,7 +223,7 @@ async function prepare(page: Page, empty: boolean, log = false): Promise<string>
  * C/D: Given subpixel CSS columns, Then native final image keeps WebGL2 GPU
  * ownership and matches an independent discrete pixel-center coverage oracle;
  * next CW32 frame stays on GPU without toggling.
- * Literal fixture: present zero; 32 BTC at 125; 64 BTC at 225; threshold 16; default opacity 0.85.
+ * Literal fixture: 16 BTC at 75 (exact threshold floor, k=0); 32 BTC at 125; 64 BTC at 225; threshold 16; default opacity 0.85.
  * LOG(32/16)/LOG(64/16)=.5 => mid-ramp turquoise CSS alpha .350, EXT .157; zero .187, peak .578.
  * Frozen source: 0637839fc2ba1e8ee9c07f9a8d13a6ca9209464e / aa45c97d9a4f71beeb9f090a4d6d7e1edb1395d3.
  */
@@ -269,7 +268,7 @@ async function freezeOracle(page: Page, id: string, narrow: boolean, log: boolea
     for (const price of [50, 75, 100, 125, 150, 175, 200, 225, 250])
       if (Math.abs(y(price) - v.yOfPrice(price)) > .00001)
         throw new Error("HARNESS_NOTRUN: literal public projection mismatch");
-    const expectedCells = JSON.stringify([[50, 0, 0], [100, 2000, 2000], [200, 7200, 7200]]);
+    const expectedCells = JSON.stringify([[50, 600, 600], [100, 2000, 2000], [200, 7200, 7200]]);
     // Five literal neighboring fixture columns cover the complete narrow ROI.
     // No unacknowledged book, invented timestamp, production collector or color helper.
     for (let k = -4; k <= 0; k++)

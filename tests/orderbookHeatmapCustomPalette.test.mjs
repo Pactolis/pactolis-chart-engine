@@ -1405,7 +1405,8 @@ test("deterministic pan/zoom benchmark (15k x 60f and 40k x 30f) reports p50/p95
         }
 
         currentScaleMode = "fixed";
-        currentThreshold = 1_000_000;
+        // Use threshold=1 so fixed O(1) range skips percentile scanning while retaining the full 15k/40k log-normal load after #262 filtering.
+        currentThreshold = 1;
         for (let f = 0; f < frames; f++) {
           view.offsetX = -f * view.colWidth;
           const t4 = performance.now();

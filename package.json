@@ -391,6 +391,7 @@
     "test:browser": "playwright test",
     "harness": "vite",
     "benchmark:gpu": "node scripts/gpu-heatmap-benchmark.mjs",
+    "benchmark:heatmap-pan": "node scripts/heatmap-pan-benchmark.mjs",
     "benchmark:webgpu-native": "node scripts/webgpu-native-benchmark.mjs"
   },
   "devDependencies": {
