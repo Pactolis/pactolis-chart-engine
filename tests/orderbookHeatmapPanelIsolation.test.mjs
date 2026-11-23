@@ -101,7 +101,7 @@ async function withPanelSettingsSource(initialModes, work) {
 
 test("SCENARIO-CE-HEATMAP-PANEL-ISOLATION: panels sharing a market isolate mode, fetches, live-tail subscriptions, and raster cache", async () => {
   await withPanelSettingsSource({ "panel-a": "off", "panel-b": "off" }, async ({ setMode }) => {
-    const startTime = 1_700_000_000_000;
+    const startTime = 1_699_999_980_000;
     const series = makeSeries(startTime, 5);
     const view = makeTestView();
     const fetches = [];
@@ -195,7 +195,7 @@ test("SCENARIO-CE-HEATMAP-PANEL-ISOLATION: panels sharing a market isolate mode,
 
 test("SCENARIO-CE-HEATMAP-RUNTIME-STATUS: exposes loading, error, source coverage, and idle reset transitions", async () => {
   await withPanelSettingsSource({ "panel-status": "off" }, async ({ setMode }) => {
-    const startTime = 1_700_000_000_000;
+    const startTime = 1_699_999_980_000;
     const series = makeSeries(startTime, 5);
     const view = makeTestView();
     let shouldFail = true;
