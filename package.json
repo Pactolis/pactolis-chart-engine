@@ -393,6 +393,7 @@
     "benchmark:footprint-text": "node scripts/footprint-text-gate-benchmark.mjs",
     "benchmark:gpu": "node scripts/gpu-heatmap-benchmark.mjs",
     "benchmark:heatmap-pan": "node scripts/heatmap-pan-benchmark.mjs",
+    "benchmark:webgl2-heatmap-storage": "node scripts/webgl2-heatmap-storage-benchmark.mjs",
     "benchmark:webgpu-heatmap": "node scripts/webgpu-native-heatmap-benchmark.mjs",
     "benchmark:webgpu-native": "node scripts/webgpu-native-benchmark.mjs",
     "benchmark:webgpu-native:large": "node scripts/webgpu-native-benchmark.mjs --profile large"
