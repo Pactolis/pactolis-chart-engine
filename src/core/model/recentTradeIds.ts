@@ -44,6 +44,8 @@ export class RecentTradeIds {
 
   /** Trades remembered. */
   get size(): number { return this.held; }
+  get capacityRows(): number { return this.flags.length; }
+  get allocatedBytes(): number { return this.fields.byteLength + this.flags.byteLength; }
 
   /**
    * The IDs kept for `market`, or null when its identities stay fingerprint strings. A
@@ -111,6 +113,35 @@ export class RecentTradeIds {
       }
       if (highest >= 0) raiseFloor(ids.market, highest);
     }
+    this.compactIfSparse();
+  }
+
+  private compactIfSparse(): void {
+    if (this.flags.length < INITIAL_ROWS * 4 || this.held * 4 > this.flags.length) return;
+    let targetRows = INITIAL_ROWS;
+    while (targetRows < this.held * 2) targetRows *= 2;
+    if (targetRows >= this.flags.length) return;
+    const nextFields = new Float64Array(targetRows * FIELDS);
+    const nextFlags = new Uint8Array(targetRows);
+    let nextRow = 0;
+    for (const ids of this.markets.values()) {
+      if (ids === null) continue;
+      for (const [id, oldRow] of ids.rows) {
+        const srcAt = oldRow * FIELDS;
+        const dstAt = nextRow * FIELDS;
+        nextFields[dstAt] = this.fields[srcAt];
+        nextFields[dstAt + 1] = this.fields[srcAt + 1];
+        nextFields[dstAt + 2] = this.fields[srcAt + 2];
+        nextFields[dstAt + 3] = this.fields[srcAt + 3];
+        nextFlags[nextRow] = this.flags[oldRow];
+        ids.rows.set(id, nextRow);
+        nextRow += 1;
+      }
+    }
+    this.fields = nextFields;
+    this.flags = nextFlags;
+    this.used = nextRow;
+    this.freed.length = 0;
   }
 
   clear(): void {

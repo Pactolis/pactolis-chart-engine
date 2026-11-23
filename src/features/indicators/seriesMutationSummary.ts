@@ -12,6 +12,7 @@ export interface IndicatorSeriesMutationSummary {
 interface MutationState {
   revision: number;
   structureRevision: number;
+  nonTailRevision: number;
   cellRevisions: number[];
   closes: number[];
   summary: IndicatorSeriesMutationSummary;
@@ -20,6 +21,7 @@ interface MutationState {
 interface PriceMutationState {
   revision: number;
   structureRevision: number;
+  nonTailRevision: number;
   times: number[];
   open: number[];
   high: number[];
@@ -34,13 +36,20 @@ const priceMutationStates = new WeakMap<FootprintSeries, PriceMutationState>();
 
 export function indicatorSeriesMutation(series: FootprintSeries): IndicatorSeriesMutationSummary {
   const cached = mutationStates.get(series);
-  if (cached?.revision === series.revision && cached.structureRevision === series.structureRevision) return cached.summary;
+  if (
+    cached?.revision === series.revision
+    && cached.structureRevision === series.structureRevision
+    && cached.nonTailRevision === series.nonTailRevision
+  ) {
+    return cached.summary;
+  }
 
   const bars = series.listReadonly();
   const tailIndex = bars.length - 1;
   const snapshot = (): MutationState => ({
     revision: series.revision,
     structureRevision: series.structureRevision,
+    nonTailRevision: series.nonTailRevision,
     cellRevisions: bars.map((bar) => bar.cellRevision ?? 0),
     closes: bars.map((bar) => bar.close),
     summary: { kind: cached ? "structure" : "initial", revision: series.revision, structureRevision: series.structureRevision, tailIndex },
@@ -52,17 +61,31 @@ export function indicatorSeriesMutation(series: FootprintSeries): IndicatorSerie
     return next.summary;
   }
 
-  if (series.revision === cached.revision + 1 && tailIndex >= 0) {
-    const tail = bars[tailIndex];
-    const cellRevision = tail.cellRevision ?? 0;
-    if (cellRevision !== cached.cellRevisions[tailIndex] || tail.close !== cached.closes[tailIndex]) {
-      cached.cellRevisions[tailIndex] = cellRevision;
-      cached.closes[tailIndex] = tail.close;
+  if (cached.nonTailRevision === series.nonTailRevision) {
+    if (tailIndex < 0) {
       cached.revision = series.revision;
       cached.structureRevision = series.structureRevision;
-      cached.summary = { kind: "tail", revision: series.revision, structureRevision: series.structureRevision, tailIndex };
+      cached.nonTailRevision = series.nonTailRevision;
+      cached.summary = { kind: "metadata", revision: series.revision, structureRevision: series.structureRevision, tailIndex };
       return cached.summary;
     }
+    const tail = bars[tailIndex];
+    const cellRevision = tail.cellRevision ?? 0;
+    const changed = cellRevision !== cached.cellRevisions[tailIndex] || tail.close !== cached.closes[tailIndex];
+    if (changed) {
+      cached.cellRevisions[tailIndex] = cellRevision;
+      cached.closes[tailIndex] = tail.close;
+    }
+    cached.revision = series.revision;
+    cached.structureRevision = series.structureRevision;
+    cached.nonTailRevision = series.nonTailRevision;
+    cached.summary = {
+      kind: changed ? "tail" : "metadata",
+      revision: series.revision,
+      structureRevision: series.structureRevision,
+      tailIndex,
+    };
+    return cached.summary;
   }
 
   let changedIndex = -1;
@@ -85,6 +108,7 @@ export function indicatorSeriesMutation(series: FootprintSeries): IndicatorSerie
       : "non-tail";
   cached.revision = series.revision;
   cached.structureRevision = series.structureRevision;
+  cached.nonTailRevision = series.nonTailRevision;
   cached.summary = { kind, revision: series.revision, structureRevision: series.structureRevision, tailIndex };
   return cached.summary;
 }
@@ -99,13 +123,20 @@ export function indicatorSeriesMutation(series: FootprintSeries): IndicatorSerie
  */
 export function indicatorPriceSeriesMutation(series: FootprintSeries): IndicatorSeriesMutationSummary {
   const cached = priceMutationStates.get(series);
-  if (cached?.revision === series.revision && cached.structureRevision === series.structureRevision) return cached.summary;
+  if (
+    cached?.revision === series.revision
+    && cached.structureRevision === series.structureRevision
+    && cached.nonTailRevision === series.nonTailRevision
+  ) {
+    return cached.summary;
+  }
 
   const bars = series.listReadonly();
   const tailIndex = bars.length - 1;
   const makeSnapshot = (kind: IndicatorSeriesMutationKind): PriceMutationState => ({
     revision: series.revision,
     structureRevision: series.structureRevision,
+    nonTailRevision: series.nonTailRevision,
     times: bars.map((bar) => bar.startTime),
     open: bars.map((bar) => bar.open),
     high: bars.map((bar) => bar.high),
@@ -127,7 +158,14 @@ export function indicatorPriceSeriesMutation(series: FootprintSeries): Indicator
     return next.summary;
   }
 
-  if (series.revision === cached.revision + 1 && cached.structureRevision === series.structureRevision && tailIndex >= 0) {
+  if (cached.structureRevision === series.structureRevision && cached.nonTailRevision === series.nonTailRevision) {
+    if (tailIndex < 0) {
+      cached.revision = series.revision;
+      cached.structureRevision = series.structureRevision;
+      cached.nonTailRevision = series.nonTailRevision;
+      cached.summary = { kind: "metadata", revision: series.revision, structureRevision: series.structureRevision, tailIndex };
+      return cached.summary;
+    }
     const bar = bars[tailIndex];
     if (bar.startTime !== cached.times[tailIndex]) {
       const next = makeSnapshot("structure");
@@ -145,11 +183,17 @@ export function indicatorPriceSeriesMutation(series: FootprintSeries): Indicator
       cached.low[tailIndex] = bar.low;
       cached.close[tailIndex] = bar.close;
       cached.volume[tailIndex] = bar.volume;
-      cached.revision = series.revision;
-      cached.structureRevision = series.structureRevision;
-      cached.summary = { kind: "tail", revision: series.revision, structureRevision: series.structureRevision, tailIndex };
-      return cached.summary;
     }
+    cached.revision = series.revision;
+    cached.structureRevision = series.structureRevision;
+    cached.nonTailRevision = series.nonTailRevision;
+    cached.summary = {
+      kind: tailChanged ? "tail" : "metadata",
+      revision: series.revision,
+      structureRevision: series.structureRevision,
+      tailIndex,
+    };
+    return cached.summary;
   }
 
   let changedIndex = -1;
@@ -184,6 +228,7 @@ export function indicatorPriceSeriesMutation(series: FootprintSeries): Indicator
       : "non-tail";
   cached.revision = series.revision;
   cached.structureRevision = series.structureRevision;
+  cached.nonTailRevision = series.nonTailRevision;
   cached.summary = { kind, revision: series.revision, structureRevision: series.structureRevision, tailIndex };
   return cached.summary;
 }

@@ -13,6 +13,7 @@ import { makeNumberPoints, visibleIndexRange, type PlotSeries } from "./taShared
 import { vwapIndicatorLineColorDefault, vwapBandColorDefault } from "../../../core/ui/seriesPalette.js";
 import { incrementPerformanceCounter, measurePerformance } from "../../../core/performanceTelemetry.js";
 import { indicatorPriceSeriesMutation } from "../seriesMutationSummary.js";
+import { createIndicatorSeriesStateStore } from "./stateRegistry.js";
 
 export interface VwapLineConfig {
   id: string; enabled: boolean; family: VwapFamily; period: CalendarPeriod; rollingWindowDays: number; color: string; showBands: boolean; bandSigma: number; bandColor: string;
@@ -28,7 +29,7 @@ interface CurrentVwapTailState { periodStart: number; prefixPv: number; prefixVo
 interface VwapIncrementalState {
   instance: object; seriesRevision: number; structureRevision: number; start: number; end: number; lines: VwapLineConfig[]; resultPoints: VwapPoint[][]; plotSeries: Array<PlotSeries & { chartLabel?: string }>; prepared: ReturnType<typeof prepareOverlayData>; tails: CurrentVwapTailState[];
 }
-const vwapIncrementalStates = new WeakMap<object, Map<string, VwapIncrementalState>>();
+const vwapIncrementalStates = createIndicatorSeriesStateStore<VwapIncrementalState>();
 
 export function normalizeVwapLines(settings: VwapIndicatorSettings): VwapLineConfig[] {
   if (Array.isArray(settings.lines)) {
@@ -66,8 +67,7 @@ function sameIncrementalLines(previous: readonly VwapLineConfig[], next: readonl
 function prepareVwap(ctx: IndicatorDrawContext<VwapIndicatorSettings>) {
   const { start, end } = visibleIndexRange(ctx); const bars = ctx.series.listReadonly(); const lines = normalizeVwapLines(ctx.settings).filter((line) => line.enabled);
   const incrementalEligible = lines.length > 0 && lines.every((line) => line.family === "current" && !line.showBands);
-  let perSeries = vwapIncrementalStates.get(ctx.series); if (!perSeries) { perSeries = new Map(); vwapIncrementalStates.set(ctx.series, perSeries); }
-  const cached = perSeries.get(ctx.instance.id);
+  const cached = vwapIncrementalStates.get(ctx.series, ctx.instance.id);
   if (cached?.seriesRevision === ctx.series.revision && cached.instance === ctx.instance && cached.start === start && cached.end === end) return cached.prepared;
   const mutation = indicatorPriceSeriesMutation(ctx.series);
   const sameLines = Boolean(cached) && sameIncrementalLines(cached!.lines, lines);
@@ -127,7 +127,7 @@ function prepareVwap(ctx: IndicatorDrawContext<VwapIndicatorSettings>) {
       series.push({ key: `vwap-${line.id}-lower`, label: `${label} -${line.bandSigma}σ`, color: line.bandColor, points: makeOverlayPoints(bands.lower, bars, start, end) });
     });
     const prepared = prepareOverlayData(ctx, series);
-    if (incrementalEligible) perSeries.set(ctx.instance.id, { instance: ctx.instance, seriesRevision: ctx.series.revision, structureRevision: ctx.series.structureRevision, start, end, lines, resultPoints, plotSeries: series, prepared, tails: lines.map((line) => currentTailState(bars, line)) }); else perSeries.delete(ctx.instance.id);
+    if (incrementalEligible) vwapIncrementalStates.set(ctx.series, ctx.instance.id, { instance: ctx.instance, seriesRevision: ctx.series.revision, structureRevision: ctx.series.structureRevision, start, end, lines, resultPoints, plotSeries: series, prepared, tails: lines.map((line) => currentTailState(bars, line)) }); else vwapIncrementalStates.delete(ctx.series, ctx.instance.id);
     incrementPerformanceCounter("indicator.incremental.full.vwap"); return prepared;
   });
 }

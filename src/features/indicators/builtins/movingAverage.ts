@@ -7,6 +7,7 @@ import { periodsFromText, visibleIndexRange, type PlotSeries } from "./taShared.
 import { seriesPalette } from "../../../core/ui/seriesPalette.js";
 import { incrementPerformanceCounter, measurePerformance } from "../../../core/performanceTelemetry.js";
 import { indicatorPriceSeriesMutation } from "../seriesMutationSummary.js";
+import { createIndicatorSeriesStateStore } from "./stateRegistry.js";
 
 export interface MovingAverageIndicatorSettings extends IndicatorSettings {
   lines: MaLineConfig[];
@@ -46,7 +47,7 @@ interface MovingAverageIncrementalState {
   prepared: ReturnType<typeof prepareOverlayData>;
 }
 
-const movingAverageIncrementalStates = new WeakMap<object, Map<string, MovingAverageIncrementalState>>();
+const movingAverageIncrementalStates = createIndicatorSeriesStateStore<MovingAverageIncrementalState>();
 
 function sameCalculationLines(cached: MovingAverageIncrementalState | undefined, lines: readonly MaLineConfig[]): boolean {
   return Boolean(cached)
@@ -92,12 +93,7 @@ function prepareMovingAverage(ctx: IndicatorDrawContext<MovingAverageIndicatorSe
   const bars = ctx.series.listReadonly();
   const lines = normalizeLines(ctx.settings).filter((line) => line.enabled);
   const incrementalEligible = lines.length > 0 && lines.every((line) => line.timeframe === "chart");
-  let perSeries = movingAverageIncrementalStates.get(ctx.series);
-  if (!perSeries) {
-    perSeries = new Map();
-    movingAverageIncrementalStates.set(ctx.series, perSeries);
-  }
-  const cached = perSeries.get(ctx.instance.id);
+  const cached = movingAverageIncrementalStates.get(ctx.series, ctx.instance.id);
   const sameLines = sameCalculationLines(cached, lines);
   const sameConfig = Boolean(cached) && cached!.instance === ctx.instance && sameLines;
   const sameShape = Boolean(cached)
@@ -145,7 +141,7 @@ function prepareMovingAverage(ctx: IndicatorDrawContext<MovingAverageIndicatorSe
       : higherTimeframeValues(bars, line.timeframe, line.period, line.method, ctx.series.config.intervalMs));
     const plotSeries = makeMovingAveragePlotSeries(lines, values, bars, start, end);
     const prepared = prepareOverlayData(ctx, plotSeries);
-    perSeries.set(ctx.instance.id, { instance: ctx.instance, seriesRevision: ctx.series.revision, structureRevision: ctx.series.structureRevision, start, end, lines, values, plotSeries, prepared });
+    movingAverageIncrementalStates.set(ctx.series, ctx.instance.id, { instance: ctx.instance, seriesRevision: ctx.series.revision, structureRevision: ctx.series.structureRevision, start, end, lines, values, plotSeries, prepared });
     incrementPerformanceCounter("indicator.incremental.full.moving-average");
     return prepared;
   });

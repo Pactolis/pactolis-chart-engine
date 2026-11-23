@@ -14,7 +14,7 @@ import {
 import { boolSetting, numericSetting, stringSetting, visibleIndexRange } from "./taShared.js";
 import { uiColor } from "../../../core/ui/seriesPalette.js";
 import { incrementPerformanceCounter } from "../../../core/performanceTelemetry.js";
-import type { FootprintSeries } from "../../../core/model/footprint.js";
+import { createIndicatorSeriesStateStore } from "./stateRegistry.js";
 
 export type SwingPivotMode = "structural" | "raw" | "both";
 
@@ -71,7 +71,7 @@ interface SwingState {
   supersededRawPivots: SwingPivot[];
 }
 
-const states = new WeakMap<FootprintSeries, Map<string, SwingState>>();
+const states = createIndicatorSeriesStateStore<SwingState>();
 
 function pivotModeSetting(settings: IndicatorSettings): SwingPivotMode {
   const value = settings.pivotMode;
@@ -207,12 +207,7 @@ function prepareSwingMap(ctx: IndicatorDrawContext<SwingMapSettings>): Indicator
     closedLength = lo;
   }
 
-  let instances = states.get(ctx.series);
-  if (!instances) {
-    instances = new Map();
-    states.set(ctx.series, instances);
-  }
-  let state = instances.get(ctx.instance.id);
+  let state = states.get(ctx.series, ctx.instance.id);
   const reset = !state
     || state.config !== config
     || state.resetEpoch !== ctx.series.resetEpoch
@@ -243,7 +238,7 @@ function prepareSwingMap(ctx: IndicatorDrawContext<SwingMapSettings>): Indicator
       marks: buildDisplayMarks(result),
       supersededRawPivots: pivotMode === "both" ? computeSupersededRawPivots(result.rawPivots, result.swings) : [],
     };
-    instances.set(ctx.instance.id, state);
+    states.set(ctx.series, ctx.instance.id, state);
     incrementPerformanceCounter("indicator.incremental.full.swing-map");
   } else if (closedLength > state!.length) {
     const prevRawCount = state!.result.rawPivots.length;

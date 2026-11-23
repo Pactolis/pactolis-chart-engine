@@ -8,6 +8,7 @@ import { defaultIndicatorPlacement, getIndicatorDefinition, isIndicatorPlacement
 import { chartLocale } from "../../core/chartLocale.js";
 import { incrementPerformanceCounter, measurePerformance } from "../../core/performanceTelemetry.js";
 import { IndicatorPrepareCache } from "./prepareCache.js";
+import { purgeIndicatorBuiltinState } from "./builtins/stateRegistry.js";
 import { buildIndicatorAnalysisSnapshot } from "./analysisSnapshot.js";
 import {
   createIndicatorPaneHeadersModel,
@@ -323,6 +324,7 @@ export class IndicatorManager {
     this.dismissSettingsSession("dispose");
     this.unsubscribeHeaderLocale();
     this.preparedDataCache.clear();
+    for (const instance of this.instances) purgeIndicatorBuiltinState(instance.id);
     this.headers.panes = [];
     this.headers.lastRemovedTitle = "";
     this.lastRemovedSnapshot = null;
@@ -346,8 +348,13 @@ export class IndicatorManager {
 
   restore(instances?: IndicatorInstance[]): void {
     if (this.lastRemovedSnapshot) this.dismissRemoveUndo();
+    const prevIds = this.instances.map((item) => item.id);
     this.preparedDataCache.clear();
     this.instances = cloneInstances(instances);
+    const nextIds = new Set(this.instances.map((item) => item.id));
+    for (const prevId of prevIds) {
+      if (!nextIds.has(prevId)) purgeIndicatorBuiltinState(prevId);
+    }
     this.renderRevision++;
     this.renderHeaders();
     if (this.latestView) this.layout(this.latestView);
@@ -713,6 +720,7 @@ export class IndicatorManager {
     this.headers.lastRemovedTitle = instance.title;
     if (this.activeSettingsSession?.instanceId === id) this.dismissSettingsSession("dispose");
     this.preparedDataCache.delete(id);
+    purgeIndicatorBuiltinState(id);
     this.instances = this.instances.filter((item) => item.id !== id).map((item, order) => ({ ...item, order }));
     this.emit(true);
   }
