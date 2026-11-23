@@ -143,6 +143,7 @@ export interface GpuSurface {
   reserveNativeHeatmapPayload?(logicalBytes: number): { release(): void } | null;
   renderNativeHeatmap?(frame: GpuNativeHeatmapFrame, plot: GpuNativeHeatmapPlot): boolean;
   renderNativeResidentHeatmap?(frame: GpuNativeHeatmapResidentFrame, plot: GpuNativeHeatmapPlot): boolean;
+  wasLastHeatmapFailureRecoverable?(): boolean;
   disposeNativeHeatmap?(): void;
   requestCapture(): Promise<RgbaFrame>;
   onLost(listener: (reason: GpuLossReason) => void): () => void;

@@ -71,7 +71,6 @@ function makeCanvasHarness(width = 1200, height = 700) {
 
 function setupController(panelOverrides = {}) {
   const view = new View();
-  view.setLayout(1200, 700);
   view.priceAxisW = 72;
   view.area = { left: 0, top: 0, width: 1128, height: 670 };
   view.subPanesH = 0;

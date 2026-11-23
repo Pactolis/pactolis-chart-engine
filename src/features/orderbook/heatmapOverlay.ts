@@ -1042,6 +1042,7 @@ export class OrderbookHeatmapOverlay {
           frame.settings,
           frame.threshold,
           fixedCeiling,
+          scalePlan.contrast,
         );
         this.scratchValueCount = 0;
         this.commitAutoScale(
@@ -1128,7 +1129,10 @@ export class OrderbookHeatmapOverlay {
       }
 
       incrementPerformanceCounter("chart.cpu.heatmap.raster.direct");
-      this.paintCellsToContext(ctx, view, series, frame);
+      const paintedCells = this.paintCellsToContext(ctx, view, series, frame);
+      if (paintedCells === 0) {
+        this.releaseRasterCache();
+      }
     } finally {
       if (startedAt !== null) recordPerformanceDuration("chart.cpu.heatmap.draw.ms", performance.now() - startedAt);
     }
@@ -1598,13 +1602,14 @@ export class OrderbookHeatmapOverlay {
     settings: OrderbookHeatmapSettings,
     threshold: number,
     fixedCeiling: number | undefined = this.resolveFixedCeiling(settings),
+    contrast: OrderbookHeatmapSettings["contrast"] = settings.contrast,
   ): { floor: number; ceiling: number; opacity: number } {
     const { floor, ceiling } = resolveHeatmapColorRange({
       values,
       threshold,
       scaleMode: settings.scaleMode,
       fixedCeiling,
-      contrast: settings.contrast,
+      contrast,
       inPlace: true,
     });
     return {
@@ -1870,6 +1875,7 @@ export class OrderbookHeatmapOverlay {
         preamble.settings,
         preamble.threshold,
         fixedCeiling,
+        scalePlan.contrast,
       );
       this.scratchValueCount = 0;
       this.commitAutoScale(
@@ -2034,6 +2040,7 @@ export class OrderbookHeatmapOverlay {
           preamble.settings,
           threshold,
           fixedCeiling,
+          scalePlan.contrast,
         );
         this.scratchValueCount = 0;
         this.commitAutoScale(
@@ -2176,13 +2183,14 @@ export class OrderbookHeatmapOverlay {
     replayActive: boolean,
   ):
     | { needsScan: false; floor: number; ceiling: number }
-    | { needsScan: true; scaleInputSig: string; viewportKey: string } {
+    | { needsScan: true; scaleInputSig: string; viewportKey: string; contrast: NonNullable<OrderbookHeatmapSettings["contrast"]> } {
     const viewportKey =
       `${view.offsetX}|${view.colWidth}|${view.priceTop}|${view.pricePerPx}|${view.area.left}|${view.area.top}|${view.area.width}|${view.area.height}`;
-    const scaleInputSig =
-      `${this.dataKey}|${settings.unit}|${threshold}|${settings.scaleMode ?? "auto"}|${fixedCeiling ?? ""}|${settings.contrast ?? "medium"}|${replayActive}`;
-    const now = this.now();
     const needsRange = this.needsRangeValues(threshold, fixedCeiling);
+    const contrast = needsRange ? (settings.contrast ?? "medium") : "medium";
+    const scaleInputSig =
+      `${this.dataKey}|${settings.unit}|${threshold}|${settings.scaleMode ?? "auto"}|${fixedCeiling ?? ""}|${contrast}|${replayActive}`;
+    const now = this.now();
     if (this.scaleViewportKey !== "" && this.scaleViewportKey !== viewportKey) {
       this.scaleViewportChangedAt = now;
       if (needsRange) {
@@ -2218,6 +2226,7 @@ export class OrderbookHeatmapOverlay {
       needsScan: true,
       scaleInputSig,
       viewportKey,
+      contrast,
     };
   }
 

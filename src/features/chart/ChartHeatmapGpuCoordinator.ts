@@ -362,14 +362,14 @@ export class ChartHeatmapGpuCoordinator {
         throw error;
       }
       if (!ok) {
-        if (surface.supportsNativeHeatmap?.() === false) {
+        if (surface.wasLastHeatmapFailureRecoverable?.() === true) {
+          this.lastFallbackReason = "recoverable-frame-skip";
+          incrementPerformanceCounter("chart.gpu.heatmap.fallback.recoverable");
+        } else {
           this.disposeHeatmapGpuRenderer();
           this.heatmapGpuFailureLatched = true;
           this.lastFallbackReason = "webgpu-resident-permanent";
           incrementPerformanceCounter("chart.gpu.heatmap.fallback.permanent");
-        } else {
-          this.lastFallbackReason = "recoverable-frame-skip";
-          incrementPerformanceCounter("chart.gpu.heatmap.fallback.recoverable");
         }
         this.lastHeatmapPath = "cpu";
         setGpuFeaturePath(HEATMAP_GPU_FEATURE, "cpu");
@@ -421,14 +421,14 @@ export class ChartHeatmapGpuCoordinator {
       }
       if (!ok) {
         frame.preparedLease?.release();
-        if (surface.supportsNativeHeatmap?.() === false) {
+        if (surface.wasLastHeatmapFailureRecoverable?.() === true) {
+          this.lastFallbackReason = "recoverable-frame-skip";
+          incrementPerformanceCounter("chart.gpu.heatmap.fallback.recoverable");
+        } else {
           this.disposeHeatmapGpuRenderer();
           this.heatmapGpuFailureLatched = true;
           this.lastFallbackReason = "webgpu-immediate-permanent";
           incrementPerformanceCounter("chart.gpu.heatmap.fallback.permanent");
-        } else {
-          this.lastFallbackReason = "recoverable-frame-skip";
-          incrementPerformanceCounter("chart.gpu.heatmap.fallback.recoverable");
         }
         this.lastHeatmapPath = "cpu";
         setGpuFeaturePath(HEATMAP_GPU_FEATURE, "cpu");

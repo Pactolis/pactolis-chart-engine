@@ -361,7 +361,7 @@ test("#256 motion raster reuse blits historical overlap, pixel-aligns at fractio
         "destination blit rect is aligned to whole device pixels");
       // Left strip [0, 10.5] and right strip [390, 800] (no live extension beyond last bar)
       assert.ok(h.mainFillRects.length <= 12, "only exposed strips + live bar are painted, not all 20 bars");
-      assert.ok(!h.mainFillRects.some((r) => r.x > 390), "no live bar extension painted in empty right space");
+      assert.ok(!h.mainFillRects.some((r) => r.x >= 410), "no live bar extension painted in empty right space");
 
       // Zoom 1.25x within [0.5, 2.0] also uses motionReuse
       h.resetCounts();

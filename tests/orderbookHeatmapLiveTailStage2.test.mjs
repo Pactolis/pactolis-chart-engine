@@ -323,7 +323,7 @@ test("coarse tiers (>= 5m) reject 1m WS tail bars without polluting cache and re
       const frame = overlay.prepareGpuCells(view, series, [0, 3], grant);
       assert.ok(frame);
       assert.equal(frame.main.length, 1, "5m bar cells remain intact without 1m wall");
-      assert.equal(frame.extension.length, 1, "5m live extension remains intact without 1m wall");
+      assert.equal(frame.extension.length, 0, "right extension is disabled (#280)");
       assert.equal(frame.main[0].value, 2_000_000);
 
       // Advance past LIVE_REFRESH_MS (20s): 5m REST refresh still runs cleanly

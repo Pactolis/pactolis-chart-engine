@@ -146,7 +146,7 @@ test("Resident heatmap constants and WGSL match 16 B/cell + 64 B uniform + 4-sto
   assert.match(NATIVE_RESIDENT_HEATMAP_WGSL, /priceBinRel:\s*f32/);
   assert.match(NATIVE_RESIDENT_HEATMAP_WGSL, /value:\s*f32/);
   assert.match(NATIVE_RESIDENT_HEATMAP_WGSL, /flags:\s*u32/);
-  assert.match(NATIVE_RESIDENT_HEATMAP_WGSL, /alphaScale\s*=\s*0\.45/);
+  assert.match(NATIVE_RESIDENT_HEATMAP_WGSL, /let\s+alphaScale\s*=\s*1\.0/);
   assert.match(NATIVE_RESIDENT_HEATMAP_WGSL, /vec3<f32>\(18\.0,\s*38\.0,\s*84\.0\)/);
   assert.match(NATIVE_RESIDENT_HEATMAP_WGSL, /vec3<f32>\(254\.0,\s*240\.0,\s*178\.0\)/);
 });

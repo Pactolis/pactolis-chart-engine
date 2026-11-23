@@ -294,9 +294,6 @@ async function freezeOracle(page: Page, id: string, narrow: boolean, log: boolea
       ]) {
         rects.push({ x: x + k * v.colWidth, y: y(cell.hi), w: narrow ? 1 : 32,
           h: y(cell.lo) - y(cell.hi), css: cell.css });
-        // Only wide EXT is qualified; narrow ROI is strictly left of live MAIN.
-        if (!narrow && k === 0) rects.push({ x: x + 32, y: y(cell.hi),
-          w: right - x - 32, h: y(cell.lo) - y(cell.hi), css: cell.ext });
       }
     }
     const annotation = points.map(([px, py]) => {

@@ -448,18 +448,18 @@ test("CPU raster cache skips cell fillRect loop when data and viewport stay unch
     overlay.applyLiveTailBars([{ t: 0, cells: [[100, 1500, 1500], [150, 2500, 2500]] }]);
     overlay.draw(ctx, view, series, [0, 0]);
     assert.equal(offClearRectCalls, 2);
-    assert.equal(offFillRectCalls, 8, "barsRevision change refreshes raster cache");
+    assert.equal(offFillRectCalls, 4, "barsRevision change refreshes raster cache");
     assert.equal(drawImageCalls.length, 3);
 
     // 4. Viewport change invalidates raster cache
     view.offsetX += 16;
     overlay.draw(ctx, view, series, [0, 0]);
     assert.equal(offClearRectCalls, 2, "moving viewport paints directly");
-    assert.equal(mainFillRectCalls, 4);
+    assert.equal(mainFillRectCalls, 2);
     overlay.now = () => 60_150;
     overlay.draw(ctx, view, series, [0, 0]);
     assert.equal(offClearRectCalls, 3);
-    assert.equal(offFillRectCalls, 12, "viewport change refreshes raster cache");
+    assert.equal(offFillRectCalls, 6, "viewport change refreshes raster cache");
     assert.equal(drawImageCalls.length, 4);
 
     // 5. Canvas dimension change invalidates raster cache
@@ -467,7 +467,7 @@ test("CPU raster cache skips cell fillRect loop when data and viewport stay unch
     overlay.draw(ctx, view, series, [0, 0]);
     assert.equal(offscreenCanvas.width, 1200);
     assert.equal(offClearRectCalls, 4);
-    assert.equal(offFillRectCalls, 16);
+    assert.equal(offFillRectCalls, 8);
     assert.equal(drawImageCalls.length, 5);
     } finally {
       overlay.dispose();

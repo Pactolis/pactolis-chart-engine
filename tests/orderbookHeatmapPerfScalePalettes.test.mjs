@@ -142,7 +142,7 @@ test("#280 tail diff & WebGPU resident incremental sync avoid full rebuilds on u
 
   // Now test end-to-end with OrderbookHeatmapOverlay + WebGpuNativeHeatmapPipeline
   const { device, writeBufferCalls } = makeWebGpuDeviceMock();
-  const pipeline = WebGpuNativeHeatmapPipeline.create(device, "rgba8unorm");
+  const pipeline = new WebGpuNativeHeatmapPipeline(device, "rgba8unorm");
   assert.ok(pipeline);
   const targetTex = { createView: () => ({}) };
   const plot = { left: 0, top: 0, width: 1000, height: 500, pixelRatio: 1 };
@@ -246,30 +246,35 @@ test("#280 tail diff & WebGPU resident incremental sync avoid full rebuilds on u
 
 test("#280 recoverable GPU frame rejection does not permanently latch CPU fallback and setSurface resets latch", () => {
   const { device } = makeWebGpuDeviceMock();
-  const pipeline = WebGpuNativeHeatmapPipeline.create(device, "rgba8unorm");
-  assert.ok(pipeline);
-  const surface = WebGpuSurface.createForTest(device, { width: 800, height: 400 }, 1, pipeline);
-  const targetTex = { createView: () => ({}) };
-  surface.setLastRenderedTextureForTest?.(targetTex);
+  const canvas = {
+    width: 800,
+    height: 400,
+    getContext: (k) => (k === "webgpu" ? { configure() {}, getCurrentTexture: () => ({ createView: () => ({}) }) } : null),
+  };
+  const surface = new WebGpuSurface(canvas, {
+    adapter: {},
+    device,
+    format: "rgba8unorm",
+    limits: { maxBufferSize: 128 * 1024 * 1024, maxTextureDimension2D: 8192 },
+    isLost: () => false,
+    onLost: () => () => {},
+    dispose: () => {},
+  });
+  const f = surface.beginFrame({ r: 0, g: 0, b: 0, a: 1 });
+  f.flushQuads(800, 400);
+  f.end();
 
-  // Invalid zero-width plot -> recoverable rejection, pipeline stays alive
-  const okInvalid = pipeline.renderFrame(
-    targetTex,
-    800,
-    400,
-    1,
+  // Invalid zero-width plot -> recoverable rejection, surface stays enabled
+  const okInvalid = surface.renderNativeHeatmap(
     { main: [{ x: 0, yTop: 0, width: 10, height: 10, value: 20 }], extension: [], ceiling: 50, threshold: 10, dataKey: "k" },
     { left: 0, top: 0, width: 0, height: 400, pixelRatio: 1 },
   );
   assert.equal(okInvalid, false);
-  assert.equal(pipeline.isDisposed(), false);
+  assert.equal(surface.wasLastHeatmapFailureRecoverable(), true);
+  assert.equal(surface.supportsNativeHeatmap(), true);
 
   // Subsequent valid frame succeeds
-  const okValid = pipeline.renderFrame(
-    targetTex,
-    800,
-    400,
-    1,
+  const okValid = surface.renderNativeHeatmap(
     { main: [{ x: 0, yTop: 0, width: 10, height: 10, value: 20 }], extension: [], ceiling: 50, threshold: 10, dataKey: "k" },
     { left: 0, top: 0, width: 800, height: 400, pixelRatio: 1 },
   );
@@ -285,7 +290,7 @@ test("#280 recoverable GPU frame rejection does not permanently latch CPU fallba
   });
   coordinator.setSurface(surface);
   assert.equal(coordinator.getDiagnostics().failureLatched, false);
-  pipeline.dispose();
+  surface.dispose();
 });
 
 test("#280 right extension is disabled across Canvas2D, WebGL2 prepare, and WebGPU resident WGSL", () => {
@@ -309,10 +314,11 @@ test("#281 Auto P96 freezes color range during pan/zoom, settles once when quiet
     aggregated: { usd: 1, btc: 10 },
     fixedCeiling: { usd: 100_000_000, btc: 200 },
   };
-  let now = 5_000_000;
+  const t0 = 4_980_000;
+  let now = t0 + 10 * MINUTE;
   const series = new FootprintSeries({ intervalMs: MINUTE, priceStep: 25 });
   series.loadBars(Array.from({ length: 10 }, (_, i) => ({
-    startTime: 4_999_000 + i * MINUTE,
+    startTime: t0 + i * MINUTE,
     open: 50_000, high: 50_500, low: 49_500, close: 50_200,
     volume: 100, delta: 0, count: 1, cells: new Map(), hasRef: true,
   })));
@@ -336,7 +342,7 @@ test("#281 Auto P96 freezes color range during pan/zoom, settles once when quiet
           from: req.from,
           to: req.to,
           bars: Array.from({ length: 10 }, (_, i) => ({
-            t: 4_999_000 + i * MINUTE,
+            t: t0 + i * MINUTE,
             // Bars 0..4 have 20 BTC, bars 5..9 have 100 BTC
             cells: [[50_000, (i < 5 ? 500_000 : 2_500_000), (i < 5 ? 500_000 : 2_500_000)]],
           })),
@@ -374,7 +380,7 @@ test("#281 Auto P96 freezes color range during pan/zoom, settles once when quiet
       assert.equal(snapshotPerformanceTelemetry().counters["chart.heatmap.scale.scan.count"], 1);
 
       // Live update while moving -> coalesced, still 0 new scans
-      overlay.applyLiveTailBars([{ t: 4_999_000 + 9 * MINUTE, cells: [[50_000, 3_000_000, 3_000_000]] }]);
+      overlay.applyLiveTailBars([{ t: t0 + 9 * MINUTE, cells: [[50_000, 3_000_000, 3_000_000]] }]);
       now += 16;
       view.offsetX = -105;
       overlay.draw(ctx, view, series, [5, 9]);
@@ -432,7 +438,7 @@ test("#1128 single-source palettes match across CPU LUT, GLSL, WGSL and trigger 
 
   // Changing palette on WebGPU pipeline uploads only 64 B uniform, 0 B cell storage
   const { device, writeBufferCalls } = makeWebGpuDeviceMock();
-  const pipeline = WebGpuNativeHeatmapPipeline.create(device, "rgba8unorm");
+  const pipeline = new WebGpuNativeHeatmapPipeline(device, "rgba8unorm");
   assert.ok(pipeline);
   const targetTex = { createView: () => ({}) };
   const plot = { left: 0, top: 0, width: 400, height: 400, pixelRatio: 1 };

@@ -506,7 +506,7 @@ const HEATMAP_COLOR_LUT_DEFAULT_LIVE: readonly string[] = Array.from({ length: 1
   formatHeatmapRgba(heatmapCellRgba(q / 1000, 0.45, 0.85)),
 );
 
-const HEATMAP_COLOR_LUT_CACHE_MAX_ENTRIES = 32;
+const HEATMAP_COLOR_LUT_CACHE_MAX_ENTRIES = 16;
 const heatmapColorLutCache = new Map<string, readonly string[]>();
 
 /**
