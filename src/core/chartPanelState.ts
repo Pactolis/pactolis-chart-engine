@@ -1,6 +1,7 @@
 /** Persisted state of a chart panel, as the chart engine reads and writes it. */
 
 import type { IndicatorInstance } from "./indicatorTypes.js";
+import type { OrderbookHeatmapMode } from "./orderbookHeatmap/settings.js";
 import type { FootprintCellData, TpoProfilePeriod, TpoBracketSize } from "./settings.js";
 import type { AnalysisPeriod } from "./analysis/periods.js";
 import type { ReferenceLevelFamily } from "./analysis/referenceLevels.js";
@@ -28,6 +29,8 @@ export interface ChartPanelState {
   cellNumbers?: boolean;
   poc?: boolean;
   stackedImbalance?: boolean;
+  /** Per-panel orderbook heatmap mode (frontend #1123). */
+  orderbookHeatmapMode?: OrderbookHeatmapMode;
   /** Per-chart automatic-object visibility. Added in workspace schema v14. */
   previousWeekStrategyVisibility?: Partial<Record<PreviousWeekStrategyId, boolean>>;
   mondayRangeVisibility?: Partial<Record<MondayRangeId, boolean>>;

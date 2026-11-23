@@ -25,6 +25,7 @@ import type {
   OrderbookHeatmapBar,
   OrderbookHeatmapRequest,
   OrderbookHeatmapResponse,
+  OrderbookHeatmapRuntimeStatus,
 } from "./heatmapContracts.js";
 import {
   HEATMAP_HOVER_SPAN,
@@ -50,7 +51,7 @@ import {
 import type { HeatmapGpuCellFrame } from "../chart/heatmap/gpu/heatmapGpuRenderer.js";
 import type { GpuNativeHeatmapResidentCell, GpuNativeHeatmapResidentFrame } from "../../core/gpu/gpuBackend.js";
 
-export type { LiveHeatmapTailEvent, LiveHeatmapTailRequest } from "./heatmapContracts.js";
+export type { LiveHeatmapTailEvent, LiveHeatmapTailRequest, OrderbookHeatmapRuntimeStatus } from "./heatmapContracts.js";
 
 export type OrderbookHeatmapFetch = (
   request: OrderbookHeatmapRequest,
@@ -164,6 +165,8 @@ export interface OrderbookHeatmapOverlayOptions {
   invalidate: () => void;
   /** The chart's current market; the overlay only draws on the BTCUSDT perp chart. */
   getMarket: () => string;
+  /** Optional stable panel identifier for panel-scoped heatmap settings and live-tail routing. */
+  getPanelId?: () => string | undefined;
   /** Reads replay state from the owning chart coordinator so the live tail stays out of replay. */
   isReplayActive?: () => boolean;
   now?: () => number;
@@ -186,6 +189,7 @@ export class OrderbookHeatmapOverlay {
   private readonly invalidate: () => void;
   private readonly now: () => number;
   private readonly getMarket: () => string;
+  private readonly getPanelId?: () => string | undefined;
   private readonly isReplayActive: () => boolean;
   private readonly subscribeLiveTail?: (
     listener: (event?: LiveHeatmapTailEvent) => void,
@@ -210,6 +214,10 @@ export class OrderbookHeatmapOverlay {
   private canonicalProjectionKey = "";
   private chunks = new Map<number, ChunkState>();
   private chunkCoverage = new Map<number, OrderbookHeatmapCoverage>();
+  private lastErrorCode: string | undefined = undefined;
+  private lastErrorMessage: string | undefined = undefined;
+  private lastActiveOnChange = false;
+  private readonly statusListeners = new Set<(status: OrderbookHeatmapRuntimeStatus) => void>();
   private inFlight = new Set<AbortController>();
   private hoverWindows = new Map<string, HoverWindow>();
   private hoverTimer: ReturnType<typeof setTimeout> | null = null;
@@ -241,24 +249,41 @@ export class OrderbookHeatmapOverlay {
     this.fetchHeatmap = options.fetch;
     this.invalidate = options.invalidate;
     this.getMarket = options.getMarket;
+    this.getPanelId = options.getPanelId;
     this.isReplayActive = options.isReplayActive ?? (() => false);
     this.now = options.now ?? Date.now;
     this.subscribeLiveTail = options.subscribeLiveTail;
     this.liveDebounceMs = Math.max(50, options.liveDebounceMs ?? DEFAULT_LIVE_DEBOUNCE_MS);
     this.lastMarket = this.getMarket();
+    this.lastActiveOnChange = this.isCurrentlyActive();
     this.unsubscribe = orderbookHeatmapSettingsSource().onChange(() => {
-      if (this.currentTier) {
-        const nextSettings = this.trySettings();
-        if (nextSettings && nextSettings.mode === "custom" && !this.activeFor(nextSettings)) {
-          if (this.dataKey !== "") this.reset("");
-        } else if (nextSettings && nextSettings.mode !== "off" && this.activeFor(nextSettings)) {
-          const nextKey = this.dataKeyFor(nextSettings, this.currentTier);
-          if (nextKey !== this.dataKey) this.reset(nextKey);
-          this.syncCanonicalTailProjection(nextSettings, this.currentTier);
+      const nextSettings = this.trySettings();
+      const isActive = nextSettings !== null && this.activeFor(nextSettings);
+      const wasActive = this.lastActiveOnChange;
+      this.lastActiveOnChange = isActive;
+
+      if (!isActive) {
+        if (this.dataKey !== "") {
+          this.reset("");
+        } else {
+          this.releaseRasterCache();
         }
+        this.syncLiveTailSubscription();
+        if (wasActive) {
+          this.invalidate();
+          this.emitStatus();
+        }
+        return;
+      }
+
+      if (this.currentTier) {
+        const nextKey = this.dataKeyFor(nextSettings, this.currentTier);
+        if (nextKey !== this.dataKey) this.reset(nextKey);
+        this.syncCanonicalTailProjection(nextSettings, this.currentTier);
       }
       this.syncLiveTailSubscription();
       this.invalidate();
+      this.emitStatus();
     });
 
     this.syncLiveTailSubscription();
@@ -273,17 +298,22 @@ export class OrderbookHeatmapOverlay {
     }, LIVE_TICK_MS);
   }
 
-  /** Shared settings with the mode saved for the chart's current pair. */
+  /** Shared settings with the mode saved for the chart's current pair (and panel, if any). */
   private get settings(): OrderbookHeatmapSettings {
-    return orderbookHeatmapSettingsSource().settingsFor(this.getMarket());
+    return orderbookHeatmapSettingsSource().settingsFor(this.getMarket(), this.getPanelId?.());
   }
 
   private trySettings(): OrderbookHeatmapSettings | null {
     try {
-      return orderbookHeatmapSettingsSource().settingsFor(this.getMarket());
+      return orderbookHeatmapSettingsSource().settingsFor(this.getMarket(), this.getPanelId?.());
     } catch {
       return null;
     }
+  }
+
+  private isCurrentlyActive(): boolean {
+    const settings = this.trySettings();
+    return settings !== null && this.activeFor(settings);
   }
 
   private liveTailKeyFor(market: string, settings: OrderbookHeatmapSettings | null): string {
@@ -301,7 +331,8 @@ export class OrderbookHeatmapOverlay {
       ? normalizeOrderbookHeatmapSources(settings.customSources ?? [])
       : [];
     const customDisabled = settings?.mode === "custom" && customSources.length === 0;
-    if (!settings || settings.mode === "off" || customDisabled || !isOrderbookHeatmapMarket(market)) {
+    const modeDisabled = settings?.mode === "off" || customDisabled;
+    if (!settings || modeDisabled || !isOrderbookHeatmapMarket(market)) {
       this.releaseRasterCache();
     }
     if (settings?.mode !== "custom" || customDisabled) {
@@ -309,7 +340,7 @@ export class OrderbookHeatmapOverlay {
       this.canonicalProjectionKey = "";
     }
     if (!this.subscribeLiveTail) return;
-    if (customDisabled) {
+    if (modeDisabled) {
       this.liveTailGeneration++;
       this.unsubscribeLiveTail?.();
       this.unsubscribeLiveTail = null;
@@ -338,15 +369,18 @@ export class OrderbookHeatmapOverlay {
     this.liveTailRequestKey = key;
 
     const parsed = parseMarket(market);
+    const panelId = this.getPanelId?.();
     const request: LiveHeatmapTailRequest = settings?.mode === "custom"
       ? {
           market,
+          ...(panelId ? { panelId } : {}),
           ...(parsed.base ? { base: parsed.base } : {}),
           source: "canonical",
           bucketStep: 25,
         }
       : {
           market,
+          ...(panelId ? { panelId } : {}),
           ...(parsed.base ? { base: parsed.base } : {}),
         };
     if (settings && settings.mode !== "custom") {
@@ -583,6 +617,7 @@ export class OrderbookHeatmapOverlay {
       this.scratchValues = new Float64Array(1024);
     }
     this.reset("");
+    this.statusListeners.clear();
   }
 
   private activeFor(settings: OrderbookHeatmapSettings): boolean {
@@ -622,6 +657,8 @@ export class OrderbookHeatmapOverlay {
     this.canonicalProjectionKey = "";
     this.chunks = new Map();
     this.chunkCoverage = new Map();
+    this.lastErrorCode = undefined;
+    this.lastErrorMessage = undefined;
     this.hoverWindows = new Map();
     // Dropping the data identity also releases the owned same-frame visible list.
     this.lastCollectedKey = "";
@@ -634,6 +671,7 @@ export class OrderbookHeatmapOverlay {
     this.residentRangeCache = null;
     this.releaseRasterCache();
     this.bumpBarsRevision();
+    this.emitStatus();
   }
 
   private baseRequest(tier: HeatmapTier): Pick<OrderbookHeatmapRequest, "source" | "sources" | "resolution" | "bucketStep"> {
@@ -690,6 +728,66 @@ export class OrderbookHeatmapOverlay {
       observedSources: Array.from(observed).sort(),
       missingSources: Array.from(missing).sort(),
     };
+  }
+
+  /** Returns current loading, error, and source-coverage status for this overlay instance. */
+  getStatus(): OrderbookHeatmapRuntimeStatus {
+    if (!this.isCurrentlyActive()) {
+      return {
+        state: "idle",
+        requestedSources: [],
+        observedSources: [],
+        missingSources: [],
+        hasBars: false,
+      };
+    }
+    let hasLoading = false;
+    let hasReady = false;
+    let hasError = false;
+    for (const chunk of this.chunks.values()) {
+      if (chunk.status === "loading") hasLoading = true;
+      else if (chunk.status === "ready") hasReady = true;
+      else if (chunk.status === "error") hasError = true;
+    }
+    const state: OrderbookHeatmapRuntimeStatus["state"] = hasLoading
+      ? "loading"
+      : hasError && !hasReady
+        ? "error"
+        : hasReady || this.bars.size > 0
+          ? "ready"
+          : hasError
+            ? "error"
+            : "idle";
+    const coverage = this.getCoverage();
+    return {
+      state,
+      ...(hasError && this.lastErrorCode ? { errorCode: this.lastErrorCode } : {}),
+      ...(hasError && this.lastErrorMessage ? { errorMessage: this.lastErrorMessage } : {}),
+      requestedSources: coverage.requestedSources,
+      observedSources: coverage.observedSources,
+      missingSources: coverage.missingSources,
+      hasBars: this.bars.size > 0,
+    };
+  }
+
+  /** Subscribes to status transitions (`loading`, `ready`, `error`, `idle`) and returns an unsubscribe function. */
+  subscribeStatus(listener: (status: OrderbookHeatmapRuntimeStatus) => void): () => void {
+    this.statusListeners.add(listener);
+    return () => {
+      this.statusListeners.delete(listener);
+    };
+  }
+
+  private emitStatus(): void {
+    if (this.statusListeners.size === 0) return;
+    const snapshot = this.getStatus();
+    for (const listener of [...this.statusListeners]) {
+      try {
+        listener(snapshot);
+      } catch {
+        // Listener errors must not disrupt overlay state transitions.
+      }
+    }
   }
 
   private thresholdParams(): Pick<OrderbookHeatmapRequest, "minUsd" | "minBtc"> {
@@ -2153,6 +2251,7 @@ export class OrderbookHeatmapOverlay {
         fullThreshold,
         fullUnit,
       });
+      this.emitStatus();
       const controller = new AbortController();
       this.inFlight.add(controller);
       this.fetchHeatmap({
@@ -2170,6 +2269,8 @@ export class OrderbookHeatmapOverlay {
         } else {
           this.bumpBarsRevision(response.bars, refreshFrom > chunkStart);
         }
+        this.lastErrorCode = undefined;
+        this.lastErrorMessage = undefined;
         this.chunks.set(chunkStart, {
           status: "ready",
           fetchedAt: this.now(),
@@ -2179,9 +2280,20 @@ export class OrderbookHeatmapOverlay {
           fullUnit,
         });
         this.evictStaleChunks(tier);
+        this.emitStatus();
         this.invalidate();
-      }, () => {
+      }, (error: unknown) => {
         if (key !== this.dataKey || controller.signal.aborted) return;
+        const code = error && typeof error === "object" && "code" in error && typeof (error as { code?: unknown }).code === "string"
+          ? (error as { code: string }).code
+          : undefined;
+        const message = error instanceof Error
+          ? error.message
+          : typeof error === "string"
+            ? error
+            : undefined;
+        this.lastErrorCode = code;
+        this.lastErrorMessage = message;
         this.chunks.set(chunkStart, {
           status: state?.status === "ready" ? "ready" : "error",
           fetchedAt: this.now(),
@@ -2190,6 +2302,7 @@ export class OrderbookHeatmapOverlay {
           fullThreshold: state?.fullThreshold ?? fullThreshold,
           fullUnit: state?.fullUnit ?? fullUnit,
         });
+        this.emitStatus();
       }).finally(() => {
         this.inFlight.delete(controller);
       });

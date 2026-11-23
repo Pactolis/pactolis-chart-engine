@@ -75,9 +75,21 @@ export interface LiveHeatmapTailEvent {
 /** Subscription parameters describing which market and server-side tail filter to stream. */
 export interface LiveHeatmapTailRequest {
   market: string;
+  panelId?: string;
   base?: string;
   source?: "single" | "aggregated" | "canonical";
   minQuantityUsd?: number;
   priceStepPct?: number;
   bucketStep?: OrderbookHeatmapBucketStep;
+}
+
+/** Read-only runtime status for one chart panel's orderbook heatmap overlay. */
+export interface OrderbookHeatmapRuntimeStatus {
+  readonly state: "idle" | "loading" | "ready" | "error";
+  readonly errorCode?: string;
+  readonly errorMessage?: string;
+  readonly requestedSources: readonly string[];
+  readonly observedSources: readonly string[];
+  readonly missingSources: readonly string[];
+  readonly hasBars: boolean;
 }
