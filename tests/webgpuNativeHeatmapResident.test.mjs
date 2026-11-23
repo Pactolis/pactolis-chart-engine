@@ -240,8 +240,9 @@ test("WebGpuNativeHeatmapPipeline.renderResidentFrame performs 0 B data upload o
     assert.deepEqual(readCalls, [2]);
     snap = snapshotPerformanceTelemetry();
     assert.equal(snap.counters["gpu.native.heatmap.dataBytes"], 2 * 16);
-    const tailWrite = mock.writtenBuffers[mock.writtenBuffers.length - 1];
-    assert.equal(tailWrite.label, "NativeResidentHeatmapCellStorage");
+    const storageWrites = mock.writtenBuffers.filter((w) => w.label === "NativeResidentHeatmapCellStorage");
+    const tailWrite = storageWrites[storageWrites.length - 1];
+    assert.ok(tailWrite);
     assert.equal(tailWrite.bufferOffset, 3 * 16, "overwrites tail bar starting at bar 2 offset in-place");
 
     // 4. Incremental rollover append (bar 2 closes without liveEligible + bar 3 opens live)
@@ -329,7 +330,7 @@ test("OrderbookHeatmapOverlay.prepareResidentGpuScene applies Auto P96 motion fr
     onChange: () => () => {},
   });
 
-  let nowMs = 10_000;
+  let nowMs = 1_700_000_105_000;
   const intervalMs = 60_000;
   const bar0Time = 1_700_000_040_000;
   const bar1Time = bar0Time + intervalMs;
@@ -346,15 +347,6 @@ test("OrderbookHeatmapOverlay.prepareResidentGpuScene applies Auto P96 motion fr
     now: () => nowMs,
   });
 
-  // Seed bars cleanly via live-tail seam
-  overlay.handleLiveTailEvent({
-    market: "BINANCE_FUTURES:btcusdt",
-    bars: [
-      { t: bar0Time, cells: [[60_000, 10 * 60_000, 0], [60_100, 40 * 60_000, 0]] },
-      { t: bar1Time, cells: [[60_200, 20 * 60_000, 0], [60_300, 120 * 60_000, 0]] },
-    ],
-  });
-
   const view = new View();
   view.area = { left: 0, top: 0, width: 1000, height: 600 };
   view.colWidth = 20;
@@ -363,6 +355,16 @@ test("OrderbookHeatmapOverlay.prepareResidentGpuScene applies Auto P96 motion fr
   view.pricePerPx = 1;
 
   try {
+    // Initialize currentTier = "1m" before live-tail push
+    overlay.prepareResidentGpuScene(view, series, [0, 1]);
+    overlay.handleLiveTailEvent({
+      market: "BINANCE_FUTURES:btcusdt",
+      bars: [
+        { t: bar0Time, cells: [[60_000, 10 * 60_000, 0], [60_100, 40 * 60_000, 0]] },
+        { t: bar1Time, cells: [[60_200, 20 * 60_000, 0], [60_300, 120 * 60_000, 0]] },
+      ],
+    });
+
     const f0 = overlay.prepareResidentGpuScene(view, series, [0, 1]);
     assert.ok(f0);
     const initialCeiling = f0.ceiling;
