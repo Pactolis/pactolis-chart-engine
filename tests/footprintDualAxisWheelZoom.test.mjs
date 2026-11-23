@@ -33,6 +33,7 @@ function makeCanvasHarness(width = 1200, height = 700) {
     },
     removeEventListener: (t, fn) => docListeners.get(t)?.delete(fn),
   };
+  ownerWindow.document = ownerDocument;
   const canvas = {
     style: { cursor: "default" },
     width,

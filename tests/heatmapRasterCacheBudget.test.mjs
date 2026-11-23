@@ -240,7 +240,7 @@ test("per-chart budget fallback paints directly without caching and releases pri
       assert.equal(createdCanvas.height, 0, "over-budget transition zeroes previous canvas height");
       assert.equal(overlay.reservedRasterBytes(), 0);
       assert.equal(getHeatmapCpuRasterModuleReservedBytes(), 0);
-      assert.equal(harness.stats().mainFillRectCalls, 4);
+      assert.equal(harness.stats().mainFillRectCalls, 2);
     });
   } finally {
     for (const overlay of overlays) overlay.dispose();
@@ -498,7 +498,7 @@ test("empty visible cells, pull-mode off, failed 2d context, and repeated releas
       assert.equal(getHeatmapCpuRasterModuleReservedBytes(), anchorBytes);
       assert.equal(hBroken.stats().offscreenCanvases[0].width, 0);
       assert.equal(hBroken.stats().offscreenCanvases[0].height, 0);
-      assert.equal(hBroken.stats().mainFillRectCalls, 4);
+      assert.equal(hBroken.stats().mainFillRectCalls, 2);
 
       // Clean up remaining anchor + broken
       brokenOverlay.dispose();

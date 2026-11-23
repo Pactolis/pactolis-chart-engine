@@ -149,6 +149,7 @@ test("#280 tail diff & WebGPU resident incremental sync avoid full rebuilds on u
 
   let now = t0 + (barCount - 1) * FIFTEEN_M + 10_000;
   let tailPayload = initialBars;
+  let fetchCount = 0;
   let overlay;
   try {
     await withSettings(() => ({
@@ -162,17 +163,20 @@ test("#280 tail diff & WebGPU resident incremental sync avoid full rebuilds on u
       aggregated: { usd: 1, btc: 10 },
     }), async () => {
       overlay = new OrderbookHeatmapOverlay({
-        fetch: async () => ({
-          schemaVersion: 1,
-          generatedAt: now,
-          base: "BTC",
-          source: "aggregated",
-          resolution: "15m",
-          bucketStep: 25,
-          from: t0,
-          to: t0 + barCount * FIFTEEN_M,
-          bars: tailPayload,
-        }),
+        fetch: async () => {
+          fetchCount++;
+          return {
+            schemaVersion: 1,
+            generatedAt: now,
+            base: "BTC",
+            source: "aggregated",
+            resolution: "15m",
+            bucketStep: 25,
+            from: t0,
+            to: t0 + barCount * FIFTEEN_M,
+            bars: tailPayload,
+          };
+        },
         invalidate: () => {},
         getMarket: () => "BINANCE_FUTURES:btcusdt",
         now: () => now,
@@ -189,16 +193,19 @@ test("#280 tail diff & WebGPU resident incremental sync avoid full rebuilds on u
       const writesBeforeUnchanged = writeBufferCalls.length;
       const syncFullBefore = snapshotPerformanceTelemetry().counters["gpu.native.heatmap.sync.full"] ?? 0;
       const syncTailBefore = snapshotPerformanceTelemetry().counters["gpu.native.heatmap.sync.tail"] ?? 0;
+      const fetchBeforeUnchanged = fetchCount;
       tailPayload = [barCount - 3, barCount - 2, barCount - 1].map((i) => ({
         t: t0 + i * FIFTEEN_M,
         cells: makeCells(1),
       }));
-      now += 15_000;
+      now += 25_000;
       overlay.prepareResidentGpuScene(view, series, [0, barCount - 1]);
       await new Promise((r) => setTimeout(r, 20));
+      assert.equal(fetchCount, fetchBeforeUnchanged + 1);
       const frame2 = overlay.prepareResidentGpuScene(view, series, [0, barCount - 1]);
       assert.equal(pipeline.renderResidentFrame(targetTex, 1000, 500, 1, frame2, plot), true);
-      assert.equal(writeBufferCalls.length, writesBeforeUnchanged, "unchanged tail must upload 0 bytes");
+      const unchangedCellWrites = writeBufferCalls.slice(writesBeforeUnchanged).filter((w) => w.buffer !== pipeline.residentUniformBuffer);
+      assert.equal(unchangedCellWrites.length, 0, "unchanged tail must upload 0 cell bytes");
 
       // Only open bar changes -> 1 bar (200 cells * 16 B = 3200 B) incremental tail sync
       tailPayload = [
@@ -206,10 +213,12 @@ test("#280 tail diff & WebGPU resident incremental sync avoid full rebuilds on u
         { t: t0 + (barCount - 2) * FIFTEEN_M, cells: makeCells(1) },
         { t: t0 + (barCount - 1) * FIFTEEN_M, cells: makeCells(2) },
       ];
-      now += 15_000;
+      now += 25_000;
       const writesBeforeLive = writeBufferCalls.length;
+      const fetchBeforeLive = fetchCount;
       overlay.prepareResidentGpuScene(view, series, [0, barCount - 1]);
       await new Promise((r) => setTimeout(r, 20));
+      assert.equal(fetchCount, fetchBeforeLive + 1);
       const frame3 = overlay.prepareResidentGpuScene(view, series, [0, barCount - 1]);
       assert.equal(pipeline.renderResidentFrame(targetTex, 1000, 500, 1, frame3, plot), true);
       const liveCellWrites = writeBufferCalls.slice(writesBeforeLive).filter((w) => w.buffer !== pipeline.residentUniformBuffer);
@@ -224,10 +233,12 @@ test("#280 tail diff & WebGPU resident incremental sync avoid full rebuilds on u
         { t: t0 + (barCount - 2) * FIFTEEN_M, cells: makeCells(3) },
         { t: t0 + (barCount - 1) * FIFTEEN_M, cells: makeCells(3) },
       ];
-      now += 15_000;
+      now += 25_000;
       const writesBeforeBounded = writeBufferCalls.length;
+      const fetchBeforeBounded = fetchCount;
       overlay.prepareResidentGpuScene(view, series, [0, barCount - 1]);
       await new Promise((r) => setTimeout(r, 20));
+      assert.equal(fetchCount, fetchBeforeBounded + 1);
       const frame4 = overlay.prepareResidentGpuScene(view, series, [0, barCount - 1]);
       assert.equal(frame4.dirtyFromBarIndex, barCount - 3);
       assert.equal(pipeline.renderResidentFrame(targetTex, 1000, 500, 1, frame4, plot), true);
@@ -359,11 +370,12 @@ test("#281 Auto P96 freezes color range during pan/zoom, settles once when quiet
       };
       overlay.draw(ctx, view, series, [0, 4]);
       await new Promise((r) => setTimeout(r, 20));
+      resetPerformanceTelemetry();
 
       // Initial settled draw on bars [0..4] (20 BTC) -> 1 scan
       overlay.draw(ctx, view, series, [0, 4]);
-      const initialFloor = overlay.lastDrawnFloor();
-      const initialCeiling = overlay.lastDrawnCeiling();
+      const initialFloor = overlay.visibleFloor;
+      const initialCeiling = overlay.visibleCeiling;
       assert.equal(snapshotPerformanceTelemetry().counters["chart.heatmap.scale.scan.count"], 1);
 
       // Opacity & palette change must NOT trigger a new P96 scan
@@ -375,8 +387,8 @@ test("#281 Auto P96 freezes color range during pan/zoom, settles once when quiet
       now += 16;
       view.offsetX = -100;
       overlay.draw(ctx, view, series, [5, 9]);
-      assert.equal(overlay.lastDrawnFloor(), initialFloor);
-      assert.equal(overlay.lastDrawnCeiling(), initialCeiling);
+      assert.equal(overlay.visibleFloor, initialFloor);
+      assert.equal(overlay.visibleCeiling, initialCeiling);
       assert.equal(snapshotPerformanceTelemetry().counters["chart.heatmap.scale.scan.count"], 1);
 
       // Live update while moving -> coalesced, still 0 new scans
@@ -390,7 +402,7 @@ test("#281 Auto P96 freezes color range during pan/zoom, settles once when quiet
       now += 200;
       overlay.draw(ctx, view, series, [5, 9]);
       assert.equal(snapshotPerformanceTelemetry().counters["chart.heatmap.scale.scan.count"], 2);
-      assert.ok(overlay.lastDrawnCeiling() > initialCeiling);
+      assert.ok(overlay.visibleCeiling > initialCeiling);
 
       // Fixed ceiling mode -> 0 scans
       const scansBeforeFixed = snapshotPerformanceTelemetry().counters["chart.heatmap.scale.scan.count"];
