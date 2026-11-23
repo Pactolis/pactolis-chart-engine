@@ -68,8 +68,6 @@ interface VolumeProfileMeta extends Record<string, unknown> {
   result: OrderFlowProfileResult;
   maxMagnitude: number;
   selectedBars: number;
-  structureRevision: number;
-  developingIndices: Int32Array | null;
 }
 
 type VolumeProfilePreparedData = IndicatorPreparedData<never, VolumeProfileMeta> & { meta: VolumeProfileMeta };
@@ -100,6 +98,10 @@ interface VolumeProfileCache {
   prepared: VolumeProfilePreparedData;
 }
 const volumeProfileCaches = createIndicatorSeriesStateStore<VolumeProfileCache>();
+const developingIndexCache = new WeakMap<
+  VolumeProfileMeta,
+  { structureRevision: number; developingIndices: Int32Array }
+>();
 
 function windowIsAscending(bars: readonly FootprintBar[]): boolean {
   for (let i = 1; i < bars.length; i++) if (bars[i].startTime <= bars[i - 1].startTime) return false;
@@ -131,11 +133,18 @@ function buildVolumeProfilePrepared(
       developingIndices[i] = startIndex + i;
     }
   }
+  const meta: VolumeProfileMeta = { result, maxMagnitude, selectedBars };
+  if (developingIndices !== null) {
+    developingIndexCache.set(meta, {
+      structureRevision: ctx.series.structureRevision,
+      developingIndices,
+    });
+  }
   return {
     status: "ok",
     points: [],
     range: { min: first, max: last + ctx.series.config.priceStep },
-    meta: { result, maxMagnitude, selectedBars, structureRevision: ctx.series.structureRevision, developingIndices },
+    meta,
     message,
   };
 }
@@ -329,19 +338,22 @@ function resolveSharedDevelopingIndices(
   meta: VolumeProfileMeta,
 ): Int32Array {
   const points = meta.result.developing;
+  const cached = developingIndexCache.get(meta);
   if (
-    meta.developingIndices
-    && meta.structureRevision === series.structureRevision
-    && meta.developingIndices.length === points.length
+    cached
+    && cached.structureRevision === series.structureRevision
+    && cached.developingIndices.length === points.length
   ) {
-    return meta.developingIndices;
+    return cached.developingIndices;
   }
   const all = series.listReadonly();
   const indices = new Int32Array(points.length);
   if (points.length === 0 || all.length === 0) {
     indices.fill(-1);
-    meta.developingIndices = indices;
-    meta.structureRevision = series.structureRevision;
+    developingIndexCache.set(meta, {
+      structureRevision: series.structureRevision,
+      developingIndices: indices,
+    });
     return indices;
   }
   let cursor = lowerBoundBarIndex(all, points[0].time);
@@ -361,8 +373,10 @@ function resolveSharedDevelopingIndices(
       cursor = found;
     }
   }
-  meta.developingIndices = indices;
-  meta.structureRevision = series.structureRevision;
+  developingIndexCache.set(meta, {
+    structureRevision: series.structureRevision,
+    developingIndices: indices,
+  });
   return indices;
 }
 
@@ -538,8 +552,6 @@ function emptyPrepared(
       result,
       maxMagnitude: 0,
       selectedBars: 0,
-      structureRevision: -1,
-      developingIndices: null,
     },
     message,
   };

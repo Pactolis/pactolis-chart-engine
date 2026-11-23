@@ -3,6 +3,8 @@ import test from "node:test";
 import { FootprintSeries } from "../dist/core/model/footprint.js";
 import {
   configurePerformanceTelemetry,
+  isPerformanceTelemetryEnabled,
+  resetPerformanceTelemetry,
   snapshotPerformanceTelemetry,
 } from "../dist/core/performanceTelemetry.js";
 import { macdIndicatorDefinition } from "../dist/features/indicators/builtins/macd.js";
@@ -73,7 +75,9 @@ test("#289: panning 20 steps on 20,000 bars performs 0 full-series MACD/ATR reco
   macdIndicatorDefinition.prepareData({ instance: macdInstance, settings: macdInstance.settings, series, range: [19_800, 20_000], view, ctx: {} });
   atrIndicatorDefinition.prepareData({ instance: atrInstance, settings: atrInstance.settings, series, range: [19_800, 20_000], view, ctx: {} });
 
-  configurePerformanceTelemetry({ enabled: true, reset: true });
+  const wasTelemetryEnabled = isPerformanceTelemetryEnabled();
+  configurePerformanceTelemetry({ enabled: true });
+  resetPerformanceTelemetry();
   try {
     let lastMacd = null;
     let lastAtr = null;
@@ -124,6 +128,7 @@ test("#289: panning 20 steps on 20,000 bars performs 0 full-series MACD/ATR reco
     const freshAfterTradeMacd = macdIndicatorDefinition.prepareData({ instance: { ...macdInstance, id: "macd-fresh-2" }, settings: macdInstance.settings, series, range: [19_800, 20_000], view, ctx: {} });
     assert.deepEqual(afterTradeMacd.meta, freshAfterTradeMacd.meta);
   } finally {
-    configurePerformanceTelemetry({ enabled: false, reset: true });
+    resetPerformanceTelemetry();
+    configurePerformanceTelemetry({ enabled: wasTelemetryEnabled });
   }
 });
