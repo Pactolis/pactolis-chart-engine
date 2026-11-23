@@ -348,7 +348,6 @@ export class WebGpuNativeHeatmapPipeline {
   private residentCellBuffer: any = null;
   private residentCellCapacityCells = 0;
   private residentCellReservedBytes = 0;
-  private residentUniformReservedBytes = 0;
   private residentStagingRaw: ArrayBuffer | null = null;
   private residentStagingU32: Uint32Array | null = null;
   private residentStagingF32: Float32Array | null = null;
@@ -748,7 +747,6 @@ export class WebGpuNativeHeatmapPipeline {
 
     if (!this.residentUniformBuffer) {
       this.reserve(RESIDENT_HEATMAP_UNIFORM_BYTES);
-      this.residentUniformReservedBytes = RESIDENT_HEATMAP_UNIFORM_BYTES;
       this.residentUniformBuffer = this.device.createBuffer({
         label: "NativeResidentHeatmapUniform",
         size: RESIDENT_HEATMAP_UNIFORM_BYTES,
@@ -1190,7 +1188,6 @@ export class WebGpuNativeHeatmapPipeline {
     this.residentCellBuffer = null;
     this.residentCellCapacityCells = 0;
     this.residentCellReservedBytes = 0;
-    this.residentUniformReservedBytes = 0;
     this.residentStagingRaw = null;
     this.residentStagingU32 = null;
     this.residentStagingF32 = null;
