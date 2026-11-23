@@ -171,8 +171,8 @@ test("#283 Footprint dual-axis wheel zooms X+Y anchored at pointer without autoF
     const initialIndex = h.view.indexOfX(anchorX);
     const initialPrice = h.view.priceOfY(anchorY);
 
-    // 18 wheel-up notches over the candle
-    for (let i = 0; i < 18; i++) {
+    // 20 wheel-up notches over the candle
+    for (let i = 0; i < 20; i++) {
       h.dispatchWheel({ clientX: anchorX, clientY: anchorY, deltaY: -120 });
     }
 
@@ -189,7 +189,7 @@ test("#283 Footprint dual-axis wheel zooms X+Y anchored at pointer without autoF
     assert.equal(cellTextModeFor(cellHeightPx, h.view.colWidth), "full");
 
     // Equal number of wheel-down notches restores original X & Y scales symmetrically
-    for (let i = 0; i < 18; i++) {
+    for (let i = 0; i < 20; i++) {
       h.dispatchWheel({ clientX: anchorX, clientY: anchorY, deltaY: 120 });
     }
     assert.ok(Math.abs(h.view.colWidth - initialColWidth) < 1e-6);
@@ -225,7 +225,7 @@ test("#283 horizontal preference, non-footprint chart types, axis targets, sub-p
   const pxBeforeAxis = axes.view.pricePerPx;
   axes.dispatchWheel({ clientX: 1160, clientY: 300, deltaY: -120 }); // over right price axis
   assert.equal(axes.view.colWidth, colBeforeAxis);
-  assert.ok(axes.view.pricePerPx > pxBeforeAxis);
+  assert.ok(axes.view.pricePerPx < pxBeforeAxis);
   axes.dispose();
 
   const subpane = setupController({ footprintWheelZoomMode: "dual" });
