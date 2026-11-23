@@ -370,7 +370,7 @@ export class WebGpuSurface implements GpuSurface {
       frame,
       plot,
     );
-    if (!ok) {
+    if (!ok && pipeline.isDisposed()) {
       this.disposeNativeHeatmap();
       this.nativeHeatmapDisabled = true;
     }
@@ -392,7 +392,7 @@ export class WebGpuSurface implements GpuSurface {
       frame,
       plot,
     );
-    if (!ok) {
+    if (!ok && pipeline.isDisposed()) {
       this.disposeNativeHeatmap();
       this.nativeHeatmapDisabled = true;
     }

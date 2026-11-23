@@ -18,7 +18,8 @@
 // throws to the caller, which falls back to the legacy annotation path.
 import { createProgram } from "../../../../core/engine/gl.js";
 import { isPerformanceTelemetryEnabled, recordPerformanceDuration } from "../../../../core/performanceTelemetry.js";
-import { HEATMAP_MIN_CEILING_RATIO } from "../../../orderbook/heatmapModel.js";
+import { HEATMAP_MIN_CEILING_RATIO, heatmapPaletteIndex } from "../../../orderbook/heatmapModel.js";
+import type { OrderbookHeatmapPalette } from "../../../../core/orderbookHeatmap/settings.js";
 import { HEATMAP_GPU_FRAG_SRC, HEATMAP_GPU_VERT_SRC } from "./heatmapGpuShaders.js";
 
 /** One density cell rectangle in CSS pixels with its scalar value. */
@@ -44,6 +45,7 @@ export interface HeatmapGpuCellFrame {
   threshold: number;
   floor?: number;
   opacity?: number;
+  palette?: OrderbookHeatmapPalette;
   dataKey: string;
   /**
    * Production prepare only: lease covering the prepared lists' known
@@ -93,6 +95,7 @@ export class HeatmapGpuRenderer {
   private uFloor: WebGLUniformLocation | null = null;
   private uLogSpan: WebGLUniformLocation | null = null;
   private uOpacity: WebGLUniformLocation | null = null;
+  private uPalette: WebGLUniformLocation | null = null;
   private uDensity: WebGLUniformLocation | null = null;
   private uValidity: WebGLUniformLocation | null = null;
 
@@ -125,6 +128,10 @@ export class HeatmapGpuRenderer {
    */
   private preparedLeaseBytes = 0;
   private disposed = false;
+
+  public isDisposed(): boolean {
+    return this.disposed;
+  }
 
   /**
    * Draw one prepared frame into the current framebuffer, above the already
@@ -178,6 +185,20 @@ export class HeatmapGpuRenderer {
     if (!val(frame.threshold) || !val(frame.ceiling) || !val(floor)) return false;
     if (!Number.isFinite(opacity) || opacity < 0 || opacity > 1) return false;
     if (!(plot.width > 0) || !(plot.height > 0)) return false;
+    const canvas = gl.canvas as HTMLCanvasElement;
+    const ownerWindow = canvas.ownerDocument?.defaultView;
+    const dpr = plot.pixelRatio ?? (ownerWindow?.devicePixelRatio || 1);
+    const bufferWidth = gl.drawingBufferWidth;
+    const bufferHeight = gl.drawingBufferHeight;
+    if (!(bufferWidth > 0) || !(bufferHeight > 0) || !(dpr > 0)) return false;
+    const scissorX = Math.round(plot.left * dpr);
+    const scissorY = bufferHeight - Math.round((plot.top + plot.height) * dpr);
+    const scissorW = Math.round(plot.width * dpr);
+    const scissorH = Math.round(plot.height * dpr);
+    if (!(scissorW > 0) || !(scissorH > 0) || scissorX < 0 || scissorY < 0
+      || scissorX + scissorW > bufferWidth || scissorY + scissorH > bufferHeight) {
+      return false;
+    }
     // The prepared frame lists themselves are a known CPU payload: charge
     // both budgets for the lifetime of the frame (transient, released after
     // the draw) instead of counting only renderer-owned allocations. A
@@ -333,6 +354,7 @@ export class HeatmapGpuRenderer {
       const uFloor = gl.getUniformLocation(program, "u_floor");
       const uLogSpan = gl.getUniformLocation(program, "u_logSpan");
       const uOpacity = gl.getUniformLocation(program, "u_opacity");
+      const uPalette = gl.getUniformLocation(program, "u_palette");
       const uDensity = gl.getUniformLocation(program, "u_density");
       const uValidity = gl.getUniformLocation(program, "u_validity");
       if (!uResolution || !uFloor || !uLogSpan || !uOpacity || !uDensity || !uValidity) {
@@ -406,6 +428,7 @@ export class HeatmapGpuRenderer {
       this.uFloor = uFloor;
       this.uLogSpan = uLogSpan;
       this.uOpacity = uOpacity;
+      this.uPalette = uPalette;
       this.uDensity = uDensity;
       this.uValidity = uValidity;
       this.vao = vao;
@@ -667,6 +690,7 @@ export class HeatmapGpuRenderer {
       gl.uniform1f(this.uFloor, floor);
       gl.uniform1f(this.uLogSpan, logSpan);
       gl.uniform1f(this.uOpacity, opacity);
+      if (this.uPalette !== null) gl.uniform1i(this.uPalette, heatmapPaletteIndex(frame.palette));
       gl.activeTexture(gl.TEXTURE0);
       gl.bindTexture(gl.TEXTURE_2D, this.densityTexture);
       gl.uniform1i(this.uDensity, 0);

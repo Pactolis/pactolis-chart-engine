@@ -9,6 +9,10 @@ import {
   isPerformanceTelemetryEnabled,
   recordPerformanceDuration,
 } from "../../performanceTelemetry.js";
+import {
+  buildHeatmapPaletteWgslBranch,
+  heatmapPaletteIndex,
+} from "../../../features/orderbook/heatmapModel.js";
 
 /** HeatmapCellRecord: 8 x 32-bit floats (32 bytes, 16-byte aligned). */
 export const HEATMAP_CELL_RECORD_WORDS = 8;
@@ -55,7 +59,7 @@ struct HeatmapUniform {
   opacity: f32,
   threshold: f32,
   cellCount: u32,
-  pad0: f32,
+  paletteIndex: u32,
   pad1: vec4<f32>,
 };
 
@@ -118,25 +122,7 @@ fn vs_main(
   var a0: f32;
   var a1: f32;
   var t: f32;
-  if (k <= 0.40) {
-    t = k / 0.40;
-    c0 = vec3<f32>(18.0, 38.0, 84.0);
-    c1 = vec3<f32>(24.0, 112.0, 168.0);
-    a0 = 0.22;
-    a1 = 0.36;
-  } else if (k <= 0.75) {
-    t = (k - 0.40) / 0.35;
-    c0 = vec3<f32>(24.0, 112.0, 168.0);
-    c1 = vec3<f32>(34.0, 211.0, 238.0);
-    a0 = 0.36;
-    a1 = 0.54;
-  } else {
-    t = (k - 0.75) / 0.25;
-    c0 = vec3<f32>(34.0, 211.0, 238.0);
-    c1 = vec3<f32>(254.0, 240.0, 178.0);
-    a0 = 0.54;
-    a1 = 0.68;
-  }
+${buildHeatmapPaletteWgslBranch("u_heatmap.paletteIndex")}
 
   let rgb = floor(c0 + (c1 - c0) * t + 0.5) / 255.0;
   let raw_a = (a0 + (a1 - a0) * t) * cell.alphaScale * clamp(u_heatmap.opacity, 0.0, 1.0);
@@ -174,7 +160,7 @@ struct ResidentHeatmapUniforms {
   priceTopRel: f32,
   pricePerPx: f32,
   bucketStep: f32,
-  baseCellOffset: u32,
+  packedOffsetPalette: u32,
 };
 
 struct ResidentHeatmapCell {
@@ -207,7 +193,9 @@ fn vs_main(
   @builtin(instance_index) instance_idx: u32,
 ) -> VertexOutput {
   var out: VertexOutput;
-  let cellIndex = u_resident.baseCellOffset + instance_idx;
+  let baseCellOffset = u_resident.packedOffsetPalette & 0x00ffffffu;
+  let paletteIndex = (u_resident.packedOffsetPalette >> 24u) & 0xffu;
+  let cellIndex = baseCellOffset + instance_idx;
   if (cellIndex >= arrayLength(&residentCells)) {
     out.position = vec4<f32>(2.0, 2.0, 0.0, 1.0);
     out.color = vec4<f32>(0.0, 0.0, 0.0, 0.0);
@@ -231,24 +219,9 @@ fn vs_main(
   let yTop = plotTop + (u_resident.priceTopRel - (cell.priceBinRel + u_resident.bucketStep)) / u_resident.pricePerPx;
   let height = max(1.0, u_resident.bucketStep / u_resident.pricePerPx);
 
-  var rectX: f32;
-  var rectW: f32;
-  var alphaScale: f32;
-  if (vertex_idx < 6u) {
-    rectX = x;
-    rectW = max(1.0, u_resident.colWidth);
-    alphaScale = 1.0;
-  } else {
-    let extX = x + u_resident.colWidth;
-    if ((cell.flags & 1u) == 0u || extX >= plotRight) {
-      out.position = vec4<f32>(2.0, 2.0, 0.0, 1.0);
-      out.color = vec4<f32>(0.0, 0.0, 0.0, 0.0);
-      return out;
-    }
-    rectX = extX;
-    rectW = plotRight - extX;
-    alphaScale = 0.45;
-  }
+  let rectX = x;
+  let rectW = max(1.0, u_resident.colWidth);
+  let alphaScale = 1.0;
 
   if (rectX + rectW < plotLeft || rectX > plotRight || yTop + height < plotTop || yTop > plotBottom) {
     out.position = vec4<f32>(2.0, 2.0, 0.0, 1.0);
@@ -270,25 +243,7 @@ fn vs_main(
   var a0: f32;
   var a1: f32;
   var t: f32;
-  if (k <= 0.40) {
-    t = k / 0.40;
-    c0 = vec3<f32>(18.0, 38.0, 84.0);
-    c1 = vec3<f32>(24.0, 112.0, 168.0);
-    a0 = 0.22;
-    a1 = 0.36;
-  } else if (k <= 0.75) {
-    t = (k - 0.40) / 0.35;
-    c0 = vec3<f32>(24.0, 112.0, 168.0);
-    c1 = vec3<f32>(34.0, 211.0, 238.0);
-    a0 = 0.36;
-    a1 = 0.54;
-  } else {
-    t = (k - 0.75) / 0.25;
-    c0 = vec3<f32>(34.0, 211.0, 238.0);
-    c1 = vec3<f32>(254.0, 240.0, 178.0);
-    a0 = 0.54;
-    a1 = 0.68;
-  }
+${buildHeatmapPaletteWgslBranch("paletteIndex")}
 
   let rgb = floor(c0 + (c1 - c0) * t + 0.5) / 255.0;
   let raw_a = (a0 + (a1 - a0) * t) * alphaScale * clamp(u_resident.opacity, 0.0, 1.0);
@@ -340,6 +295,10 @@ export class WebGpuNativeHeatmapPipeline {
   private preparedLeaseBytes = 0;
   private readonly maxBufferSize: number;
   private disposed = false;
+
+  public isDisposed(): boolean {
+    return this.disposed;
+  }
 
   private residentRenderPipeline: any = null;
   private residentBindGroupLayout: any = null;
@@ -662,7 +621,7 @@ export class WebGpuNativeHeatmapPipeline {
       this.uniformF32[8] = opacity;
       this.uniformF32[9] = frame.threshold;
       this.uniformU32[10] = cells;
-      this.uniformF32[11] = 0;
+      this.uniformU32[11] = heatmapPaletteIndex(frame.palette) >>> 0;
       this.uniformF32[12] = 0;
       this.uniformF32[13] = 0;
       this.uniformF32[14] = 0;
@@ -984,6 +943,12 @@ export class WebGpuNativeHeatmapPipeline {
 
       if (needsSync) {
         let incrementalDone = false;
+        let syncedBarsCount = 0;
+        const dirtyFrom = frame.dirtyFromBarIndex;
+        const canUseDirtyWindow =
+          dirtyFrom !== undefined
+          && dirtyFrom >= Math.max(0, frame.barCount - 12)
+          && dirtyFrom < frame.barCount;
 
         if (
           sameGeneration
@@ -991,6 +956,7 @@ export class WebGpuNativeHeatmapPipeline {
           && frame.liveBarIndex === this.residentSyncedLiveBarIndex
           && frame.barCount === this.residentSyncedBarCount
           && frame.liveBarIndex === this.residentSyncedBarCount - 1
+          && (dirtyFrom === undefined || dirtyFrom >= frame.liveBarIndex)
         ) {
           const tailOffset = this.residentBarOffsets[frame.liveBarIndex];
           const tailCells = frame.readBarCells(frame.liveBarIndex);
@@ -1000,6 +966,31 @@ export class WebGpuNativeHeatmapPipeline {
             this.residentBarCounts[frame.liveBarIndex] = tailCells.length;
             this.residentTotalCells = tailOffset + tailCells.length;
             this.residentSyncedTailRevision = frame.tailSyncRevision;
+            syncedBarsCount = 1;
+            incrementalDone = true;
+          }
+        } else if (
+          sameGeneration
+          && frame.barCount === this.residentSyncedBarCount
+          && canUseDirtyWindow
+          && this.residentBarOffsets[dirtyFrom!] >= 0
+        ) {
+          const startBar = dirtyFrom!;
+          const startOffset = this.residentBarOffsets[startBar];
+          let sliceCells = 0;
+          for (let b = startBar; b < frame.barCount; b++) {
+            const barCells = frame.readBarCells(b);
+            this.residentBarOffsets[b] = startOffset + sliceCells;
+            this.residentBarCounts[b] = barCells.length;
+            this.packResidentCellsIntoStaging(sliceCells, b, frame.priceOrigin, barCells);
+            sliceCells += barCells.length;
+          }
+          if (startOffset + sliceCells <= this.residentCellCapacityCells) {
+            this.uploadResidentDataSlice(startOffset, sliceCells);
+            this.residentTotalCells = startOffset + sliceCells;
+            this.residentSyncedLiveBarIndex = frame.liveBarIndex;
+            this.residentSyncedTailRevision = frame.tailSyncRevision;
+            syncedBarsCount = frame.barCount - startBar;
             incrementalDone = true;
           }
         } else if (
@@ -1010,11 +1001,12 @@ export class WebGpuNativeHeatmapPipeline {
           && frame.barCount >= frame.liveBarIndex + 1
         ) {
           const prevLive = this.residentSyncedLiveBarIndex;
-          const prevOffset = this.residentBarOffsets[prevLive];
+          const startBar = canUseDirtyWindow && dirtyFrom! < prevLive ? dirtyFrom! : prevLive;
+          const prevOffset = this.residentBarOffsets[startBar];
           if (prevOffset >= 0) {
             let sliceCells = 0;
-            this.ensureResidentBarMetadata(frame.barCount, prevLive);
-            for (let b = prevLive; b < frame.barCount; b++) {
+            this.ensureResidentBarMetadata(frame.barCount, startBar);
+            for (let b = startBar; b < frame.barCount; b++) {
               const barCells = frame.readBarCells(b);
               this.residentBarOffsets[b] = prevOffset + sliceCells;
               this.residentBarCounts[b] = barCells.length;
@@ -1027,12 +1019,16 @@ export class WebGpuNativeHeatmapPipeline {
               this.residentSyncedLiveBarIndex = frame.liveBarIndex;
               this.residentSyncedBarCount = frame.barCount;
               this.residentSyncedTailRevision = frame.tailSyncRevision;
+              syncedBarsCount = frame.barCount - startBar;
               incrementalDone = true;
             }
           }
         }
 
-        if (!incrementalDone) {
+        if (incrementalDone) {
+          incrementPerformanceCounter("gpu.native.heatmap.sync.tail");
+          incrementPerformanceCounter("gpu.native.heatmap.sync.bars", syncedBarsCount);
+        } else {
           this.ensureResidentBarMetadata(frame.barCount, 0);
           let totalCells = 0;
           for (let b = 0; b < frame.barCount; b++) {
@@ -1050,6 +1046,8 @@ export class WebGpuNativeHeatmapPipeline {
           this.residentSyncedTailRevision = frame.tailSyncRevision;
           this.residentSyncedLiveBarIndex = frame.liveBarIndex;
           this.residentSyncedBarCount = frame.barCount;
+          incrementPerformanceCounter("gpu.native.heatmap.sync.full");
+          incrementPerformanceCounter("gpu.native.heatmap.sync.bars", frame.barCount);
         }
       }
 
@@ -1067,6 +1065,7 @@ export class WebGpuNativeHeatmapPipeline {
         : this.residentBarOffsets[visEndBar + 1];
       const visibleCellCount = Math.max(0, endCell - visibleCellOffset);
       if (visibleCellCount === 0) return true;
+      if (visibleCellOffset > 0x00ffffff) return false;
 
       this.residentUniformF32[0] = bitmapWidth / effectiveDpr;
       this.residentUniformF32[1] = bitmapHeight / effectiveDpr;
@@ -1083,7 +1082,7 @@ export class WebGpuNativeHeatmapPipeline {
       this.residentUniformF32[12] = frame.view.priceTop - frame.priceOrigin;
       this.residentUniformF32[13] = frame.view.pricePerPx;
       this.residentUniformF32[14] = frame.bucketStep;
-      this.residentUniformU32[15] = visibleCellOffset >>> 0;
+      this.residentUniformU32[15] = ((heatmapPaletteIndex(frame.palette) & 0xff) << 24) | (visibleCellOffset & 0x00ffffff);
 
       let needsUniformUpload = !this.hasUploadedResidentUniform;
       if (!needsUniformUpload) {
@@ -1118,7 +1117,7 @@ export class WebGpuNativeHeatmapPipeline {
       passEncoder.setScissorRect?.(scissorX, scissorY, scissorW, scissorH);
       passEncoder.setPipeline(this.residentRenderPipeline);
       passEncoder.setBindGroup(0, this.residentBindGroup);
-      passEncoder.draw(12, visibleCellCount, 0, 0);
+      passEncoder.draw(6, visibleCellCount, 0, 0);
       passEncoder.end();
       this.device.queue.submit([commandEncoder.finish()]);
       return true;

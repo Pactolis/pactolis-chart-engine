@@ -6,11 +6,25 @@ export type OrderbookHeatmapUnit = "usd" | "btc";
 export type OrderbookHeatmapStep = 25 | 50 | 100 | 250;
 export type OrderbookHeatmapScaleMode = "auto" | "fixed";
 export type OrderbookHeatmapContrast = "low" | "medium" | "high";
+export type OrderbookHeatmapPalette = "pactolis" | "viridis" | "cividis" | "inferno";
 
 export const ORDERBOOK_HEATMAP_STEPS: readonly OrderbookHeatmapStep[] = [25, 50, 100, 250];
+export const ORDERBOOK_HEATMAP_PALETTES: readonly OrderbookHeatmapPalette[] = [
+  "pactolis",
+  "viridis",
+  "cividis",
+  "inferno",
+];
 export const DEFAULT_HEATMAP_OPACITY = 0.85;
 export const DEFAULT_HEATMAP_SCALE_MODE: OrderbookHeatmapScaleMode = "auto";
 export const DEFAULT_HEATMAP_CONTRAST: OrderbookHeatmapContrast = "medium";
+export const DEFAULT_HEATMAP_PALETTE: OrderbookHeatmapPalette = "pactolis";
+
+export function resolveOrderbookHeatmapPalette(palette: unknown): OrderbookHeatmapPalette {
+  return palette === "viridis" || palette === "cividis" || palette === "inferno"
+    ? palette
+    : DEFAULT_HEATMAP_PALETTE;
+}
 
 export interface OrderbookHeatmapThresholds {
   /** Minimum bid+ask per bucket in USD. */
@@ -31,6 +45,7 @@ export interface OrderbookHeatmapSettings {
   scaleMode?: OrderbookHeatmapScaleMode;
   fixedCeiling?: OrderbookHeatmapThresholds;
   contrast?: OrderbookHeatmapContrast;
+  palette?: OrderbookHeatmapPalette;
 }
 
 /** Normalizes source identifiers: trim, lowercase, deduplicate, and sort lexicographically. */
@@ -62,6 +77,7 @@ export const DEFAULT_ORDERBOOK_HEATMAP_SETTINGS: OrderbookHeatmapSettings = {
   scaleMode: DEFAULT_HEATMAP_SCALE_MODE,
   fixedCeiling: { usd: 100_000_000, btc: 1_200 },
   contrast: DEFAULT_HEATMAP_CONTRAST,
+  palette: DEFAULT_HEATMAP_PALETTE,
 };
 
 /** The active mode's threshold in the selected unit. */

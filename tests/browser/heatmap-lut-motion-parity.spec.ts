@@ -229,21 +229,15 @@ test("LUT 0.65/0.85 pixel parity, motion reuse + post-settle zoom parity, live-t
         return Math.abs(r.view.priceOfY(py) - closePrice) >= 3 * bucketStep
           && c.x >= r.view.area.left + 8 && c.x + c.width <= r.view.area.left + r.view.area.width - 8;
       });
-      const extSafe = gpuFrame.extension.filter((c) => {
-        const py = c.yTop + c.height * 0.5;
-        return Math.abs(r.view.priceOfY(py) - closePrice) >= 3 * bucketStep;
-      });
       const normalCell = mainSafe[Math.floor(mainSafe.length / 2)];
-      const liveCell = extSafe[Math.floor(extSafe.length / 2)];
       const normalDiff = maxDiff(
         sampleCell(normalCell),
         expectedStraightRgba(normalCell.value, gpuFrame.floor, gpuFrame.ceiling, 1, opacity),
       );
-      const liveDiff = maxDiff(
-        sampleCell(liveCell),
-        expectedStraightRgba(liveCell.value, gpuFrame.floor, gpuFrame.ceiling, 0.45, opacity),
-      );
-      parityChecks.push({ opacity, normalDiff, liveDiff });
+      const emptyRightX = Math.min(annotation.width - 2, Math.floor((r.view.xOfIndex(barsCount - 1) + r.view.colWidth + 16) * dpr));
+      const emptyRightY = Math.min(annotation.height - 1, Math.max(0, Math.floor((normalCell.yTop + normalCell.height * 0.5) * dpr)));
+      const emptyRightAlpha = ctx2d.getImageData(emptyRightX, emptyRightY, 1, 1).data[3];
+      parityChecks.push({ opacity, normalDiff, liveDiff: gpuFrame.extension.length === 0 ? emptyRightAlpha : 255 });
     }
 
     // 2. Motion reuse during pan & zoom (1-canvas budget), plus post-settle zoom pixel parity vs cache-disabled direct draw

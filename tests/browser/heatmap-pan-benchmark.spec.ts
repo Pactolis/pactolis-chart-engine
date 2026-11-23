@@ -439,7 +439,7 @@ test("#260/#256 BTC Single / $25 / 10 BTC / Auto P96 preset benchmark, motion re
         const annotation = roots[0].querySelector<HTMLCanvasElement>('canvas[data-chart-surface="annotation"]');
         const ctx2d = annotation?.getContext("2d");
         const gpuFrame = r.orderbookHeatmap.prepareGpuCells(r.view, r.pipeline.series, [0, cfg.barsCount - 1]);
-        if (annotation && ctx2d && gpuFrame && gpuFrame.main.length > 0 && gpuFrame.extension.length > 0) {
+        if (annotation && ctx2d && gpuFrame && gpuFrame.main.length > 0) {
           const dpr = window.devicePixelRatio || 1;
           const area = r.view.area;
           const lastClose = cfg.basePrice + Math.floor(cfg.levelsPerBar / 2) * cfg.bucketStep + 50;
@@ -460,12 +460,7 @@ test("#260/#256 BTC Single / $25 / 10 BTC / Auto P96 preset benchmark, motion re
           };
           const safeMain = (gpuFrame.main as Array<{ x: number; yTop: number; width: number; height: number; value: number }>)
             .filter(isSafeCell);
-          const safeExt = (gpuFrame.extension as Array<{ x: number; yTop: number; width: number; height: number; value: number }>)
-            .filter(isSafeCell);
           const normalCell = safeMain[Math.floor(safeMain.length / 2)] ?? gpuFrame.main[Math.floor(gpuFrame.main.length / 2)] as {
-            x: number; yTop: number; width: number; height: number; value: number;
-          };
-          const liveCell = safeExt[Math.floor(safeExt.length / 2)] ?? gpuFrame.extension[Math.floor(gpuFrame.extension.length / 2)] as {
             x: number; yTop: number; width: number; height: number; value: number;
           };
           const samplePixel = (cell: { x: number; yTop: number; width: number; height: number }) => {
@@ -488,21 +483,21 @@ test("#260/#256 BTC Single / $25 / 10 BTC / Auto P96 preset benchmark, motion re
           };
           const actualNormal = samplePixel(normalCell);
           const expectedNormal = expectedStraightRgba(normalCell.value, 1);
-          const actualLive = samplePixel(liveCell);
-          const expectedLive = expectedStraightRgba(liveCell.value, 0.45);
+          const emptyRightX = Math.min(annotation.width - 2, Math.floor((r.view.xOfIndex(cfg.barsCount - 1) + r.view.colWidth + 16) * dpr));
+          const emptyRightY = Math.min(annotation.height - 1, Math.max(0, Math.floor((normalCell.yTop + normalCell.height * 0.5) * dpr)));
+          const emptyRightAlpha = ctx2d.getImageData(emptyRightX, emptyRightY, 1, 1).data[3];
           const maxDiff = (a: number[], b: number[]) => Math.max(...a.map((v, idx) => Math.abs(v - b[idx])));
           const normalDeltaMax = maxDiff(actualNormal, expectedNormal);
-          const liveExtDeltaMax = maxDiff(actualLive, expectedLive);
           colorParity.push({
             opacity: cond.opacity,
             actualNormal,
             expectedNormal,
             normalDeltaMax,
             normalMatch: normalDeltaMax <= 3,
-            actualLive,
-            expectedLive,
-            liveExtDeltaMax,
-            liveExtMatch: liveExtDeltaMax <= 3,
+            actualLive: [0, 0, 0, emptyRightAlpha],
+            expectedLive: [0, 0, 0, 0],
+            liveExtDeltaMax: gpuFrame.extension.length === 0 ? emptyRightAlpha : 255,
+            liveExtMatch: gpuFrame.extension.length === 0 && emptyRightAlpha === 0,
           });
         }
       }

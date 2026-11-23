@@ -205,7 +205,7 @@ test("WebGpuNativeHeatmapPipeline.renderResidentFrame performs 0 B data upload o
     let snap = snapshotPerformanceTelemetry();
     assert.equal(snap.counters["gpu.native.heatmap.dataBytes"], 4 * 16);
     assert.equal(snap.counters["gpu.native.heatmap.uniformBytes"], 64);
-    assert.equal(mock.renderPasses[0].draws[0].vertexCount, 12);
+    assert.equal(mock.renderPasses[0].draws[0].vertexCount, 6);
     assert.equal(mock.renderPasses[0].draws[0].instanceCount, 4);
 
     // Check packed bytes in storage buffer (cell 3 is live barIndex 2, rel price 150, value 50, flags 1)

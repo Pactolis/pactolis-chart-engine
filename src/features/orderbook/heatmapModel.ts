@@ -1,8 +1,12 @@
 // Pure helpers for the chart's orderbook heatmap: tier choice, chunking, bar
 // lookup, unit conversion, color range, luminance palette, and WS tail projection. No I/O, no DOM.
 import {
+  DEFAULT_HEATMAP_PALETTE,
+  ORDERBOOK_HEATMAP_PALETTES,
   normalizeOrderbookHeatmapSources,
+  resolveOrderbookHeatmapPalette,
   type OrderbookHeatmapContrast,
+  type OrderbookHeatmapPalette,
   type OrderbookHeatmapScaleMode,
 } from "../../core/orderbookHeatmap/settings.js";
 import type {
@@ -338,7 +342,7 @@ export function heatmapIntensity(value: number, floor: number, ceiling = floor >
   return Math.min(1, Math.max(0, Math.log10(1 + value) / 8));
 }
 
-interface HeatmapColorStop {
+export interface HeatmapColorStop {
   readonly k: number;
   readonly r: number;
   readonly g: number;
@@ -346,13 +350,43 @@ interface HeatmapColorStop {
   readonly a: number;
 }
 
-/** Dark-theme luminance ramp: faint deep navy -> cobalt -> vivid turquoise -> warm pale yellow/off-white. */
-const HEATMAP_PALETTE_STOPS: readonly HeatmapColorStop[] = [
-  { k: 0.0, r: 18, g: 38, b: 84, a: 0.22 },
-  { k: 0.4, r: 24, g: 112, b: 168, a: 0.36 },
-  { k: 0.75, r: 34, g: 211, b: 238, a: 0.54 },
-  { k: 1.0, r: 254, g: 240, b: 178, a: 0.68 },
-];
+/** Single-source palette stop definitions shared by CPU Canvas2D, WebGL2 GLSL, and WebGPU WGSL. */
+export const HEATMAP_PALETTE_STOPS_BY_ID: Record<OrderbookHeatmapPalette, readonly HeatmapColorStop[]> = {
+  // Dark-theme luminance ramp: faint deep navy -> cobalt -> vivid turquoise -> warm pale yellow/off-white.
+  pactolis: [
+    { k: 0.0, r: 18, g: 38, b: 84, a: 0.22 },
+    { k: 0.4, r: 24, g: 112, b: 168, a: 0.36 },
+    { k: 0.75, r: 34, g: 211, b: 238, a: 0.54 },
+    { k: 1.0, r: 254, g: 240, b: 178, a: 0.68 },
+  ],
+  viridis: [
+    { k: 0.0, r: 72, g: 33, b: 115, a: 0.24 },
+    { k: 0.25, r: 56, g: 88, b: 140, a: 0.34 },
+    { k: 0.5, r: 33, g: 145, b: 140, a: 0.45 },
+    { k: 0.75, r: 94, g: 201, b: 98, a: 0.57 },
+    { k: 1.0, r: 253, g: 231, b: 37, a: 0.68 },
+  ],
+  cividis: [
+    { k: 0.0, r: 0, g: 46, b: 111, a: 0.24 },
+    { k: 0.25, r: 65, g: 77, b: 107, a: 0.34 },
+    { k: 0.5, r: 124, g: 123, b: 120, a: 0.45 },
+    { k: 0.75, r: 188, g: 175, b: 111, a: 0.57 },
+    { k: 1.0, r: 253, g: 234, b: 69, a: 0.68 },
+  ],
+  inferno: [
+    { k: 0.0, r: 40, g: 11, b: 83, a: 0.24 },
+    { k: 0.25, r: 120, g: 28, b: 109, a: 0.34 },
+    { k: 0.5, r: 207, g: 68, b: 70, a: 0.46 },
+    { k: 0.75, r: 251, g: 155, b: 6, a: 0.58 },
+    { k: 1.0, r: 252, g: 255, b: 164, a: 0.68 },
+  ],
+};
+
+export function heatmapPaletteIndex(palette: OrderbookHeatmapPalette | undefined): number {
+  const resolved = resolveOrderbookHeatmapPalette(palette);
+  const idx = ORDERBOOK_HEATMAP_PALETTES.indexOf(resolved);
+  return idx >= 0 ? idx : 0;
+}
 
 export interface HeatmapRgba {
   r: number;
@@ -361,18 +395,24 @@ export interface HeatmapRgba {
   a: number;
 }
 
-/** Computes exact RGBA channels and quantized alpha matching `HEATMAP_GPU_FRAG_SRC`. */
-export function heatmapCellRgba(intensity: number, alphaScale = 1, opacity = 1): HeatmapRgba {
+/** Computes exact RGBA channels and quantized alpha matching `HEATMAP_GPU_FRAG_SRC` and WGSL. */
+export function heatmapCellRgba(
+  intensity: number,
+  alphaScale = 1,
+  opacity = 1,
+  palette: OrderbookHeatmapPalette = DEFAULT_HEATMAP_PALETTE,
+): HeatmapRgba {
   const k = Math.min(1, Math.max(0, Number.isFinite(intensity) ? intensity : 0));
   const clampedOpacity = Math.min(1, Math.max(0, Number.isFinite(opacity) ? opacity : 1));
-  let s0 = HEATMAP_PALETTE_STOPS[0];
-  let s1 = HEATMAP_PALETTE_STOPS[1];
-  if (k > 0.75) {
-    s0 = HEATMAP_PALETTE_STOPS[2];
-    s1 = HEATMAP_PALETTE_STOPS[3];
-  } else if (k > 0.4) {
-    s0 = HEATMAP_PALETTE_STOPS[1];
-    s1 = HEATMAP_PALETTE_STOPS[2];
+  const stops = HEATMAP_PALETTE_STOPS_BY_ID[resolveOrderbookHeatmapPalette(palette)];
+  let s0 = stops[0];
+  let s1 = stops[1];
+  for (let i = 1; i < stops.length; i++) {
+    if (k <= stops[i].k || i === stops.length - 1) {
+      s0 = stops[i - 1];
+      s1 = stops[i];
+      break;
+    }
   }
   const t = (k - s0.k) / (s1.k - s0.k);
   const r = Math.floor(s0.r + (s1.r - s0.r) * t + 0.5);
@@ -381,6 +421,72 @@ export function heatmapCellRgba(intensity: number, alphaScale = 1, opacity = 1):
   const rawAlpha = (s0.a + (s1.a - s0.a) * t) * alphaScale * clampedOpacity;
   const a = Math.floor(Math.min(1, Math.max(0, rawAlpha)) * 1000 + 0.5) / 1000;
   return { r, g, b, a };
+}
+
+function formatShaderFloat(v: number): string {
+  return Number.isInteger(v) ? `${v}.0` : `${v}`;
+}
+
+function buildPaletteStopBranch(
+  stops: readonly HeatmapColorStop[],
+  vec3Ctor: "vec3" | "vec3<f32>",
+  indent: string,
+): string {
+  const lines: string[] = [];
+  for (let i = 1; i < stops.length; i++) {
+    const s0 = stops[i - 1];
+    const s1 = stops[i];
+    const span = formatShaderFloat(Number((s1.k - s0.k).toFixed(6)));
+    const head = i === 1
+      ? `${indent}if (k <= ${formatShaderFloat(s1.k)}) {`
+      : i === stops.length - 1
+        ? `${indent}} else {`
+        : `${indent}} else if (k <= ${formatShaderFloat(s1.k)}) {`;
+    lines.push(head);
+    lines.push(`${indent}  t = (k - ${formatShaderFloat(s0.k)}) / ${span};`);
+    lines.push(`${indent}  c0 = ${vec3Ctor}(${formatShaderFloat(s0.r)}, ${formatShaderFloat(s0.g)}, ${formatShaderFloat(s0.b)});`);
+    lines.push(`${indent}  c1 = ${vec3Ctor}(${formatShaderFloat(s1.r)}, ${formatShaderFloat(s1.g)}, ${formatShaderFloat(s1.b)});`);
+    lines.push(`${indent}  a0 = ${formatShaderFloat(s0.a)};`);
+    lines.push(`${indent}  a1 = ${formatShaderFloat(s1.a)};`);
+  }
+  lines.push(`${indent}}`);
+  return lines.join("\n");
+}
+
+/** Generates deterministic GLSL palette stop selection from `HEATMAP_PALETTE_STOPS_BY_ID`. */
+export function buildHeatmapPaletteGlslBranch(): string {
+  const blocks: string[] = [];
+  for (let p = 0; p < ORDERBOOK_HEATMAP_PALETTES.length; p++) {
+    const id = ORDERBOOK_HEATMAP_PALETTES[p];
+    const stops = HEATMAP_PALETTE_STOPS_BY_ID[id];
+    const header = p === 0
+      ? `  if (u_palette == 0) {`
+      : p === ORDERBOOK_HEATMAP_PALETTES.length - 1
+        ? `  } else {`
+        : `  } else if (u_palette == ${p}) {`;
+    blocks.push(header);
+    blocks.push(buildPaletteStopBranch(stops, "vec3", "    "));
+  }
+  blocks.push("  }");
+  return blocks.join("\n");
+}
+
+/** Generates deterministic WGSL palette stop selection from `HEATMAP_PALETTE_STOPS_BY_ID`. */
+export function buildHeatmapPaletteWgslBranch(paletteExpr: string): string {
+  const blocks: string[] = [];
+  for (let p = 0; p < ORDERBOOK_HEATMAP_PALETTES.length; p++) {
+    const id = ORDERBOOK_HEATMAP_PALETTES[p];
+    const stops = HEATMAP_PALETTE_STOPS_BY_ID[id];
+    const header = p === 0
+      ? `  if (${paletteExpr} == 0u) {`
+      : p === ORDERBOOK_HEATMAP_PALETTES.length - 1
+        ? `  } else {`
+        : `  } else if (${paletteExpr} == ${p}u) {`;
+    blocks.push(header);
+    blocks.push(buildPaletteStopBranch(stops, "vec3<f32>", "    "));
+  }
+  blocks.push("  }");
+  return blocks.join("\n");
 }
 
 function formatHeatmapRgba(rgba: HeatmapRgba): string {
@@ -400,26 +506,33 @@ const HEATMAP_COLOR_LUT_DEFAULT_LIVE: readonly string[] = Array.from({ length: 1
   formatHeatmapRgba(heatmapCellRgba(q / 1000, 0.45, 0.85)),
 );
 
-const HEATMAP_COLOR_LUT_CACHE_MAX_ENTRIES = 16;
+const HEATMAP_COLOR_LUT_CACHE_MAX_ENTRIES = 32;
 const heatmapColorLutCache = new Map<string, readonly string[]>();
 
 /**
- * Returns a 1001-entry RGBA string lookup table for `(alphaScale, opacity)`.
- * `1.0` and `0.85` at `alphaScale` `1` / `0.45` stay pre-warmed; all other
- * `(alphaScale, clampedOpacity)` pairs share a bounded 16-entry FIFO cache.
+ * Returns a 1001-entry RGBA string lookup table for `(alphaScale, opacity, palette)`.
+ * Default `pactolis` `1.0` and `0.85` at `alphaScale` `1` / `0.45` stay pre-warmed;
+ * all other combinations share a bounded 32-entry FIFO cache.
  */
-export function getHeatmapColorLut(alphaScale = 1, opacity = 1): readonly string[] {
+export function getHeatmapColorLut(
+  alphaScale = 1,
+  opacity = 1,
+  palette: OrderbookHeatmapPalette = DEFAULT_HEATMAP_PALETTE,
+): readonly string[] {
   const safeAlphaScale = Number.isFinite(alphaScale) ? (alphaScale <= 0 ? 0 : alphaScale) : 1;
   const rawClampedOpacity = Math.min(1, Math.max(0, Number.isFinite(opacity) ? opacity : 1));
   const clampedOpacity = rawClampedOpacity === 0 ? 0 : rawClampedOpacity;
-  if (clampedOpacity === 1) {
-    if (safeAlphaScale === 1) return HEATMAP_COLOR_LUT_FULL;
-    if (safeAlphaScale === 0.45) return HEATMAP_COLOR_LUT_LIVE;
-  } else if (clampedOpacity === 0.85) {
-    if (safeAlphaScale === 1) return HEATMAP_COLOR_LUT_DEFAULT_FULL;
-    if (safeAlphaScale === 0.45) return HEATMAP_COLOR_LUT_DEFAULT_LIVE;
+  const resolvedPalette = resolveOrderbookHeatmapPalette(palette);
+  if (resolvedPalette === "pactolis") {
+    if (clampedOpacity === 1) {
+      if (safeAlphaScale === 1) return HEATMAP_COLOR_LUT_FULL;
+      if (safeAlphaScale === 0.45) return HEATMAP_COLOR_LUT_LIVE;
+    } else if (clampedOpacity === 0.85) {
+      if (safeAlphaScale === 1) return HEATMAP_COLOR_LUT_DEFAULT_FULL;
+      if (safeAlphaScale === 0.45) return HEATMAP_COLOR_LUT_DEFAULT_LIVE;
+    }
   }
-  const key = `${safeAlphaScale}|${clampedOpacity}`;
+  const key = `${resolvedPalette}|${safeAlphaScale}|${clampedOpacity}`;
   const cached = heatmapColorLutCache.get(key);
   if (cached) return cached;
   if (heatmapColorLutCache.size >= HEATMAP_COLOR_LUT_CACHE_MAX_ENTRIES) {
@@ -427,17 +540,22 @@ export function getHeatmapColorLut(alphaScale = 1, opacity = 1): readonly string
     if (oldestKey !== undefined) heatmapColorLutCache.delete(oldestKey);
   }
   const lut: readonly string[] = Array.from({ length: 1001 }, (_, q) =>
-    formatHeatmapRgba(heatmapCellRgba(q / 1000, safeAlphaScale, clampedOpacity)),
+    formatHeatmapRgba(heatmapCellRgba(q / 1000, safeAlphaScale, clampedOpacity, resolvedPalette)),
   );
   heatmapColorLutCache.set(key, lut);
   return lut;
 }
 
-/** Fill color for a cell of the given intensity; `alphaScale` fades it (the live bar's extension) and `opacity` applies user opacity. */
-export function heatmapCellColor(intensity: number, alphaScale = 1, opacity = 1): string {
+/** Fill color for a cell of the given intensity; `alphaScale` fades it and `opacity` applies user opacity. */
+export function heatmapCellColor(
+  intensity: number,
+  alphaScale = 1,
+  opacity = 1,
+  palette: OrderbookHeatmapPalette = DEFAULT_HEATMAP_PALETTE,
+): string {
   const k = Math.min(1, Math.max(0, Number.isFinite(intensity) ? intensity : 0));
   const q = Math.round(k * 1000);
-  return getHeatmapColorLut(alphaScale, opacity)[q];
+  return getHeatmapColorLut(alphaScale, opacity, palette)[q];
 }
 
 export function formatHeatmapValue(value: number, unit: "usd" | "btc"): string {
@@ -455,6 +573,35 @@ export function formatHeatmapValue(value: number, unit: "usd" | "btc"): string {
 /** Merges a response's bars into the cache; a later copy of a bar replaces the earlier one. */
 export function mergeHeatmapBars(target: Map<number, OrderbookHeatmapBar>, bars: readonly OrderbookHeatmapBar[]): void {
   for (const bar of bars) target.set(bar.t, bar);
+}
+
+/** Returns true when two bars have identical bucket prices and bid/ask amounts. */
+export function heatmapBarCellsEqual(a: OrderbookHeatmapBar | undefined, b: OrderbookHeatmapBar): boolean {
+  if (!a) return false;
+  if (a === b) return true;
+  if (a.cells.length !== b.cells.length) return false;
+  for (let i = 0; i < a.cells.length; i++) {
+    const ca = a.cells[i];
+    const cb = b.cells[i];
+    if (ca[0] !== cb[0] || ca[1] !== cb[1] || ca[2] !== cb[2]) return false;
+  }
+  return true;
+}
+
+/** Merges bars into `target` and returns only the bars that were newly added or changed. */
+export function mergeHeatmapBarsWithDiff(
+  target: Map<number, OrderbookHeatmapBar>,
+  bars: readonly OrderbookHeatmapBar[],
+): OrderbookHeatmapBar[] {
+  const changed: OrderbookHeatmapBar[] = [];
+  for (const bar of bars) {
+    const existing = target.get(bar.t);
+    if (!heatmapBarCellsEqual(existing, bar)) {
+      target.set(bar.t, bar);
+      changed.push(bar);
+    }
+  }
+  return changed;
 }
 
 export interface ProjectCanonicalHeatmapTailOptions {

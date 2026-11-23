@@ -1,6 +1,7 @@
 import type { RGBA } from "../engine/gl.js";
 import type { ChartArea } from "../engine/view.js";
 import type { FootprintSeries } from "../model/footprint.js";
+import type { OrderbookHeatmapPalette } from "../orderbookHeatmap/settings.js";
 
 export type { RGBA };
 
@@ -61,6 +62,7 @@ export interface GpuNativeHeatmapFrame {
   readonly threshold: number;
   readonly floor?: number;
   readonly opacity?: number;
+  readonly palette?: OrderbookHeatmapPalette;
   readonly dataKey: string;
   readonly preparedLease?: { release(): void };
 }
@@ -122,6 +124,8 @@ export interface GpuNativeHeatmapResidentFrame {
   readonly ceiling: number;
   readonly threshold: number;
   readonly opacity: number;
+  readonly palette?: OrderbookHeatmapPalette;
+  readonly dirtyFromBarIndex?: number;
   readonly visibleRange: readonly [number, number];
   readBarCells(barIndex: number): readonly GpuNativeHeatmapResidentCell[];
 }
