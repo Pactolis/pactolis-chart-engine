@@ -4,6 +4,8 @@ export const WEBGL2_HEATMAP_STORAGE_WORKLOADS = Object.freeze(["static", "fixed-
 export const WEBGL2_HEATMAP_STORAGE_DECISION_RULE = Object.freeze({
   name: "webgl2-resident-heatmap-storage-research",
   speedupThreshold: 1.10,
+  minAbsSavingMs: 1.0,
+  maxRegressionRatio: 0.90,
   requireFewerResizeAllocs: true,
   requireZeroGlErrors: true,
   requireHardwareRenderer: true,
@@ -76,9 +78,19 @@ export function evaluateWebGl2StorageDecision({ hardwareValid = false, rows = []
     };
   }
 
+  if (rows.some((r) => (r.glError ?? 0) !== 0)) {
+    return {
+      decision: "RECOMMEND_NOT_PLANNED",
+      reason: "WebGL2 benchmark çalıştırması sırasında sıfırdan farklı GL hatası gözlendi; değişiklik önerilmiyor.",
+      comparisons: [],
+    };
+  }
+
   const chartCounts = [...new Set(rows.map((r) => r.chartCount))].sort((a, b) => a - b);
+  const maxChartCount = chartCounts[chartCounts.length - 1];
   const comparisons = [];
   let hasRecommendableWin = false;
+  let hasRegression = false;
 
   for (const chartCount of chartCounts) {
     for (const workload of WEBGL2_HEATMAP_STORAGE_WORKLOADS) {
@@ -92,11 +104,19 @@ export function evaluateWebGl2StorageDecision({ hardwareValid = false, rows = []
       const bucP95 = buc.frame?.p95Ms ?? 0;
       const speedupBucketVsMutable = mutP95 > 0 && bucP95 > 0 ? round4(mutP95 / bucP95) : 1;
       const speedupImmutableVsMutable = mutP95 > 0 && immP95 > 0 ? round4(mutP95 / immP95) : 1;
+      const absSavingMs = round4(mutP95 - bucP95);
       const allocReduction = mut.textureAllocCount > 0 ? buc.textureAllocCount < mut.textureAllocCount : false;
 
+      if (speedupBucketVsMutable < WEBGL2_HEATMAP_STORAGE_DECISION_RULE.maxRegressionRatio) {
+        hasRegression = true;
+      }
+
       if (
-        (workload === "resize" && allocReduction && speedupBucketVsMutable >= WEBGL2_HEATMAP_STORAGE_DECISION_RULE.speedupThreshold)
-        || (speedupBucketVsMutable >= WEBGL2_HEATMAP_STORAGE_DECISION_RULE.speedupThreshold && chartCount >= 1)
+        chartCount === maxChartCount
+        && workload === "resize"
+        && allocReduction
+        && speedupBucketVsMutable >= WEBGL2_HEATMAP_STORAGE_DECISION_RULE.speedupThreshold
+        && absSavingMs >= WEBGL2_HEATMAP_STORAGE_DECISION_RULE.minAbsSavingMs
       ) {
         hasRecommendableWin = true;
       }
@@ -107,6 +127,7 @@ export function evaluateWebGl2StorageDecision({ hardwareValid = false, rows = []
         mutableFrameP95Ms: mutP95,
         immutableFrameP95Ms: immP95,
         bucketFrameP95Ms: bucP95,
+        absSavingMs,
         speedupImmutableVsMutable,
         speedupBucketVsMutable,
         mutableAllocCount: mut.textureAllocCount ?? 0,
@@ -124,7 +145,15 @@ export function evaluateWebGl2StorageDecision({ hardwareValid = false, rows = []
     };
   }
 
-  if (hasRecommendableWin) {
+  if (hasRegression) {
+    return {
+      decision: "RECOMMEND_NOT_PLANNED",
+      reason: "Bucket modunda anlamlı p95 kare süresi regresyonu (< 0.90x) gözlemlendi; değişiklik önerilmiyor.",
+      comparisons,
+    };
+  }
+
+  if (hasRecommendableWin && !hasRegression) {
     return {
       decision: "RECOMMEND_IMPLEMENT",
       reason: "Power-of-two bucket texStorage2D yeniden kullanımı allocation sayısını düşürüp p95 kare süresinde anlamlı iyileşme sağladı.",
@@ -134,7 +163,7 @@ export function evaluateWebGl2StorageDecision({ hardwareValid = false, rows = []
 
   return {
     decision: "RECOMMEND_NOT_PLANNED",
-    reason: "texStorage2D / bucket yeniden kullanımı allocation sayısını azaltsa da donanım p95 kare süresinde >= 1.10x eşik iyileşme göstermedi.",
+    reason: "texStorage2D / bucket yeniden kullanımı allocation sayısını azaltsa da en yüksek grafik yükünde anlamlı p95 kazancı (>= 1.10x ve >= 1.0 ms) sağlamadı.",
     comparisons,
   };
 }
