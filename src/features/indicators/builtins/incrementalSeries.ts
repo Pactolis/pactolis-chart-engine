@@ -1,6 +1,7 @@
 import type { FootprintSeries } from "../../../core/model/footprint.js";
 import { incrementPerformanceCounter } from "../../../core/performanceTelemetry.js";
 import type { IndicatorDrawContext, IndicatorSettings } from "../types.js";
+import { createIndicatorSeriesStateStore, type IndicatorSeriesStateStore } from "./stateRegistry.js";
 
 /**
  * Shared incremental-state cache for indicators whose full-series values are expensive but
@@ -20,7 +21,7 @@ export interface IncrementalBase {
   length: number;
 }
 
-const caches = new Map<string, WeakMap<FootprintSeries, Map<string, IncrementalBase>>>();
+const caches = new Map<string, IndicatorSeriesStateStore<IncrementalBase>>();
 
 export function resolveIncremental<S extends IncrementalBase>(
   kind: string,
@@ -31,11 +32,9 @@ export function resolveIncremental<S extends IncrementalBase>(
 ): S {
   const { series } = ctx;
   let byKind = caches.get(kind);
-  if (!byKind) { byKind = new WeakMap(); caches.set(kind, byKind); }
-  let perSeries = byKind.get(series);
-  if (!perSeries) { perSeries = new Map(); byKind.set(series, perSeries); }
+  if (!byKind) { byKind = createIndicatorSeriesStateStore<IncrementalBase>(); caches.set(kind, byKind); }
   const length = series.listReadonly().length;
-  const cached = perSeries.get(ctx.instance.id) as S | undefined;
+  const cached = byKind.get(series, ctx.instance.id) as S | undefined;
   if (
     cached && length > 0
     && cached.configKey === configKey
@@ -54,7 +53,7 @@ export function resolveIncremental<S extends IncrementalBase>(
     }
   }
   const state = { ...build(), configKey, structureRevision: series.structureRevision, nonTailRevision: series.nonTailRevision, seriesRevision: series.revision, length } as S;
-  perSeries.set(ctx.instance.id, state);
+  byKind.set(series, ctx.instance.id, state);
   incrementPerformanceCounter(`indicator.incremental.full.${kind}`);
   return state;
 }

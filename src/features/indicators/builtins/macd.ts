@@ -4,6 +4,7 @@ import { defaultPaneSettings, drawMultiSeries, makeSeriesPoints, numericSetting,
 import { uiColor, macdHistogramColorDefault } from "../../../core/ui/seriesPalette.js";
 import { incrementPerformanceCounter, measurePerformance } from "../../../core/performanceTelemetry.js";
 import { indicatorPriceSeriesMutation } from "../seriesMutationSummary.js";
+import { createIndicatorSeriesStateStore } from "./stateRegistry.js";
 
 export interface MacdSettings extends IndicatorSettings { fast: number; slow: number; signal: number; macdColor: string; signalColor: string; histogramColor: string; lineWidth: number; showLastValueLabel: boolean; showReadout: boolean; showAxisTicks: boolean; showPlotLabel: boolean; }
 
@@ -23,11 +24,12 @@ interface MacdIncrementalState {
   slowValues: Array<number | null>;
   macdValues: Array<number | null>;
   signalValues: Array<number | null>;
+  histogramValues: Array<number | null>;
   plotSeries: PlotSeries[];
   prepared: ReturnType<typeof prepareMultiSeries>;
 }
 
-const macdIncrementalStates = new WeakMap<object, Map<string, MacdIncrementalState>>();
+const macdIncrementalStates = createIndicatorSeriesStateStore<MacdIncrementalState>();
 
 function emaTail(current: number, previous: number | null | undefined, period: number): number | null {
   if (!Number.isFinite(current) || previous === null || previous === undefined || !Number.isFinite(previous)) return null;
@@ -42,6 +44,24 @@ function updateVisibleTail(plot: PlotSeries, tailIndex: number, time: number, va
   point.value = value;
 }
 
+function rebuildMacdGeometry(
+  ctx: IndicatorDrawContext<MacdSettings>,
+  cached: MacdIncrementalState,
+  bars: ReturnType<IndicatorDrawContext<MacdSettings>["series"]["listReadonly"]>,
+  start: number,
+  end: number,
+): ReturnType<typeof prepareMultiSeries> {
+  cached.start = start;
+  cached.end = end;
+  cached.plotSeries = [
+    { key: "hist", label: "Hist", color: cached.histogramColor, style: "histogram", points: makeSeriesPoints(cached.histogramValues, bars, start, end) },
+    { key: "macd", label: "MACD", color: cached.macdColor, points: makeSeriesPoints(cached.macdValues, bars, start, end) },
+    { key: "signal", label: "Signal", color: cached.signalColor, points: makeSeriesPoints(cached.signalValues, bars, start, end) },
+  ];
+  cached.prepared = prepareMultiSeries(ctx, cached.plotSeries, { scaleMode: "signed-zero", baseline: 0 });
+  return cached.prepared;
+}
+
 function prepareMacd(ctx: IndicatorDrawContext<MacdSettings>) {
   const { start, end } = visibleIndexRange(ctx);
   const bars = ctx.series.listReadonly();
@@ -52,12 +72,7 @@ function prepareMacd(ctx: IndicatorDrawContext<MacdSettings>) {
   const signalColor = stringSetting(ctx.settings, "signalColor", uiColor.warn);
   const histogramColor = stringSetting(ctx.settings, "histogramColor", macdHistogramColorDefault);
 
-  let perSeries = macdIncrementalStates.get(ctx.series);
-  if (!perSeries) {
-    perSeries = new Map();
-    macdIncrementalStates.set(ctx.series, perSeries);
-  }
-  const cached = perSeries.get(ctx.instance.id);
+  const cached = macdIncrementalStates.get(ctx.series, ctx.instance.id);
   const sameConfig = Boolean(cached)
     && cached!.instance === ctx.instance
     && cached!.fastPeriod === fastPeriod
@@ -66,24 +81,30 @@ function prepareMacd(ctx: IndicatorDrawContext<MacdSettings>) {
     && cached!.macdColor === macdColor
     && cached!.signalColor === signalColor
     && cached!.histogramColor === histogramColor;
-  if (sameConfig && cached!.seriesRevision === ctx.series.revision && cached!.start === start && cached!.end === end) return cached!.prepared;
-
-  const mutation = indicatorPriceSeriesMutation(ctx.series);
   const sameShape = Boolean(cached)
     && cached!.fastValues.length === bars.length
     && cached!.slowValues.length === bars.length
     && cached!.macdValues.length === bars.length
-    && cached!.signalValues.length === bars.length;
-  const canReuse = sameConfig
-    && cached!.start === start
-    && cached!.end === end
-    && sameShape;
+    && cached!.signalValues.length === bars.length
+    && cached!.histogramValues.length === bars.length;
+
+  if (sameConfig && sameShape && cached!.seriesRevision === ctx.series.revision) {
+    if (cached!.start === start && cached!.end === end) return cached!.prepared;
+    incrementPerformanceCounter("indicator.incremental.hit.macd");
+    return rebuildMacdGeometry(ctx, cached!, bars, start, end);
+  }
+
+  const mutation = indicatorPriceSeriesMutation(ctx.series);
+  const canReuse = sameConfig && sameShape;
 
   if (canReuse && (mutation.kind === "tail" || mutation.kind === "metadata")) {
     if (mutation.kind === "metadata") {
       cached!.seriesRevision = ctx.series.revision;
       cached!.structureRevision = ctx.series.structureRevision;
       incrementPerformanceCounter("indicator.incremental.hit.macd");
+      if (cached!.start !== start || cached!.end !== end) {
+        return rebuildMacdGeometry(ctx, cached!, bars, start, end);
+      }
       return cached!.prepared;
     }
 
@@ -101,14 +122,19 @@ function prepareMacd(ctx: IndicatorDrawContext<MacdSettings>) {
           cached!.slowValues[tailIndex] = slow;
           cached!.macdValues[tailIndex] = macdValue;
           cached!.signalValues[tailIndex] = signal;
-          updateVisibleTail(cached!.plotSeries[0], tailIndex, tail.startTime, histogram);
-          updateVisibleTail(cached!.plotSeries[1], tailIndex, tail.startTime, macdValue);
-          updateVisibleTail(cached!.plotSeries[2], tailIndex, tail.startTime, signal);
-          if (tailIndex >= start && tailIndex < end) {
-            cached!.prepared = prepareMultiSeries(ctx, cached!.plotSeries, { scaleMode: "signed-zero", baseline: 0 });
-          }
+          cached!.histogramValues[tailIndex] = histogram;
           cached!.seriesRevision = ctx.series.revision;
           cached!.structureRevision = ctx.series.structureRevision;
+          if (cached!.start !== start || cached!.end !== end) {
+            rebuildMacdGeometry(ctx, cached!, bars, start, end);
+          } else {
+            updateVisibleTail(cached!.plotSeries[0], tailIndex, tail.startTime, histogram);
+            updateVisibleTail(cached!.plotSeries[1], tailIndex, tail.startTime, macdValue);
+            updateVisibleTail(cached!.plotSeries[2], tailIndex, tail.startTime, signal);
+            if (tailIndex >= start && tailIndex < end) {
+              cached!.prepared = prepareMultiSeries(ctx, cached!.plotSeries, { scaleMode: "signed-zero", baseline: 0 });
+            }
+          }
           incrementPerformanceCounter("indicator.incremental.hit.macd");
           return cached!.prepared;
         });
@@ -121,7 +147,6 @@ function prepareMacd(ctx: IndicatorDrawContext<MacdSettings>) {
     let fallbackReason: string;
     if (!cached) fallbackReason = "initial";
     else if (!sameConfig) fallbackReason = "settings";
-    else if (cached.start !== start || cached.end !== end) fallbackReason = "range";
     else if (!sameShape) fallbackReason = "shape";
     else if (mutation.kind === "structure") fallbackReason = "structure";
     else fallbackReason = `mutation-${mutation.kind}`;
@@ -141,7 +166,7 @@ function prepareMacd(ctx: IndicatorDrawContext<MacdSettings>) {
       { key: "signal", label: "Signal", color: signalColor, points: makeSeriesPoints(signalValues, bars, start, end) },
     ];
     const prepared = prepareMultiSeries(ctx, plotSeries, { scaleMode: "signed-zero", baseline: 0 });
-    perSeries.set(ctx.instance.id, {
+    macdIncrementalStates.set(ctx.series, ctx.instance.id, {
       instance: ctx.instance,
       seriesRevision: ctx.series.revision,
       structureRevision: ctx.series.structureRevision,
@@ -157,6 +182,7 @@ function prepareMacd(ctx: IndicatorDrawContext<MacdSettings>) {
       slowValues,
       macdValues,
       signalValues,
+      histogramValues,
       plotSeries,
       prepared,
     });

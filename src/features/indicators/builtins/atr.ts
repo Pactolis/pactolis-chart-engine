@@ -5,6 +5,7 @@ import { defaultPaneSettings, drawMultiSeries, makeSeriesPoints, numericSetting,
 import { atrColorDefault } from "../../../core/ui/seriesPalette.js";
 import { incrementPerformanceCounter, measurePerformance } from "../../../core/performanceTelemetry.js";
 import { indicatorPriceSeriesMutation } from "../seriesMutationSummary.js";
+import { createIndicatorSeriesStateStore } from "./stateRegistry.js";
 
 export interface AtrSettings extends IndicatorSettings { period: number; color: string; lineWidth: number; showLastValueLabel: boolean; showReadout: boolean; showAxisTicks: boolean; showPlotLabel: boolean; }
 
@@ -21,7 +22,7 @@ interface AtrIncrementalState {
   prepared: ReturnType<typeof prepareMultiSeries>;
 }
 
-const atrIncrementalStates = new WeakMap<object, Map<string, AtrIncrementalState>>();
+const atrIncrementalStates = createIndicatorSeriesStateStore<AtrIncrementalState>();
 
 function trueRangeAt(bars: readonly FootprintBar[], index: number): number | null {
   const bar = bars[index];
@@ -55,35 +56,49 @@ function atrTailValue(
   return { reusable: true, value: (previous * (period - 1) + currentRange) / period };
 }
 
+function rebuildAtrGeometry(
+  ctx: IndicatorDrawContext<AtrSettings>,
+  cached: AtrIncrementalState,
+  bars: ReturnType<IndicatorDrawContext<AtrSettings>["series"]["listReadonly"]>,
+  start: number,
+  end: number,
+): ReturnType<typeof prepareMultiSeries> {
+  cached.start = start;
+  cached.end = end;
+  cached.plotSeries = [{ key: "atr", label: "ATR", color: cached.color, points: makeSeriesPoints(cached.values, bars, start, end) }];
+  cached.prepared = prepareMultiSeries(ctx, cached.plotSeries, { scaleMode: "linear" });
+  return cached.prepared;
+}
+
 function prepareAtr(ctx: IndicatorDrawContext<AtrSettings>) {
   const { start, end } = visibleIndexRange(ctx);
   const bars = ctx.series.listReadonly();
   const period = numericSetting(ctx.settings, "period", 14, 1, 200);
   const color = stringSetting(ctx.settings, "color", atrColorDefault);
-  let perSeries = atrIncrementalStates.get(ctx.series);
-  if (!perSeries) {
-    perSeries = new Map();
-    atrIncrementalStates.set(ctx.series, perSeries);
-  }
-  const cached = perSeries.get(ctx.instance.id);
+  const cached = atrIncrementalStates.get(ctx.series, ctx.instance.id);
   const sameConfig = Boolean(cached)
     && cached!.instance === ctx.instance
     && cached!.period === period
     && cached!.color === color;
-  if (sameConfig && cached!.seriesRevision === ctx.series.revision && cached!.start === start && cached!.end === end) return cached!.prepared;
+  const sameShape = Boolean(cached) && cached!.values.length === bars.length;
+
+  if (sameConfig && sameShape && cached!.seriesRevision === ctx.series.revision) {
+    if (cached!.start === start && cached!.end === end) return cached!.prepared;
+    incrementPerformanceCounter("indicator.incremental.hit.atr");
+    return rebuildAtrGeometry(ctx, cached!, bars, start, end);
+  }
 
   const mutation = indicatorPriceSeriesMutation(ctx.series);
-  const sameShape = Boolean(cached) && cached!.values.length === bars.length;
-  const canReuse = sameConfig
-    && cached!.start === start
-    && cached!.end === end
-    && sameShape;
+  const canReuse = sameConfig && sameShape;
 
   if (canReuse && (mutation.kind === "tail" || mutation.kind === "metadata")) {
     if (mutation.kind === "metadata") {
       cached!.seriesRevision = ctx.series.revision;
       cached!.structureRevision = ctx.series.structureRevision;
       incrementPerformanceCounter("indicator.incremental.hit.atr");
+      if (cached!.start !== start || cached!.end !== end) {
+        return rebuildAtrGeometry(ctx, cached!, bars, start, end);
+      }
       return cached!.prepared;
     }
     const tailIndex = mutation.tailIndex;
@@ -92,16 +107,20 @@ function prepareAtr(ctx: IndicatorDrawContext<AtrSettings>) {
     if (tail && next.reusable) {
       return measurePerformance("indicator.prepare.incremental.atr", () => {
         cached!.values[tailIndex] = next.value;
-        const point = cached!.plotSeries[0].points.at(-1);
-        if (point?.index === tailIndex) {
-          point.time = tail.startTime;
-          point.value = next.value;
-        }
-        if (tailIndex >= start && tailIndex < end) {
-          cached!.prepared = prepareMultiSeries(ctx, cached!.plotSeries, { scaleMode: "linear" });
-        }
         cached!.seriesRevision = ctx.series.revision;
         cached!.structureRevision = ctx.series.structureRevision;
+        if (cached!.start !== start || cached!.end !== end) {
+          rebuildAtrGeometry(ctx, cached!, bars, start, end);
+        } else {
+          const point = cached!.plotSeries[0].points.at(-1);
+          if (point?.index === tailIndex) {
+            point.time = tail.startTime;
+            point.value = next.value;
+          }
+          if (tailIndex >= start && tailIndex < end) {
+            cached!.prepared = prepareMultiSeries(ctx, cached!.plotSeries, { scaleMode: "linear" });
+          }
+        }
         incrementPerformanceCounter("indicator.incremental.hit.atr");
         return cached!.prepared;
       });
@@ -111,7 +130,6 @@ function prepareAtr(ctx: IndicatorDrawContext<AtrSettings>) {
     let fallbackReason: string;
     if (!cached) fallbackReason = "initial";
     else if (!sameConfig) fallbackReason = "settings";
-    else if (cached.start !== start || cached.end !== end) fallbackReason = "range";
     else if (!sameShape) fallbackReason = "shape";
     else if (mutation.kind === "structure") fallbackReason = "structure";
     else fallbackReason = `mutation-${mutation.kind}`;
@@ -122,7 +140,7 @@ function prepareAtr(ctx: IndicatorDrawContext<AtrSettings>) {
     const values = averageTrueRange(seriesOhlcv(ctx.series), period);
     const plotSeries: PlotSeries[] = [{ key: "atr", label: "ATR", color, points: makeSeriesPoints(values, bars, start, end) }];
     const prepared = prepareMultiSeries(ctx, plotSeries, { scaleMode: "linear" });
-    perSeries.set(ctx.instance.id, {
+    atrIncrementalStates.set(ctx.series, ctx.instance.id, {
       instance: ctx.instance,
       seriesRevision: ctx.series.revision,
       structureRevision: ctx.series.structureRevision,

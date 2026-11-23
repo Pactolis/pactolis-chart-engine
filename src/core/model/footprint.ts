@@ -101,6 +101,8 @@ const DECIMAL_TRADE_ID = /^(0|[1-9][0-9]*)$/;
 const MAX_U64 = 18_446_744_073_709_551_615n;
 /** Decimal IDs up to this many digits stay below 2^53, so a number holds them exactly. */
 const MAX_NUMBER_ID_DIGITS = 15;
+const DEDUP_MIN_RETENTION_MS = 60_000;
+const DEDUP_MAX_RETENTION_MS = 120_000;
 /**
  * Markets whose trade IDs are exchange aggTrade IDs that only grow (Binance spot and
  * futures). Other venues' IDs, decimal or not, carry no order a pruning floor can use.
@@ -686,7 +688,7 @@ export class FootprintSeries {
 
   /** Forget the trades older than the dedup window, wherever they sit, and remember the IDs that fell out. */
   private pruneRecentTrades(now: number): void {
-    const retentionMs = Math.max(this.cfg.intervalMs * 2, 60_000);
+    const retentionMs = Math.min(DEDUP_MAX_RETENTION_MS, Math.max(this.cfg.intervalMs * 2, DEDUP_MIN_RETENTION_MS));
     const cutoff = now - retentionMs;
     for (const [key, entry] of this.recentTrades) {
       if (entry.time >= cutoff) continue;
@@ -695,6 +697,22 @@ export class FootprintSeries {
     }
     this.recentTradeIds.evictBefore(cutoff, (market, id) => this.raisePrunedTradeIdFloor(market, id));
     this.nextRecentTradesPruneAt = now + Math.max(10_000, Math.floor(retentionMs / 4));
+  }
+
+  getDedupMemoryStats(): {
+    activeCount: number;
+    numericActiveCount: number;
+    fingerprintActiveCount: number;
+    capacityRows: number;
+    allocatedBytes: number;
+  } {
+    return {
+      activeCount: this.recentTrades.size + this.recentTradeIds.size,
+      numericActiveCount: this.recentTradeIds.size,
+      fingerprintActiveCount: this.recentTrades.size,
+      capacityRows: this.recentTradeIds.capacityRows,
+      allocatedBytes: this.recentTradeIds.allocatedBytes,
+    };
   }
 
   private addTradeInternal(

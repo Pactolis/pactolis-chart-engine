@@ -6,6 +6,7 @@ import { incrementPerformanceCounter } from "../../../core/performanceTelemetry.
 import type { FootprintBar } from "../../../core/types.js";
 import type { FootprintSeries } from "../../../core/model/footprint.js";
 import { quoteVolumeForBar } from "../../../core/model/footprintCellMetrics.js";
+import { createIndicatorSeriesStateStore } from "./stateRegistry.js";
 // Canvas defaults mirror theme.ts semantic tokens; kept Node-safe for registry tests.
 const VOLUME_COLORS = { buy: `#${"3fe0a0"}`, sell: `#${"e06c75"}`, info: `#${"38bdf8"}`, ma: `#${"eef2fb"}` } as const;
 import { defaultPaneSettings, drawMultiSeries, makeMappedPoints, makeSeriesPoints, numericSetting, prepareMultiSeries, simpleHeader, standardAppearanceFields, stringSetting, visibleIndexRange, type PlotSeries } from "./taShared.js";
@@ -19,13 +20,11 @@ export interface VolumeSettings extends IndicatorSettings { maPeriod: number; sh
  * change (structure / non-tail revision, period, length) falls back to the full computation.
  */
 interface VolumeMaState { period: number; length: number; structureRevision: number; nonTailRevision: number; seriesRevision: number; volumes: number[]; ma: Array<number | null>; beforeLast: SmaState | null }
-const volumeMaStates = new WeakMap<FootprintSeries, Map<string, VolumeMaState>>();
+const volumeMaStates = createIndicatorSeriesStateStore<VolumeMaState>();
 
 function volumeMovingAverage(ctx: IndicatorDrawContext<VolumeSettings>, bars: readonly FootprintBar[], period: number): Array<number | null> {
   const { series } = ctx;
-  let perSeries = volumeMaStates.get(series);
-  if (!perSeries) { perSeries = new Map(); volumeMaStates.set(series, perSeries); }
-  const cached = perSeries.get(ctx.instance.id);
+  const cached = volumeMaStates.get(series, ctx.instance.id);
   const tail = bars.length - 1;
   if (cached && cached.period === period && cached.length === bars.length && cached.structureRevision === series.structureRevision && cached.nonTailRevision === series.nonTailRevision && cached.beforeLast !== null) {
     if (cached.seriesRevision === series.revision) return cached.ma;
@@ -37,7 +36,7 @@ function volumeMovingAverage(ctx: IndicatorDrawContext<VolumeSettings>, bars: re
   }
   const volumes = bars.map((bar) => bar.volume);
   const { out, beforeLast } = simpleMovingAverageWithState(volumes, period);
-  perSeries.set(ctx.instance.id, { period, length: bars.length, structureRevision: series.structureRevision, nonTailRevision: series.nonTailRevision, seriesRevision: series.revision, volumes, ma: out, beforeLast });
+  volumeMaStates.set(series, ctx.instance.id, { period, length: bars.length, structureRevision: series.structureRevision, nonTailRevision: series.nonTailRevision, seriesRevision: series.revision, volumes, ma: out, beforeLast });
   incrementPerformanceCounter("indicator.incremental.full.volume");
   return out;
 }

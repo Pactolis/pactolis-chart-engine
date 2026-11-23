@@ -5,6 +5,7 @@ import { defaultPaneSettings, drawMultiSeries, prepareMultiSeries, simpleHeader,
 import { uiColor } from "../../../core/ui/seriesPalette.js";
 import { incrementPerformanceCounter } from "../../../core/performanceTelemetry.js";
 import { indicatorSeriesMutation } from "../seriesMutationSummary.js";
+import { createIndicatorSeriesStateStore } from "./stateRegistry.js";
 
 export interface CvdIndicatorSettings extends IndicatorSettings {
   plotStyle: IndicatorPlotStyle;
@@ -45,7 +46,7 @@ interface CvdIncrementalState {
   prepared: ReturnType<typeof prepareMultiSeries>;
 }
 
-const cvdIncrementalStates = new WeakMap<object, Map<string, CvdIncrementalState>>();
+const cvdIncrementalStates = createIndicatorSeriesStateStore<CvdIncrementalState>();
 
 function prepareCvdData(ctx: IndicatorDrawContext<CvdIndicatorSettings>) {
   const { start, end } = visibleIndexRange(ctx);
@@ -53,12 +54,7 @@ function prepareCvdData(ctx: IndicatorDrawContext<CvdIndicatorSettings>) {
   const groups = groupsForSettings(ctx.settings);
   const lastIndex = bars.length - 1;
   const lastBar = lastIndex >= 0 ? bars[lastIndex] : undefined;
-  let perSeries = cvdIncrementalStates.get(ctx.series);
-  if (!perSeries) {
-    perSeries = new Map();
-    cvdIncrementalStates.set(ctx.series, perSeries);
-  }
-  const cached = perSeries.get(ctx.instance.id);
+  const cached = cvdIncrementalStates.get(ctx.series, ctx.instance.id);
   if (cached?.seriesRevision === ctx.series.revision && cached.instance === ctx.instance && cached.start === start && cached.end === end) return cached.prepared;
 
   const mutation = indicatorSeriesMutation(ctx.series);
@@ -97,7 +93,7 @@ function prepareCvdData(ctx: IndicatorDrawContext<CvdIndicatorSettings>) {
     points: cumulativePoints(bars, start, end, group.indices),
   }));
   const prepared = prepareMultiSeries(ctx, plotSeries, { scaleMode: "signed-zero", baseline: 0 });
-  perSeries.set(ctx.instance.id, {
+  cvdIncrementalStates.set(ctx.series, ctx.instance.id, {
     instance: ctx.instance,
     seriesRevision: ctx.series.revision,
     structureRevision: ctx.series.structureRevision,

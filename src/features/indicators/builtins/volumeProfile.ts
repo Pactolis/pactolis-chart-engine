@@ -4,6 +4,7 @@ import {
   cloneOrderFlowProfileAccumulator,
   createOrderFlowProfileAccumulator,
   finishOrderFlowProfile,
+  type OrderFlowDevelopingPoint,
   type OrderFlowProfileAccumulator,
   type OrderFlowProfileOptions,
   type OrderFlowProfileResult,
@@ -28,6 +29,7 @@ import { uiColor, volumeProfileReadoutTextColor } from "../../../core/ui/seriesP
 import type { IndicatorDefinition, IndicatorDrawContext, IndicatorPreparedData, IndicatorSettings } from "../types.js";
 import { compactNumber, drawIndicatorBadge, drawIndicatorMessage } from "../render/indicatorPaneUi.js";
 import { numericSetting, stringSetting } from "./taShared.js";
+import { createIndicatorSeriesStateStore } from "./stateRegistry.js";
 
 interface VolumeProfileIndicatorSettings extends IndicatorSettings {
   mode: "visible" | "session" | "lookback";
@@ -67,6 +69,8 @@ interface VolumeProfileMeta extends Record<string, unknown> {
   result: OrderFlowProfileResult;
   maxMagnitude: number;
   selectedBars: number;
+  structureRevision: number;
+  developingIndices: Int32Array | null;
 }
 
 type VolumeProfilePreparedData = IndicatorPreparedData<never, VolumeProfileMeta> & { meta: VolumeProfileMeta };
@@ -96,7 +100,7 @@ interface VolumeProfileCache {
   prefix: OrderFlowProfileAccumulator;
   prepared: VolumeProfilePreparedData;
 }
-const volumeProfileCaches = new WeakMap<FootprintSeries, Map<string, VolumeProfileCache>>();
+const volumeProfileCaches = createIndicatorSeriesStateStore<VolumeProfileCache>();
 
 function windowIsAscending(bars: readonly FootprintBar[]): boolean {
   for (let i = 1; i < bars.length; i++) if (bars[i].startTime <= bars[i - 1].startTime) return false;
@@ -107,6 +111,7 @@ function buildVolumeProfilePrepared(
   ctx: IndicatorDrawContext<VolumeProfileIndicatorSettings>,
   profile: OrderFlowProfileResult,
   selectedBars: number,
+  startIndex: number,
 ): VolumeProfilePreparedData {
   const result = profile;
   if (result.availability === "unavailable") {
@@ -120,11 +125,18 @@ function buildVolumeProfilePrepared(
   const message = result.isEstimated
     ? (result.provenance === "mixed" ? tOr("indicator.volumeProfile.mixed") : tOr("indicator.volumeProfile.estimated"))
     : (result.dataComplete ? undefined : t("indicator.volumeProfile.incompleteData"));
+  let developingIndices: Int32Array | null = null;
+  if (result.developing.length > 0 && startIndex >= 0 && selectedBars === result.developing.length) {
+    developingIndices = new Int32Array(result.developing.length);
+    for (let i = 0; i < result.developing.length; i += 1) {
+      developingIndices[i] = startIndex + i;
+    }
+  }
   return {
     status: "ok",
     points: [],
     range: { min: first, max: last + ctx.series.config.priceStep },
-    meta: { result, maxMagnitude, selectedBars },
+    meta: { result, maxMagnitude, selectedBars, structureRevision: ctx.series.structureRevision, developingIndices },
     message,
   };
 }
@@ -132,7 +144,7 @@ function buildVolumeProfilePrepared(
 function prepareVolumeProfile(ctx: IndicatorDrawContext<VolumeProfileIndicatorSettings>): VolumeProfilePreparedData {
   if (!ctx.instance.visible) return emptyPrepared("hidden", "");
   const settings = normalizedSettings(ctx.settings);
-  const bars = selectBars(ctx, settings);
+  const { bars, startIndex } = selectBars(ctx, settings);
   const profileMetric = settings.profileMetric;
   const developing = profileSupportsValueArea(profileMetric)
     && [settings.pocMode, settings.vahMode, settings.valMode].some(levelModeHasDeveloping);
@@ -146,11 +158,9 @@ function prepareVolumeProfile(ctx: IndicatorDrawContext<VolumeProfileIndicatorSe
     allowOhlcvEstimate: true,
   };
   const key = `${profileMetric}|${options.profileSide}|${options.valueAreaPercent}|${developing}|${series.config.priceStep}|${stringSetting(settings, "mode", "visible")}|${numericSetting(settings, "lookbackBars", 200, 1, 10_000)}`;
-  let perSeries = volumeProfileCaches.get(series);
-  if (!perSeries) { perSeries = new Map(); volumeProfileCaches.set(series, perSeries); }
   const firstBar = bars[0];
   const lastBar = bars[bars.length - 1];
-  const cached = perSeries.get(ctx.instance.id);
+  const cached = volumeProfileCaches.get(series, ctx.instance.id);
   if (
     cached && firstBar && lastBar
     && cached.key === key
@@ -169,7 +179,7 @@ function prepareVolumeProfile(ctx: IndicatorDrawContext<VolumeProfileIndicatorSe
     }
     const acc = cloneOrderFlowProfileAccumulator(cached.prefix);
     accumulateOrderFlowProfileBar(acc, lastBar, options);
-    cached.prepared = buildVolumeProfilePrepared(ctx, finishOrderFlowProfile(acc, options), bars.length);
+    cached.prepared = buildVolumeProfilePrepared(ctx, finishOrderFlowProfile(acc, options), bars.length, startIndex);
     cached.seriesRevision = series.revision;
     incrementPerformanceCounter("indicator.incremental.hit.volumeProfile");
     return cached.prepared;
@@ -177,42 +187,58 @@ function prepareVolumeProfile(ctx: IndicatorDrawContext<VolumeProfileIndicatorSe
 
   const ascending = firstBar !== undefined && windowIsAscending(bars);
   if (!ascending) {
-    perSeries.delete(ctx.instance.id);
+    volumeProfileCaches.delete(series, ctx.instance.id);
     const acc = createOrderFlowProfileAccumulator();
     for (const bar of [...bars].sort((a, b) => a.startTime - b.startTime)) accumulateOrderFlowProfileBar(acc, bar, options);
-    return buildVolumeProfilePrepared(ctx, finishOrderFlowProfile(acc, options), bars.length);
+    return buildVolumeProfilePrepared(ctx, finishOrderFlowProfile(acc, options), bars.length, -1);
   }
   const prefix = createOrderFlowProfileAccumulator();
   for (let i = 0; i < bars.length - 1; i++) accumulateOrderFlowProfileBar(prefix, bars[i], options);
   const acc = cloneOrderFlowProfileAccumulator(prefix);
   accumulateOrderFlowProfileBar(acc, lastBar!, options);
-  const prepared = buildVolumeProfilePrepared(ctx, finishOrderFlowProfile(acc, options), bars.length);
-  perSeries.set(ctx.instance.id, { key, structureRevision: series.structureRevision, nonTailRevision: series.nonTailRevision, seriesRevision: series.revision, firstTime: firstBar!.startTime, lastTime: lastBar!.startTime, length: bars.length, prefix, prepared });
+  const prepared = buildVolumeProfilePrepared(ctx, finishOrderFlowProfile(acc, options), bars.length, startIndex);
+  volumeProfileCaches.set(series, ctx.instance.id, { key, structureRevision: series.structureRevision, nonTailRevision: series.nonTailRevision, seriesRevision: series.revision, firstTime: firstBar!.startTime, lastTime: lastBar!.startTime, length: bars.length, prefix, prepared });
   incrementPerformanceCounter("indicator.incremental.full.volumeProfile");
   return prepared;
+}
+
+function lowerBoundBarIndex(all: readonly FootprintBar[], targetTime: number): number {
+  let lo = 0;
+  let hi = all.length;
+  while (lo < hi) {
+    const mid = (lo + hi) >>> 1;
+    if (all[mid].startTime < targetTime) lo = mid + 1;
+    else hi = mid;
+  }
+  return lo;
 }
 
 function selectBars(
   ctx: IndicatorDrawContext<VolumeProfileIndicatorSettings>,
   settings = normalizedSettings(ctx.settings),
-): FootprintBar[] {
+): { bars: FootprintBar[]; startIndex: number } {
   const all = ctx.series.listReadonly();
   const [from, to] = ctx.range;
-  const visible = all.slice(Math.max(0, from), Math.min(all.length, to));
+  const s = Math.max(0, from);
+  const e = Math.min(all.length, to);
+  const visible = all.slice(s, e);
   const mode = stringSetting(settings, "mode", "visible");
   if (mode === "session") {
     const anchor = visible[visible.length - 1]?.startTime ?? all[all.length - 1]?.startTime;
-    return anchor === undefined ? visible : sessionBars(all, anchor);
+    const bars = anchor === undefined ? visible : sessionBars(all, anchor);
+    if (bars.length === 0) return { bars, startIndex: -1 };
+    const idx = lowerBoundBarIndex(all, bars[0].startTime);
+    const startIndex = idx < all.length && all[idx].startTime === bars[0].startTime ? idx : -1;
+    return { bars, startIndex };
   }
   if (mode === "lookback") {
     const count = numericSetting(settings, "lookbackBars", 200, 1, 10_000);
-    const end = visible[visible.length - 1]?.startTime ?? all[all.length - 1]?.startTime;
-    if (end === undefined) return [];
-    const endIndex = all.findIndex((bar) => bar.startTime === end);
-    const last = endIndex >= 0 ? endIndex + 1 : all.length;
-    return all.slice(Math.max(0, last - count), last);
+    const last = visible.length > 0 ? e : all.length;
+    if (last <= 0) return { bars: [], startIndex: -1 };
+    const startIndex = Math.max(0, last - count);
+    return { bars: all.slice(startIndex, last), startIndex };
   }
-  return visible;
+  return { bars: visible, startIndex: visible.length > 0 ? s : -1 };
 }
 
 function asVolumeProfileData(prepared?: IndicatorPreparedData): VolumeProfilePreparedData {
@@ -278,9 +304,15 @@ function drawVolumeProfileOverlay(ctx: IndicatorDrawContext<VolumeProfileIndicat
   canvas.globalAlpha = 1;
   if (profileSupportsValueArea(result.profileMetric)) {
     const estSuffix = result.isEstimated ? " (~)" : "";
-    drawConfiguredLevel(ctx, settings, "poc", result.poc, result.developing.map((point) => ({ time: point.time, price: point.poc, valid: point.valid })), `POC${estSuffix}`, `dPOC${estSuffix}`, uiColor.warn);
-    drawConfiguredLevel(ctx, settings, "vah", result.vah, result.developing.map((point) => ({ time: point.time, price: point.vah, valid: point.valid })), `VAH${estSuffix}`, `dVAH${estSuffix}`, uiColor.info);
-    drawConfiguredLevel(ctx, settings, "val", result.val, result.developing.map((point) => ({ time: point.time, price: point.val, valid: point.valid })), `VAL${estSuffix}`, `dVAL${estSuffix}`, uiColor.info);
+    const anyDeveloping = (["poc", "vah", "val"] as const).some((prefix) =>
+      levelModeHasDeveloping(stringSetting(settings, `${prefix}Mode`, "static") as ProfileLevelDisplay),
+    );
+    const sharedIndices = anyDeveloping && result.developing.length > 0
+      ? resolveSharedDevelopingIndices(series, data.meta)
+      : null;
+    drawConfiguredLevel(ctx, settings, "poc", result.poc, result.developing, sharedIndices, `POC${estSuffix}`, `dPOC${estSuffix}`, uiColor.warn);
+    drawConfiguredLevel(ctx, settings, "vah", result.vah, result.developing, sharedIndices, `VAH${estSuffix}`, `dVAH${estSuffix}`, uiColor.info);
+    drawConfiguredLevel(ctx, settings, "val", result.val, result.developing, sharedIndices, `VAL${estSuffix}`, `dVAL${estSuffix}`, uiColor.info);
   }
   if (result.isEstimated && settings.showPlotLabel !== false) {
     const badge = tOr(result.provenance === "mixed" ? "indicator.volumeProfile.mixed" : "indicator.volumeProfile.estimated");
@@ -293,12 +325,55 @@ function drawVolumeProfileOverlay(ctx: IndicatorDrawContext<VolumeProfileIndicat
   canvas.restore();
 }
 
+function resolveSharedDevelopingIndices(
+  series: FootprintSeries,
+  meta: VolumeProfileMeta,
+): Int32Array {
+  const points = meta.result.developing;
+  if (
+    meta.developingIndices
+    && meta.structureRevision === series.structureRevision
+    && meta.developingIndices.length === points.length
+  ) {
+    return meta.developingIndices;
+  }
+  const all = series.listReadonly();
+  const indices = new Int32Array(points.length);
+  if (points.length === 0 || all.length === 0) {
+    indices.fill(-1);
+    meta.developingIndices = indices;
+    meta.structureRevision = series.structureRevision;
+    return indices;
+  }
+  let cursor = lowerBoundBarIndex(all, points[0].time);
+  for (let i = 0; i < points.length; i += 1) {
+    const targetTime = points[i].time;
+    if (cursor < all.length && all[cursor].startTime === targetTime) {
+      indices[i] = cursor;
+      cursor += 1;
+      continue;
+    }
+    const found = lowerBoundBarIndex(all, targetTime);
+    if (found < all.length && all[found].startTime === targetTime) {
+      indices[i] = found;
+      cursor = found + 1;
+    } else {
+      indices[i] = -1;
+      cursor = found;
+    }
+  }
+  meta.developingIndices = indices;
+  meta.structureRevision = series.structureRevision;
+  return indices;
+}
+
 function drawConfiguredLevel(
   ctx: IndicatorDrawContext<VolumeProfileIndicatorSettings>,
   settings: VolumeProfileIndicatorSettings,
   prefix: "poc" | "vah" | "val",
   staticPrice: number | null,
-  developing: Array<{ time: number; price: number | null; valid: boolean }>,
+  developing: readonly OrderFlowDevelopingPoint[],
+  developingIndices: Int32Array | null,
   staticLabel: string,
   developingLabel: string,
   fallbackColor: string,
@@ -314,10 +389,12 @@ function drawConfiguredLevel(
       stringSetting(settings, `${prefix}StaticStyle`, "dashed") as ProfileLineStyle,
     );
   }
-  if (levelModeHasDeveloping(mode)) {
+  if (levelModeHasDeveloping(mode) && developingIndices) {
     drawDevelopingLevel(
       ctx,
       developing,
+      developingIndices,
+      prefix,
       developingLabel,
       stringSetting(settings, `${prefix}DevelopingColor`, fallbackColor),
       numericSetting(settings, `${prefix}DevelopingWidth`, 1, 1, 5),
@@ -351,26 +428,28 @@ function drawStaticLevel(
 
 function drawDevelopingLevel(
   ctx: IndicatorDrawContext<VolumeProfileIndicatorSettings>,
-  points: Array<{ time: number; price: number | null; valid: boolean }>,
+  points: readonly OrderFlowDevelopingPoint[],
+  developingIndices: Int32Array,
+  field: "poc" | "vah" | "val",
   label: string,
   color: string,
   width: number,
   style: ProfileLineStyle,
 ): void {
-  const { ctx: canvas, view, series } = ctx;
-  const all = series.listReadonly();
-  const indexByTime = new Map(all.map((bar, index) => [bar.startTime, index] as const));
+  const { ctx: canvas, view } = ctx;
   const runs: Array<Array<{ x: number; y: number; price: number }>> = [];
   let current: Array<{ x: number; y: number; price: number }> = [];
-  for (const point of points) {
-    if (!point.valid || point.price === null || !Number.isFinite(point.price)) {
+  for (let i = 0; i < points.length; i += 1) {
+    const point = points[i];
+    const price = point[field];
+    if (!point.valid || price === null || !Number.isFinite(price)) {
       if (current.length) runs.push(current);
       current = [];
       continue;
     }
-    const index = indexByTime.get(point.time);
-    if (index === undefined) continue;
-    current.push({ x: view.xOfIndex(index) + view.colWidth / 2, y: view.yOfPrice(point.price), price: point.price });
+    const index = developingIndices[i];
+    if (index < 0) continue;
+    current.push({ x: view.xOfIndex(index) + view.colWidth / 2, y: view.yOfPrice(price), price });
   }
   if (current.length) runs.push(current);
   if (!runs.length) return;

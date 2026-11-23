@@ -4,6 +4,7 @@ import { defaultPaneSettings, drawMultiSeries, drawMultiSeriesInteraction, makeS
 import { uiColor } from "../../../core/ui/seriesPalette.js";
 import { incrementPerformanceCounter, measurePerformance } from "../../../core/performanceTelemetry.js";
 import { indicatorPriceSeriesMutation } from "../seriesMutationSummary.js";
+import { createIndicatorSeriesStateStore } from "./stateRegistry.js";
 
 export interface RsiSettings extends IndicatorSettings { period: number; overbought: number; oversold: number; color: string; lineWidth: number; showLastValueLabel: boolean; showReadout: boolean; showAxisTicks: boolean; showPlotLabel: boolean; }
 
@@ -24,7 +25,7 @@ interface RsiIncrementalState {
   prepared: ReturnType<typeof prepareMultiSeries>;
 }
 
-const rsiIncrementalStates = new WeakMap<object, Map<string, RsiIncrementalState>>();
+const rsiIncrementalStates = createIndicatorSeriesStateStore<RsiIncrementalState>();
 
 function wilderTail(current: number, previous: number | null | undefined, period: number): number | null {
   if (!Number.isFinite(current) || previous === null || previous === undefined || !Number.isFinite(previous)) return null;
@@ -90,9 +91,7 @@ function prepareRsi(ctx: IndicatorDrawContext<RsiSettings>) {
   const overbought = numericSetting(ctx.settings, "overbought", 70);
   const oversold = numericSetting(ctx.settings, "oversold", 30);
   const color = stringSetting(ctx.settings, "color", uiColor.special);
-  let perSeries = rsiIncrementalStates.get(ctx.series);
-  if (!perSeries) { perSeries = new Map(); rsiIncrementalStates.set(ctx.series, perSeries); }
-  const cached = perSeries.get(ctx.instance.id);
+  const cached = rsiIncrementalStates.get(ctx.series, ctx.instance.id);
   const sameConfig = Boolean(cached)
     && cached!.instance === ctx.instance
     && cached!.period === period
@@ -159,7 +158,7 @@ function prepareRsi(ctx: IndicatorDrawContext<RsiSettings>) {
     const values = points.map((point) => point.value);
     const plotSeries: PlotSeries[] = [{ key: "rsi", label: "RSI", color, points: makeSeriesPoints(values, bars, start, end) }];
     const prepared = prepareMultiSeries(ctx, plotSeries, { scaleMode: "percent", baseline: 50, horizontalLevels: [{ value: overbought, label: "OB" }, { value: oversold, label: "OS" }], axisTicks: [overbought, 50, oversold], fixedRange: { min: 0, max: 100 } });
-    perSeries.set(ctx.instance.id, { instance: ctx.instance, seriesRevision: ctx.series.revision, structureRevision: ctx.series.structureRevision, start, end, period, color, overbought, oversold, avgGains, avgLosses, values, plotSeries, prepared });
+    rsiIncrementalStates.set(ctx.series, ctx.instance.id, { instance: ctx.instance, seriesRevision: ctx.series.revision, structureRevision: ctx.series.structureRevision, start, end, period, color, overbought, oversold, avgGains, avgLosses, values, plotSeries, prepared });
     incrementPerformanceCounter("indicator.incremental.full.rsi");
     return prepared;
   });
