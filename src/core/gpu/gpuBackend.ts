@@ -18,6 +18,18 @@ export interface GpuNativeSceneView {
   readonly candleWidth: number;
 }
 
+export interface NativeGlyphSink {
+  addText(
+    text: string,
+    anchorX: number,
+    yMid: number,
+    fontSize: number,
+    align: "left" | "center" | "right",
+    colorPacked: number,
+    clipArea: ChartArea,
+  ): boolean;
+}
+
 export interface GpuNativeSceneInput {
   readonly series: FootprintSeries;
   readonly view: GpuNativeSceneView;
@@ -30,6 +42,7 @@ export interface GpuNativeSceneInput {
   readonly drawPoc: boolean;
   readonly drawGridQuads?: (quads: QuadSink) => void;
   readonly drawForegroundOverlay?: (quads: QuadSink) => void;
+  readonly drawFootprintText?: (sink: NativeGlyphSink) => boolean;
 }
 
 export interface GpuNativeHeatmapRect {
@@ -93,6 +106,7 @@ export interface GpuSurface {
   beginFrame(clear: RGBA): GpuFrame;
   supportsNativeScene?(): boolean;
   renderNativeScene?(clear: RGBA, logicalWidth: number, logicalHeight: number, scene: GpuNativeSceneInput): boolean;
+  didLastNativeSceneRenderText?(): boolean;
   supportsNativeHeatmap?(): boolean;
   reserveNativeHeatmapPayload?(logicalBytes: number): { release(): void } | null;
   renderNativeHeatmap?(frame: GpuNativeHeatmapFrame, plot: GpuNativeHeatmapPlot): boolean;

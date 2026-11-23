@@ -13,6 +13,7 @@ import {
   resolveFootprintTextFixture,
   selectWebGpuProbe,
   shouldTryWebGpuVulkan,
+  summarizeFootprintTextAbComparison,
   summarizeMetricValues,
   webGpuFlushHardwareInvalidReasons,
   webGpuFlushLaunchArgs,
@@ -317,6 +318,7 @@ async function runChartCountPass(
   args: string[],
   presentationMode: "real" | "offscreen-substitute",
   sharedAnchorTo: number,
+  webgpuText: boolean,
 ) {
   const browser = await launchBrowser(args);
   let context: BrowserContext | null = null;
@@ -328,7 +330,7 @@ async function runChartCountPass(
       await installWebGpuOffscreenPresentInitScript(page);
     }
 
-    await page.goto("/harness/blank.html?gpu=webgpu");
+    await page.goto(`/harness/blank.html?gpu=webgpu&webgpuText=${webgpuText ? 1 : 0}`);
     const markets = ALL_MARKETS.slice(0, chartCount);
 
     const raw = await page.evaluate(
@@ -733,8 +735,8 @@ async function runChartCountPass(
   }
 }
 
-test("WebGPU native footprint cell text share pre-gate benchmark across 4/8 charts and full/compact modes", async ({ baseURL }, testInfo) => {
-  test.setTimeout(HARDWARE_MODE ? 480_000 : 240_000);
+test("WebGPU native footprint cell text share pre-gate and SDF glyph A/B benchmark across 4/8 charts and full/compact modes", async ({ baseURL }, testInfo) => {
+  test.setTimeout(HARDWARE_MODE ? 600_000 : 240_000);
   const resolvedBaseURL = baseURL ?? testInfo.project.use.baseURL ?? "http://127.0.0.1:4173";
   const reportPath = process.env.CHART_FOOTPRINT_TEXT_REPORT_PATH;
   const sharedAnchorTo = Date.now();
@@ -794,12 +796,16 @@ test("WebGPU native footprint cell text share pre-gate benchmark across 4/8 char
     test.skip(true, `WebGPU adapter unavailable in runtime (${webgpuProbe.reason ?? "unknown"})`);
   }
 
-  const passResults: Array<Awaited<ReturnType<typeof runChartCountPass>>> = [];
+  const canvas2dPassResults: Array<Awaited<ReturnType<typeof runChartCountPass>>> = [];
+  const sdfPassResults: Array<Awaited<ReturnType<typeof runChartCountPass>>> = [];
   for (const count of CHART_COUNTS) {
-    passResults.push(await runChartCountPass(resolvedBaseURL, count, webgpuProbe.args, presentationMode, sharedAnchorTo));
+    canvas2dPassResults.push(await runChartCountPass(resolvedBaseURL, count, webgpuProbe.args, presentationMode, sharedAnchorTo, false));
+    sdfPassResults.push(await runChartCountPass(resolvedBaseURL, count, webgpuProbe.args, presentationMode, sharedAnchorTo, true));
   }
 
-  const lastAdapter = passResults[passResults.length - 1]?.adapter ?? webgpuProbe.adapterInfo;
+  const lastAdapter = sdfPassResults[sdfPassResults.length - 1]?.adapter
+    ?? canvas2dPassResults[canvas2dPassResults.length - 1]?.adapter
+    ?? webgpuProbe.adapterInfo;
   environment.webgpuAdapter = lastAdapter;
   const measuredReason = classifyWebGpuAdapter(lastAdapter).reason;
   if (measuredReason) {
@@ -808,10 +814,21 @@ test("WebGPU native footprint cell text share pre-gate benchmark across 4/8 char
   }
 
   const featurePathsByChartCount = Object.fromEntries(
-    passResults.map((res) => [String(res.chartCount), res.featurePaths]),
+    canvas2dPassResults.map((res) => [String(res.chartCount), res.featurePaths]),
   );
-  const allEntries = passResults.flatMap((res) => res.entries);
-  const gate = evaluateFootprintTextGate({ hardwareValid, entries: allEntries });
+  const sdfFeaturePathsByChartCount = Object.fromEntries(
+    sdfPassResults.map((res) => [String(res.chartCount), res.featurePaths]),
+  );
+  const gate = evaluateFootprintTextGate({
+    hardwareValid,
+    entries: canvas2dPassResults.flatMap((res) => res.entries),
+  });
+  const sdfGate = evaluateFootprintTextGate({
+    hardwareValid,
+    entries: sdfPassResults.flatMap((res) => res.entries),
+  });
+  const abComparison = summarizeFootprintTextAbComparison(gate.rows, sdfGate.rows);
+
   const report = {
     schemaVersion: 1,
     issue: "#266",
@@ -823,7 +840,10 @@ test("WebGPU native footprint cell text share pre-gate benchmark across 4/8 char
     environment,
     webgpuProbe,
     featurePathsByChartCount,
+    sdfFeaturePathsByChartCount,
     ...gate,
+    sdfRows: sdfGate.rows,
+    abComparison,
   };
 
   console.log("FOOTPRINT_TEXT_GATE_EVIDENCE", JSON.stringify({
@@ -831,18 +851,33 @@ test("WebGPU native footprint cell text share pre-gate benchmark across 4/8 char
     hardwareValid: report.hardwareValid,
     maxPanZoomTextShareP95: report.maxPanZoomTextShareP95,
     featurePathsByChartCount,
-    rows: report.rows,
+    sdfFeaturePathsByChartCount,
+    abRows: abComparison.rows,
   }));
   await writeReport(report);
 
-  for (const res of passResults) {
+  for (const res of canvas2dPassResults) {
     expect(res.active).toBe("webgpu");
     expect(res.panelBackends).toEqual(Array(res.chartCount).fill("webgpu"));
     expect(res.featurePaths.scene).toBe("webgpu-native");
+    expect(res.featurePaths.footprintText).toBe("canvas2d");
+  }
+  for (const res of sdfPassResults) {
+    expect(res.active).toBe("webgpu");
+    expect(res.panelBackends).toEqual(Array(res.chartCount).fill("webgpu"));
+    expect(res.featurePaths.scene).toBe("webgpu-native");
+    expect(res.featurePaths.footprintText).toBe("webgpu-sdf");
   }
   for (const row of gate.rows) {
     if (row.scenario === "pan" || row.scenario === "zoom") {
       expect(row.footprintText?.count ?? 0).toBeGreaterThan(0);
+    }
+  }
+  for (const row of sdfGate.rows) {
+    if (row.scenario === "pan" || row.scenario === "zoom") {
+      expect(row.nativeText?.count ?? 0).toBeGreaterThan(0);
+      expect(row.footprintText?.meanMs ?? 0).toBeLessThan(0.25);
+      expect(row.footprintText?.p95Ms ?? 0).toBeLessThan(0.5);
     }
   }
 });

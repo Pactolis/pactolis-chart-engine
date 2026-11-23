@@ -3,11 +3,13 @@ import assert from "node:assert/strict";
 
 import {
   evaluateFootprintTextGate,
+  FOOTPRINT_TEXT_AB_MODES,
   FOOTPRINT_TEXT_GATE_RULE,
   FOOTPRINT_TEXT_MARKETS,
   FOOTPRINT_TEXT_METRICS,
   formatFootprintTextMarkdown,
   resolveFootprintTextFixture,
+  summarizeFootprintTextAbComparison,
 } from "../harness/footprintTextGateBenchmark.mjs";
 import { parseArgs } from "../scripts/footprint-text-gate-benchmark.mjs";
 
@@ -142,4 +144,29 @@ test("formatFootprintTextMarkdown renders Turkish gate table and CLI parseArgs h
   assert.throws(() => parseArgs(["--list", "--dry-run"]));
   assert.throws(() => parseArgs(["--charts", "12"]));
   assert.throws(() => parseArgs(["--unknown"]));
+
+  assert.deepEqual(FOOTPRINT_TEXT_AB_MODES, ["canvas2d", "webgpu-sdf"]);
+  assert.ok(FOOTPRINT_TEXT_METRICS.includes("chart.gpu.native.text.ms"));
+
+  const c2dGate = evaluateFootprintTextGate({
+    hardwareValid: true,
+    entries: [makeEntry({ chartCount: 4, textMode: "full", scenario: "pan", frameP95: 8.0, frameMean: 5.0, textP95: 4.0 })],
+  });
+  const sdfGate = evaluateFootprintTextGate({
+    hardwareValid: true,
+    entries: [{
+      ...makeEntry({ chartCount: 4, textMode: "full", scenario: "pan", frameP95: 2.0, frameMean: 1.5, textP95: 0.01 }),
+      combined: {
+        ...makeEntry({ chartCount: 4, textMode: "full", scenario: "pan", frameP95: 2.0, frameMean: 1.5, textP95: 0.01 }).combined,
+        "chart.gpu.native.text.ms": { count: 100, meanMs: 0.2, totalMs: 20, p50Ms: 0.2, p95Ms: 0.3, p99Ms: 0.4 },
+      },
+    }],
+  });
+  const ab = summarizeFootprintTextAbComparison(c2dGate.rows, sdfGate.rows);
+  assert.equal(ab.rows.length, 1);
+  assert.equal(ab.rows[0].frameP95Speedup, 4);
+  assert.equal(ab.rows[0].sdfNativeTextP95Ms, 0.3);
+  const abMd = formatFootprintTextMarkdown({ ...gate, abComparison: ab });
+  assert.match(abMd, /A\/B Karşılaştırması/);
+  assert.match(abMd, /4\.00×/);
 });

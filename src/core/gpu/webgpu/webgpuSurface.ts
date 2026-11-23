@@ -10,6 +10,8 @@ import type {
   RgbaFrame,
 } from "../gpuBackend.js";
 import type { WebGpuDeviceHandle } from "./webgpuDevice.js";
+import { recordGpuFeatureFallback } from "../gpuDiagnostics.js";
+import { WebGpuGlyphSink, WebGpuNativeGlyphPipeline } from "./webgpuNativeGlyphPipeline.js";
 import { WebGpuNativeHeatmapPipeline } from "./webgpuNativeHeatmapPipeline.js";
 import { WebGpuNativeScenePipeline } from "./webgpuNativeScenePipeline.js";
 import { WebGpuQuadPipeline } from "./webgpuQuadPipeline.js";
@@ -57,9 +59,13 @@ export class WebGpuSurface implements GpuSurface {
   private readonly pipeline: WebGpuQuadPipeline;
   private nativePipeline: WebGpuNativeScenePipeline | null = null;
   private nativeSceneDisabled = false;
+  private nativeGlyphPipeline: WebGpuNativeGlyphPipeline | null = null;
+  private nativeGlyphDisabled = false;
   private nativeHeatmapPipeline: WebGpuNativeHeatmapPipeline | null = null;
   private nativeHeatmapDisabled = false;
   private readonly quadSink = new WebGpuQuadSink();
+  private readonly glyphSink = new WebGpuGlyphSink();
+  private lastNativeSceneRenderedText = false;
   private dpr = 1;
   private disposed = false;
   private lastRenderedTexture: any = null;
@@ -173,12 +179,34 @@ export class WebGpuSurface implements GpuSurface {
     );
   }
 
+  didLastNativeSceneRenderText(): boolean {
+    return this.lastNativeSceneRenderedText;
+  }
+
+  private ensureNativeGlyphPipeline(): WebGpuNativeGlyphPipeline | null {
+    if (this.disposed || this.nativeGlyphDisabled || this.handle.isLost()) return null;
+    if (!this.nativeGlyphPipeline) {
+      try {
+        this.nativeGlyphPipeline = new WebGpuNativeGlyphPipeline(
+          this.handle.device,
+          this.handle.format,
+        );
+      } catch {
+        this.nativeGlyphDisabled = true;
+        recordGpuFeatureFallback("footprintText", "native_glyph_init_failed");
+        return null;
+      }
+    }
+    return this.nativeGlyphPipeline;
+  }
+
   renderNativeScene(
     clear: RGBA,
     logicalWidth: number,
     logicalHeight: number,
     scene: GpuNativeSceneInput,
   ): boolean {
+    this.lastNativeSceneRenderedText = false;
     if (!this.supportsNativeScene()) return false;
     const device = this.handle.device;
     if (!device) return false;
@@ -225,6 +253,22 @@ export class WebGpuSurface implements GpuSurface {
       this.pipeline.uploadInstances(this.quadSink.data, totalOverlayQuads);
     }
 
+    let glyphCount = 0;
+    if (scene.drawFootprintText) {
+      const glyphPipeline = this.ensureNativeGlyphPipeline();
+      if (glyphPipeline) {
+        this.glyphSink.reset();
+        if (scene.drawFootprintText(this.glyphSink)) {
+          glyphCount = this.glyphSink.count;
+          if (glyphCount > 0) {
+            glyphPipeline.updateView(w, h, scene.view.area);
+            glyphPipeline.uploadInstances(this.glyphSink);
+          }
+          this.lastNativeSceneRenderedText = true;
+        }
+      }
+    }
+
     const commandEncoder = device.createCommandEncoder({
       label: "WebGpuNativeSceneCommandEncoder",
     });
@@ -254,6 +298,9 @@ export class WebGpuSurface implements GpuSurface {
     this.nativePipeline.recordRenderPasses(passEncoder, scene, prepared);
     if (fgCount > 0) {
       this.pipeline.recordPass(passEncoder, fgCount, gridCount);
+    }
+    if (glyphCount > 0 && this.nativeGlyphPipeline) {
+      this.nativeGlyphPipeline.recordPass(passEncoder, glyphCount);
     }
 
     passEncoder.end();
@@ -587,6 +634,8 @@ export class WebGpuSurface implements GpuSurface {
     this.pipeline.dispose();
     this.nativePipeline?.dispose();
     this.nativePipeline = null;
+    this.nativeGlyphPipeline?.dispose();
+    this.nativeGlyphPipeline = null;
     this.nativeHeatmapPipeline?.dispose();
     this.nativeHeatmapPipeline = null;
   }

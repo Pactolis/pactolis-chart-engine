@@ -46,9 +46,12 @@ export const FOOTPRINT_TEXT_METRICS = Object.freeze([
   "chart.surface.gpu.draw.ms",
   "chart.surface.annotation.draw.ms",
   "chart.annotation.layer.footprint-text.ms",
+  "chart.gpu.native.text.ms",
   "chart.annotation.layer.axis.ms",
   "chart.annotation.setup.ms",
 ]);
+
+export const FOOTPRINT_TEXT_AB_MODES = Object.freeze(["canvas2d", "webgpu-sdf"]);
 
 export const FOOTPRINT_TEXT_SCENARIOS = Object.freeze(["pan", "zoom", "live"]);
 
@@ -127,6 +130,7 @@ export function evaluateFootprintTextGate({ hardwareValid, entries = [], measure
     const gpuDraw = metrics["chart.surface.gpu.draw.ms"] ?? null;
     const annotationDraw = metrics["chart.surface.annotation.draw.ms"] ?? null;
     const footprintText = metrics["chart.annotation.layer.footprint-text.ms"] ?? null;
+    const nativeText = metrics["chart.gpu.native.text.ms"] ?? null;
     const axisLayer = metrics["chart.annotation.layer.axis.ms"] ?? null;
     const annotationSetup = metrics["chart.annotation.setup.ms"] ?? null;
 
@@ -149,6 +153,7 @@ export function evaluateFootprintTextGate({ hardwareValid, entries = [], measure
       gpuDraw,
       annotationDraw,
       footprintText,
+      nativeText,
       axisLayer,
       annotationSetup,
       textShareOfFrameP95,
@@ -216,6 +221,48 @@ function fmtPct(share) {
   return Number.isFinite(share) ? `${(share * 100).toFixed(1)}%` : "—";
 }
 
+export function summarizeFootprintTextAbComparison(canvas2dRows = [], sdfRows = []) {
+  const byKey = new Map();
+  for (const row of sdfRows ?? []) {
+    const key = `${row.chartCount}|${row.textMode}|${row.scenario}`;
+    byKey.set(key, row);
+  }
+  const rows = [];
+  for (const base of canvas2dRows ?? []) {
+    const key = `${base.chartCount}|${base.textMode}|${base.scenario}`;
+    const sdf = byKey.get(key);
+    if (!sdf) continue;
+    const cFrame = base.frameRender?.p95Ms ?? null;
+    const sFrame = sdf.frameRender?.p95Ms ?? null;
+    const cText = base.footprintText?.p95Ms ?? null;
+    const sAnnotationText = sdf.footprintText?.p95Ms ?? null;
+    const sNativeText = sdf.nativeText?.p95Ms ?? null;
+    const frameP95Speedup = Number.isFinite(cFrame) && Number.isFinite(sFrame) && sFrame > 0
+      ? round6(cFrame / sFrame)
+      : null;
+    const frameMeanSpeedup = Number.isFinite(base.frameRender?.meanMs) && Number.isFinite(sdf.frameRender?.meanMs) && sdf.frameRender.meanMs > 0
+      ? round6(base.frameRender.meanMs / sdf.frameRender.meanMs)
+      : null;
+    const annotationTextP95ReductionRatio = Number.isFinite(cText) && Number.isFinite(sAnnotationText) && cText > 0
+      ? round6((cText - sAnnotationText) / cText)
+      : null;
+    rows.push({
+      chartCount: base.chartCount,
+      textMode: base.textMode,
+      scenario: base.scenario,
+      canvas2dFrameP95Ms: cFrame,
+      sdfFrameP95Ms: sFrame,
+      frameP95Speedup,
+      frameMeanSpeedup,
+      canvas2dTextP95Ms: cText,
+      sdfAnnotationTextP95Ms: sAnnotationText,
+      sdfNativeTextP95Ms: sNativeText,
+      annotationTextP95ReductionRatio,
+    });
+  }
+  return { rows };
+}
+
 export function formatFootprintTextMarkdown(report) {
   const env = report?.environment ?? {};
   const adapter = env.webgpuAdapter ?? report?.webgpuProbe?.adapterInfo ?? {};
@@ -254,6 +301,23 @@ export function formatFootprintTextMarkdown(report) {
     lines.push(
       `| ${row.chartCount} | ${row.textMode} | ${row.scenario} | ${fmtPair(row.frameRender)} | ${fmtMs(row.gpuDraw?.count ? row.gpuDraw.p95Ms : null)} | ${fmtMs(row.annotationDraw?.count ? row.annotationDraw.p95Ms : null)} | ${fmtPair(row.footprintText)} | ${fmtPct(row.textShareOfFrameP95)} | ${fmtPct(row.textShareOfTotal)} | ${row.reuseCount ?? 0} |`,
     );
+  }
+
+  const abRows = report?.abComparison?.rows ?? [];
+  if (abRows.length > 0) {
+    lines.push(
+      "",
+      "## A/B Karşılaştırması (`canvas2d` vs `webgpu-sdf`)",
+      "",
+      "| Grafik | Mod | Senaryo | c2d frame p95 | sdf frame p95 | p95 Hızlanma | c2d text p95 | sdf annot text p95 | sdf gpu.text p95 |",
+      "| ---: | --- | --- | ---: | ---: | ---: | ---: | ---: | ---: |",
+    );
+    for (const ab of abRows) {
+      const speedup = Number.isFinite(ab.frameP95Speedup) ? `${ab.frameP95Speedup.toFixed(2)}×` : "—";
+      lines.push(
+        `| ${ab.chartCount} | ${ab.textMode} | ${ab.scenario} | ${fmtMs(ab.canvas2dFrameP95Ms)} | ${fmtMs(ab.sdfFrameP95Ms)} | ${speedup} | ${fmtMs(ab.canvas2dTextP95Ms)} | ${fmtMs(ab.sdfAnnotationTextP95Ms)} | ${fmtMs(ab.sdfNativeTextP95Ms)} |`,
+      );
+    }
   }
 
   lines.push(

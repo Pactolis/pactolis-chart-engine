@@ -9,6 +9,7 @@ export interface GpuSettings {
   readonly residentHeatmap: boolean;
   readonly asyncCapture: boolean;
   readonly nativeWebGpu?: boolean;
+  readonly nativeWebGpuText?: boolean;
 }
 
 export interface GpuSettingsSource {
@@ -21,6 +22,7 @@ export const DEFAULT_GPU_SETTINGS: GpuSettings = Object.freeze({
   residentHeatmap: false,
   asyncCapture: false,
   nativeWebGpu: true,
+  nativeWebGpuText: true,
 });
 
 let configuredSource: GpuSettingsSource | null = null;
@@ -92,11 +94,13 @@ export function readGpuSettings(win?: { location?: { search?: string } } | null)
 
   const override = parseUrlGpuParam(search);
   const nativeOverride = parseUrlBoolParam(search, ["webgpuNative", "gpuNative"]);
-  if (override || nativeOverride !== null) {
+  const nativeTextOverride = parseUrlBoolParam(search, ["webgpuText", "gpuText"]);
+  if (override || nativeOverride !== null || nativeTextOverride !== null) {
     return {
       ...base,
       ...(override ? { backend: override } : {}),
       ...(nativeOverride !== null ? { nativeWebGpu: nativeOverride } : {}),
+      ...(nativeTextOverride !== null ? { nativeWebGpuText: nativeTextOverride } : {}),
     };
   }
 

@@ -1,7 +1,6 @@
 import type { View } from "../../engine/view.js";
 import type { FootprintBar } from "../../types.js";
-import { cellImbalance, type FootprintSeries } from "../../model/footprint.js";
-import { cellAverageTradeSize, cellAverageTradeSizes, cellDeltaPercent, cellTradeCounts } from "../../model/footprintCellMetrics.js";
+import type { FootprintSeries } from "../../model/footprint.js";
 import { settings, type ChartViewConfig } from "../../settings.js";
 import { cellTextModeFor } from "../chartLod.js";
 import type { IndicatorPaneRender } from "../../indicatorTypes.js";
@@ -24,19 +23,18 @@ import type { PreviousWeekStrategyLevel, PreviousWeekStrategySettings } from "..
 import type { MondayRangeLevel, MondayRangeSettings } from "../../analysis/mondayRange.js";
 import type { StrategyLevel, StrategyLineStyle } from "../../analysis/strategyLevels.js";
 import { periodPrefix, periodUnit } from "../../analysis/periods.js";
-import { uiColor, cellDimSell, cellDimBuy, nakedPocPalette, lineLabelPillBg } from "../../ui/seriesPalette.js";
+import { uiColor, nakedPocPalette, lineLabelPillBg } from "../../ui/seriesPalette.js";
 import { levelStartX } from "../levelAnchor.js";
-import { drawOverlayPill, fmtNotional, fmtVol } from "./hudRenderer.js";
+import { drawOverlayPill } from "./hudRenderer.js";
 import type { Crosshair } from "./interactionOverlayRenderer.js";
+import {
+  cellTextCacheKey,
+  formatFootprintCellText,
+  getOrCreateBarCellTextEntries,
+  type FormattedCellText,
+} from "./footprintCellText.js";
 
-export interface FormattedCellText {
-  centerText?: string;
-  centerColor?: string;
-  leftText?: string;
-  leftColor?: string;
-  rightText?: string;
-  rightColor?: string;
-}
+export type { FormattedCellText };
 
 export interface VolumeProfileCacheState {
   key: string;
@@ -93,10 +91,6 @@ export function lineLabelPriority(text: string): number {
   if (/VAH|VAL|VWAP/i.test(text)) return 60;
   if (/LVW|HVW|D-H|D-L|H-H|H-L/i.test(text)) return 50;
   return 40;
-}
-
-function fmtCellValue(v: number, bp: number, showNotional: boolean): string {
-  return showNotional ? fmtNotional(v * bp) : fmtVol(v);
 }
 
 export function drawPreviousWeekStrategy(host: AnnotationRendererHost, view: View, series: FootprintSeries): void {
@@ -274,7 +268,7 @@ export function drawCells(host: AnnotationRendererHost, view: View, series: Foot
   ctx.font = `${Math.min(12, cellH - 2)}px ui-monospace, Menlo, monospace`;
   ctx.textBaseline = "middle";
 
-  const cacheKey = `${mode}|${compact ? 1 : 0}|${showNotional ? 1 : 0}|${step}`;
+  const cacheKey = cellTextCacheKey(mode, compact, showNotional, step);
 
   for (let i = from; i < to; i++) {
     const bar = series.at(i);
@@ -282,103 +276,18 @@ export function drawCells(host: AnnotationRendererHost, view: View, series: Foot
     const fpLeft = view.xOfIndex(i) + candleW;
     const half = fpW / 2;
 
-    let barCache: { key: string; cellRevision: number; entries: Map<number, FormattedCellText> } | null = null;
-    if (bar.cellRevision !== undefined) {
-      const existing = host.cellTextCache.get(bar);
-      if (existing && existing.key === cacheKey && existing.cellRevision === bar.cellRevision) {
-        barCache = existing;
-      } else {
-        barCache = { key: cacheKey, cellRevision: bar.cellRevision, entries: new Map() };
-        host.cellTextCache.set(bar, barCache);
-      }
-    }
+    const barEntries = getOrCreateBarCellTextEntries(host.cellTextCache, bar, cacheKey);
 
     for (const cell of bar.cells.values()) {
       if (cell.priceBin + step < minVisPrice || cell.priceBin > maxVisPrice) continue;
       const yMid = view.yOfPrice(cell.priceBin + step / 2);
       if (yMid < view.area.top || yMid > view.area.top + view.area.height) continue;
 
-      let entry: FormattedCellText | undefined = barCache?.entries.get(cell.priceBin);
+      let entry: FormattedCellText | undefined = barEntries?.get(cell.priceBin);
       if (!entry) {
-        const binPrice = cell.priceBin + step / 2;
-        if (mode === "bidask") {
-          const imb = cellImbalance(cell);
-          if (compact) {
-            entry = {
-              centerText: fmtCellValue(cell.buyVol + cell.sellVol, binPrice, showNotional),
-              centerColor: imb > 0.3 ? uiColor.buy : imb < -0.3 ? uiColor.sell : uiColor.text,
-            };
-          } else {
-            entry = {
-              leftText: fmtCellValue(cell.sellVol, binPrice, showNotional),
-              leftColor: imb < -0.3 ? uiColor.sell : cellDimSell,
-              rightText: fmtCellValue(cell.buyVol, binPrice, showNotional),
-              rightColor: imb > 0.3 ? uiColor.buy : cellDimBuy,
-            };
-          }
-        } else if (mode === "volume") {
-          entry = {
-            centerText: fmtCellValue(cell.buyVol + cell.sellVol, binPrice, showNotional),
-            centerColor: uiColor.text,
-          };
-        } else if (mode === "count") {
-          const counts = cellTradeCounts(cell);
-          entry = {
-            centerText: fmtVol(counts.total),
-            centerColor: uiColor.text,
-          };
-        } else if (mode === "countBidask") {
-          const counts = cellTradeCounts(cell);
-          if (compact) {
-            entry = {
-              centerText: fmtVol(counts.total),
-              centerColor: uiColor.text,
-            };
-          } else {
-            entry = {
-              leftText: fmtVol(counts.sell),
-              leftColor: counts.sell > counts.buy ? uiColor.sell : cellDimSell,
-              rightText: fmtVol(counts.buy),
-              rightColor: counts.buy > counts.sell ? uiColor.buy : cellDimBuy,
-            };
-          }
-        } else if (mode === "deltaPct") {
-          const deltaPct = cellDeltaPercent(cell);
-          const sign = deltaPct > 0 ? "+" : deltaPct < 0 ? "-" : "";
-          entry = {
-            centerText: `${sign}${Math.abs(deltaPct).toFixed(0)}%`,
-            centerColor: deltaPct > 0 ? uiColor.buy : deltaPct < 0 ? uiColor.sell : uiColor.textSecondary,
-          };
-        } else if (mode === "avgTradeSize") {
-          entry = {
-            centerText: fmtCellValue(cellAverageTradeSize(cell), binPrice, showNotional),
-            centerColor: uiColor.text,
-          };
-        } else if (mode === "avgTradeSizeBidask") {
-          const averages = cellAverageTradeSizes(cell);
-          if (compact) {
-            entry = {
-              centerText: fmtCellValue(cellAverageTradeSize(cell), binPrice, showNotional),
-              centerColor: uiColor.text,
-            };
-          } else {
-            entry = {
-              leftText: fmtCellValue(averages.sell, binPrice, showNotional),
-              leftColor: averages.sell > averages.buy ? uiColor.sell : cellDimSell,
-              rightText: fmtCellValue(averages.buy, binPrice, showNotional),
-              rightColor: averages.buy > averages.sell ? uiColor.buy : cellDimBuy,
-            };
-          }
-        } else {
-          const delta = cell.buyVol - cell.sellVol;
-          const sign = delta > 0 ? "+" : delta < 0 ? "-" : "";
-          entry = {
-            centerText: sign + fmtCellValue(Math.abs(delta), binPrice, showNotional),
-            centerColor: delta > 0 ? uiColor.buy : delta < 0 ? uiColor.sell : uiColor.textSecondary,
-          };
-        }
-        if (barCache) {
-          barCache.entries.set(cell.priceBin, entry);
+        entry = formatFootprintCellText(cell, mode, compact, step, showNotional);
+        if (barEntries) {
+          barEntries.set(cell.priceBin, entry);
         }
       }
 
