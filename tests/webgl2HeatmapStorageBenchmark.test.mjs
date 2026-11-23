@@ -76,4 +76,24 @@ test("evaluateWebGl2StorageDecision distinguishes HARDWARE_INVALID, RECOMMEND_IM
   assert.match(md, /RECOMMEND_IMPLEMENT/);
   assert.match(md, /Intel UHD 620/);
   assert.match(md, /\| 8 \| resize \| bucket \|/);
+
+  // Intel UHD 620 pattern: sub-ms 1-chart resize noise + 8-chart fixed-update regression + 8-chart resize miss
+  const uhd620Rows = [
+    { chartCount: 1, workload: "resize", variant: "mutable", frame: { p50Ms: 1.8, p95Ms: 3.6 }, gpu: { count: 36, p95Ms: 11.09 }, textureAllocCount: 312, texturePayloadPeakMiB: 0.1953, glError: 0 },
+    { chartCount: 1, workload: "resize", variant: "immutable", frame: { p50Ms: 1.8, p95Ms: 3.7 }, gpu: { count: 36, p95Ms: 10.935 }, textureAllocCount: 312, texturePayloadPeakMiB: 0.1953, glError: 0 },
+    { chartCount: 1, workload: "resize", variant: "bucket", frame: { p50Ms: 1.7, p95Ms: 3.2 }, gpu: { count: 36, p95Ms: 11.024 }, textureAllocCount: 4, texturePayloadPeakMiB: 0.3125, glError: 0 },
+    { chartCount: 8, workload: "fixed-update", variant: "mutable", frame: { p50Ms: 16.5, p95Ms: 21.1 }, gpu: { count: 36, p95Ms: 5.224 }, textureAllocCount: 16, texturePayloadPeakMiB: 1.5625, glError: 0 },
+    { chartCount: 8, workload: "fixed-update", variant: "immutable", frame: { p50Ms: 17.0, p95Ms: 22.8 }, gpu: { count: 36, p95Ms: 5.138 }, textureAllocCount: 16, texturePayloadPeakMiB: 1.5625, glError: 0 },
+    { chartCount: 8, workload: "fixed-update", variant: "bucket", frame: { p50Ms: 30.0, p95Ms: 36.0 }, gpu: { count: 36, p95Ms: 4.88 }, textureAllocCount: 16, texturePayloadPeakMiB: 2.5, glError: 0 },
+    { chartCount: 8, workload: "resize", variant: "mutable", frame: { p50Ms: 27.7, p95Ms: 47.3 }, gpu: { count: 36, p95Ms: 5.376 }, textureAllocCount: 2496, texturePayloadPeakMiB: 1.5625, glError: 0 },
+    { chartCount: 8, workload: "resize", variant: "immutable", frame: { p50Ms: 28.6, p95Ms: 47.8 }, gpu: { count: 36, p95Ms: 5.531 }, textureAllocCount: 2496, texturePayloadPeakMiB: 1.5625, glError: 0 },
+    { chartCount: 8, workload: "resize", variant: "bucket", frame: { p50Ms: 27.3, p95Ms: 49.4 }, gpu: { count: 36, p95Ms: 5.181 }, textureAllocCount: 32, texturePayloadPeakMiB: 2.5, glError: 0 },
+  ];
+  assert.equal(evaluateWebGl2StorageDecision({ hardwareValid: true, rows: uhd620Rows }).decision, "RECOMMEND_NOT_PLANNED");
+
+  // Non-zero glError must reject implementation
+  const glErrorRows = fasterRows.map((row) =>
+    row.variant === "bucket" ? { ...row, glError: 1282 } : row,
+  );
+  assert.equal(evaluateWebGl2StorageDecision({ hardwareValid: true, rows: glErrorRows }).decision, "RECOMMEND_NOT_PLANNED");
 });
