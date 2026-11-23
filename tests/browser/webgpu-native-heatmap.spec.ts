@@ -293,9 +293,11 @@ async function measureHeatmapMode({
     const r: any = getChartRuntime(id);
     const s = r.pipeline.series;
     r.updateState({ ...r.getState(), chartType: "candlestick", scaleMode: "linear" });
-    r.view.fitPriceRange(59_800, 61_600, 0.05);
-    r.view.colWidth = Math.max(2, r.view.area.width / fitColumns);
-    r.view.offsetX = r.view.area.width - (s.length + 2) * r.view.colWidth;
+    r.view.colWidth = Math.max(2, Math.floor(r.view.area.width / fitColumns));
+    r.view.setPriceAutoScale(false);
+    r.view.pricePerPx = 50 / 20;
+    r.view.priceTop = 61_500;
+    r.view.offsetX = Math.floor(r.view.area.width - (s.length + 2) * r.view.colWidth);
     updateOrderbookHeatmapSettings({ unit: "btc", bucketStep: 50, single: { usd: 0, btc: 10 } });
     setOrderbookHeatmapModeFor(r.getState().market, "single");
     r.invalidate();
@@ -307,7 +309,16 @@ async function measureHeatmapMode({
       const { getChartRuntime } = await import("/harness/chart.ts");
       const r: any = getChartRuntime(id);
       const book = r?.orderbookHeatmap;
-      return Boolean(book && book.bars.size >= minBars && book.inFlight.size === 0 && book.chunks.size > 0);
+      const s = r?.pipeline?.series;
+      const tail = book && s && s.length > 0 ? book.bars.get(s.timeOfIndex(s.length - 1)) : null;
+      return Boolean(
+        book
+        && book.bars.size >= minBars
+        && tail?.cells?.length > 0
+        && book.inFlight.size === 0
+        && book.chunks.size > 0
+        && [...book.chunks.values()].every((c: any) => c.status === "ready"),
+      );
     }, { id, minBars: Math.min(100, fixture.barCount) }),
     { timeout: 30_000 },
   ).toBe(true);
@@ -515,6 +526,15 @@ test("SwiftShader WebGPU verifies 40k-cell GPU-resident heatmap with 0 B pan/zoo
     });
     const { bars, heatmapBars } = buildWebGpuHeatmapBars(fixture, FROZEN_NOW);
 
+    const canvas2d = await measureHeatmapMode({
+      browser,
+      baseURL: resolvedBaseURL,
+      bars,
+      heatmapBars,
+      fixture: { ...fixture, panFrames: 1, zoomFrames: 1 },
+      residentEnabled: false,
+      hardwareMode: false,
+    });
     const resident = await measureHeatmapMode({
       browser,
       baseURL: resolvedBaseURL,
@@ -525,7 +545,10 @@ test("SwiftShader WebGPU verifies 40k-cell GPU-resident heatmap with 0 B pan/zoo
       hardwareMode: false,
       checkFallbackAndLayerOrder: true,
     });
+    const parity = await computePngParity(browser, resolvedBaseURL, canvas2d.pngB64, resident.pngB64);
 
+    expect(parity.nonBg).toBeGreaterThan(200);
+    expect(parity.matchRatio).toBeGreaterThanOrEqual(0.98);
     expect(resident.paths.heatmap).toBe("webgpu-native");
     expect(resident.paths["orderbook-heatmap"]).toBe("webgpu");
     expect(resident.pan.dataBytes).toBe(0);
