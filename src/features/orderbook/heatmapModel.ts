@@ -84,6 +84,22 @@ export function heatmapChunksFor(from: number, to: number, tier: HeatmapTier): n
   return chunks;
 }
 
+function upperBoundTime(sortedTimes: readonly number[], target: number): number {
+  let lo = 0;
+  let hi = sortedTimes.length - 1;
+  let ans = -1;
+  while (lo <= hi) {
+    const mid = (lo + hi) >> 1;
+    if (sortedTimes[mid] <= target) {
+      ans = mid;
+      lo = mid + 1;
+    } else {
+      hi = mid - 1;
+    }
+  }
+  return ans;
+}
+
 /**
  * The newest tier bar inside the chart bar `[start, end)`: its values are the
  * book at the chart bar's close (or now, for the live bar).
@@ -93,9 +109,37 @@ export function lastHeatmapSubBar(
   start: number,
   end: number,
   tier: HeatmapTier,
+  sortedTimes?: readonly number[],
 ): OrderbookHeatmapBar | undefined {
-  if (!(end > start)) return undefined;
-  for (let t = Math.floor((end - 1) / tier.periodMs) * tier.periodMs; t >= start; t -= tier.periodMs) {
+  if (!(end > start) || bars.size === 0) return undefined;
+  const latestSlot = Math.floor((end - 1) / tier.periodMs) * tier.periodMs;
+  if (latestSlot < start) return undefined;
+  const direct = bars.get(latestSlot);
+  if (direct) return direct;
+  const prevSlot = latestSlot - tier.periodMs;
+  if (prevSlot < start) return undefined;
+  if (sortedTimes !== undefined) {
+    for (let i = upperBoundTime(sortedTimes, prevSlot); i >= 0; i--) {
+      const t = sortedTimes[i];
+      if (t < start) break;
+      if ((latestSlot - t) % tier.periodMs === 0) {
+        const bar = bars.get(t);
+        if (bar) return bar;
+      }
+    }
+    return undefined;
+  }
+  const remainingSteps = Math.floor((prevSlot - start) / tier.periodMs) + 1;
+  if (bars.size < remainingSteps) {
+    let bestTime = Number.NEGATIVE_INFINITY;
+    for (const t of bars.keys()) {
+      if (t >= start && t <= prevSlot && t > bestTime && (latestSlot - t) % tier.periodMs === 0) {
+        bestTime = t;
+      }
+    }
+    return bestTime > Number.NEGATIVE_INFINITY ? bars.get(bestTime) : undefined;
+  }
+  for (let t = prevSlot; t >= start; t -= tier.periodMs) {
     const bar = bars.get(t);
     if (bar) return bar;
   }
@@ -112,8 +156,66 @@ export function liveHeatmapSubBar(
   start: number,
   end: number,
   tier: HeatmapTier,
+  sortedTimes?: readonly number[],
 ): OrderbookHeatmapBar | undefined {
-  return lastHeatmapSubBar(bars, start, end, tier) ?? lastHeatmapSubBar(bars, start - (end - start), start, tier);
+  return (
+    lastHeatmapSubBar(bars, start, end, tier, sortedTimes)
+    ?? lastHeatmapSubBar(bars, start - (end - start), start, tier, sortedTimes)
+  );
+}
+
+const sortedCellsCache = new WeakMap<readonly OrderbookHeatmapCell[], boolean>();
+
+/**
+ * Returns true if `cells` are non-decreasing by `priceStart` (`cell[0]`),
+ * memoized per array identity so repeated viewport queries skip O(K) checks.
+ */
+export function areHeatmapCellsSortedByPrice(cells: readonly OrderbookHeatmapCell[]): boolean {
+  const cached = sortedCellsCache.get(cells);
+  if (cached !== undefined) return cached;
+  let sorted = true;
+  for (let i = 1; i < cells.length; i++) {
+    if (cells[i][0] < cells[i - 1][0]) {
+      sorted = false;
+      break;
+    }
+  }
+  sortedCellsCache.set(cells, sorted);
+  return sorted;
+}
+
+/**
+ * Returns the `[start, end)` slice of `cells` overlapping `[minVisPrice, maxVisPrice]`
+ * using O(log K) binary search when `cells` are ascending by `priceStart`.
+ */
+export function visibleHeatmapCellBounds(
+  cells: readonly OrderbookHeatmapCell[],
+  minVisPrice: number,
+  maxVisPrice: number,
+  step: number,
+): { start: number; end: number } {
+  const len = cells.length;
+  if (len === 0) return { start: 0, end: 0 };
+  if (!Number.isFinite(minVisPrice) || !Number.isFinite(maxVisPrice) || !areHeatmapCellsSortedByPrice(cells)) {
+    return { start: 0, end: len };
+  }
+  const minStart = minVisPrice - step;
+  let lo = 0;
+  let hi = len;
+  while (lo < hi) {
+    const mid = (lo + hi) >> 1;
+    if (cells[mid][0] < minStart) lo = mid + 1;
+    else hi = mid;
+  }
+  const start = lo;
+  lo = start;
+  hi = len;
+  while (lo < hi) {
+    const mid = (lo + hi) >> 1;
+    if (cells[mid][0] <= maxVisPrice) lo = mid + 1;
+    else hi = mid;
+  }
+  return { start, end: lo };
 }
 
 export function heatmapCellUsd(cell: OrderbookHeatmapCell): number {
@@ -314,6 +416,130 @@ export function resolveHeatmapColorRange(input: HeatmapColorRangeInput): Heatmap
   const loFloor = Math.floor((count - 1) * floorQ);
   const pFloor = percentileFromBuffer(buf, count, floorQ, 0);
   const pCeiling = percentileFromBuffer(buf, count, ceilingQ, loFloor);
+  return {
+    floor: pFloor,
+    ceiling: Math.max(pCeiling, pFloor * HEATMAP_MIN_CEILING_RATIO),
+  };
+}
+
+function kthOfTwoSorted(
+  a: Float64Array,
+  lenA: number,
+  b: Float64Array,
+  lenB: number,
+  k: number,
+): number {
+  if (lenA > lenB) return kthOfTwoSorted(b, lenB, a, lenA, k);
+  let lo = Math.max(0, k - lenB);
+  let hi = Math.min(lenA, k + 1);
+  while (lo <= hi) {
+    const cutA = (lo + hi) >> 1;
+    const cutB = k - cutA;
+    const aLeft = cutA > 0 ? a[cutA - 1] : Number.NEGATIVE_INFINITY;
+    const aRight = cutA < lenA ? a[cutA] : Number.POSITIVE_INFINITY;
+    const bLeft = cutB > 0 ? b[cutB - 1] : Number.NEGATIVE_INFINITY;
+    const bRight = cutB < lenB ? b[cutB] : Number.POSITIVE_INFINITY;
+    if (aLeft <= bRight && bLeft <= aRight) {
+      return aRight <= bRight ? aRight : bRight;
+    }
+    if (aLeft > bRight) {
+      hi = cutA - 1;
+    } else {
+      lo = cutA + 1;
+    }
+  }
+  return 0;
+}
+
+function percentileFromTwoSorted(
+  a: Float64Array,
+  lenA: number,
+  b: Float64Array,
+  lenB: number,
+  quantile: number,
+): number {
+  const n = lenA + lenB;
+  if (n === 0) return 0;
+  if (n === 1) return lenA === 1 ? a[0] : b[0];
+  const idx = (n - 1) * quantile;
+  const lo = Math.floor(idx);
+  const hi = Math.ceil(idx);
+  const vLo = kthOfTwoSorted(a, lenA, b, lenB, lo);
+  if (hi === lo) return vLo;
+  const vHi = kthOfTwoSorted(a, lenA, b, lenB, hi);
+  return vLo + (vHi - vLo) * (idx - lo);
+}
+
+/**
+ * Exact O(log N) equivalent of `resolveHeatmapColorRange` when positive visible values
+ * are split into a cached sorted historical array and a sorted live-bar array.
+ */
+export function resolveHeatmapColorRangeFromTwoSorted(input: {
+  histSorted: Float64Array;
+  histCount: number;
+  liveSorted: Float64Array;
+  liveCount: number;
+  threshold: number;
+  scaleMode?: OrderbookHeatmapScaleMode;
+  fixedCeiling?: number;
+  contrast?: OrderbookHeatmapContrast;
+}): HeatmapColorRange {
+  const scaleMode = input.scaleMode ?? "auto";
+  const hasThreshold = Number.isFinite(input.threshold) && input.threshold > 0;
+  const threshold = hasThreshold ? input.threshold : 0;
+  const hasFixedCeiling =
+    scaleMode === "fixed" &&
+    input.fixedCeiling !== undefined &&
+    Number.isFinite(input.fixedCeiling) &&
+    input.fixedCeiling > 0;
+
+  if (hasFixedCeiling && threshold > 0) {
+    return {
+      floor: threshold,
+      ceiling: Math.max(input.fixedCeiling!, threshold * HEATMAP_MIN_CEILING_RATIO),
+    };
+  }
+
+  const contrast = input.contrast ?? "medium";
+  const [floorQ, ceilingQ] = HEATMAP_AUTO_PERCENTILES[contrast] ?? HEATMAP_AUTO_PERCENTILES.medium;
+  const count = input.histCount + input.liveCount;
+
+  if (hasFixedCeiling) {
+    const floor = count > 0
+      ? Math.min(
+          percentileFromTwoSorted(input.histSorted, input.histCount, input.liveSorted, input.liveCount, floorQ),
+          input.fixedCeiling! / HEATMAP_MIN_CEILING_RATIO,
+        )
+      : 0;
+    const ceiling = floor > 0
+      ? Math.max(input.fixedCeiling!, floor * HEATMAP_MIN_CEILING_RATIO)
+      : input.fixedCeiling!;
+    return { floor, ceiling };
+  }
+
+  if (count === 0) {
+    return {
+      floor: threshold,
+      ceiling: threshold > 0 ? threshold * 10 : 0,
+    };
+  }
+
+  if (threshold > 0) {
+    const pCeiling = percentileFromTwoSorted(
+      input.histSorted,
+      input.histCount,
+      input.liveSorted,
+      input.liveCount,
+      ceilingQ,
+    );
+    return {
+      floor: threshold,
+      ceiling: Math.max(pCeiling, threshold * HEATMAP_MIN_CEILING_RATIO),
+    };
+  }
+
+  const pFloor = percentileFromTwoSorted(input.histSorted, input.histCount, input.liveSorted, input.liveCount, floorQ);
+  const pCeiling = percentileFromTwoSorted(input.histSorted, input.histCount, input.liveSorted, input.liveCount, ceilingQ);
   return {
     floor: pFloor,
     ceiling: Math.max(pCeiling, pFloor * HEATMAP_MIN_CEILING_RATIO),
@@ -572,7 +798,10 @@ export function formatHeatmapValue(value: number, unit: "usd" | "btc"): string {
 
 /** Merges a response's bars into the cache; a later copy of a bar replaces the earlier one. */
 export function mergeHeatmapBars(target: Map<number, OrderbookHeatmapBar>, bars: readonly OrderbookHeatmapBar[]): void {
-  for (const bar of bars) target.set(bar.t, bar);
+  for (const bar of bars) {
+    areHeatmapCellsSortedByPrice(bar.cells);
+    target.set(bar.t, bar);
+  }
 }
 
 /** Returns true when two bars have identical bucket prices and bid/ask amounts. */
@@ -597,6 +826,7 @@ export function mergeHeatmapBarsWithDiff(
   for (const bar of bars) {
     const existing = target.get(bar.t);
     if (!heatmapBarCellsEqual(existing, bar)) {
+      areHeatmapCellsSortedByPrice(bar.cells);
       target.set(bar.t, bar);
       changed.push(bar);
     }
