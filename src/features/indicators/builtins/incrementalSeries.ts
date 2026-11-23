@@ -1,4 +1,3 @@
-import type { FootprintSeries } from "../../../core/model/footprint.js";
 import { incrementPerformanceCounter } from "../../../core/performanceTelemetry.js";
 import type { IndicatorDrawContext, IndicatorSettings } from "../types.js";
 import { createIndicatorSeriesStateStore, type IndicatorSeriesStateStore } from "./stateRegistry.js";

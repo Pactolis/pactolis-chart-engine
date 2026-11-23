@@ -14,7 +14,6 @@ import {
 import { boolSetting, numericSetting, stringSetting, visibleIndexRange } from "./taShared.js";
 import { uiColor } from "../../../core/ui/seriesPalette.js";
 import { incrementPerformanceCounter } from "../../../core/performanceTelemetry.js";
-import type { FootprintSeries } from "../../../core/model/footprint.js";
 import { createIndicatorSeriesStateStore } from "./stateRegistry.js";
 
 export type SwingPivotMode = "structural" | "raw" | "both";

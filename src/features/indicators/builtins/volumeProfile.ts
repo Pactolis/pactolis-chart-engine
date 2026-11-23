@@ -4,7 +4,6 @@ import {
   cloneOrderFlowProfileAccumulator,
   createOrderFlowProfileAccumulator,
   finishOrderFlowProfile,
-  type OrderFlowDevelopingPoint,
   type OrderFlowProfileAccumulator,
   type OrderFlowProfileOptions,
   type OrderFlowProfileResult,
@@ -372,7 +371,7 @@ function drawConfiguredLevel(
   settings: VolumeProfileIndicatorSettings,
   prefix: "poc" | "vah" | "val",
   staticPrice: number | null,
-  developing: readonly OrderFlowDevelopingPoint[],
+  developing: OrderFlowProfileResult["developing"],
   developingIndices: Int32Array | null,
   staticLabel: string,
   developingLabel: string,
@@ -428,7 +427,7 @@ function drawStaticLevel(
 
 function drawDevelopingLevel(
   ctx: IndicatorDrawContext<VolumeProfileIndicatorSettings>,
-  points: readonly OrderFlowDevelopingPoint[],
+  points: OrderFlowProfileResult["developing"],
   developingIndices: Int32Array,
   field: "poc" | "vah" | "val",
   label: string,
@@ -539,6 +538,8 @@ function emptyPrepared(
       result,
       maxMagnitude: 0,
       selectedBars: 0,
+      structureRevision: -1,
+      developingIndices: null,
     },
     message,
   };

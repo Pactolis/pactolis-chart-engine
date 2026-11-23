@@ -4,7 +4,6 @@ import { compactNumber } from "../render/indicatorPaneUi.js";
 import { parseMarket } from "../../../core/domain/market.js";
 import { incrementPerformanceCounter } from "../../../core/performanceTelemetry.js";
 import type { FootprintBar } from "../../../core/types.js";
-import type { FootprintSeries } from "../../../core/model/footprint.js";
 import { quoteVolumeForBar } from "../../../core/model/footprintCellMetrics.js";
 import { createIndicatorSeriesStateStore } from "./stateRegistry.js";
 // Canvas defaults mirror theme.ts semantic tokens; kept Node-safe for registry tests.
