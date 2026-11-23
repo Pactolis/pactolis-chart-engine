@@ -6,8 +6,8 @@ import type { OrderbookHeatmapSettings } from "../../core/orderbookHeatmap/setti
  * before mounting a chart.
  */
 export interface OrderbookHeatmapSettingsSource {
-  /** Settings as they apply on `market`. */
-  settingsFor(market: string): OrderbookHeatmapSettings;
+  /** Settings as they apply on `market` (optionally scoped to `panelId`). */
+  settingsFor(market: string, panelId?: string): OrderbookHeatmapSettings;
   /** Call `listener` after the settings change. Returns an unsubscribe function. */
   onChange(listener: () => void): () => void;
 }

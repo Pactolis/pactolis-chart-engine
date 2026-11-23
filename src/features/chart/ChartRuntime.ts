@@ -74,6 +74,7 @@ import { decideLiveSameBarAutoFit, type LiveAutoFitSnapshot } from "./liveAutoFi
 import { buildTpoProfileGroups, effectiveTpoBracketMs } from "../../core/analysis/tpoProfile.js";
 import { tOr } from "../../core/chartLocale.js";
 import { OrderbookHeatmapOverlay, type LiveHeatmapTailEvent } from "../orderbook/heatmapOverlay.js";
+import type { OrderbookHeatmapRuntimeStatus } from "../orderbook/heatmapContracts.js";
 import { orderbookHeatmapSettingsSource } from "../orderbook/heatmapSettingsSource.js";
 import { isOrderbookHeatmapMarket } from "../../core/orderbookHeatmap/settings.js";
 import type { HeatmapGpuCellFrame } from "./heatmap/gpu/heatmapGpuRenderer.js";
@@ -81,7 +82,7 @@ import type { FootprintSeries } from "../../core/model/footprint.js";
 import { abortableDelay } from "./abortableDelay.js";
 import type { ChartSurfaceModel } from "./chartSurfaceModel.js";
 
-export type { MagnetSnapTarget, HeatmapGpuRenderFrame };
+export type { MagnetSnapTarget, HeatmapGpuRenderFrame, OrderbookHeatmapRuntimeStatus };
 
 export interface ChartRuntime {
   updateState(next: ChartPanelState): void;
@@ -89,6 +90,10 @@ export interface ChartRuntime {
   getAnalysisSnapshot(options?: AnalysisSnapshotOptions): ChartAnalysisSnapshot;
   /** Invalidate or push live tail orderbook heatmap data. */
   invalidateOrderbookHeatmapLiveTail?(event?: LiveHeatmapTailEvent): void;
+  /** Read-only orderbook heatmap loading/error/source-coverage status for this chart panel. */
+  getOrderbookHeatmapStatus?(): OrderbookHeatmapRuntimeStatus;
+  /** Subscribe to orderbook heatmap status transitions for this chart panel. */
+  subscribeOrderbookHeatmapStatus?(listener: (status: OrderbookHeatmapRuntimeStatus) => void): () => void;
   activate(): void;
   deactivate(): void;
   refreshHostLifecycle(): void;
@@ -389,6 +394,7 @@ class ChartRuntimeImpl implements ChartRuntime, ChartInputHost {
           if (!this.disposed) this.session?.invalidate();
         },
         getMarket: () => this.state.market,
+        getPanelId: () => this.panelId,
         isReplayActive: () => this.replayCoordinator.isActive(),
         subscribeLiveTail: subscribeHeatmapLiveTail,
       })
@@ -502,7 +508,7 @@ class ChartRuntimeImpl implements ChartRuntime, ChartInputHost {
         if (!this.orderbookHeatmap) return false;
         this.orderbookHeatmap.draw(ctx, activeView, activeSeries, range);
         return this.state.chartType !== "tpo" || (isOrderbookHeatmapMarket(this.state.market)
-          && orderbookHeatmapSettingsSource().settingsFor(this.state.market).mode !== "off");
+          && orderbookHeatmapSettingsSource().settingsFor(this.state.market, this.panelId).mode !== "off");
       },
       (ctx, activeView, activeSeries, activeCrosshair) =>
         this.orderbookHeatmap?.drawHover(ctx, activeView, activeSeries, activeCrosshair),
@@ -537,7 +543,7 @@ class ChartRuntimeImpl implements ChartRuntime, ChartInputHost {
             const isOrderbookHeatmapActive =
               this.orderbookHeatmap !== null
               && isOrderbookHeatmapMarket(this.state.market)
-              && orderbookHeatmapSettingsSource().settingsFor(this.state.market).mode !== "off";
+              && orderbookHeatmapSettingsSource().settingsFor(this.state.market, this.panelId).mode !== "off";
             this.renderer.setAllowNativeFootprintText(!isOrderbookHeatmapActive);
             this.renderer.renderLayers(v, s, this.renderCoordinator?.getGpuLayerIds() ?? new Set());
             // Density paints above the flushed candle layers and strictly before
@@ -885,6 +891,20 @@ class ChartRuntimeImpl implements ChartRuntime, ChartInputHost {
 
   invalidateOrderbookHeatmapLiveTail(event?: LiveHeatmapTailEvent): void {
     this.orderbookHeatmap?.invalidateLiveTail(event);
+  }
+
+  getOrderbookHeatmapStatus(): OrderbookHeatmapRuntimeStatus {
+    return this.orderbookHeatmap?.getStatus() ?? {
+      state: "idle",
+      requestedSources: [],
+      observedSources: [],
+      missingSources: [],
+      hasBars: false,
+    };
+  }
+
+  subscribeOrderbookHeatmapStatus(listener: (status: OrderbookHeatmapRuntimeStatus) => void): () => void {
+    return this.orderbookHeatmap?.subscribeStatus(listener) ?? (() => undefined);
   }
 
   getAnalysisSnapshot(options: AnalysisSnapshotOptions = {}): ChartAnalysisSnapshot {
