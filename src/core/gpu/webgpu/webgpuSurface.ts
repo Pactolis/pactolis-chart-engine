@@ -3,6 +3,7 @@ import type {
   GpuLossReason,
   GpuNativeHeatmapFrame,
   GpuNativeHeatmapPlot,
+  GpuNativeHeatmapResidentFrame,
   GpuNativeSceneInput,
   GpuSurface,
   QuadSink,
@@ -343,22 +344,47 @@ export class WebGpuSurface implements GpuSurface {
     return pipeline.reservePreparedPayload(logicalBytes);
   }
 
+  private resolveHeatmapTargetTexture(): any {
+    if (this.lastRenderedTexture) return this.lastRenderedTexture;
+    try {
+      const target = this.ctx?.getCurrentTexture?.();
+      this.lastRenderedTexture = target;
+      return target;
+    } catch {
+      return null;
+    }
+  }
+
   renderNativeHeatmap(frame: GpuNativeHeatmapFrame, plot: GpuNativeHeatmapPlot): boolean {
     const pipeline = this.ensureNativeHeatmapPipeline();
     if (!pipeline) return false;
 
-    let targetTexture = this.lastRenderedTexture;
-    if (!targetTexture) {
-      try {
-        targetTexture = this.ctx?.getCurrentTexture?.();
-        this.lastRenderedTexture = targetTexture;
-      } catch {
-        targetTexture = null;
-      }
-    }
+    const targetTexture = this.resolveHeatmapTargetTexture();
     if (!targetTexture) return false;
 
     const ok = pipeline.renderFrame(
+      targetTexture,
+      this.canvas.width,
+      this.canvas.height,
+      this.dpr,
+      frame,
+      plot,
+    );
+    if (!ok) {
+      this.disposeNativeHeatmap();
+      this.nativeHeatmapDisabled = true;
+    }
+    return ok;
+  }
+
+  renderNativeResidentHeatmap(frame: GpuNativeHeatmapResidentFrame, plot: GpuNativeHeatmapPlot): boolean {
+    const pipeline = this.ensureNativeHeatmapPipeline();
+    if (!pipeline) return false;
+
+    const targetTexture = this.resolveHeatmapTargetTexture();
+    if (!targetTexture) return false;
+
+    const ok = pipeline.renderResidentFrame(
       targetTexture,
       this.canvas.width,
       this.canvas.height,

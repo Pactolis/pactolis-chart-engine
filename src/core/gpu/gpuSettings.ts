@@ -95,12 +95,14 @@ export function readGpuSettings(win?: { location?: { search?: string } } | null)
   const override = parseUrlGpuParam(search);
   const nativeOverride = parseUrlBoolParam(search, ["webgpuNative", "gpuNative"]);
   const nativeTextOverride = parseUrlBoolParam(search, ["webgpuText", "gpuText"]);
-  if (override || nativeOverride !== null || nativeTextOverride !== null) {
+  const residentHeatmapOverride = parseUrlBoolParam(search, ["residentHeatmap", "heatmapGpu"]);
+  if (override || nativeOverride !== null || nativeTextOverride !== null || residentHeatmapOverride !== null) {
     return {
       ...base,
       ...(override ? { backend: override } : {}),
       ...(nativeOverride !== null ? { nativeWebGpu: nativeOverride } : {}),
       ...(nativeTextOverride !== null ? { nativeWebGpuText: nativeTextOverride } : {}),
+      ...(residentHeatmapOverride !== null ? { residentHeatmap: residentHeatmapOverride } : {}),
     };
   }
 

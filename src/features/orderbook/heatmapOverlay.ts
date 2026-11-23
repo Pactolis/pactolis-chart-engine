@@ -48,6 +48,7 @@ import {
   type HeatmapTier,
 } from "./heatmapModel.js";
 import type { HeatmapGpuCellFrame } from "../chart/heatmap/gpu/heatmapGpuRenderer.js";
+import type { GpuNativeHeatmapResidentCell, GpuNativeHeatmapResidentFrame } from "../../core/gpu/gpuBackend.js";
 
 export type { LiveHeatmapTailEvent, LiveHeatmapTailRequest } from "./heatmapContracts.js";
 
@@ -401,9 +402,11 @@ export class OrderbookHeatmapOverlay {
       bars !== undefined &&
       bars.every((bar) => bar.t >= this.lastSeriesLiveBarTime)
     ) {
+      this.liveTailSyncRevision++;
       return;
     }
     this.historicalBarsRevision++;
+    this.gpuSyncGeneration++;
   }
 
   private reprojectCanonicalTailBars(settings: OrderbookHeatmapSettings, tier: HeatmapTier): void {
@@ -625,6 +628,10 @@ export class OrderbookHeatmapOverlay {
     this.lastCollected = null;
     this.lastCollectedRange = null;
     this.lastSeriesLiveBarTime = Number.NEGATIVE_INFINITY;
+    this.residentPriceOrigin = Number.NaN;
+    this.residentPriceOriginInitializedFromBars = false;
+    this.lastResidentRangeViewportKey = "";
+    this.residentRangeCache = null;
     this.releaseRasterCache();
     this.bumpBarsRevision();
   }
@@ -1737,6 +1744,180 @@ export class OrderbookHeatmapOverlay {
     }
   }
 
+  /**
+   * Builds a lightweight descriptor for the WebGPU resident vertex-projected heatmap pipeline.
+   * Skips `prepareReservedGpuCells` and cell-rect array allocations entirely, freezing Auto P96
+   * range computation during active viewport motion (within `HEATMAP_CPU_RASTER_QUIET_MS`) and
+   * scanning raw `bar.cells` once settled or when visible/data inputs change.
+   */
+  prepareResidentGpuScene(
+    view: View,
+    series: FootprintSeries,
+    range: [number, number],
+  ): GpuNativeHeatmapResidentFrame | null {
+    const preamble = this.beginFrame(series, range);
+    if (!preamble) return null;
+
+    const unit = preamble.settings.unit;
+    const step = preamble.settings.bucketStep;
+    const threshold = preamble.threshold;
+    const replayActive = this.isReplayActive();
+    const seriesStartTime = series.length > 0 ? series.timeOfIndex(0) : Number.NaN;
+
+    const findSampleBarPrice = (): number | null => {
+      const candidates = [
+        series.length > 0 ? this.bars.get(series.timeOfIndex(preamble.first)) : undefined,
+        series.length > 0 ? this.bars.get(seriesStartTime) : undefined,
+        this.bars.values().next().value,
+      ];
+      for (const bar of candidates) {
+        const samplePrice = bar?.cells?.[0]?.[0];
+        if (typeof samplePrice === "number" && Number.isFinite(samplePrice)) {
+          return Math.floor(samplePrice);
+        }
+      }
+      return null;
+    };
+
+    const structureReset =
+      !Number.isFinite(this.residentPriceOrigin)
+      || (!this.residentPriceOriginInitializedFromBars && this.bars.size > 0)
+      || this.lastResidentUnit !== unit
+      || this.lastResidentThreshold !== threshold
+      || this.lastResidentReplayActive !== replayActive
+      || this.lastResidentSeriesStartTime !== seriesStartTime
+      || series.length < this.lastResidentSeriesLength
+      || series.length > this.lastResidentSeriesLength + 1;
+
+    if (structureReset) {
+      this.gpuSyncGeneration++;
+      const sampleOrigin = findSampleBarPrice();
+      if (sampleOrigin !== null) {
+        this.residentPriceOrigin = sampleOrigin;
+        this.residentPriceOriginInitializedFromBars = true;
+      } else {
+        this.residentPriceOrigin = Number.isFinite(view.priceTop) ? Math.floor(view.priceTop) : 0;
+        this.residentPriceOriginInitializedFromBars = false;
+      }
+      this.residentRangeCache = null;
+    } else if (series.length === this.lastResidentSeriesLength + 1) {
+      this.liveTailSyncRevision++;
+    }
+
+    this.lastResidentUnit = unit;
+    this.lastResidentThreshold = threshold;
+    this.lastResidentReplayActive = replayActive;
+    this.lastResidentSeriesStartTime = seriesStartTime;
+    this.lastResidentSeriesLength = series.length;
+
+    const fixedCeiling = this.resolveFixedCeiling(preamble.settings);
+    const opacity = resolveOrderbookHeatmapOpacity(preamble.settings.opacity);
+    const scaleMode = preamble.settings.scaleMode ?? "auto";
+    const contrast = preamble.settings.contrast ?? "medium";
+    const viewportKey =
+      `${view.offsetX}|${view.colWidth}|${view.priceTop}|${view.pricePerPx}|${view.area.left}|${view.area.top}|${view.area.width}|${view.area.height}`;
+    if (viewportKey !== this.lastResidentViewportKey) {
+      this.lastResidentViewportKey = viewportKey;
+      this.residentViewportChangedAt = this.now();
+    }
+    const dataSig =
+      `${this.dataKey}|${unit}|${threshold}|${opacity}|${scaleMode}|${fixedCeiling ?? ""}|${contrast}|${this.barsRevision}|${replayActive}`;
+    const settled = this.now() - this.residentViewportChangedAt >= HEATMAP_CPU_RASTER_QUIET_MS;
+    const needsRecompute =
+      this.residentRangeCache === null
+      || dataSig !== this.residentLastDataSig
+      || (settled && this.lastResidentRangeViewportKey !== viewportKey);
+
+    if (needsRecompute) {
+      const collectRangeValues = this.needsRangeValues(threshold, fixedCeiling);
+      this.scratchValueCount = 0;
+      if (collectRangeValues) {
+        let minVisPrice = Number.NEGATIVE_INFINITY;
+        let maxVisPrice = Number.POSITIVE_INFINITY;
+        if (typeof view.priceOfY === "function") {
+          const pTop = view.priceOfY(view.area.top);
+          const pBottom = view.priceOfY(view.area.top + view.area.height);
+          if (Number.isFinite(pTop) && Number.isFinite(pBottom)) {
+            minVisPrice = Math.min(pTop, pBottom);
+            maxVisPrice = Math.max(pTop, pBottom);
+          }
+        }
+        const liveIndex = replayActive ? -1 : series.length - 1;
+        for (let index = preamble.first; index <= preamble.last; index++) {
+          const bar = (index === liveIndex ? liveHeatmapSubBar : lastHeatmapSubBar)(
+            this.bars, series.timeOfIndex(index), series.timeOfIndex(index + 1), preamble.tier);
+          if (!bar || bar.cells.length === 0) continue;
+          for (const cell of bar.cells) {
+            const priceStart = cell[0];
+            if (priceStart + step < minVisPrice || priceStart > maxVisPrice) continue;
+            const value = heatmapValueInUnit(heatmapCellUsd(cell), priceStart, step, unit);
+            if (value <= 0 || (threshold > 0 && value < threshold)) continue;
+            this.pushScratchValue(value);
+          }
+        }
+      }
+      const resolved = this.resolveRangeForValues(
+        this.scratchValues.subarray(0, this.scratchValueCount),
+        preamble.settings,
+        threshold,
+        fixedCeiling,
+      );
+      this.scratchValueCount = 0;
+      this.residentRangeCache = {
+        floor: resolved.floor,
+        ceiling: resolved.ceiling,
+        opacity: resolved.opacity,
+      };
+      this.residentLastDataSig = dataSig;
+      this.lastResidentRangeViewportKey = viewportKey;
+    }
+
+    const resolvedRange = this.residentRangeCache!;
+    this.visibleFloor = resolvedRange.floor;
+    this.visibleCeiling = resolvedRange.ceiling;
+    this.visibleThreshold = threshold;
+    this.visibleOpacity = resolvedRange.opacity;
+
+    const liveIndex = replayActive ? -1 : series.length - 1;
+    const tier = preamble.tier;
+    const bars = this.bars;
+    return {
+      syncGeneration: this.gpuSyncGeneration,
+      tailSyncRevision: this.liveTailSyncRevision,
+      barCount: series.length,
+      priceOrigin: this.residentPriceOrigin,
+      bucketStep: step,
+      liveBarIndex: liveIndex,
+      dataKey: this.dataKey,
+      view: {
+        offsetX: view.offsetX,
+        colWidth: view.colWidth,
+        priceTop: view.priceTop,
+        pricePerPx: view.pricePerPx,
+      },
+      floor: resolvedRange.floor,
+      ceiling: resolvedRange.ceiling,
+      threshold,
+      opacity: resolvedRange.opacity,
+      visibleRange: [preamble.first, preamble.last],
+      readBarCells: (barIndex: number): readonly GpuNativeHeatmapResidentCell[] => {
+        if (barIndex < 0 || barIndex >= series.length) return [];
+        const isLive = barIndex === liveIndex;
+        const bar = (isLive ? liveHeatmapSubBar : lastHeatmapSubBar)(
+          bars, series.timeOfIndex(barIndex), series.timeOfIndex(barIndex + 1), tier);
+        if (!bar || bar.cells.length === 0) return [];
+        const out: GpuNativeHeatmapResidentCell[] = [];
+        for (const cell of bar.cells) {
+          const priceStart = cell[0];
+          const value = heatmapValueInUnit(heatmapCellUsd(cell), priceStart, step, unit);
+          if (value <= 0 || (threshold > 0 && value < threshold)) continue;
+          out.push({ priceStart, value, liveEligible: isLive });
+        }
+        return out;
+      },
+    };
+  }
+
   /** Builds the GPU instance frame from an already collected visible list. */
   private buildGpuFrame(
     visible: Array<{ x: number; yTop: number; cellHeight: number; value: number; live: boolean }>,
@@ -1792,6 +1973,22 @@ export class OrderbookHeatmapOverlay {
   private barsRevision = 0;
   /** Bumped only when non-live historical bars or resets/evictions change. */
   private historicalBarsRevision = 0;
+  /** Bumped when GPU-resident dataset must rebuild (reset, eviction, history shift, unit/threshold change). */
+  private gpuSyncGeneration = 0;
+  /** Bumped when only live tail bars or rollover bar update. */
+  private liveTailSyncRevision = 0;
+  private lastResidentUnit: OrderbookHeatmapUnit | null = null;
+  private lastResidentThreshold = Number.NaN;
+  private lastResidentReplayActive: boolean | null = null;
+  private lastResidentSeriesStartTime = Number.NaN;
+  private lastResidentSeriesLength = 0;
+  private residentPriceOrigin = Number.NaN;
+  private residentPriceOriginInitializedFromBars = false;
+  private lastResidentViewportKey = "";
+  private residentViewportChangedAt = Number.NEGATIVE_INFINITY;
+  private residentLastDataSig = "";
+  private lastResidentRangeViewportKey = "";
+  private residentRangeCache: { floor: number; ceiling: number; opacity: number } | null = null;
   private lastSeriesLiveBarTime = Number.NEGATIVE_INFINITY;
   /** Same-frame collection memo: one visible list per frame shared by the GPU prepare and the legacy draw. */
   private lastCollectedKey = "";

@@ -98,6 +98,34 @@ export type GpuLossReason =
   | "out-of-memory"
   | "internal-error";
 
+export interface GpuNativeHeatmapResidentCell {
+  readonly priceStart: number;
+  readonly value: number;
+  readonly liveEligible: boolean;
+}
+
+export interface GpuNativeHeatmapResidentFrame {
+  readonly syncGeneration: number;
+  readonly tailSyncRevision: number;
+  readonly barCount: number;
+  readonly priceOrigin: number;
+  readonly bucketStep: number;
+  readonly liveBarIndex: number;
+  readonly dataKey: string;
+  readonly view: {
+    readonly offsetX: number;
+    readonly colWidth: number;
+    readonly priceTop: number;
+    readonly pricePerPx: number;
+  };
+  readonly floor: number;
+  readonly ceiling: number;
+  readonly threshold: number;
+  readonly opacity: number;
+  readonly visibleRange: readonly [number, number];
+  readBarCells(barIndex: number): readonly GpuNativeHeatmapResidentCell[];
+}
+
 export interface GpuSurface {
   readonly kind: GpuBackendKind;
   readonly canvas: HTMLCanvasElement;
@@ -110,6 +138,7 @@ export interface GpuSurface {
   supportsNativeHeatmap?(): boolean;
   reserveNativeHeatmapPayload?(logicalBytes: number): { release(): void } | null;
   renderNativeHeatmap?(frame: GpuNativeHeatmapFrame, plot: GpuNativeHeatmapPlot): boolean;
+  renderNativeResidentHeatmap?(frame: GpuNativeHeatmapResidentFrame, plot: GpuNativeHeatmapPlot): boolean;
   disposeNativeHeatmap?(): void;
   requestCapture(): Promise<RgbaFrame>;
   onLost(listener: (reason: GpuLossReason) => void): () => void;

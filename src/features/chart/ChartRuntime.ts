@@ -534,12 +534,11 @@ class ChartRuntimeImpl implements ChartRuntime, ChartInputHost {
           try {
             heatmapFrame = this.prepareHeatmapGpuCells(v, s);
             this.renderer.setShowNotional(this.overlay.showNotional);
-            const isCanvas2dHeatmapActive =
+            const isOrderbookHeatmapActive =
               this.orderbookHeatmap !== null
               && isOrderbookHeatmapMarket(this.state.market)
-              && orderbookHeatmapSettingsSource().settingsFor(this.state.market).mode !== "off"
-              && !this.heatmapGpuCoordinator.isHeatmapTexturePrototypeEnabled();
-            this.renderer.setAllowNativeFootprintText(!isCanvas2dHeatmapActive);
+              && orderbookHeatmapSettingsSource().settingsFor(this.state.market).mode !== "off";
+            this.renderer.setAllowNativeFootprintText(!isOrderbookHeatmapActive);
             this.renderer.renderLayers(v, s, this.renderCoordinator?.getGpuLayerIds() ?? new Set());
             // Density paints above the flushed candle layers and strictly before
             // this GPU callback returns, so the Session's immediate readPixels
