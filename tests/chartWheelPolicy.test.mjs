@@ -133,3 +133,51 @@ test("platform delta scale shrinks pixel deltas", () => {
   const scaled = resolveChartWheelAction({ deltaX: 0, deltaY: -100, deltaScale: 0.5, altKey: false, shiftKey: false });
   assert.ok(Math.abs(scaled.factor - 1.1 ** 0.5) < 1e-12);
 });
+
+test("#283 dualAxis plot wheel resolves symmetric zoom-xy and zoom-xy-pan-x while preserving Alt/Shift/axis overrides", () => {
+  const dualIn = resolveChartWheelAction({
+    deltaX: 0, deltaY: -120, altKey: false, shiftKey: false, target: "plot", dualAxis: true,
+  });
+  const dualOut = resolveChartWheelAction({
+    deltaX: 0, deltaY: 120, altKey: false, shiftKey: false, target: "plot", dualAxis: true,
+  });
+  assert.equal(dualIn.kind, "zoom-xy");
+  assert.equal(dualOut.kind, "zoom-xy");
+  assert.equal(dualIn.factorX, 1.1);
+  assert.ok(Math.abs(dualIn.factorY - 1.15 ** -1) < 1e-12);
+  assert.ok(Math.abs(dualIn.factorX * dualOut.factorX - 1) < 1e-12);
+  assert.ok(Math.abs(dualIn.factorY * dualOut.factorY - 1) < 1e-12);
+
+  // Diagonal trackpad gesture with dualAxis
+  const diag = resolveChartWheelAction({
+    deltaX: 80, deltaY: -100, altKey: false, shiftKey: false, target: "plot", dualAxis: true,
+  });
+  assert.equal(diag.kind, "zoom-xy-pan-x");
+  assert.equal(diag.deltaPx, 40);
+  assert.equal(diag.factorX, 1.1);
+  assert.ok(Math.abs(diag.factorY - 1.15 ** -1) < 1e-12);
+
+  // Pure horizontal trackpad gesture stays pan-x
+  assert.deepEqual(
+    resolveChartWheelAction({ deltaX: 80, deltaY: 0, altKey: false, shiftKey: false, target: "plot", dualAxis: true }),
+    { kind: "pan-x", deltaPx: 40 },
+  );
+
+  // Alt+wheel -> zoom-y only; Shift+wheel -> zoom-x only; price-axis -> zoom-y; time-axis -> zoom-x
+  assert.deepEqual(
+    resolveChartWheelAction({ deltaX: 0, deltaY: -120, altKey: true, shiftKey: false, target: "plot", dualAxis: true }),
+    { kind: "zoom-y", factor: ZOOM_OUT },
+  );
+  assert.deepEqual(
+    resolveChartWheelAction({ deltaX: 0, deltaY: -120, altKey: false, shiftKey: true, target: "plot", dualAxis: true }),
+    { kind: "zoom-x", factor: 1.1 },
+  );
+  assert.deepEqual(
+    resolveChartWheelAction({ deltaX: 0, deltaY: -120, altKey: false, shiftKey: false, target: "price-axis", dualAxis: true }),
+    { kind: "zoom-y", factor: ZOOM_OUT },
+  );
+  assert.deepEqual(
+    resolveChartWheelAction({ deltaX: 0, deltaY: -120, altKey: false, shiftKey: false, target: "time-axis", dualAxis: true }),
+    { kind: "zoom-x", factor: 1.1 },
+  );
+});

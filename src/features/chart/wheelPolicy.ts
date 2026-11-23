@@ -12,16 +12,22 @@ export interface ChartWheelInput {
   deltaScale?: number;
   /** Hit-tested region under the pointer. Defaults to plot for legacy callers. */
   target?: ChartAxisTarget;
+  /** Enables pointer-anchored dual-axis (X + Y) wheel zoom over the Footprint Cluster plot. */
+  dualAxis?: boolean;
 }
 
 export type ChartWheelAction =
   | { kind: "zoom-y"; factor: number }
   | { kind: "zoom-x"; factor: number }
   | { kind: "pan-x"; deltaPx: number }
-  | { kind: "zoom-pan-x"; factor: number; deltaPx: number };
+  | { kind: "zoom-pan-x"; factor: number; deltaPx: number }
+  | { kind: "zoom-xy"; factorX: number; factorY: number }
+  | { kind: "zoom-xy-pan-x"; factorX: number; factorY: number; deltaPx: number };
 
 /** Largest zoom step a single wheel event may apply (one physical notch). */
 const MAX_ZOOM_STEP = 1.1;
+/** Slightly stronger symmetric Y-axis step in Footprint dual-axis zoom so $50 rows reach legible height alongside Bid/Ask width. */
+const MAX_DUAL_AXIS_Y_ZOOM_STEP = 1.15;
 /**
  * Pixel delta that counts as one full zoom step. Mouse wheels report ~100-120px
  * per notch, so they keep the full 10% step; trackpads and pinch gestures emit
@@ -66,6 +72,11 @@ function priceZoomFactor(input: ChartWheelInput): number {
   return zoomFactorFromDelta(normalizeDelta(priceZoomDelta(input), input));
 }
 
+function dualAxisPriceZoomFactor(delta: number, input: ChartWheelInput): number {
+  const step = Math.max(-1, Math.min(1, normalizeDelta(delta, input) / FULL_STEP_DELTA_PX));
+  return step === 0 ? 1 : MAX_DUAL_AXIS_Y_ZOOM_STEP ** step;
+}
+
 function shiftZoomDelta(input: ChartWheelInput): number {
   // Browsers differ here: some keep Shift+wheel in deltaY, others translate it
   // to horizontal deltaX. Prefer deltaY when present so the physical wheel
@@ -107,6 +118,17 @@ export function resolveChartWheelAction(
   const panPx = policy.scroll.mouseWheel && policy.scroll.horizontalWheelPan
     ? normalizeDelta(input.deltaX, input) * HORIZONTAL_PAN_SPEED
     : 0;
+
+  if (
+    input.dualAxis === true
+    && (input.target === undefined || input.target === "plot")
+    && policy.scale.mouseWheel
+    && factor !== 1
+  ) {
+    const factorY = dualAxisPriceZoomFactor(input.deltaY, input);
+    if (panPx !== 0) return { kind: "zoom-xy-pan-x", factorX: factor, factorY, deltaPx: panPx };
+    return { kind: "zoom-xy", factorX: factor, factorY };
+  }
 
   if (panPx !== 0 && factor !== 1) return { kind: "zoom-pan-x", factor, deltaPx: panPx };
   if (panPx !== 0) return { kind: "pan-x", deltaPx: panPx };

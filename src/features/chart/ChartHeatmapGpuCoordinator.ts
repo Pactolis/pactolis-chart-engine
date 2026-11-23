@@ -4,6 +4,7 @@ import type { FootprintSeries } from "../../core/model/footprint.js";
 import type { HeatmapGpuRenderer, HeatmapGpuCellFrame } from "./heatmap/gpu/heatmapGpuRenderer.js";
 import type { OrderbookHeatmapOverlay } from "../orderbook/heatmapOverlay.js";
 import { recordGpuFeatureFallback, setGpuFeaturePath } from "../../core/gpu/gpuDiagnostics.js";
+import { incrementPerformanceCounter } from "../../core/performanceTelemetry.js";
 
 const HEATMAP_GPU_FEATURE = "orderbook-heatmap";
 
