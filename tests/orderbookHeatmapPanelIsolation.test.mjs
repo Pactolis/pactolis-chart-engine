@@ -22,19 +22,20 @@ function makeTestView(width = 800) {
 }
 
 function makeSeries(startTime, count = 5) {
-  const bars = [];
-  for (let i = 0; i < count; i++) {
-    bars.push({
-      t: startTime + i * MINUTE,
-      o: 100_000,
-      h: 100_500,
-      l: 99_500,
-      c: 100_200,
-      v: 100,
-      cells: [],
-    });
-  }
-  return new FootprintSeries({ market: MARKET, timeframe: "1m", intervalMs: MINUTE, priceStep: 25 }, bars);
+  const series = new FootprintSeries({ intervalMs: MINUTE, priceStep: 25 });
+  series.loadBars(Array.from({ length: count }, (_, i) => ({
+    startTime: startTime + i * MINUTE,
+    open: 100_000,
+    high: 100_500,
+    low: 99_500,
+    close: 100_200,
+    volume: 100,
+    delta: 0,
+    count: 0,
+    cells: new Map(),
+    hasRef: true,
+  })));
+  return series;
 }
 
 const mockCtx = {
@@ -179,7 +180,10 @@ test("SCENARIO-CE-HEATMAP-PANEL-ISOLATION: panels sharing a market isolate mode,
       setMode("panel-a", "off");
       assert.equal(subscriptions[0].unsubscribed, true);
       assert.equal(subscriptions[1].unsubscribed, false);
-      assert.equal(overlayA.cachedBarsCount(), 0);
+      assert.equal(overlayA.reservedRasterBytes(), 0);
+      overlayA.draw(mockCtx, view, series, [0, 4]);
+      await flushMicrotasks();
+      assert.equal(fetches.length, 2);
       assert.equal(overlayA.reservedRasterBytes(), 0);
       assert.equal(overlayB.cachedBarsCount(), 1);
     } finally {

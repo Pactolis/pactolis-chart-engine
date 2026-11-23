@@ -263,9 +263,17 @@ export class OrderbookHeatmapOverlay {
       this.lastActiveOnChange = isActive;
 
       if (!isActive) {
-        if (this.dataKey !== "") {
-          this.reset("");
+        if (nextSettings?.mode === "custom") {
+          if (this.dataKey !== "") this.reset("");
+          else this.releaseRasterCache();
         } else {
+          for (const controller of this.inFlight) controller.abort();
+          this.inFlight.clear();
+          for (const [chunkStart, state] of this.chunks) {
+            if (state.status !== "ready") this.chunks.delete(chunkStart);
+          }
+          this.lastErrorCode = undefined;
+          this.lastErrorMessage = undefined;
           this.releaseRasterCache();
         }
         this.syncLiveTailSubscription();
