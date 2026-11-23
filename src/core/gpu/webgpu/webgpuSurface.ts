@@ -64,6 +64,7 @@ export class WebGpuSurface implements GpuSurface {
   private nativeGlyphDisabled = false;
   private nativeHeatmapPipeline: WebGpuNativeHeatmapPipeline | null = null;
   private nativeHeatmapDisabled = false;
+  private lastHeatmapFailureRecoverable = false;
   private readonly quadSink = new WebGpuQuadSink();
   private readonly glyphSink = new WebGpuGlyphSink();
   private lastNativeSceneRenderedText = false;
@@ -355,12 +356,20 @@ export class WebGpuSurface implements GpuSurface {
     }
   }
 
+  wasLastHeatmapFailureRecoverable(): boolean {
+    return this.lastHeatmapFailureRecoverable;
+  }
+
   renderNativeHeatmap(frame: GpuNativeHeatmapFrame, plot: GpuNativeHeatmapPlot): boolean {
+    this.lastHeatmapFailureRecoverable = false;
     const pipeline = this.ensureNativeHeatmapPipeline();
     if (!pipeline) return false;
 
     const targetTexture = this.resolveHeatmapTargetTexture();
-    if (!targetTexture) return false;
+    if (!targetTexture) {
+      this.lastHeatmapFailureRecoverable = true;
+      return false;
+    }
 
     const ok = pipeline.renderFrame(
       targetTexture,
@@ -371,18 +380,26 @@ export class WebGpuSurface implements GpuSurface {
       plot,
     );
     if (!ok) {
-      this.disposeNativeHeatmap();
-      this.nativeHeatmapDisabled = true;
+      if (pipeline.isDisposed()) {
+        this.disposeNativeHeatmap();
+        this.nativeHeatmapDisabled = true;
+      } else {
+        this.lastHeatmapFailureRecoverable = true;
+      }
     }
     return ok;
   }
 
   renderNativeResidentHeatmap(frame: GpuNativeHeatmapResidentFrame, plot: GpuNativeHeatmapPlot): boolean {
+    this.lastHeatmapFailureRecoverable = false;
     const pipeline = this.ensureNativeHeatmapPipeline();
     if (!pipeline) return false;
 
     const targetTexture = this.resolveHeatmapTargetTexture();
-    if (!targetTexture) return false;
+    if (!targetTexture) {
+      this.lastHeatmapFailureRecoverable = true;
+      return false;
+    }
 
     const ok = pipeline.renderResidentFrame(
       targetTexture,
@@ -393,8 +410,12 @@ export class WebGpuSurface implements GpuSurface {
       plot,
     );
     if (!ok) {
-      this.disposeNativeHeatmap();
-      this.nativeHeatmapDisabled = true;
+      if (pipeline.isDisposed()) {
+        this.disposeNativeHeatmap();
+        this.nativeHeatmapDisabled = true;
+      } else {
+        this.lastHeatmapFailureRecoverable = true;
+      }
     }
     return ok;
   }

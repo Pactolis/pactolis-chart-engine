@@ -359,9 +359,9 @@ test("#256 motion raster reuse blits historical overlap, pixel-aligns at fractio
       const [, , , , dx, dy, dw, dh] = h.mainDrawImages[0].args;
       assert.ok(Number.isInteger(dx) && Number.isInteger(dy) && Number.isInteger(dw) && Number.isInteger(dh),
         "destination blit rect is aligned to whole device pixels");
-      // Left strip [0, 10.5] and right strip [390, 800] (including live bar + extension) painted directly
+      // Left strip [0, 10.5] and right strip [390, 800] (no live extension beyond last bar)
       assert.ok(h.mainFillRects.length <= 12, "only exposed strips + live bar are painted, not all 20 bars");
-      assert.ok(h.mainFillRects.some((r) => r.x > 390), "live bar extension painted in right strip");
+      assert.ok(!h.mainFillRects.some((r) => r.x >= 410), "no live bar extension painted in empty right space");
 
       // Zoom 1.25x within [0.5, 2.0] also uses motionReuse
       h.resetCounts();
@@ -454,7 +454,7 @@ test("#256 static live-tail patch clears only live slice when color range stays 
       assert.equal(h.offClearRects.length, 1);
       // liveX = 4 * 20 = 80 -> clears only [80, 800], NOT [0, 800]
       assert.deepEqual(h.offClearRects[0], { x: 80, y: 0, w: 720, h: 400 });
-      assert.equal(h.offFillRects.length, 4, "repaints only live bar (2 cells) + live extensions (2 cells)");
+      assert.equal(h.offFillRects.length, 2, "repaints only live bar (2 cells, no right extension)");
       assert.equal(h.mainDrawImages.length, 1);
 
       // Now switch to auto scaleMode and push a giant live wall that shifts P96 ceiling (> 1e-6) -> full rebuild!

@@ -23,6 +23,7 @@ import type { ChartSession } from "./ChartSession.js";
 import type { ChartDataPipeline } from "./ChartDataPipeline.js";
 import type { TimeScaleViewportController } from "../controllers/timeScaleViewportController.js";
 import type { ChartPanelState } from "../../core/chartPanelState.js";
+import { resolveFootprintWheelZoomMode, settings } from "../../core/settings.js";
 import { isDrawingMagnetTransientActive, setDrawingMagnetTransient } from "./drawingInteractionState.js";
 import { executeChartAction, type ChartCommandServices, type ChartCommandTarget } from "./chartCommands.js";
 import { ChartGestureController, type ChartPanGesture, type IndicatorScaleGesture } from "./ChartGestureController.js";
@@ -272,6 +273,16 @@ function attachChartInput(canvas: HTMLCanvasElement, crosshair: Crosshair, host:
     }
     const hitTarget = hitTestChartAxis(view, localX, localY);
     const target = gestures.pan && gestures.pan.target !== "corner-axis" ? gestures.pan.target : hitTarget;
+    const inMainPlotY = localY >= view.area.top && localY <= view.area.top + view.area.height;
+    const effectiveChartType = host.state.chartType ?? settings.chartType;
+    const effectiveWheelZoomMode = resolveFootprintWheelZoomMode(
+      host.state.footprintWheelZoomMode ?? settings.footprintWheelZoomMode,
+    );
+    const dualAxis =
+      target === "plot"
+      && inMainPlotY
+      && effectiveChartType === "footprint"
+      && effectiveWheelZoomMode === "dual";
     const action = resolveChartWheelAction({
       deltaX: e.deltaX,
       deltaY: e.deltaY,
@@ -280,6 +291,7 @@ function attachChartInput(canvas: HTMLCanvasElement, crosshair: Crosshair, host:
       deltaMode: e.deltaMode,
       deltaScale: wheelDeltaScale(),
       target,
+      dualAxis,
     }, interactionPolicy);
 
     if (action.kind === "zoom-y") {
@@ -287,6 +299,20 @@ function attachChartInput(canvas: HTMLCanvasElement, crosshair: Crosshair, host:
       host.view.setPriceAutoScale(false);
       rebaseActiveGestureAfterWheel(e, localX, localY);
       session.invalidate(ChartChange.Viewport);
+      return;
+    }
+
+    if (action.kind === "zoom-xy" || action.kind === "zoom-xy-pan-x") {
+      const total = host.pipeline.series.length;
+      view.setPriceAutoScale(false);
+      host.timeViewport.applyWheelZoom(action.factorX, localX, total);
+      if (action.kind === "zoom-xy-pan-x") {
+        host.timeViewport.applyWheelPan(action.deltaPx, total);
+      }
+      view.zoomY(action.factorY, localY);
+      rebaseActiveGestureAfterWheel(e, localX, localY);
+      session.invalidate(ChartChange.Viewport);
+      host.emitVisibleRange();
       return;
     }
 

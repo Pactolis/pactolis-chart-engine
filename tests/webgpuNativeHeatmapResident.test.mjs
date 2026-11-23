@@ -146,7 +146,7 @@ test("Resident heatmap constants and WGSL match 16 B/cell + 64 B uniform + 4-sto
   assert.match(NATIVE_RESIDENT_HEATMAP_WGSL, /priceBinRel:\s*f32/);
   assert.match(NATIVE_RESIDENT_HEATMAP_WGSL, /value:\s*f32/);
   assert.match(NATIVE_RESIDENT_HEATMAP_WGSL, /flags:\s*u32/);
-  assert.match(NATIVE_RESIDENT_HEATMAP_WGSL, /alphaScale\s*=\s*0\.45/);
+  assert.match(NATIVE_RESIDENT_HEATMAP_WGSL, /let\s+alphaScale\s*=\s*1\.0/);
   assert.match(NATIVE_RESIDENT_HEATMAP_WGSL, /vec3<f32>\(18\.0,\s*38\.0,\s*84\.0\)/);
   assert.match(NATIVE_RESIDENT_HEATMAP_WGSL, /vec3<f32>\(254\.0,\s*240\.0,\s*178\.0\)/);
 });
@@ -205,7 +205,7 @@ test("WebGpuNativeHeatmapPipeline.renderResidentFrame performs 0 B data upload o
     let snap = snapshotPerformanceTelemetry();
     assert.equal(snap.counters["gpu.native.heatmap.dataBytes"], 4 * 16);
     assert.equal(snap.counters["gpu.native.heatmap.uniformBytes"], 64);
-    assert.equal(mock.renderPasses[0].draws[0].vertexCount, 12);
+    assert.equal(mock.renderPasses[0].draws[0].vertexCount, 6);
     assert.equal(mock.renderPasses[0].draws[0].instanceCount, 4);
 
     // Check packed bytes in storage buffer (cell 3 is live barIndex 2, rel price 150, value 50, flags 1)

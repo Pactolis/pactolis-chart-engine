@@ -293,6 +293,7 @@ export class View {
     range.scaleAroundCenter(factor);
     this.setScaleRange(range);
     this.priceTop = sAtAnchor + (anchorY - this.area.top) * this.pricePerPx;
+    this.priceScale.setPriceRange(this.scaleRange());
   }
 
   /**

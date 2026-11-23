@@ -14,6 +14,13 @@ export type FootprintCellData =
 export type TpoProfilePeriod = "daily" | "weekly" | "monthly" | "visible";
 export type TpoBracketSize = "auto" | "5m" | "15m" | "30m" | "1h";
 export type MagnetMode = "weak" | "strong";
+export type FootprintWheelZoomMode = "horizontal" | "dual";
+
+export const DEFAULT_FOOTPRINT_WHEEL_ZOOM_MODE: FootprintWheelZoomMode = "dual";
+
+export function resolveFootprintWheelZoomMode(value: unknown): FootprintWheelZoomMode {
+  return value === "horizontal" ? "horizontal" : DEFAULT_FOOTPRINT_WHEEL_ZOOM_MODE;
+}
 
 /**
  * Per-chart görünüm ayarlarının çözülmüş (effective) hali. Alan adları
@@ -85,6 +92,8 @@ export interface DisplaySettings {
   magnet: boolean;
   /** Magnet sensitivity mode: "weak" snaps within threshold, "strong" forces snap to nearest level. Default "weak". */
   magnetMode: MagnetMode;
+  /** Wheel behavior over Footprint Cluster plot: "dual" zooms both X & Y around pointer; "horizontal" zooms X only. */
+  footprintWheelZoomMode: FootprintWheelZoomMode;
 }
 
 export const DEFAULT_SCALE_MARGINS = { top: 0.2, bottom: 0.1 } as const;
@@ -116,4 +125,5 @@ export const settings: DisplaySettings = {
   scaleMarginBottom: DEFAULT_SCALE_MARGINS.bottom,
   magnet: false,
   magnetMode: "weak",
+  footprintWheelZoomMode: DEFAULT_FOOTPRINT_WHEEL_ZOOM_MODE,
 };

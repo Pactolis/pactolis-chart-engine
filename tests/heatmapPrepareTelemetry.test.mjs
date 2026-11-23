@@ -79,7 +79,7 @@ test("an active production frame records one prepare sample and the frame is unc
     const snapshot = snapshotPerformanceTelemetry().metrics[METRIC];
     assert.ok(Number.isFinite(snapshot.p95Ms) && snapshot.p95Ms >= 0 && snapshot.maxMs >= snapshot.minMs);
     assert.equal(on.main.length, BARS * WALLS.length);
-    assert.equal(on.extension.length, WALLS.length);
+    assert.equal(on.extension.length, 0);
     const shape = ({ main, extension, ceiling, threshold, dataKey }) => ({ main, extension, ceiling, threshold, dataKey });
     assert.deepEqual(shape(on), shape(off));
   } finally {

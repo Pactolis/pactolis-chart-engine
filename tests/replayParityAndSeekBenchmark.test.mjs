@@ -603,7 +603,7 @@ test("replay parity matrix row: Orderbook heatmap suppresses the live extension 
     overlay.prepareGpuCells(view, series, [0, series.length - 1]);
     overlay.applyLiveTailBars([liveHeatmapBar]);
     const liveBeforeReplay = overlay.prepareGpuCells(view, series, [0, series.length - 1]);
-    assert.equal(liveBeforeReplay.extension.length, 1, "live chart draws the final bar's right-edge extension");
+    assert.equal(liveBeforeReplay.extension.length, 0, "live chart does not draw right-edge extension (#280)");
 
     coordinator.start();
     assert.equal(coordinator.isActive(), true);
@@ -615,7 +615,7 @@ test("replay parity matrix row: Orderbook heatmap suppresses the live extension 
     coordinator.exit({ reloadHistory: false });
     assert.equal(coordinator.isActive(), false);
     const liveAfterReplay = overlay.prepareGpuCells(view, series, [0, series.length - 1]);
-    assert.equal(liveAfterReplay.extension.length, 1, "leaving replay restores the ordinary live extension");
+    assert.equal(liveAfterReplay.extension.length, 0, "right-edge extension stays disabled after replay (#280)");
   } finally {
     overlay.dispose();
     coordinator.exit({ reloadHistory: false });

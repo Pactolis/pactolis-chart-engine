@@ -163,15 +163,15 @@ test("#262 raising threshold filters cached below-threshold cells on draw, live 
     await new Promise((resolve) => setTimeout(resolve, 20));
     assert.equal(requests.length, 1);
 
-    // Threshold = 10 BTC: all 3 levels (including exact value === 10) render (3 bars * 3 + 3 live extensions = 12 rects)
+    // Threshold = 10 BTC: all 3 levels (including exact value === 10) render (3 bars * 3 = 9 rects, no extension)
     ctx.fills.length = 0;
     overlay.draw(ctx, view, series, [0, 2]);
-    assert.equal(ctx.fills.length, 12, "exact threshold cell (10 BTC) is included");
+    assert.equal(ctx.fills.length, 9, "exact threshold cell (10 BTC) is included");
 
     const gpuAt10 = overlay.prepareGpuCells(view, series, [0, 2], () => ({ release() {} }));
     assert.ok(gpuAt10);
     assert.equal(gpuAt10.main.length, 9);
-    assert.equal(gpuAt10.extension.length, 3);
+    assert.equal(gpuAt10.extension.length, 0);
     assert.equal(gpuAt10.floor, 10);
 
     // Raise threshold to 99_999 BTC without refetching: 10 BTC & 50 BTC disappear in the same frame!
@@ -179,20 +179,20 @@ test("#262 raising threshold filters cached below-threshold cells on draw, live 
     ctx.fills.length = 0;
     overlay.draw(ctx, view, series, [0, 2]);
     assert.equal(requests.length, 1, "raising threshold must not trigger any refetch");
-    assert.equal(ctx.fills.length, 4, "only the 100_000 BTC cell (3 bars + 1 live extension) remains");
+    assert.equal(ctx.fills.length, 3, "only the 100_000 BTC cell (3 bars, no extension) remains");
 
     // Reserved GPU path (both auto and fixed scaleMode) also excludes below-threshold cells
     const gpuAt99999Auto = overlay.prepareGpuCells(view, series, [0, 2], () => ({ release() {} }));
     assert.ok(gpuAt99999Auto);
     assert.equal(gpuAt99999Auto.main.length, 3);
-    assert.equal(gpuAt99999Auto.extension.length, 1);
+    assert.equal(gpuAt99999Auto.extension.length, 0);
     assert.ok(gpuAt99999Auto.main.every((c) => c.value >= 99_999));
 
     scaleMode = "fixed";
     const gpuAt99999Fixed = overlay.prepareGpuCells(view, series, [0, 2], () => ({ release() {} }));
     assert.ok(gpuAt99999Fixed);
     assert.equal(gpuAt99999Fixed.main.length, 3);
-    assert.equal(gpuAt99999Fixed.extension.length, 1);
+    assert.equal(gpuAt99999Fixed.extension.length, 0);
 
     // Fresh overlay loaded directly at 99_999 BTC produces identical GPU frame geometry/ceiling as hot cache
     const freshOverlay = new OrderbookHeatmapOverlay({
@@ -220,7 +220,7 @@ test("#262 raising threshold filters cached below-threshold cells on draw, live 
     ctx.fills.length = 0;
     overlay.draw(ctx, view, series, [0, 2]);
     assert.equal(requests.length, 1, "lowering back to fullThreshold=10 must not refetch");
-    assert.equal(ctx.fills.length, 12, "cached 10 BTC and 50 BTC cells return immediately");
+    assert.equal(ctx.fills.length, 9, "cached 10 BTC and 50 BTC cells return immediately");
   } finally {
     overlay.dispose();
   }
@@ -258,7 +258,7 @@ test("#262 threshold=0 preserves zero-intensity cells and hover shows raw below-
     await new Promise((resolve) => setTimeout(resolve, 20));
     ctx.fills.length = 0;
     overlay.draw(ctx, view, series, [0, 0]);
-    assert.equal(ctx.fills.length, 6, "threshold=0 keeps 0-intensity cell (3 cells * bar+extension)");
+    assert.equal(ctx.fills.length, 3, "threshold=0 keeps 0-intensity cell (3 cells, no extension)");
 
     threshold = 5_000;
     const texts = [];

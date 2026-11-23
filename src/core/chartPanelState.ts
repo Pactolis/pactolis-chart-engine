@@ -2,7 +2,7 @@
 
 import type { IndicatorInstance } from "./indicatorTypes.js";
 import type { OrderbookHeatmapMode } from "./orderbookHeatmap/settings.js";
-import type { FootprintCellData, TpoProfilePeriod, TpoBracketSize } from "./settings.js";
+import type { FootprintCellData, FootprintWheelZoomMode, TpoProfilePeriod, TpoBracketSize } from "./settings.js";
 import type { AnalysisPeriod } from "./analysis/periods.js";
 import type { ReferenceLevelFamily } from "./analysis/referenceLevels.js";
 import type { PreviousWeekStrategyId } from "./analysis/previousWeekStrategy.js";
@@ -29,6 +29,8 @@ export interface ChartPanelState {
   cellNumbers?: boolean;
   poc?: boolean;
   stackedImbalance?: boolean;
+  /** Per-panel Footprint Cluster mouse-wheel zoom mode ("dual" | "horizontal"). */
+  footprintWheelZoomMode?: FootprintWheelZoomMode;
   /** Per-panel orderbook heatmap mode (frontend #1123). */
   orderbookHeatmapMode?: OrderbookHeatmapMode;
   /** Per-chart automatic-object visibility. Added in workspace schema v14. */

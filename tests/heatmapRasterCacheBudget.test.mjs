@@ -207,7 +207,7 @@ test("per-chart budget fallback paints directly without caching and releases pri
       assert.equal(s1.createCanvasCalls, 0, "over-chart-budget frame must not create offscreen canvas");
       assert.equal(s1.drawImageCount, 0);
       assert.equal(s1.offFillRectCalls, 0);
-      assert.equal(s1.mainFillRectCalls, 4, "over-budget fallback still draws all cells directly (bar + live tail)");
+      assert.equal(s1.mainFillRectCalls, 2, "over-budget fallback still draws all cells directly (no right extension)");
       assert.equal(overlay.reservedRasterBytes(), 0);
       assert.equal(getHeatmapCpuRasterModuleReservedBytes(), 0);
       assert.equal(
@@ -240,7 +240,7 @@ test("per-chart budget fallback paints directly without caching and releases pri
       assert.equal(createdCanvas.height, 0, "over-budget transition zeroes previous canvas height");
       assert.equal(overlay.reservedRasterBytes(), 0);
       assert.equal(getHeatmapCpuRasterModuleReservedBytes(), 0);
-      assert.equal(harness.stats().mainFillRectCalls, 4);
+      assert.equal(harness.stats().mainFillRectCalls, 2);
     });
   } finally {
     for (const overlay of overlays) overlay.dispose();
@@ -314,7 +314,7 @@ test("module budget caps N concurrent charts (8+ realms) and frees slots on hide
         assert.equal(heavyOverlays[i].reservedRasterBytes(), 0, `chart ${i} falls back cleanly past 128 MiB`);
         assert.equal(heavyHarnesses[i].stats().createCanvasCalls, 0);
         assert.equal(heavyHarnesses[i].stats().drawImageCount, 0);
-        assert.equal(heavyHarnesses[i].stats().mainFillRectCalls, 4);
+        assert.equal(heavyHarnesses[i].stats().mainFillRectCalls, 2);
       }
       assert.equal(getHeatmapCpuRasterModuleReservedBytes(), 4 * chartBytes);
 
@@ -413,7 +413,7 @@ test("resize updates net reserved bytes accurately and drops old buffer if resiz
       assert.equal(canvasA.height, 0);
       assert.equal(overlayA.reservedRasterBytes(), 0);
       assert.equal(getHeatmapCpuRasterModuleReservedBytes(), 128_000_000);
-      assert.equal(hA.stats().mainFillRectCalls, 4);
+      assert.equal(hA.stats().mainFillRectCalls, 2);
     });
   } finally {
     for (const overlay of overlays) overlay.dispose();
@@ -498,7 +498,7 @@ test("empty visible cells, pull-mode off, failed 2d context, and repeated releas
       assert.equal(getHeatmapCpuRasterModuleReservedBytes(), anchorBytes);
       assert.equal(hBroken.stats().offscreenCanvases[0].width, 0);
       assert.equal(hBroken.stats().offscreenCanvases[0].height, 0);
-      assert.equal(hBroken.stats().mainFillRectCalls, 4);
+      assert.equal(hBroken.stats().mainFillRectCalls, 2);
 
       // Clean up remaining anchor + broken
       brokenOverlay.dispose();
@@ -650,7 +650,7 @@ test("hidden panel/tab visibility transitions release rasterCache without double
       overlay.draw(h.ctx, view, series, [0, 0]);
       assert.equal(overlay.reservedRasterBytes(), 0);
       assert.equal(h.stats().drawImageCount, 0);
-      assert.equal(h.stats().mainFillRectCalls, 4);
+      assert.equal(h.stats().mainFillRectCalls, 2);
       assert.equal(getHeatmapCpuRasterModuleReservedBytes(), anchorBytes);
 
       h.dispatchVisibility("visible");
@@ -669,7 +669,7 @@ test("hidden panel/tab visibility transitions release rasterCache without double
       h.resetPaintCounters();
       overlay.draw(h.ctx, view, series, [0, 0]);
       assert.equal(overlay.reservedRasterBytes(), 0);
-      assert.equal(h.stats().mainFillRectCalls, 4);
+      assert.equal(h.stats().mainFillRectCalls, 2);
 
       h.triggerIntersection(true);
       h.resetPaintCounters();
@@ -684,7 +684,7 @@ test("hidden panel/tab visibility transitions release rasterCache without double
       overlay.draw(h.ctx, view, series, [0, 0]);
       assert.equal(overlay.reservedRasterBytes(), 0);
       assert.equal(getHeatmapCpuRasterModuleReservedBytes(), anchorBytes);
-      assert.equal(h.stats().mainFillRectCalls, 4);
+      assert.equal(h.stats().mainFillRectCalls, 2);
 
       h.setConnected(true);
       h.resetPaintCounters();
@@ -704,7 +704,7 @@ test("hidden panel/tab visibility transitions release rasterCache without double
         (afterDirect["chart.cpu.heatmap.raster.direct"] ?? 0) - (beforeDirect["chart.cpu.heatmap.raster.direct"] ?? 0),
         1,
       );
-      assert.equal(h.stats().mainFillRectCalls, 4);
+      assert.equal(h.stats().mainFillRectCalls, 2);
       assert.equal(h.stats().drawImageCount, 0);
 
       overlay.setRasterCacheDisabledForTest(false);
