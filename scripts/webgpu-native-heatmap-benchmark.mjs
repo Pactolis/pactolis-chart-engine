@@ -107,6 +107,8 @@ async function main() {
     "tests/browser/webgpu-native-heatmap.spec.ts",
     "--project=default",
     "--workers=1",
+    "--grep",
+    "40k-cell resident vs immediate heatmap benchmark",
   ], {
     cwd: ROOT,
     env: {
@@ -165,6 +167,7 @@ async function main() {
   await writeFile(jsonPath, `${JSON.stringify(report, null, 2)}\n`, "utf8");
   await writeFile(mdPath, `${formatWebGpuHeatmapMarkdown(report)}\n`, "utf8");
 
+  console.log(`hardwareValid=${Boolean(report.hardwareValid)}`);
   console.log(`decision=${report.assessment?.decision ?? "unknown"}`);
   console.log(`json=${jsonPath}`);
   console.log(`markdown=${mdPath}`);
