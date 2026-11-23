@@ -39,6 +39,32 @@ test("#302: stationary live-tail update resolves exact Auto P96 without rescanni
     }
   }
 
+  // 1b. Small-array & duplicate-element edge-case parity (including k=0 boundary)
+  for (const [aArr, bArr] of [
+    [[10], [20]],
+    [[20], [10]],
+    [[], [10, 40]],
+    [[10, 40], []],
+    [[15, 15], [15, 30, 30]],
+  ]) {
+    const a = new Float64Array(aArr);
+    const b = new Float64Array(bArr);
+    const all = new Float64Array([...aArr, ...bArr]);
+    for (const contrast of ["low", "medium", "high"]) {
+      const ref = resolveHeatmapColorRange({ values: all, threshold: 0, scaleMode: "auto", contrast });
+      const inc = resolveHeatmapColorRangeFromTwoSorted({
+        histSorted: a,
+        histCount: a.length,
+        liveSorted: b,
+        liveCount: b.length,
+        threshold: 0,
+        scaleMode: "auto",
+        contrast,
+      });
+      assert.deepEqual(inc, ref, `parity failed for a=${JSON.stringify(aArr)} b=${JSON.stringify(bArr)} contrast=${contrast}`);
+    }
+  }
+
   // 2. Stationary viewport live-tail updates scan only the live bar's cells
   let prevSource = null;
   try { prevSource = orderbookHeatmapSettingsSource(); } catch {}

@@ -431,7 +431,7 @@ function kthOfTwoSorted(
 ): number {
   if (lenA > lenB) return kthOfTwoSorted(b, lenB, a, lenA, k);
   let lo = Math.max(0, k - lenB);
-  let hi = Math.min(lenA, k + 1);
+  let hi = Math.min(lenA, k);
   while (lo <= hi) {
     const cutA = (lo + hi) >> 1;
     const cutB = k - cutA;
