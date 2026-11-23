@@ -293,6 +293,8 @@ async function measureHeatmapMode({
     const r: any = getChartRuntime(id);
     const s = r.pipeline.series;
     r.updateState({ ...r.getState(), chartType: "candlestick", scaleMode: "linear" });
+    r.invalidate();
+    await r.session.captureCompositePng();
     r.view.colWidth = Math.max(2, Math.floor(r.view.area.width / fitColumns));
     r.view.setPriceAutoScale(false);
     r.view.pricePerPx = 50 / 20;
@@ -323,7 +325,7 @@ async function measureHeatmapMode({
     { timeout: 30_000 },
   ).toBe(true);
 
-  const measured = await page.evaluate(async ({ id, panFrames, zoomFrames, residentEnabled, checkFallbackAndLayerOrder }) => {
+  const measured = await page.evaluate(async ({ id, fitColumns, panFrames, zoomFrames, residentEnabled, checkFallbackAndLayerOrder }) => {
     const { getChartRuntime } = await import("/harness/chart.ts");
     const { getGpuDiagnostics } = await import("/src/core/gpu/gpuDiagnostics.ts");
     const telemetry = await import("/src/core/performanceTelemetry.ts");
@@ -343,6 +345,12 @@ async function measureHeatmapMode({
     const adapter = adapterObj ? await readWebGpuAdapterIdentity(adapterObj) : null;
 
     const r: any = getChartRuntime(id);
+    const s = r.pipeline.series;
+    r.view.colWidth = Math.max(2, Math.floor(r.view.area.width / fitColumns));
+    r.view.setPriceAutoScale(false);
+    r.view.pricePerPx = 50 / 20;
+    r.view.priceTop = 61_500;
+    r.view.offsetX = Math.floor(r.view.area.width - (s.length + 2) * r.view.colWidth);
     // Single static capture before timed loops for warm-up and parity baseline.
     r.invalidate();
     const staticCapture = await r.session.captureCompositePng();
@@ -436,6 +444,7 @@ async function measureHeatmapMode({
     };
   }, {
     id,
+    fitColumns: fixture.fitColumns,
     panFrames: fixture.panFrames,
     zoomFrames: fixture.zoomFrames,
     residentEnabled,
