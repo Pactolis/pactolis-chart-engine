@@ -10,8 +10,8 @@ export const WEBGPU_HEATMAP_FIXTURE = Object.freeze({
   basePrice: 60_000,
 });
 
-export const WEBGPU_HEATMAP_MODES = Object.freeze(["immediate", "resident"]);
-export const WEBGPU_HEATMAP_SCENARIOS = Object.freeze(["pan", "zoom", "live", "live-rollover"]);
+export const WEBGPU_HEATMAP_MODES = Object.freeze(["canvas2d", "webgpu-native"]);
+export const WEBGPU_HEATMAP_SCENARIOS = Object.freeze(["pan", "zoom"]);
 
 function parsePositiveInt(raw, fallback, min, max, label) {
   if (raw === undefined || raw === null || raw === "") return fallback;
@@ -22,12 +22,20 @@ function parsePositiveInt(raw, fallback, min, max, label) {
   return n;
 }
 
-export function resolveWebGpuHeatmapFixture({ barCount, cellsPerBar, fitColumns } = {}) {
+export function resolveWebGpuHeatmapFixture({
+  barCount,
+  cellsPerBar,
+  fitColumns,
+  panFrames,
+  zoomFrames,
+} = {}) {
   return Object.freeze({
     ...WEBGPU_HEATMAP_FIXTURE,
     barCount: parsePositiveInt(barCount, WEBGPU_HEATMAP_FIXTURE.barCount, 100, 10_000, "barCount"),
     cellsPerBar: parsePositiveInt(cellsPerBar, WEBGPU_HEATMAP_FIXTURE.cellsPerBar, 5, 200, "cellsPerBar"),
     fitColumns: parsePositiveInt(fitColumns, WEBGPU_HEATMAP_FIXTURE.fitColumns, 20, 500, "fitColumns"),
+    panFrames: parsePositiveInt(panFrames, WEBGPU_HEATMAP_FIXTURE.panFrames, 2, 200, "panFrames"),
+    zoomFrames: parsePositiveInt(zoomFrames, WEBGPU_HEATMAP_FIXTURE.zoomFrames, 2, 200, "zoomFrames"),
   });
 }
 
@@ -94,39 +102,110 @@ export function summarizeMetricValues(values) {
   };
 }
 
+function summarizeScenarioComparison(canvas2dScenario, residentScenario) {
+  if (!canvas2dScenario && !residentScenario) return null;
+  const cFrameP95 = canvas2dScenario?.frame?.p95Ms ?? 0;
+  const rFrameP95 = residentScenario?.frame?.p95Ms ?? 0;
+  const cHeatmapP95 = canvas2dScenario?.heatmap?.p95Ms ?? 0;
+  const rHeatmapP95 = residentScenario?.heatmap?.p95Ms ?? 0;
+  return {
+    canvas2d: canvas2dScenario ?? null,
+    resident: residentScenario ?? null,
+    frameP95Speedup: cFrameP95 > 0 && rFrameP95 > 0 ? round4(cFrameP95 / rFrameP95) : null,
+    heatmapP95Speedup: cHeatmapP95 > 0 && rHeatmapP95 > 0 ? round4(cHeatmapP95 / rHeatmapP95) : null,
+  };
+}
+
 export function evaluateWebGpuHeatmapAssessment({
   hardwareValid = false,
-  residentZeroPanZoomUpload = false,
-  residentPrepareCallsDuringPanZoom = -1,
+  residentZeroPanZoomUpload,
+  residentPrepareCallsDuringPanZoom,
   fallbacks = 0,
   scenarios = {},
+  ab = null,
+  parity = null,
 } = {}) {
+  const derivedZeroUpload = residentZeroPanZoomUpload !== undefined
+    ? Boolean(residentZeroPanZoomUpload)
+    : Boolean(ab?.resident?.pan?.dataBytes === 0 && ab?.resident?.zoom?.dataBytes === 0);
+  const derivedPrepareCalls = residentPrepareCallsDuringPanZoom !== undefined
+    ? residentPrepareCallsDuringPanZoom
+    : ((ab?.resident?.pan?.prepareCount ?? 0) + (ab?.resident?.zoom?.prepareCount ?? 0));
+
+  const abSummary = ab
+    ? {
+        pan: summarizeScenarioComparison(ab.canvas2d?.pan, ab.resident?.pan),
+        zoom: summarizeScenarioComparison(ab.canvas2d?.zoom, ab.resident?.zoom),
+      }
+    : null;
+
   const checks = [];
   if (!hardwareValid) checks.push("non-hardware-adapter");
-  if (!residentZeroPanZoomUpload) checks.push("pan-zoom-data-upload-nonzero");
-  if (residentPrepareCallsDuringPanZoom !== 0) checks.push("resident-called-prepareReservedGpuCells");
+  if (!derivedZeroUpload) checks.push("pan-zoom-data-upload-nonzero");
+  if (derivedPrepareCalls !== 0) checks.push("resident-called-prepareReservedGpuCells");
   if (fallbacks > 0) checks.push("runtime-fallbacks-observed");
+  if (parity && typeof parity.matchRatio === "number" && parity.matchRatio < 0.98) {
+    checks.push("parity-below-threshold");
+  }
   const decision = checks.length === 0 ? "PASS" : "INVESTIGATE";
-  return { decision, reasons: checks, scenarios };
+  return { decision, reasons: checks, scenarios, ab: abSummary, parity };
+}
+
+function fmtMs(value) {
+  return typeof value === "number" && Number.isFinite(value) ? value.toFixed(3) : "n/a";
+}
+
+function fmtSpeedup(value) {
+  return typeof value === "number" && Number.isFinite(value) ? `${value.toFixed(2)}x` : "n/a";
 }
 
 export function formatWebGpuHeatmapMarkdown(report) {
+  const adapter = report.adapter ?? {};
   const lines = [
     `# WebGPU Native Resident Heatmap Benchmark (#265)`,
     ``,
     `- **Run ID:** ${report.runId ?? "n/a"}`,
     `- **Created At:** ${report.createdAt ?? "n/a"}`,
     `- **Fixture:** ${report.fixture?.barCount ?? 0} bars x ${report.fixture?.cellsPerBar ?? 0} cells = ${(report.fixture?.barCount ?? 0) * (report.fixture?.cellsPerBar ?? 0)} cells`,
-    `- **Adapter:** ${report.adapter?.description ?? report.adapter?.vendor ?? "unavailable"} (${report.adapterClass ?? "unknown"})`,
+    `- **Adapter:** ${adapter.description ?? adapter.vendor ?? "unavailable"} (fallback: ${adapter.isFallbackAdapter ?? "unknown"})`,
     `- **Hardware Valid:** ${Boolean(report.hardwareValid)}`,
     `- **Decision:** ${report.assessment?.decision ?? "UNKNOWN"}`,
+    `- **Reasons:** ${(report.assessment?.reasons ?? []).join(", ") || "none"}`,
     ``,
     `## Pan / Zoom Upload & CPU Prepare`,
     ``,
     `- Resident pan/zoom dataBytes: ${report.residentPanZoomDataBytes ?? "n/a"}`,
     `- Resident pan/zoom uniformBytes: ${report.residentPanZoomUniformBytes ?? "n/a"}`,
     `- Resident pan/zoom prepare.ms count: ${report.residentPanZoomPrepareCount ?? "n/a"}`,
-    `- Immediate pan/zoom data upload / frame: ${report.immediatePanZoomUploadBytes ?? "n/a"}`,
+    `- Canvas2D vs WebGPU-Native Parity: ${report.parity?.matchRatio !== undefined ? `${(report.parity.matchRatio * 100).toFixed(2)}% (nonBg=${report.parity.nonBg ?? 0})` : "n/a"}`,
   ];
+
+  const abSummary = report.assessment?.ab;
+  if (abSummary) {
+    lines.push(
+      ``,
+      `## A/B Comparison (\`canvas2d\` vs \`webgpu-native\`)`,
+      ``,
+      `| Scenario | Path | Frame p50 (ms) | Frame p95 (ms) | Frame p95 Speedup | Heatmap p50 (ms) | Heatmap p95 (ms) | Heatmap p95 Speedup | rAF Missed | Data Upload (B) | Uniform Upload (B) | Prepare Count |`,
+      `| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |`,
+    );
+    for (const scenarioName of WEBGPU_HEATMAP_SCENARIOS) {
+      const entry = abSummary[scenarioName];
+      if (!entry) continue;
+      if (entry.canvas2d) {
+        const c = entry.canvas2d;
+        lines.push(
+          `| ${scenarioName} | canvas2d | ${fmtMs(c.frame?.p50Ms)} | ${fmtMs(c.frame?.p95Ms)} | baseline | ${fmtMs(c.heatmap?.p50Ms)} | ${fmtMs(c.heatmap?.p95Ms)} | baseline | ${c.rafMissed ?? 0} | ${c.dataBytes ?? 0} | ${c.uniformBytes ?? 0} | ${c.prepareCount ?? 0} |`,
+        );
+      }
+      if (entry.resident) {
+        const r = entry.resident;
+        lines.push(
+          `| ${scenarioName} | webgpu-native | ${fmtMs(r.frame?.p50Ms)} | ${fmtMs(r.frame?.p95Ms)} | ${fmtSpeedup(entry.frameP95Speedup)} | ${fmtMs(r.heatmap?.p50Ms)} | ${fmtMs(r.heatmap?.p95Ms)} | ${fmtSpeedup(entry.heatmapP95Speedup)} | ${r.rafMissed ?? 0} | ${r.dataBytes ?? 0} | ${r.uniformBytes ?? 0} | ${r.prepareCount ?? 0} |`,
+        );
+      }
+    }
+  }
+
   return lines.join("\n");
 }

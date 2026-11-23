@@ -514,3 +514,71 @@ test("ChartHeatmapGpuCoordinator and heatmapOverlay have zero static core/gpu/we
     assert.doesNotMatch(src, /from\s+["'][^"']*webgpu\//, `${rel} must not statically import core/gpu/webgpu/*`);
   }
 });
+
+test("evaluateWebGpuHeatmapAssessment and formatWebGpuHeatmapMarkdown format A/B comparison table cleanly", async () => {
+  const {
+    evaluateWebGpuHeatmapAssessment,
+    formatWebGpuHeatmapMarkdown,
+  } = await import("../harness/webgpuNativeHeatmapBenchmark.mjs");
+
+  const ab = {
+    canvas2d: {
+      pan: {
+        frame: { count: 40, p50Ms: 12, p95Ms: 18, p99Ms: 20, meanMs: 13, maxMs: 21 },
+        heatmap: { count: 40, p50Ms: 8, p95Ms: 12, p99Ms: 14, meanMs: 9, maxMs: 15 },
+        rafMissed: 6,
+        dataBytes: 0,
+        uniformBytes: 0,
+        prepareCount: 0,
+      },
+      zoom: {
+        frame: { count: 30, p50Ms: 14, p95Ms: 20, p99Ms: 22, meanMs: 15, maxMs: 23 },
+        heatmap: { count: 30, p50Ms: 9, p95Ms: 13, p99Ms: 15, meanMs: 10, maxMs: 16 },
+        rafMissed: 5,
+        dataBytes: 0,
+        uniformBytes: 0,
+        prepareCount: 0,
+      },
+    },
+    resident: {
+      pan: {
+        frame: { count: 40, p50Ms: 2, p95Ms: 3, p99Ms: 4, meanMs: 2.2, maxMs: 4.5 },
+        heatmap: { count: 40, p50Ms: 0.4, p95Ms: 0.6, p99Ms: 0.8, meanMs: 0.45, maxMs: 0.9 },
+        rafMissed: 0,
+        dataBytes: 0,
+        uniformBytes: 2560,
+        prepareCount: 0,
+      },
+      zoom: {
+        frame: { count: 30, p50Ms: 2.1, p95Ms: 3.2, p99Ms: 4.1, meanMs: 2.3, maxMs: 4.4 },
+        heatmap: { count: 30, p50Ms: 0.4, p95Ms: 0.65, p99Ms: 0.8, meanMs: 0.45, maxMs: 0.9 },
+        rafMissed: 0,
+        dataBytes: 0,
+        uniformBytes: 1920,
+        prepareCount: 0,
+      },
+    },
+  };
+  const parity = { matchRatio: 0.995, nonBg: 42000 };
+  const assessment = evaluateWebGpuHeatmapAssessment({ hardwareValid: true, ab, parity });
+  assert.equal(assessment.decision, "PASS");
+  assert.equal(assessment.ab.pan.frameP95Speedup, 6);
+  assert.equal(assessment.ab.pan.heatmapP95Speedup, 20);
+
+  const md = formatWebGpuHeatmapMarkdown({
+    runId: "test-run",
+    createdAt: "2026-11-23T00:00:00Z",
+    fixture: { barCount: 2000, cellsPerBar: 20 },
+    adapter: { vendor: "intel", description: "UHD Graphics 620", isFallbackAdapter: false },
+    hardwareValid: true,
+    residentPanZoomDataBytes: 0,
+    residentPanZoomUniformBytes: 4480,
+    residentPanZoomPrepareCount: 0,
+    parity,
+    assessment,
+  });
+  assert.match(md, /A\/B Comparison/);
+  assert.match(md, /\| pan \| canvas2d \|/);
+  assert.match(md, /\| pan \| webgpu-native \| .*6\.00x/);
+  assert.match(md, /99\.50%/);
+});
