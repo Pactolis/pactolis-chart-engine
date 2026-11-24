@@ -16,7 +16,7 @@ function makeView() {
   const view = new View();
   view.area = { left: 0, top: 0, width: 800, height: 400 };
   view.colWidth = 10;
-  view.priceTop = 50_500;
+  view.priceTop = 51_000;
   view.pricePerPx = 5;
   return view;
 }
