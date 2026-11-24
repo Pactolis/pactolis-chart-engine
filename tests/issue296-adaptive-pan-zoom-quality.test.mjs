@@ -107,12 +107,12 @@ function makeMockCanvas(width = 800, height = 400) {
 function makeSeriesWithFootprintCells() {
   const series = new FootprintSeries({ intervalMs: 60_000, priceStep: 10 });
   const cells = new Map([
-    [50_000, { bid: 12, ask: 18, volume: 30, delta: 6 }],
-    [50_010, { bid: 8, ask: 14, volume: 22, delta: 6 }],
+    [50_000, { priceBin: 50_000, buyVol: 18, sellVol: 12, count: 6 }],
+    [50_010, { priceBin: 50_010, buyVol: 14, sellVol: 8, count: 4 }],
   ]);
   series.loadBars([
     {
-      startTime: 1_700_000_000_000,
+      startTime: 1_699_999_980_000,
       open: 50_000,
       high: 50_020,
       low: 49_990,
@@ -130,7 +130,7 @@ function makeSeriesWithFootprintCells() {
 function makeView() {
   const view = new View();
   view.area = { left: 0, top: 0, width: 720, height: 360 };
-  view.colWidth = 60;
+  view.colWidth = 100;
   view.offsetX = 0;
   view.priceTop = 50_050;
   view.pricePerPx = 0.5;

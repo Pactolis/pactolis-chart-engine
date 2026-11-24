@@ -197,7 +197,7 @@ export class InteractionQualityController {
 
   bumpGeneration(): number {
     this.generation += 1;
-    this.clearMaxReducedTimer();
+    this.clearTimers();
     this.resetToFullIdle();
     return this.generation;
   }
