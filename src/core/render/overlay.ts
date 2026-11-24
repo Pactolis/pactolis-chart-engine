@@ -538,21 +538,59 @@ export class Overlay {
     ctx.restore();
   }
 
+  private cachedNakedPocRef: unknown = undefined;
+  private cachedNakedPocKey = "";
+  private cachedStrategyKeyRefs: readonly [unknown, unknown, unknown, unknown] | null = null;
+  private cachedStrategyKey = "";
+  private cachedReferenceLevelsRef: unknown = undefined;
+  private cachedReferenceLevelsKey = "";
+
   private layerCacheKey(layerId: string, crosshair: Crosshair): string {
     switch (layerId) {
-      case "axis":
-        return JSON.stringify([this.lineLabels, this.timeMarkers, crosshair.touch]);
-      case "naked-poc":
-        return JSON.stringify(this.getNakedPocs?.() ?? null);
-      case "strategy-levels":
-        return JSON.stringify([
-          this.getPreviousWeekStrategySettings?.() ?? null,
-          this.getPreviousWeekStrategyLevels?.() ?? null,
-          this.getMondayRangeSettings?.() ?? null,
-          this.getMondayRangeLevels?.() ?? null,
-        ]);
-      case "reference-levels":
-        return JSON.stringify(this.getReferenceLevels?.() ?? null);
+      case "axis": {
+        let key = crosshair.touch ? "1|" : "0|";
+        for (let i = 0; i < this.lineLabels.length; i++) {
+          const l = this.lineLabels[i];
+          key += `${l.price},${l.text},${l.color};`;
+        }
+        key += "|";
+        for (let i = 0; i < this.timeMarkers.length; i++) {
+          const m = this.timeMarkers[i];
+          key += `${m.time},${m.text},${m.color},${m.priority};`;
+        }
+        return key;
+      }
+      case "naked-poc": {
+        const val = this.getNakedPocs?.() ?? null;
+        if (val === this.cachedNakedPocRef && this.cachedNakedPocKey !== "") {
+          return this.cachedNakedPocKey;
+        }
+        this.cachedNakedPocRef = val;
+        this.cachedNakedPocKey = JSON.stringify(val);
+        return this.cachedNakedPocKey;
+      }
+      case "strategy-levels": {
+        const s1 = this.getPreviousWeekStrategySettings?.() ?? null;
+        const l1 = this.getPreviousWeekStrategyLevels?.() ?? null;
+        const s2 = this.getMondayRangeSettings?.() ?? null;
+        const l2 = this.getMondayRangeLevels?.() ?? null;
+        const prev = this.cachedStrategyKeyRefs;
+        if (prev && prev[0] === s1 && prev[1] === l1 && prev[2] === s2 && prev[3] === l2 && this.cachedStrategyKey !== "") {
+          return this.cachedStrategyKey;
+        }
+        this.cachedStrategyKeyRefs = [s1, l1, s2, l2];
+        this.cachedStrategyKey = JSON.stringify([s1, l1, s2, l2]);
+        return this.cachedStrategyKey;
+      }
+      case "reference-levels": {
+        const val = this.getReferenceLevels?.() ?? null;
+        if (val === this.cachedReferenceLevelsRef && this.cachedReferenceLevelsKey !== "") {
+          return this.cachedReferenceLevelsKey;
+        }
+        this.cachedReferenceLevelsRef = val;
+        this.cachedReferenceLevelsKey = JSON.stringify(val);
+        return this.cachedReferenceLevelsKey;
+      }
       default:
         return "";
     }

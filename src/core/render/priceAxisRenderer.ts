@@ -150,8 +150,8 @@ export function drawPriceAxisGridLines(
 ): void {
   if (!settings.grid || gridYs.length === 0) return;
   const axisX = view.area.left + view.area.width;
+  ctx.strokeStyle = axisGridLineColor;
   for (const y of gridYs) {
-    ctx.strokeStyle = axisGridLineColor;
     ctx.beginPath();
     ctx.moveTo(view.area.left, y);
     ctx.lineTo(axisX, y);

@@ -86,18 +86,34 @@ function normalizedSettings(settings: IndicatorSettings): VolumeProfileIndicator
  * nonTailRevision are unchanged (so no bar other than the tail changed) and the window has
  * the same first bar, last bar and length; anything else rebuilds the prefix from scratch.
  */
+interface VolumeProfileLruEntry {
+  key: string;
+  structureRevision: number;
+  nonTailRevision: number;
+  seriesRevision: number;
+  startIndex: number;
+  endIndex: number;
+  prepared: VolumeProfilePreparedData;
+}
+
 interface VolumeProfileCache {
   key: string;
   structureRevision: number;
   nonTailRevision: number;
   seriesRevision: number;
+  startIndex: number;
+  endIndex: number;
   firstTime: number;
   lastTime: number;
   length: number;
-  prefix: OrderFlowProfileAccumulator;
+  prefix: OrderFlowProfileAccumulator | null;
+  visibleAcc: OrderFlowProfileAccumulator | null;
+  lruEntries: VolumeProfileLruEntry[];
   prepared: VolumeProfilePreparedData;
 }
+const MAX_VOLUME_PROFILE_LRU = 4;
 const volumeProfileCaches = createIndicatorSeriesStateStore<VolumeProfileCache>();
+const seriesAscendingCache = new WeakMap<FootprintSeries, { structureRevision: number; ascending: boolean }>();
 const developingIndexCache = new WeakMap<
   VolumeProfileMeta,
   { structureRevision: number; developingIndices: Int32Array }
@@ -106,6 +122,38 @@ const developingIndexCache = new WeakMap<
 function windowIsAscending(bars: readonly FootprintBar[]): boolean {
   for (let i = 1; i < bars.length; i++) if (bars[i].startTime <= bars[i - 1].startTime) return false;
   return true;
+}
+
+function isSeriesSliceAscending(series: FootprintSeries, all: readonly FootprintBar[], bars: readonly FootprintBar[], startIndex: number): boolean {
+  if (bars.length === 0) return false;
+  if (startIndex >= 0 && startIndex + bars.length <= all.length && all[startIndex] === bars[0]) {
+    const cached = seriesAscendingCache.get(series);
+    if (cached && cached.structureRevision === series.structureRevision) {
+      return cached.ascending;
+    }
+    const ascending = windowIsAscending(all);
+    seriesAscendingCache.set(series, { structureRevision: series.structureRevision, ascending });
+    return ascending;
+  }
+  return windowIsAscending(bars);
+}
+
+function pushVolumeProfileLru(lruEntries: VolumeProfileLruEntry[], entry: VolumeProfileLruEntry): void {
+  const existingIdx = lruEntries.findIndex(
+    (e) =>
+      e.key === entry.key
+      && e.structureRevision === entry.structureRevision
+      && e.nonTailRevision === entry.nonTailRevision
+      && e.seriesRevision === entry.seriesRevision
+      && e.startIndex === entry.startIndex
+      && e.endIndex === entry.endIndex,
+  );
+  if (existingIdx >= 0) {
+    lruEntries.splice(existingIdx, 1);
+  } else if (lruEntries.length >= MAX_VOLUME_PROFILE_LRU) {
+    lruEntries.shift();
+  }
+  lruEntries.push(entry);
 }
 
 function buildVolumeProfilePrepared(
@@ -152,11 +200,12 @@ function buildVolumeProfilePrepared(
 function prepareVolumeProfile(ctx: IndicatorDrawContext<VolumeProfileIndicatorSettings>): VolumeProfilePreparedData {
   if (!ctx.instance.visible) return emptyPrepared("hidden", "");
   const settings = normalizedSettings(ctx.settings);
-  const { bars, startIndex } = selectBars(ctx, settings);
+  const { bars, startIndex, endIndex } = selectBars(ctx, settings);
   const profileMetric = settings.profileMetric;
   const developing = profileSupportsValueArea(profileMetric)
     && [settings.pocMode, settings.vahMode, settings.valMode].some(levelModeHasDeveloping);
   const { series } = ctx;
+  const mode = stringSetting(settings, "mode", "visible");
   const options: OrderFlowProfileOptions = {
     profileMetric,
     profileSide: settings.profileSide,
@@ -165,9 +214,10 @@ function prepareVolumeProfile(ctx: IndicatorDrawContext<VolumeProfileIndicatorSe
     priceStep: series.config.priceStep,
     allowOhlcvEstimate: true,
   };
-  const key = `${profileMetric}|${options.profileSide}|${options.valueAreaPercent}|${developing}|${series.config.priceStep}|${stringSetting(settings, "mode", "visible")}|${numericSetting(settings, "lookbackBars", 200, 1, 10_000)}`;
+  const key = `${profileMetric}|${options.profileSide}|${options.valueAreaPercent}|${developing}|${series.config.priceStep}|${mode}|${numericSetting(settings, "lookbackBars", 200, 1, 10_000)}`;
   const firstBar = bars[0];
   const lastBar = bars[bars.length - 1];
+  const all = series.listReadonly();
   const cached = volumeProfileCaches.get(series, ctx.instance.id);
   if (
     cached && firstBar && lastBar
@@ -179,33 +229,137 @@ function prepareVolumeProfile(ctx: IndicatorDrawContext<VolumeProfileIndicatorSe
     && cached.length === bars.length
   ) {
     if (cached.seriesRevision === series.revision) return cached.prepared;
-    const seriesBars = series.listReadonly();
     // Window ends before the series tail: nothing inside it can have changed.
-    if (seriesBars[seriesBars.length - 1] !== lastBar) {
+    if (all[all.length - 1] !== lastBar) {
       cached.seriesRevision = series.revision;
       return cached.prepared;
     }
-    const acc = cloneOrderFlowProfileAccumulator(cached.prefix);
-    accumulateOrderFlowProfileBar(acc, lastBar, options);
-    cached.prepared = buildVolumeProfilePrepared(ctx, finishOrderFlowProfile(acc, options), bars.length, startIndex);
-    cached.seriesRevision = series.revision;
-    incrementPerformanceCounter("indicator.incremental.hit.volumeProfile");
-    return cached.prepared;
+    if (cached.prefix) {
+      const acc = cloneOrderFlowProfileAccumulator(cached.prefix);
+      accumulateOrderFlowProfileBar(acc, lastBar, options);
+      cached.visibleAcc = acc;
+      cached.prepared = buildVolumeProfilePrepared(ctx, finishOrderFlowProfile(acc, options), bars.length, startIndex);
+      cached.seriesRevision = series.revision;
+      pushVolumeProfileLru(cached.lruEntries, {
+        key,
+        structureRevision: series.structureRevision,
+        nonTailRevision: series.nonTailRevision,
+        seriesRevision: series.revision,
+        startIndex,
+        endIndex,
+        prepared: cached.prepared,
+      });
+      incrementPerformanceCounter("indicator.incremental.hit.volumeProfile");
+      return cached.prepared;
+    }
   }
 
-  const ascending = firstBar !== undefined && windowIsAscending(bars);
+  if (cached && startIndex >= 0 && endIndex > startIndex) {
+    const lruIdx = cached.lruEntries.findIndex(
+      (e) =>
+        e.key === key
+        && e.structureRevision === series.structureRevision
+        && e.nonTailRevision === series.nonTailRevision
+        && e.seriesRevision === series.revision
+        && e.startIndex === startIndex
+        && e.endIndex === endIndex,
+    );
+    if (lruIdx >= 0) {
+      const hit = cached.lruEntries.splice(lruIdx, 1)[0];
+      cached.lruEntries.push(hit);
+      incrementPerformanceCounter("indicator.incremental.delta.volumeProfile");
+      return hit.prepared;
+    }
+  }
+
+  const ascending = isSeriesSliceAscending(series, all, bars, startIndex);
+  if (
+    ascending
+    && mode === "visible"
+    && !developing
+    && cached
+    && cached.visibleAcc
+    && cached.key === key
+    && cached.structureRevision === series.structureRevision
+    && cached.nonTailRevision === series.nonTailRevision
+    && cached.seriesRevision === series.revision
+    && startIndex >= 0
+    && startIndex === cached.startIndex
+    && endIndex > cached.endIndex
+  ) {
+    const acc = cached.visibleAcc;
+    for (let i = cached.endIndex; i < endIndex; i++) {
+      accumulateOrderFlowProfileBar(acc, all[i], options);
+    }
+    acc.fromTime = firstBar!.startTime;
+    acc.toTime = lastBar!.startTime;
+    const prepared = buildVolumeProfilePrepared(ctx, finishOrderFlowProfile(acc, options), bars.length, startIndex);
+    cached.endIndex = endIndex;
+    cached.lastTime = lastBar!.startTime;
+    cached.length = bars.length;
+    cached.prefix = null;
+    cached.prepared = prepared;
+    pushVolumeProfileLru(cached.lruEntries, {
+      key,
+      structureRevision: series.structureRevision,
+      nonTailRevision: series.nonTailRevision,
+      seriesRevision: series.revision,
+      startIndex,
+      endIndex,
+      prepared,
+    });
+    incrementPerformanceCounter("indicator.incremental.delta.volumeProfile");
+    return prepared;
+  }
+
   if (!ascending) {
     volumeProfileCaches.delete(series, ctx.instance.id);
     const acc = createOrderFlowProfileAccumulator();
     for (const bar of [...bars].sort((a, b) => a.startTime - b.startTime)) accumulateOrderFlowProfileBar(acc, bar, options);
     return buildVolumeProfilePrepared(ctx, finishOrderFlowProfile(acc, options), bars.length, -1);
   }
-  const prefix = createOrderFlowProfileAccumulator();
-  for (let i = 0; i < bars.length - 1; i++) accumulateOrderFlowProfileBar(prefix, bars[i], options);
-  const acc = cloneOrderFlowProfileAccumulator(prefix);
-  accumulateOrderFlowProfileBar(acc, lastBar!, options);
+
+  const includesTail = lastBar === all[all.length - 1];
+  let prefix: OrderFlowProfileAccumulator | null = null;
+  let acc: OrderFlowProfileAccumulator;
+  if (includesTail) {
+    prefix = createOrderFlowProfileAccumulator();
+    for (let i = 0; i < bars.length - 1; i++) accumulateOrderFlowProfileBar(prefix, bars[i], options);
+    acc = cloneOrderFlowProfileAccumulator(prefix);
+    accumulateOrderFlowProfileBar(acc, lastBar!, options);
+  } else {
+    acc = createOrderFlowProfileAccumulator();
+    for (let i = 0; i < bars.length; i++) accumulateOrderFlowProfileBar(acc, bars[i], options);
+  }
   const prepared = buildVolumeProfilePrepared(ctx, finishOrderFlowProfile(acc, options), bars.length, startIndex);
-  volumeProfileCaches.set(series, ctx.instance.id, { key, structureRevision: series.structureRevision, nonTailRevision: series.nonTailRevision, seriesRevision: series.revision, firstTime: firstBar!.startTime, lastTime: lastBar!.startTime, length: bars.length, prefix, prepared });
+  const canRightExtend = mode === "visible" && !developing;
+  const lruEntries = cached?.lruEntries ?? [];
+  if (startIndex >= 0 && endIndex > startIndex) {
+    pushVolumeProfileLru(lruEntries, {
+      key,
+      structureRevision: series.structureRevision,
+      nonTailRevision: series.nonTailRevision,
+      seriesRevision: series.revision,
+      startIndex,
+      endIndex,
+      prepared,
+    });
+  }
+  volumeProfileCaches.set(series, ctx.instance.id, {
+    key,
+    structureRevision: series.structureRevision,
+    nonTailRevision: series.nonTailRevision,
+    seriesRevision: series.revision,
+    startIndex,
+    endIndex,
+    firstTime: firstBar!.startTime,
+    lastTime: lastBar!.startTime,
+    length: bars.length,
+    prefix,
+    visibleAcc: canRightExtend ? acc : null,
+    lruEntries,
+    prepared,
+  });
   incrementPerformanceCounter("indicator.incremental.full.volumeProfile");
   return prepared;
 }
@@ -224,7 +378,7 @@ function lowerBoundBarIndex(all: readonly FootprintBar[], targetTime: number): n
 function selectBars(
   ctx: IndicatorDrawContext<VolumeProfileIndicatorSettings>,
   settings = normalizedSettings(ctx.settings),
-): { bars: FootprintBar[]; startIndex: number } {
+): { bars: FootprintBar[]; startIndex: number; endIndex: number } {
   const all = ctx.series.listReadonly();
   const [from, to] = ctx.range;
   const s = Math.max(0, from);
@@ -234,19 +388,19 @@ function selectBars(
   if (mode === "session") {
     const anchor = visible[visible.length - 1]?.startTime ?? all[all.length - 1]?.startTime;
     const bars = anchor === undefined ? visible : sessionBars(all, anchor);
-    if (bars.length === 0) return { bars, startIndex: -1 };
+    if (bars.length === 0) return { bars, startIndex: -1, endIndex: -1 };
     const idx = lowerBoundBarIndex(all, bars[0].startTime);
     const startIndex = idx < all.length && all[idx].startTime === bars[0].startTime ? idx : -1;
-    return { bars, startIndex };
+    return { bars, startIndex, endIndex: startIndex >= 0 ? startIndex + bars.length : -1 };
   }
   if (mode === "lookback") {
     const count = numericSetting(settings, "lookbackBars", 200, 1, 10_000);
     const last = visible.length > 0 ? e : all.length;
-    if (last <= 0) return { bars: [], startIndex: -1 };
+    if (last <= 0) return { bars: [], startIndex: -1, endIndex: -1 };
     const startIndex = Math.max(0, last - count);
-    return { bars: all.slice(startIndex, last), startIndex };
+    return { bars: all.slice(startIndex, last), startIndex, endIndex: last };
   }
-  return { bars: visible, startIndex: visible.length > 0 ? s : -1 };
+  return { bars: visible, startIndex: visible.length > 0 ? s : -1, endIndex: visible.length > 0 ? e : -1 };
 }
 
 function asVolumeProfileData(prepared?: IndicatorPreparedData): VolumeProfilePreparedData {

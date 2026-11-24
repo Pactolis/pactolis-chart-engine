@@ -16,6 +16,8 @@ import { drawTimeAxis, type TimeMarker } from "./timeAxisRenderer.js";
 
 /** Extra CSS px kept on the left of the price-axis offscreen strip so long labels never clip. */
 const PRICE_LABEL_OVERFLOW_PX = 48;
+const AXIS_MOVE_STREAK_DIRECT_THRESHOLD = 3;
+const AXIS_MOVE_WINDOW_MS = 180;
 
 interface AxisTransform {
   readonly a: number;
@@ -67,6 +69,11 @@ export class AxisLayerCache {
   private lastTimeOffsetX = Number.NaN;
   private lastTimeColWidth = Number.NaN;
   private timeViewportMoveStreak = 0;
+  private hasLastPriceViewport = false;
+  private lastPriceTop = Number.NaN;
+  private lastPricePerPx = Number.NaN;
+  private priceMoveStreak = 0;
+  private lastPriceMoveAt = Number.NEGATIVE_INFINITY;
 
   renderPriceAxis(
     ctx: CanvasRenderingContext2D,
@@ -77,8 +84,39 @@ export class AxisLayerCache {
   ): void {
     const priceStep = series.config.priceStep;
     const pricePrecision = series.config.pricePrecision;
+    const priceTop = view.priceTop;
+    const pricePerPx = view.pricePerPx;
+    if (series.length === 0) {
+      this.hasLastPriceViewport = false;
+      this.lastPriceTop = Number.NaN;
+      this.lastPricePerPx = Number.NaN;
+      this.priceMoveStreak = 0;
+      this.lastPriceMoveAt = Number.NEGATIVE_INFINITY;
+    }
+    const now = typeof performance !== "undefined" ? performance.now() : Date.now();
+    const priceMoved =
+      series.length > 0 &&
+      this.hasLastPriceViewport &&
+      (this.lastPriceTop !== priceTop || this.lastPricePerPx !== pricePerPx);
+    const nextMoveStreak = priceMoved
+      ? (now - this.lastPriceMoveAt <= AXIS_MOVE_WINDOW_MS ? this.priceMoveStreak + 1 : 1)
+      : 0;
+    if (nextMoveStreak >= AXIS_MOVE_STREAK_DIRECT_THRESHOLD) {
+      this.priceEntry = null;
+      this.lastPriceTop = priceTop;
+      this.lastPricePerPx = pricePerPx;
+      this.priceMoveStreak = nextMoveStreak;
+      this.lastPriceMoveAt = now;
+      incrementPerformanceCounter("chart.annotation.axis.price.cache.bypass");
+      drawPriceAxis(ctx, view, priceStep, pricePrecision, keepOut, displayOptions);
+      return;
+    }
+
     const env = resolveOffscreenEnvironment(ctx, view);
     if (!env) {
+      this.priceEntry = null;
+      this.hasLastPriceViewport = false;
+      this.priceMoveStreak = 0;
       drawPriceAxis(ctx, view, priceStep, pricePrecision, keepOut, displayOptions);
       return;
     }
@@ -88,6 +126,9 @@ export class AxisLayerCache {
     const axisW = layout.priceAxisRect.width;
     const gutterFillH = Math.min(layout.priceAxisRect.height, view.area.top + view.area.height);
     if (axisW <= 0 || gutterFillH <= 0) {
+      this.priceEntry = null;
+      this.hasLastPriceViewport = false;
+      this.priceMoveStreak = 0;
       drawPriceAxis(ctx, view, priceStep, pricePrecision, keepOut, displayOptions);
       return;
     }
@@ -104,6 +145,9 @@ export class AxisLayerCache {
       0,
     );
     if (bounds.devW <= 0 || bounds.devH <= 0) {
+      this.priceEntry = null;
+      this.hasLastPriceViewport = false;
+      this.priceMoveStreak = 0;
       drawPriceAxis(ctx, view, priceStep, pricePrecision, keepOut, displayOptions);
       return;
     }
@@ -111,6 +155,12 @@ export class AxisLayerCache {
     const key = buildPriceAxisKey(view, series, keepOut, displayOptions, env.canvasW, env.canvasH, env.tx);
     if (this.priceEntry && this.priceEntry.key === key) {
       incrementPerformanceCounter("chart.annotation.axis.price.cache.hit");
+      if (series.length > 0) {
+        this.lastPriceTop = priceTop;
+        this.lastPricePerPx = pricePerPx;
+        this.hasLastPriceViewport = true;
+        this.priceMoveStreak = 0;
+      }
       drawPriceAxisGridLines(ctx, view, this.priceEntry.gridYs);
       if (this.priceEntry.hasBitmap && this.priceCanvas) {
         blitOffscreenCanvas(ctx, this.priceCanvas, this.priceEntry.devX, this.priceEntry.devY);
@@ -122,6 +172,9 @@ export class AxisLayerCache {
     const offscreen = this.ensurePriceCanvas(env.doc, bounds.devW, bounds.devH);
     const offCtx = offscreen.getContext("2d");
     if (!offCtx || typeof offCtx.setTransform !== "function") {
+      this.priceEntry = null;
+      this.hasLastPriceViewport = false;
+      this.priceMoveStreak = 0;
       drawPriceAxis(ctx, view, priceStep, pricePrecision, keepOut, displayOptions);
       return;
     }
@@ -147,6 +200,13 @@ export class AxisLayerCache {
       subPaneSeparatorBottom: separatorBottom,
     };
     this.priceEntry = entry;
+    if (series.length > 0) {
+      this.lastPriceTop = priceTop;
+      this.lastPricePerPx = pricePerPx;
+      this.hasLastPriceViewport = true;
+      this.priceMoveStreak = nextMoveStreak;
+      if (priceMoved) this.lastPriceMoveAt = now;
+    }
 
     drawPriceAxisGridLines(ctx, view, entry.gridYs);
     blitOffscreenCanvas(ctx, offscreen, entry.devX, entry.devY);
@@ -265,6 +325,11 @@ export class AxisLayerCache {
     this.lastTimeOffsetX = Number.NaN;
     this.lastTimeColWidth = Number.NaN;
     this.timeViewportMoveStreak = 0;
+    this.hasLastPriceViewport = false;
+    this.lastPriceTop = Number.NaN;
+    this.lastPricePerPx = Number.NaN;
+    this.priceMoveStreak = 0;
+    this.lastPriceMoveAt = Number.NEGATIVE_INFINITY;
   }
 
   dispose(): void {

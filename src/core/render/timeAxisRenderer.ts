@@ -12,6 +12,23 @@ function labelInset(axis: { height: number }): number {
   return axis.height > DESIGNED_AXIS_HEIGHT + 2 ? Math.round((axis.height - DESIGNED_AXIS_HEIGHT) / 2) : 0;
 }
 
+const TIME_AXIS_LABEL_WIDTH_CACHE_MAX = 256;
+const timeAxisLabelWidthCache = new Map<string, number>();
+
+function measureTimeAxisLabelWidth(ctx: CanvasRenderingContext2D, font: string, label: string): number {
+  const key = `${font}|${label}`;
+  let width = timeAxisLabelWidthCache.get(key);
+  if (width === undefined) {
+    width = ctx.measureText(label).width;
+    if (timeAxisLabelWidthCache.size >= TIME_AXIS_LABEL_WIDTH_CACHE_MAX) {
+      const oldest = timeAxisLabelWidthCache.keys().next().value;
+      if (oldest !== undefined) timeAxisLabelWidthCache.delete(oldest);
+    }
+    timeAxisLabelWidthCache.set(key, width);
+  }
+  return width;
+}
+
 export interface TimeMarker {
   time: number;
   text: string;
@@ -52,23 +69,41 @@ export function drawTimeAxis(
   ctx.beginPath();
   ctx.rect(axis.left, axis.top, axis.width, axis.height);
   ctx.clip();
-  ctx.font = `${view.timeScaleOptions.tickMarkFontSize}px ui-monospace, monospace`;
+  const tickFont = `${view.timeScaleOptions.tickMarkFontSize}px ui-monospace, monospace`;
+  ctx.font = tickFont;
   ctx.textAlign = "center";
   ctx.textBaseline = "top";
 
+  const minorTickXs: number[] = [];
+  const majorTickXs: number[] = [];
   for (const mark of marks) {
     const x = mark.coord;
-    const labelW = ctx.measureText(mark.label).width;
+    const labelW = measureTimeAxisLabelWidth(ctx, tickFont, mark.label);
     if (x < axis.left - labelW / 2 || x > axis.left + axis.width + labelW / 2) continue;
     const isMajor = mark.weight >= TickMarkWeight.Day;
     const tickX = Math.max(axis.left, Math.min(axis.left + axis.width, x));
-    ctx.strokeStyle = isMajor ? axisMajorTickColor : uiColor.separator;
-    ctx.beginPath();
-    ctx.moveTo(tickX, axisY);
-    ctx.lineTo(tickX, axisY + tickH + (isMajor ? 1 : 0));
-    ctx.stroke();
+    if (isMajor) majorTickXs.push(tickX);
+    else minorTickXs.push(tickX);
     ctx.fillStyle = isMajor ? axisMajorLabelColor : uiColor.textSecondary;
     ctx.fillText(mark.label, alignLabelCenter(x, labelW, axis), axisY + inset + tickH + 2);
+  }
+  if (minorTickXs.length > 0) {
+    ctx.strokeStyle = uiColor.separator;
+    ctx.beginPath();
+    for (const tickX of minorTickXs) {
+      ctx.moveTo(tickX, axisY);
+      ctx.lineTo(tickX, axisY + tickH);
+    }
+    ctx.stroke();
+  }
+  if (majorTickXs.length > 0) {
+    ctx.strokeStyle = axisMajorTickColor;
+    ctx.beginPath();
+    for (const tickX of majorTickXs) {
+      ctx.moveTo(tickX, axisY);
+      ctx.lineTo(tickX, axisY + tickH + 1);
+    }
+    ctx.stroke();
   }
 
   drawTimeMarkers(ctx, view, series, axis, timeMarkers);

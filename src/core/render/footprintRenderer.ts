@@ -363,13 +363,28 @@ export class FootprintRenderer {
 
     if (lod === "footprint" && chartType === "footprint" && activeLayers.has("footprint")) {
       const footprintStartedAt = telemetryEnabled ? performance.now() : null;
+      const isCanvas2d = this.surface.kind === "canvas2d";
+      if (isCanvas2d) this.beginCanvas2dFootprintHeatBatch();
       try {
         for (let i = from; i < to; i++) {
           const bar = series.at(i);
           if (!bar) continue;
           this.drawFootprintCells(view, bar, view.xOfIndex(i), view.colWidth, candleW, step);
         }
+        if (isCanvas2d) {
+          this.flushCanvas2dFootprintHeatBatch();
+          if (this.cfg().stackedImbalance && this.rowHeight(view, step) >= CELL_PIXEL_MERGE_HEIGHT) {
+            for (let i = from; i < to; i++) {
+              const bar = series.at(i);
+              if (!bar) continue;
+              const fpLeft = view.xOfIndex(i) + candleW;
+              const fpW = view.colWidth - candleW;
+              this.drawStackedImbalance(view, bar, step, fpLeft, fpW, fpW / 2);
+            }
+          }
+        }
       } finally {
+        if (isCanvas2d) this.canvas2dHeatBatchActive = false;
         if (footprintStartedAt !== null) {
           recordPerformanceDuration("chart.gpu.footprint.ms", performance.now() - footprintStartedAt);
         }
@@ -646,6 +661,51 @@ export class FootprintRenderer {
     }
   }
 
+  private canvas2dHeatBatchActive = false;
+  private readonly canvas2dPocRects: number[] = [];
+  private readonly canvas2dSellBuckets: number[][] = Array.from({ length: 32 }, () => []);
+  private readonly canvas2dBuyBuckets: number[][] = Array.from({ length: 32 }, () => []);
+
+  private beginCanvas2dFootprintHeatBatch(): void {
+    this.canvas2dHeatBatchActive = true;
+    this.canvas2dPocRects.length = 0;
+    for (let i = 0; i < 32; i++) {
+      this.canvas2dSellBuckets[i].length = 0;
+      this.canvas2dBuyBuckets[i].length = 0;
+    }
+  }
+
+  private flushCanvas2dFootprintHeatBatch(): void {
+    this.canvas2dHeatBatchActive = false;
+    const poc = this.canvas2dPocRects;
+    for (let i = 0; i < poc.length; i += 4) {
+      this.batch.rect(poc[i], poc[i + 1], poc[i + 2], poc[i + 3], POC);
+    }
+    poc.length = 0;
+
+    scratchColor.r = SELL.r; scratchColor.g = SELL.g; scratchColor.b = SELL.b;
+    for (let b = 0; b < 32; b++) {
+      const bucket = this.canvas2dSellBuckets[b];
+      if (bucket.length === 0) continue;
+      scratchColor.a = 0.12 + 0.7 * (b / 31);
+      for (let i = 0; i < bucket.length; i += 4) {
+        this.batch.rect(bucket[i], bucket[i + 1], bucket[i + 2], bucket[i + 3], scratchColor);
+      }
+      bucket.length = 0;
+    }
+
+    scratchColor.r = BUY.r; scratchColor.g = BUY.g; scratchColor.b = BUY.b;
+    for (let b = 0; b < 32; b++) {
+      const bucket = this.canvas2dBuyBuckets[b];
+      if (bucket.length === 0) continue;
+      scratchColor.a = 0.12 + 0.7 * (b / 31);
+      for (let i = 0; i < bucket.length; i += 4) {
+        this.batch.rect(bucket[i], bucket[i + 1], bucket[i + 2], bucket[i + 3], scratchColor);
+      }
+      bucket.length = 0;
+    }
+  }
+
   private drawFootprintCells(
     view: View,
     bar: FootprintBar,
@@ -687,15 +747,28 @@ export class FootprintRenderer {
           const { yTop, height: h } = rect;
           if (yTop > view.area.top + view.area.height || yTop + h < view.area.top) return;
 
-          if (cfg.poc && cell.priceBin === pocBin) this.batch.rect(fpLeft, yTop, fpW, h, POC);
+          if (cfg.poc && cell.priceBin === pocBin) {
+            if (this.canvas2dHeatBatchActive) {
+              this.canvas2dPocRects.push(fpLeft, yTop, fpW, h);
+            } else {
+              this.batch.rect(fpLeft, yTop, fpW, h, POC);
+            }
+          }
           if (cfg.heat) {
-            const sellA = 0.12 + 0.7 * (cell.sellVol / maxVol);
-            const buyA = 0.12 + 0.7 * (cell.buyVol / maxVol);
+            const sellRatio = cell.sellVol / maxVol;
+            const buyRatio = cell.buyVol / maxVol;
             const rowH = h > 1 ? h - 1 : h;
-            scratchColor.r = SELL.r; scratchColor.g = SELL.g; scratchColor.b = SELL.b; scratchColor.a = sellA;
-            this.batch.rect(fpLeft, yTop, halfW, rowH, scratchColor);
-            scratchColor.r = BUY.r; scratchColor.g = BUY.g; scratchColor.b = BUY.b; scratchColor.a = buyA;
-            this.batch.rect(fpLeft + halfW, yTop, halfW, rowH, scratchColor);
+            if (this.canvas2dHeatBatchActive) {
+              const sellB = Math.min(31, Math.max(0, (sellRatio * 31 + 0.5) | 0));
+              const buyB = Math.min(31, Math.max(0, (buyRatio * 31 + 0.5) | 0));
+              this.canvas2dSellBuckets[sellB].push(fpLeft, yTop, halfW, rowH);
+              this.canvas2dBuyBuckets[buyB].push(fpLeft + halfW, yTop, halfW, rowH);
+            } else {
+              scratchColor.r = SELL.r; scratchColor.g = SELL.g; scratchColor.b = SELL.b; scratchColor.a = 0.12 + 0.7 * sellRatio;
+              this.batch.rect(fpLeft, yTop, halfW, rowH, scratchColor);
+              scratchColor.r = BUY.r; scratchColor.g = BUY.g; scratchColor.b = BUY.b; scratchColor.a = 0.12 + 0.7 * buyRatio;
+              this.batch.rect(fpLeft + halfW, yTop, halfW, rowH, scratchColor);
+            }
           }
         };
         const slice = getVisibleFootprintCellSlice(bar, minVisPrice, maxVisPrice, step);
@@ -711,7 +784,7 @@ export class FootprintRenderer {
       }
     }
 
-    if (cfg.stackedImbalance) {
+    if (cfg.stackedImbalance && !this.canvas2dHeatBatchActive) {
       this.drawStackedImbalance(view, bar, step, fpLeft, fpW, halfW);
     }
   }
@@ -830,12 +903,19 @@ export class FootprintRenderer {
       if (!rect) continue;
       if (rect.yTop > view.area.top + view.area.height) continue;
       if (rect.yTop + rect.height < view.area.top) continue;
-      scratchColor.r = SELL.r; scratchColor.g = SELL.g; scratchColor.b = SELL.b;
-      scratchColor.a = 0.12 + 0.7 * (bucket.sellVol / mergedMax);
-      this.batch.rect(fpLeft, rect.yTop, halfW, rect.height, scratchColor);
-      scratchColor.r = BUY.r; scratchColor.g = BUY.g; scratchColor.b = BUY.b;
-      scratchColor.a = 0.12 + 0.7 * (bucket.buyVol / mergedMax);
-      this.batch.rect(fpLeft + halfW, rect.yTop, halfW, rect.height, scratchColor);
+      if (this.canvas2dHeatBatchActive) {
+        const sellB = Math.min(31, Math.max(0, ((bucket.sellVol / mergedMax) * 31 + 0.5) | 0));
+        const buyB = Math.min(31, Math.max(0, ((bucket.buyVol / mergedMax) * 31 + 0.5) | 0));
+        this.canvas2dSellBuckets[sellB].push(fpLeft, rect.yTop, halfW, rect.height);
+        this.canvas2dBuyBuckets[buyB].push(fpLeft + halfW, rect.yTop, halfW, rect.height);
+      } else {
+        scratchColor.r = SELL.r; scratchColor.g = SELL.g; scratchColor.b = SELL.b;
+        scratchColor.a = 0.12 + 0.7 * (bucket.sellVol / mergedMax);
+        this.batch.rect(fpLeft, rect.yTop, halfW, rect.height, scratchColor);
+        scratchColor.r = BUY.r; scratchColor.g = BUY.g; scratchColor.b = BUY.b;
+        scratchColor.a = 0.12 + 0.7 * (bucket.buyVol / mergedMax);
+        this.batch.rect(fpLeft + halfW, rect.yTop, halfW, rect.height, scratchColor);
+      }
     }
   }
 
