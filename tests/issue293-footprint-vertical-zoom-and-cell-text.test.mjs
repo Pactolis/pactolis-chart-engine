@@ -81,7 +81,7 @@ test("#293: narrow vertical zoom binary-searches dense 1W bar cells and live tra
     const nextFormatted = getOrFormatBarCellText(barCache2, c, "bidask", false, 10, false);
     if (c.priceBin === 54_050) {
       assert.notEqual(nextFormatted, initialRefs.get(c.priceBin), "mutated bin must re-format");
-      assert.equal(nextFormatted.rightText, "60");
+      assert.equal(nextFormatted.rightText, "60.0");
     } else {
       assert.equal(nextFormatted, initialRefs.get(c.priceBin), "unchanged bin must reuse cached object");
     }
