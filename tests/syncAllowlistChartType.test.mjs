@@ -145,7 +145,7 @@ test("niceStepForPrice + calculateTpoProfile stays within MAX_BINS_PER_BAR (10_0
     );
   }
 
-  // Defensive check: degenerate range exceeding 10_000 bins per bar is skipped without OOM/crash.
+  // Wide bar within the 250_000-entry dense level budget is preserved instead of dropped.
   const hugeBar = {
     startTime: START,
     open: 100,
@@ -160,7 +160,20 @@ test("niceStepForPrice + calculateTpoProfile stays within MAX_BINS_PER_BAR (10_0
     completeness: "complete",
     sources: ["history"],
   };
-  const guarded = calculateTpoProfile([hugeBar], 0.0001, 0.7);
+  const wideResult = calculateTpoProfile([hugeBar], 0.0001, 0.7);
+  assert.equal(wideResult.levels.length, 20_001);
+  assert.equal(wideResult.poc, 100);
+  assert.equal(wideResult.truncated, false);
+
+  // Degenerate range exceeding the 250_000-entry budget avoids dense-level OOM while keeping exact POC/VA.
+  const degenerateBar = {
+    ...hugeBar,
+    high: 100 + 500_000 * 0.0001,
+  };
+  const guarded = calculateTpoProfile([degenerateBar], 0.0001, 0.7);
   assert.equal(guarded.levels.length, 0);
-  assert.equal(guarded.poc, null);
+  assert.equal(guarded.truncated, true);
+  assert.equal(guarded.poc, 100);
+  assert.equal(guarded.val, 100);
+  assert.equal(guarded.vah, 135);
 });

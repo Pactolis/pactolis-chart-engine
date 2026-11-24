@@ -1,7 +1,7 @@
 import type { FootprintBar } from "../types.js";
 import { bucketEnd, bucketStart, DAY_MS, MONTH_TOKEN_MS, WEEK_MS } from "../time.js";
 import type { TpoBracketSize, TpoProfilePeriod } from "../settings.js";
-import { neighbourBin, quantizeToStep } from "../priceStep.js";
+import { quantizeToStep } from "../priceStep.js";
 
 /**
  * TPO (Time-Price Opportunity / Market Profile) profile.
@@ -21,6 +21,12 @@ export interface TpoProfileLevel {
   bracketIndices: number[];
 }
 
+export interface TpoProfileRun {
+  startPrice: number;
+  endPrice: number;
+  count: number;
+}
+
 export interface TpoProfileResult {
   levels: TpoProfileLevel[];
   totalCount: number;
@@ -31,6 +37,10 @@ export interface TpoProfileResult {
   val: number | null;
   fromTime: number | null;
   toTime: number | null;
+  /** Compact run-length summary of non-zero TPO price bins in ascending order. */
+  runs?: readonly TpoProfileRun[];
+  /** True when total bracket-bin entries exceed the dense level-table budget. */
+  truncated?: boolean;
 }
 
 export interface TpoSessionSpan {
@@ -76,8 +86,8 @@ export interface TpoProfileGroupSet {
   groups: TpoProfileGroup[];
 }
 
-/** Defensive cap on bins per bar to avoid blow-up on degenerate ranges. */
-const MAX_BINS_PER_BAR = 10_000;
+/** Maximum total bracket-bin entries materialized into dense `levels`. */
+const MAX_TPO_LEVEL_ENTRIES = 250_000;
 
 const TPO_BRACKET_MS: Record<Exclude<TpoBracketSize, "auto">, number> = {
   "5m": 5 * 60_000,
@@ -127,6 +137,17 @@ export function buildTpoSessionSpans(
   return spans;
 }
 
+function lowerBoundStartTime(bars: readonly FootprintBar[], lo: number, hi: number, targetTime: number): number {
+  let low = lo;
+  let high = hi;
+  while (low < high) {
+    const mid = low + ((high - low) >>> 1);
+    if (bars[mid].startTime < targetTime) low = mid + 1;
+    else high = mid;
+  }
+  return low;
+}
+
 /** Expand a viewport to complete loaded sessions, including connected user merges.
  * The input series is already the replay as-of projection: never read another series.
  */
@@ -138,9 +159,28 @@ export function tpoSessionRange(
   let end = Math.max(first, Math.min(bars.length, Math.ceil(to)));
   const sessionMs = tpoProfilePeriodMs(period);
   if (sessionMs === null || first === end) return [first, end];
+
   const sessionAt = (index: number): number => bucketStart(bars[index].startTime, sessionMs);
-  while (first > 0 && (sessionAt(first - 1) === sessionAt(first) || mergeLeft.has(sessionAt(first)))) first--;
-  while (end < bars.length && (sessionAt(end - 1) === sessionAt(end) || mergeLeft.has(sessionAt(end)))) end++;
+
+  let curSession = sessionAt(first);
+  if (first > 0) {
+    first = lowerBoundStartTime(bars, 0, first, curSession);
+    while (first > 0 && mergeLeft.has(curSession)) {
+      curSession = sessionAt(first - 1);
+      first = lowerBoundStartTime(bars, 0, first, curSession);
+    }
+  }
+
+  if (end < bars.length) {
+    const prevSession = sessionAt(end - 1);
+    end = lowerBoundStartTime(bars, end, bars.length, bucketEnd(prevSession, sessionMs));
+    while (end < bars.length) {
+      const nextSession = sessionAt(end);
+      if (!mergeLeft.has(nextSession)) break;
+      end = lowerBoundStartTime(bars, end + 1, bars.length, bucketEnd(nextSession, sessionMs));
+    }
+  }
+
   return [first, end];
 }
 
@@ -295,76 +335,178 @@ export function buildTpoProfileGroups(
   return { from: sessionFrom, to: sessionTo, brackets, groups };
 }
 
+function binAtOffset(refBin: number, priceStep: number, offset: number): number {
+  return offset === 0 ? refBin : quantizeToStep(refBin + offset * priceStep, priceStep);
+}
+
 export function calculateTpoProfile(
   bars: readonly FootprintBar[],
   priceStep: number,
   valueAreaPercent = 0.7
 ): TpoProfileResult {
-  const byPrice = new Map<number, TpoProfileLevel>();
   let fromTime: number | null = null;
   let toTime: number | null = null;
 
-  if (priceStep > 0) {
-    for (let bracketIndex = 0; bracketIndex < bars.length; bracketIndex++) {
-      const bar = bars[bracketIndex];
-      fromTime = fromTime === null ? bar.startTime : Math.min(fromTime, bar.startTime);
-      toTime = toTime === null ? bar.startTime : Math.max(toTime, bar.startTime);
+  if (!(priceStep > 0) || !Number.isFinite(priceStep) || bars.length === 0) {
+    return { levels: [], totalCount: 0, poc: null, vah: null, val: null, fromTime, toTime, truncated: false };
+  }
 
-      const lo = quantizeToStep(bar.low, priceStep);
-      const hi = quantizeToStep(bar.high, priceStep);
-      if (!Number.isFinite(lo) || !Number.isFinite(hi) || hi < lo) continue;
-      const spanBins = Math.round((hi - lo) / priceStep);
-      if (!Number.isFinite(spanBins) || spanBins > MAX_BINS_PER_BAR) continue; // degenerate, skip
+  let refBin: number | null = null;
+  const validBrackets: { bracketIndex: number; loIdx: number; hiIdx: number }[] = [];
+  const events: { pos: number; delta: number }[] = [];
 
-      let bin = lo;
-      for (let index = 0; index <= spanBins; index += 1) {
-        const level = byPrice.get(bin);
-        if (level) {
-          level.count += 1;
-          level.bracketIndices.push(bracketIndex);
-        } else {
-          byPrice.set(bin, { priceBin: bin, count: 1, bracketIndices: [bracketIndex] });
-        }
-        if (index < spanBins) bin = neighbourBin(bin, priceStep, 1);
+  for (let bracketIndex = 0; bracketIndex < bars.length; bracketIndex++) {
+    const bar = bars[bracketIndex];
+    fromTime = fromTime === null ? bar.startTime : Math.min(fromTime, bar.startTime);
+    toTime = toTime === null ? bar.startTime : Math.max(toTime, bar.startTime);
+
+    const lo = quantizeToStep(bar.low, priceStep);
+    const hi = quantizeToStep(bar.high, priceStep);
+    if (!Number.isFinite(lo) || !Number.isFinite(hi) || hi < lo) continue;
+    if (refBin === null) refBin = lo;
+
+    const loIdx = Math.round((lo - refBin) / priceStep);
+    const spanBins = Math.round((hi - lo) / priceStep);
+    const hiIdx = loIdx + spanBins;
+    if (!Number.isSafeInteger(loIdx) || !Number.isSafeInteger(hiIdx) || spanBins < 0) continue;
+
+    validBrackets.push({ bracketIndex, loIdx, hiIdx });
+    events.push({ pos: loIdx, delta: 1 }, { pos: hiIdx + 1, delta: -1 });
+  }
+
+  if (refBin === null || events.length === 0) {
+    return { levels: [], totalCount: 0, poc: null, vah: null, val: null, fromTime, toTime, truncated: false };
+  }
+
+  events.sort((a, b) => a.pos - b.pos);
+
+  const runsInternal: { startIdx: number; endIdx: number; len: number; count: number; levelStart: number }[] = [];
+  let activeCount = 0;
+  let totalCount = 0;
+  let totalBins = 0;
+  let eventIdx = 0;
+  while (eventIdx < events.length) {
+    const pos = events[eventIdx].pos;
+    while (eventIdx < events.length && events[eventIdx].pos === pos) {
+      activeCount += events[eventIdx].delta;
+      eventIdx++;
+    }
+    if (eventIdx < events.length && activeCount > 0) {
+      const nextPos = events[eventIdx].pos;
+      const len = nextPos - pos;
+      if (len > 0) {
+        totalCount += activeCount * len;
+        runsInternal.push({ startIdx: pos, endIdx: nextPos - 1, len, count: activeCount, levelStart: totalBins });
+        totalBins += len;
       }
     }
   }
 
-  const levels = [...byPrice.values()].sort((a, b) => a.priceBin - b.priceBin);
-  const totalCount = levels.reduce((sum, level) => sum + level.count, 0);
-  if (!levels.length || totalCount <= 0) {
-    return { levels, totalCount, poc: null, vah: null, val: null, fromTime, toTime };
+  if (!runsInternal.length || totalCount <= 0) {
+    return { levels: [], totalCount: 0, poc: null, vah: null, val: null, fromTime, toTime, truncated: false };
   }
 
-  let pocIndex = 0;
-  for (let i = 1; i < levels.length; i++) {
-    if (levels[i].count > levels[pocIndex].count) pocIndex = i;
+  let pocRunIdx = 0;
+  for (let i = 1; i < runsInternal.length; i++) {
+    if (runsInternal[i].count > runsInternal[pocRunIdx].count) pocRunIdx = i;
   }
 
   const target = totalCount * clamp(valueAreaPercent, 0.5, 0.99);
-  let low = pocIndex;
-  let high = pocIndex;
-  let included = levels[pocIndex].count;
-  while (included < target && (low > 0 || high < levels.length - 1)) {
-    const below = low > 0 ? levels[low - 1].count : -1;
-    const above = high < levels.length - 1 ? levels[high + 1].count : -1;
+  let lowRun = pocRunIdx;
+  let lowOffset = 0;
+  let highRun = pocRunIdx;
+  let highOffset = 0;
+  let included = runsInternal[pocRunIdx].count;
+
+  while (included < target) {
+    const below = lowOffset > 0
+      ? runsInternal[lowRun].count
+      : (lowRun > 0 ? runsInternal[lowRun - 1].count : -1);
+    const above = highOffset < runsInternal[highRun].len - 1
+      ? runsInternal[highRun].count
+      : (highRun < runsInternal.length - 1 ? runsInternal[highRun + 1].count : -1);
+    if (below < 0 && above < 0) break;
+
     if (above > below) {
-      high++;
-      included += levels[high].count;
+      if (highOffset < runsInternal[highRun].len - 1) {
+        const stepCount = runsInternal[highRun].count;
+        const avail = runsInternal[highRun].len - 1 - highOffset;
+        const take = Math.min(avail, Math.ceil((target - included) / stepCount));
+        highOffset += take;
+        included += take * stepCount;
+      } else {
+        highRun++;
+        highOffset = 0;
+        included += runsInternal[highRun].count;
+      }
     } else {
-      low--;
-      included += levels[low].count;
+      if (lowOffset > 0) {
+        const stepCount = runsInternal[lowRun].count;
+        const take = Math.min(lowOffset, Math.ceil((target - included) / stepCount));
+        lowOffset -= take;
+        included += take * stepCount;
+      } else {
+        lowRun--;
+        lowOffset = runsInternal[lowRun].len - 1;
+        included += runsInternal[lowRun].count;
+      }
+    }
+  }
+
+  const poc = binAtOffset(refBin, priceStep, runsInternal[pocRunIdx].startIdx);
+  const val = binAtOffset(refBin, priceStep, runsInternal[lowRun].startIdx + lowOffset);
+  const vah = binAtOffset(refBin, priceStep, runsInternal[highRun].startIdx + highOffset);
+
+  const runs: TpoProfileRun[] = runsInternal.map((run) => ({
+    startPrice: binAtOffset(refBin, priceStep, run.startIdx),
+    endPrice: binAtOffset(refBin, priceStep, run.endIdx),
+    count: run.count,
+  }));
+
+  const truncated = totalCount > MAX_TPO_LEVEL_ENTRIES;
+  if (truncated) {
+    return { levels: [], totalCount, poc, vah, val, fromTime, toTime, runs, truncated: true };
+  }
+
+  const levels = new Array<TpoProfileLevel>(totalBins);
+  for (const run of runsInternal) {
+    for (let k = 0; k < run.len; k++) {
+      levels[run.levelStart + k] = {
+        priceBin: binAtOffset(refBin, priceStep, run.startIdx + k),
+        count: run.count,
+        bracketIndices: [],
+      };
+    }
+  }
+
+  for (const { bracketIndex, loIdx, hiIdx } of validBrackets) {
+    let lo = 0;
+    let hi = runsInternal.length;
+    while (lo < hi) {
+      const mid = lo + ((hi - lo) >>> 1);
+      if (runsInternal[mid].endIdx < loIdx) lo = mid + 1;
+      else hi = mid;
+    }
+    for (let rIdx = lo; rIdx < runsInternal.length && runsInternal[rIdx].startIdx <= hiIdx; rIdx++) {
+      const run = runsInternal[rIdx];
+      const fromOff = Math.max(loIdx, run.startIdx) - run.startIdx;
+      const toOff = Math.min(hiIdx, run.endIdx) - run.startIdx;
+      for (let off = fromOff; off <= toOff; off++) {
+        levels[run.levelStart + off].bracketIndices.push(bracketIndex);
+      }
     }
   }
 
   return {
     levels,
     totalCount,
-    poc: levels[pocIndex].priceBin,
-    vah: levels[high].priceBin,
-    val: levels[low].priceBin,
+    poc,
+    vah,
+    val,
     fromTime,
     toTime,
+    runs,
+    truncated: false,
   };
 }
 
