@@ -25,6 +25,7 @@ import type {
   LiveHeatmapTailEvent,
   LiveHeatmapTailRequest,
   OrderbookHeatmapBar,
+  OrderbookHeatmapCell,
   OrderbookHeatmapRequest,
   OrderbookHeatmapResponse,
   OrderbookHeatmapRuntimeStatus,
@@ -2261,7 +2262,7 @@ export class OrderbookHeatmapOverlay {
       const bar = (live ? liveHeatmapSubBar : lastHeatmapSubBar)(
         this.bars, series.timeOfIndex(index), series.timeOfIndex(index + 1), frame.tier, sortedTimes);
       if (!bar || bar.cells.length === 0) continue;
-      let cells = bar.cells;
+      let cells: readonly OrderbookHeatmapCell[] = bar.cells;
       let sparseValues: readonly number[] | null = null;
       if (threshold > 0) {
         const sparse = getHeatmapThresholdSparseBar(bar, unit, threshold, step);
@@ -2375,7 +2376,7 @@ export class OrderbookHeatmapOverlay {
       const bar = (live ? liveHeatmapSubBar : lastHeatmapSubBar)(
         this.bars, series.timeOfIndex(index), series.timeOfIndex(index + 1), preamble.tier, sortedTimes);
       if (!bar || bar.cells.length === 0) continue;
-      let cells = bar.cells;
+      let cells: readonly OrderbookHeatmapCell[] = bar.cells;
       if (preamble.threshold > 0) {
         const sparse = getHeatmapThresholdSparseBar(bar, preamble.settings.unit, preamble.threshold, step);
         if (sparse.maxValue < preamble.threshold || sparse.cells.length === 0) continue;
