@@ -34,8 +34,8 @@ test("explicit history reconciles only overlapping journal trades behind a water
 });
 
 test("normal scheduler turns are bounded and history barriers never force a synchronous full drain", () => {
-  assert.match(source, /_flushTrades\(nextLiveTradeFlushBatchSize\(this\.pendingTrades\.length\)\)/);
+  assert.match(source, /_flushTrades\(nextLiveTradeFlushBatchSize\(this\.getPendingCount\(\)\)\)/);
   assert.match(source, /DEFAULT_LIVE_TRADE_FLUSH_BUDGET_MS/);
-  assert.doesNotMatch(source, /overflowRecoveryBatchSize\(this\.pendingTrades\.length, PENDING_TRADE_BUFFER_CAP\)/);
+  assert.doesNotMatch(source, /overflowRecoveryBatchSize\(this\.(?:pendingTrades\.length|getPendingCount\(\)), PENDING_TRADE_BUFFER_CAP\)/);
   assert.doesNotMatch(source, /this\._cancelFlush\(\);\s*this\._flushTrades\(\);/);
 });

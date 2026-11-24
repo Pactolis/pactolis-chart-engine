@@ -123,7 +123,8 @@ export class LiveTradeQueueCoordinator {
   private subscribedMarket: string | null = null;
   paused = false;
   private lastBarStart = -1;
-  pendingTrades: AggTrade[] = [];
+  private pendingQueue: (AggTrade | undefined)[] = [];
+  private pendingHead = 0;
   private flushScheduled = false;
   private flushHandle: number | null = null;
   pendingTradeOverloaded = false;
@@ -140,6 +141,58 @@ export class LiveTradeQueueCoordinator {
     this.scheduler = scheduler;
   }
 
+  getPendingCount(): number {
+    return this.pendingQueue.length - this.pendingHead;
+  }
+
+  getPendingTrades(): AggTrade[] {
+    const count = this.getPendingCount();
+    if (count <= 0) return [];
+    const result = new Array<AggTrade>(count);
+    for (let i = 0; i < count; i++) {
+      result[i] = this.pendingQueue[this.pendingHead + i]!;
+    }
+    return result;
+  }
+
+  filterPendingTrades(predicate: (trade: AggTrade) => boolean): void {
+    let write = 0;
+    for (let i = this.pendingHead; i < this.pendingQueue.length; i++) {
+      const trade = this.pendingQueue[i];
+      if (trade !== undefined && predicate(trade)) {
+        this.pendingQueue[write++] = trade;
+      }
+    }
+    this.pendingQueue.length = write;
+    this.pendingHead = 0;
+  }
+
+  private compactPendingQueue(): void {
+    const remaining = this.pendingQueue.length - this.pendingHead;
+    if (remaining <= 0) {
+      this.pendingQueue.length = 0;
+      this.pendingHead = 0;
+      return;
+    }
+    if (this.pendingHead === 0) return;
+    for (let i = 0; i < remaining; i++) {
+      this.pendingQueue[i] = this.pendingQueue[this.pendingHead + i];
+    }
+    this.pendingQueue.length = remaining;
+    this.pendingHead = 0;
+  }
+
+  /** @internal White-box test compatibility bridge; hot paths must use getPendingCount/getPendingTrades/filterPendingTrades. */
+  get pendingTrades(): AggTrade[] {
+    if (this.pendingHead > 0) this.compactPendingQueue();
+    return this.pendingQueue as AggTrade[];
+  }
+
+  set pendingTrades(trades: AggTrade[]) {
+    this.pendingQueue = trades;
+    this.pendingHead = 0;
+  }
+
   setPaused(paused: boolean): void {
     if (this.paused === paused) return;
     this.paused = paused;
@@ -151,12 +204,13 @@ export class LiveTradeQueueCoordinator {
       return;
     }
     this.ensureDesiredSubscription();
-    if (this.pendingTrades.length > 0) this.host._scheduleFlush();
+    if (this.getPendingCount() > 0) this.host._scheduleFlush();
   }
 
   resetOnConfigOrStepChange(): void {
     this.host._cancelFlush();
-    this.pendingTrades = [];
+    this.pendingQueue = [];
+    this.pendingHead = 0;
     this.pendingTradeOverloaded = false;
     this.pendingTradeDataLoss = false;
     this.lastBarStart = -1;
@@ -170,7 +224,8 @@ export class LiveTradeQueueCoordinator {
 
   dispose(): void {
     this.host._cancelFlush();
-    this.pendingTrades = [];
+    this.pendingQueue = [];
+    this.pendingHead = 0;
     this.pendingTradeOverloaded = false;
     this.unsubscribe?.();
     this.unsubscribe = null;
@@ -230,8 +285,11 @@ export class LiveTradeQueueCoordinator {
   }
 
   _enqueuePendingTrade(trade: AggTrade): boolean {
-    if (!this.scheduler.isThrottled?.() && this.pendingTrades.length < PENDING_TRADE_BUFFER_CAP - 1) {
-      this.pendingTrades.push(trade);
+    if (!this.scheduler.isThrottled?.() && this.getPendingCount() < PENDING_TRADE_BUFFER_CAP - 1) {
+      if (this.pendingHead >= 1024 && this.pendingHead * 2 >= this.pendingQueue.length) {
+        this.compactPendingQueue();
+      }
+      this.pendingQueue.push(trade);
       return false;
     }
     return this._enqueuePendingTrades([trade]);
@@ -240,11 +298,16 @@ export class LiveTradeQueueCoordinator {
   _enqueuePendingTrades(trades: readonly AggTrade[]): boolean {
     if (trades.length === 0) return false;
     if (this.scheduler.isThrottled?.()) this._drainThrottledQueue(trades.length);
-    const available = Math.max(0, PENDING_TRADE_BUFFER_CAP - this.pendingTrades.length);
+    const available = Math.max(0, PENDING_TRADE_BUFFER_CAP - this.getPendingCount());
     const accepted = Math.min(available, trades.length);
-    if (accepted > 0) this.pendingTrades.push(...trades.slice(0, accepted));
+    if (accepted > 0) {
+      if (this.pendingHead >= 1024 && this.pendingHead * 2 >= this.pendingQueue.length) {
+        this.compactPendingQueue();
+      }
+      for (let i = 0; i < accepted; i++) this.pendingQueue.push(trades[i]);
+    }
     const dropped = trades.length - accepted;
-    if (this.pendingTrades.length < PENDING_TRADE_BUFFER_CAP && dropped === 0) return false;
+    if (this.getPendingCount() < PENDING_TRADE_BUFFER_CAP && dropped === 0) return false;
     incrementPerformanceCounter("pipeline.flush.overflow");
     this.pendingTradeOverloaded = true;
     this.host.integrityReporter?.report("pending", "PENDING_TRADE_BUFFER_OVERFLOW");
@@ -253,7 +316,9 @@ export class LiveTradeQueueCoordinator {
       incrementPerformanceCounter("pipeline.flush.overflow_dropped");
       this.host.notifyDataDegraded(true, "PENDING_TRADE_BUFFER_OVERFLOW: " + dropped + " live trade(s) require resync");
       this.host.cancelRecentFootprintCoverageRepair();
-      this.host.recoverDataLoss(trades.slice(accepted));
+      const droppedTrades = new Array<AggTrade>(dropped);
+      for (let i = 0; i < dropped; i++) droppedTrades[i] = trades[accepted + i];
+      this.host.recoverDataLoss(droppedTrades);
     }
     this.host._scheduleFlush();
     return true;
@@ -261,10 +326,10 @@ export class LiveTradeQueueCoordinator {
 
   /** Apply queued trades now, so a hidden page's queue plus the incoming trades stays within one drain turn. */
   private _drainThrottledQueue(incoming: number): void {
-    while (this.pendingTrades.length > 0 && this.pendingTrades.length + incoming > THROTTLED_QUEUE_LIMIT) {
-      const before = this.pendingTrades.length;
+    while (this.getPendingCount() > 0 && this.getPendingCount() + incoming > THROTTLED_QUEUE_LIMIT) {
+      const before = this.getPendingCount();
       this.host._flushTrades(before, THROTTLED_DRAIN_BUDGET_MS);
-      if (this.pendingTrades.length >= before) return;
+      if (this.getPendingCount() >= before) return;
       incrementPerformanceCounter("pipeline.flush.throttled_drain");
     }
   }
@@ -277,8 +342,8 @@ export class LiveTradeQueueCoordinator {
       firedSynchronously = true;
       this.flushScheduled = false;
       this.flushHandle = null;
-      this.host._flushTrades(nextLiveTradeFlushBatchSize(this.pendingTrades.length));
-      if (this.pendingTrades.length > 0) this.host._scheduleFlush();
+      this.host._flushTrades(nextLiveTradeFlushBatchSize(this.getPendingCount()));
+      if (this.getPendingCount() > 0) this.host._scheduleFlush();
     });
     this.flushHandle = firedSynchronously ? null : handle;
   }
@@ -290,12 +355,13 @@ export class LiveTradeQueueCoordinator {
   }
 
   _flushTrades(
-    limit = nextLiveTradeFlushBatchSize(this.pendingTrades.length),
+    limit = nextLiveTradeFlushBatchSize(this.getPendingCount()),
     budgetMs = DEFAULT_LIVE_TRADE_FLUSH_BUDGET_MS,
   ): void {
-    if (this.host.isDisposed() || this.paused || this.pendingTrades.length === 0) return;
+    const pendingCount = this.getPendingCount();
+    if (this.host.isDisposed() || this.paused || pendingCount === 0) return;
     const flushStartedAt = performance.now();
-    const count = Math.max(0, Math.min(this.pendingTrades.length, Math.floor(limit)));
+    const count = Math.max(0, Math.min(pendingCount, Math.floor(limit)));
     if (count === 0) return;
     const previousRevision = this.series.revision;
     const previousStructureRevision = this.series.structureRevision;
@@ -306,9 +372,12 @@ export class LiveTradeQueueCoordinator {
       if (liveTradeFlushBudgetExpired(flushStartedAt, performance.now(), processed, budgetMs)) break;
       const subBatchSize = nextLiveTradeSubBatchSize(count - processed);
       if (subBatchSize === 0) break;
-      const batch = this.pendingTrades.slice(processed, processed + subBatchSize);
+      const start = this.pendingHead;
+      const end = start + subBatchSize;
       measurePerformance("pipeline.addTrades", () => {
-        for (const trade of batch) {
+        for (let i = start; i < end; i++) {
+          const trade = this.pendingQueue[i];
+          if (!trade) continue;
           if (typeof trade.id === "string" && trade.id.length > 0 && trade.liquidation !== true) {
             this.series.addTrade(trade);
           } else {
@@ -316,14 +385,24 @@ export class LiveTradeQueueCoordinator {
           }
         }
       });
-      for (const trade of batch) {
-        this.host.markTradeAppliedForRepairs(trade);
-        this.host.recordLastAppliedTradeTime(trade.time);
+      for (let i = start; i < end; i++) {
+        const trade = this.pendingQueue[i];
+        if (trade) {
+          this.host.markTradeAppliedForRepairs(trade);
+          this.host.recordLastAppliedTradeTime(trade.time);
+        }
+        this.pendingQueue[i] = undefined;
       }
-      processed += batch.length;
+      this.pendingHead = end;
+      processed += subBatchSize;
     }
     if (processed === 0) return;
-    this.pendingTrades = this.pendingTrades.slice(processed);
+    if (this.pendingHead >= this.pendingQueue.length) {
+      this.pendingQueue.length = 0;
+      this.pendingHead = 0;
+    } else if (this.pendingHead >= 1024 && this.pendingHead * 2 >= this.pendingQueue.length) {
+      this.compactPendingQueue();
+    }
     incrementPerformanceCounter("pipeline.flush.count");
     incrementPerformanceCounter("pipeline.flush.trades", processed);
     const seriesChanged = this.series.revision !== previousRevision
@@ -354,7 +433,7 @@ export class LiveTradeQueueCoordinator {
       });
     }
     recordPerformanceDuration("pipeline.flush", performance.now() - flushStartedAt);
-    if (this.pendingTradeOverloaded && this.pendingTrades.length < PENDING_TRADE_BUFFER_CAP && !this.pendingTradeDataLoss) {
+    if (this.pendingTradeOverloaded && this.getPendingCount() < PENDING_TRADE_BUFFER_CAP && !this.pendingTradeDataLoss) {
       this.pendingTradeOverloaded = false;
       incrementPerformanceCounter("pipeline.flush.overflow_recovered");
       if (!this.host.isBlockingMaintenance()) this.host.integrityReporter?.report("healthy");
