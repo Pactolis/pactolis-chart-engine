@@ -630,49 +630,56 @@ export class FootprintRenderer {
     const fpW = colW - candleW;
     const halfW = fpW / 2;
     const cfg = this.cfg();
-    const { maxVol, pocBin } = this.heatStats(bar, step);
-    if (maxVol <= 0) return;
+    if (!cfg.heat && !cfg.poc && !cfg.stackedImbalance) return;
 
     // Vertical LOD: at sub-pixel row heights, thousands of clamped 1px rects per column
     // is pure overdraw that reads as a solid block. Merge per screen pixel instead.
     // POC and imbalance are skipped there — a single row is not resolvable anyway.
     const rowHeight = this.rowHeight(view, step);
     if (rowHeight < CELL_PIXEL_MERGE_HEIGHT) {
-      if (cfg.heat) this.drawMergedCells(view, bar, step, fpLeft, halfW);
+      if (cfg.heat) {
+        const { maxVol } = this.heatStats(bar, step);
+        if (maxVol > 0) this.drawMergedCells(view, bar, step, fpLeft, halfW);
+      }
       return;
     }
 
-    const pTop = view.priceOfY(view.area.top);
-    const pBot = view.priceOfY(view.area.top + view.area.height);
-    const minVisPrice = Math.min(pTop, pBot) - step;
-    const maxVisPrice = Math.max(pTop, pBot) + step;
+    if (cfg.heat || cfg.poc) {
+      const { maxVol, pocBin } = this.heatStats(bar, step);
+      if (maxVol > 0) {
+        const pTop = view.priceOfY(view.area.top);
+        const pBot = view.priceOfY(view.area.top + view.area.height);
+        const minVisPrice = Math.min(pTop, pBot) - step;
+        const maxVisPrice = Math.max(pTop, pBot) + step;
 
-    const emitHeatCell = (cell: FootprintCell): void => {
-      if (cell.priceBin + step < minVisPrice || cell.priceBin > maxVisPrice) return;
-      const rect = this.clippedCellRect(view, bar, cell.priceBin, step);
-      if (!rect) return;
-      const { yTop, height: h } = rect;
-      if (yTop > view.area.top + view.area.height || yTop + h < view.area.top) return;
+        const emitHeatCell = (cell: FootprintCell): void => {
+          if (cell.priceBin + step < minVisPrice || cell.priceBin > maxVisPrice) return;
+          const rect = this.clippedCellRect(view, bar, cell.priceBin, step);
+          if (!rect) return;
+          const { yTop, height: h } = rect;
+          if (yTop > view.area.top + view.area.height || yTop + h < view.area.top) return;
 
-      if (cfg.poc && cell.priceBin === pocBin) this.batch.rect(fpLeft, yTop, fpW, h, POC);
-      if (cfg.heat) {
-        const sellA = 0.12 + 0.7 * (cell.sellVol / maxVol);
-        const buyA = 0.12 + 0.7 * (cell.buyVol / maxVol);
-        const rowH = h > 1 ? h - 1 : h;
-        scratchColor.r = SELL.r; scratchColor.g = SELL.g; scratchColor.b = SELL.b; scratchColor.a = sellA;
-        this.batch.rect(fpLeft, yTop, halfW, rowH, scratchColor);
-        scratchColor.r = BUY.r; scratchColor.g = BUY.g; scratchColor.b = BUY.b; scratchColor.a = buyA;
-        this.batch.rect(fpLeft + halfW, yTop, halfW, rowH, scratchColor);
-      }
-    };
-    const slice = getVisibleFootprintCellSlice(bar, minVisPrice, maxVisPrice, step);
-    if (slice !== null) {
-      for (let c = slice.start; c < slice.end; c++) {
-        emitHeatCell(slice.cells[c]);
-      }
-    } else {
-      for (const cell of bar.cells.values()) {
-        emitHeatCell(cell);
+          if (cfg.poc && cell.priceBin === pocBin) this.batch.rect(fpLeft, yTop, fpW, h, POC);
+          if (cfg.heat) {
+            const sellA = 0.12 + 0.7 * (cell.sellVol / maxVol);
+            const buyA = 0.12 + 0.7 * (cell.buyVol / maxVol);
+            const rowH = h > 1 ? h - 1 : h;
+            scratchColor.r = SELL.r; scratchColor.g = SELL.g; scratchColor.b = SELL.b; scratchColor.a = sellA;
+            this.batch.rect(fpLeft, yTop, halfW, rowH, scratchColor);
+            scratchColor.r = BUY.r; scratchColor.g = BUY.g; scratchColor.b = BUY.b; scratchColor.a = buyA;
+            this.batch.rect(fpLeft + halfW, yTop, halfW, rowH, scratchColor);
+          }
+        };
+        const slice = getVisibleFootprintCellSlice(bar, minVisPrice, maxVisPrice, step);
+        if (slice !== null) {
+          for (let c = slice.start; c < slice.end; c++) {
+            emitHeatCell(slice.cells[c]);
+          }
+        } else {
+          for (const cell of bar.cells.values()) {
+            emitHeatCell(cell);
+          }
+        }
       }
     }
 
@@ -872,13 +879,19 @@ export class FootprintRenderer {
     color: RGBA,
     sink: QuadSink = this.batch,
   ): void {
+    const areaTop = view.area.top;
+    const areaBottom = areaTop + view.area.height;
     const flushRun = (end: number, run: number): void => {
       if (run < IMB_STACK) return;
       for (let j = end - run; j < end; j++) {
         const rect = this.clippedCellRect(view, bar, cells[j].priceBin, step);
         if (!rect) continue;
-        const rowH = rect.height > 1 ? rect.height - 1 : rect.height;
-        sink.rect(x, rect.yTop, w, rowH, color);
+        const rawRowH = rect.height > 1 ? rect.height - 1 : rect.height;
+        const yTop = Math.max(rect.yTop, areaTop);
+        const yBot = Math.min(rect.yTop + rawRowH, areaBottom);
+        const clippedH = yBot - yTop;
+        if (!(clippedH > 0)) continue;
+        sink.rect(x, yTop, w, clippedH, color);
       }
     };
     let run = 0;

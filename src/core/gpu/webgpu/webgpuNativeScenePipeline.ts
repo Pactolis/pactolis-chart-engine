@@ -1,5 +1,10 @@
 import type { GpuNativeSceneInput, GpuNativeSceneLodMode } from "../gpuBackend.js";
-import type { FootprintSeries } from "../../model/footprint.js";
+import {
+  type FootprintSeries,
+  getFootprintBarKeysRevision,
+  getFootprintCellRevision,
+  getSortedFootprintBarCells,
+} from "../../model/footprint.js";
 import type { FootprintBar } from "../../types.js";
 import { incrementPerformanceCounter, recordPerformanceDuration } from "../../performanceTelemetry.js";
 
@@ -653,12 +658,32 @@ fn cs_main(@builtin(global_invocation_id) gid: vec3<u32>) {
   let bar = bars[bar_idx];
   let end = bar.cellOffset + bar.cellCount;
   var merged_max: f32 = 0.0;
+  var has_cur: bool = false;
+  var cur_y: i32 = 0;
+  var cur_buy: f32 = 0.0;
+  var cur_sell: f32 = 0.0;
 
   for (var i: u32 = bar.cellOffset; i < end; i = i + 1u) {
     let cell = cells[i];
     let y_top_f = u_view.area.y + (u_view.priceTopRel - (cell.priceBinRel + u_view.priceStep)) / u_view.pricePerPx;
     let y_bot_f = u_view.area.y + (u_view.priceTopRel - cell.priceBinRel) / u_view.pricePerPx;
     let y_top_i = i32(floor(y_top_f));
+
+    if (!has_cur) {
+      has_cur = true;
+      cur_y = y_top_i;
+      cur_buy = cell.buyVol;
+      cur_sell = cell.sellVol;
+    } else if (y_top_i == cur_y) {
+      cur_buy = cur_buy + cell.buyVol;
+      cur_sell = cur_sell + cell.sellVol;
+    } else {
+      merged_max = max(merged_max, max(cur_buy, cur_sell));
+      cur_y = y_top_i;
+      cur_buy = cell.buyVol;
+      cur_sell = cell.sellVol;
+    }
+
     let row_idx = y_top_i - u_lod.startCoord;
     if (row_idx >= 0 && row_idx < i32(u_lod.plotHeight)) {
       let slot = vis_bar_idx * u_lod.plotHeight + u32(row_idx);
@@ -672,8 +697,11 @@ fn cs_main(@builtin(global_invocation_id) gid: vec3<u32>) {
       rec.buyVol = rec.buyVol + cell.buyVol;
       rec.sellVol = rec.sellVol + cell.sellVol;
       merged_rows[slot] = rec;
-      merged_max = max(merged_max, max(rec.buyVol, rec.sellVol));
     }
+  }
+
+  if (has_cur) {
+    merged_max = max(merged_max, max(cur_buy, cur_sell));
   }
 
   merged_bar_max[vis_bar_idx] = merged_max;
@@ -878,6 +906,10 @@ export class WebGpuNativeScenePipeline {
   private readonly tailBarF32 = new Float32Array(this.tailBarBuffer);
   private readonly tailBarU32 = new Uint32Array(this.tailBarBuffer);
 
+  private readonly tailCellBuffer = new ArrayBuffer(CELL_RECORD_BYTES);
+  private readonly tailCellF32 = new Float32Array(this.tailCellBuffer);
+  private readonly tailCellU32 = new Uint32Array(this.tailCellBuffer);
+
   private readonly viewUniformRaw = new ArrayBuffer(VIEW_UNIFORM_BYTES);
   private readonly viewUniformF32 = new Float32Array(this.viewUniformRaw);
   private readonly viewUniformU32 = new Uint32Array(this.viewUniformRaw);
@@ -935,6 +967,10 @@ export class WebGpuNativeScenePipeline {
   private syncedTailClose = Number.NaN;
   private syncedTailCellCount = -1;
   private tailCellOffset = 0;
+  private cellsSynced = false;
+  private tailCellsDirty = false;
+  private syncedTailKeysRevision = -1;
+  private syncedTailCellRevs = new Uint32Array(256);
 
   private overflowSeries: FootprintSeries | null = null;
   private overflowResetEpoch = -1;
@@ -1160,6 +1196,29 @@ export class WebGpuNativeScenePipeline {
     }
   }
 
+  private ensureTailCellRevCapacity(cellCount: number): void {
+    if (cellCount > this.syncedTailCellRevs.length) {
+      let cap = Math.max(256, this.syncedTailCellRevs.length);
+      while (cap < cellCount) cap *= 2;
+      this.syncedTailCellRevs = new Uint32Array(cap);
+    }
+  }
+
+  private recordTailCellRevisions(bar: FootprintBar | undefined): void {
+    if (!bar) {
+      this.syncedTailKeysRevision = -1;
+      return;
+    }
+    this.syncedTailKeysRevision = getFootprintBarKeysRevision(bar) ?? 0;
+    const cellCount = bar.cells.size;
+    if (cellCount === 0) return;
+    this.ensureTailCellRevCapacity(cellCount);
+    const sortedCells = getSortedFootprintBarCells(bar);
+    for (let i = 0; i < sortedCells.length; i++) {
+      this.syncedTailCellRevs[i] = getFootprintCellRevision(sortedCells[i]);
+    }
+  }
+
   private packStagingBar(
     stagingBarIndex: number,
     gpuBarIndex: number,
@@ -1167,6 +1226,7 @@ export class WebGpuNativeScenePipeline {
     origin: number,
     gpuCellOffset: number,
     stagingCellCursor: number,
+    packCells = true,
   ): number {
     const barBase = stagingBarIndex * BAR_RECORD_WORDS;
     if (!bar) {
@@ -1197,8 +1257,14 @@ export class WebGpuNativeScenePipeline {
     this.barCellCounts[gpuBarIndex] = cellCount;
     this.recordBarMetadata(gpuBarIndex, bar);
 
+    if (!packCells || cellCount === 0) {
+      return stagingCellCursor;
+    }
+
     let cursor = stagingCellCursor;
-    for (const cell of bar.cells.values()) {
+    const sortedCells = getSortedFootprintBarCells(bar);
+    for (let i = 0; i < sortedCells.length; i++) {
+      const cell = sortedCells[i];
       const cellBase = cursor * CELL_RECORD_WORDS;
       this.cellStagingU32[cellBase] = gpuBarIndex;
       this.cellStagingF32[cellBase + 1] = cell.priceBin - origin;
@@ -1274,6 +1340,9 @@ export class WebGpuNativeScenePipeline {
       this.cellBuffer?.destroy?.();
       this.cellCapacity = nextCap;
       this.cellBuffer = this.allocateStorageBuffer("NativeSceneCellStorage", nextCap * CELL_RECORD_BYTES);
+      this.cellsSynced = false;
+      this.tailCellsDirty = false;
+      this.syncedTailKeysRevision = -1;
       reallocated = true;
     }
 
@@ -1288,7 +1357,7 @@ export class WebGpuNativeScenePipeline {
     this.device.queue.writeBuffer(buffer, dstByteOffset, src, 0, srcByteLength);
   }
 
-  private syncSeries(series: FootprintSeries): boolean {
+  private syncSeries(series: FootprintSeries, drawFootprint: boolean): boolean {
     this.dirtyStart = 0;
     this.dirtyCount = 0;
 
@@ -1296,6 +1365,7 @@ export class WebGpuNativeScenePipeline {
       return false;
     }
 
+    const needCells = drawFootprint;
     const barCount = series.length;
 
     if (barCount === 0) {
@@ -1316,6 +1386,9 @@ export class WebGpuNativeScenePipeline {
       this.syncedTailClose = Number.NaN;
       this.syncedTailCellCount = -1;
       this.tailCellOffset = 0;
+      this.cellsSynced = needCells;
+      this.tailCellsDirty = false;
+      this.syncedTailKeysRevision = -1;
       this.activeBarCount = 0;
       this.activeCellCount = 0;
       return true;
@@ -1328,82 +1401,179 @@ export class WebGpuNativeScenePipeline {
       && this.syncedBarCount === barCount;
 
     if (sameStructure) {
-      if (this.syncedRevision === series.revision) {
+      if (
+        this.syncedRevision === series.revision
+        && (!needCells || (this.cellsSynced && !this.tailCellsDirty))
+      ) {
         return true;
       }
 
-      const tailIdx = barCount - 1;
-      const tailBar = series.at(tailIdx);
-      if (tailBar) {
-        const tailCellRev = tailBar.cellRevision ?? 0;
-        const tailCellsSize = tailBar.cells.size;
-        const tailUnchanged =
-          this.syncedTailCellRevision === tailCellRev
-          && this.syncedTailOpen === tailBar.open
-          && this.syncedTailHigh === tailBar.high
-          && this.syncedTailLow === tailBar.low
-          && this.syncedTailClose === tailBar.close
-          && this.syncedTailCellCount === tailCellsSize;
+      if (!needCells || this.cellsSynced) {
+        const tailIdx = barCount - 1;
+        const tailBar = series.at(tailIdx);
+        if (tailBar) {
+          const tailCellRev = tailBar.cellRevision ?? 0;
+          const tailCellsSize = tailBar.cells.size;
+          const tailOhlcChanged =
+            this.syncedTailOpen !== tailBar.open
+            || this.syncedTailHigh !== tailBar.high
+            || this.syncedTailLow !== tailBar.low
+            || this.syncedTailClose !== tailBar.close;
+          const tailCellChanged =
+            this.syncedTailCellRevision !== tailCellRev
+            || this.syncedTailCellCount !== tailCellsSize;
 
-        if (tailUnchanged) {
-          this.syncedRevision = series.revision;
-          return true;
-        }
-
-        if (this.tailCellOffset + tailCellsSize <= this.cellCapacity) {
-          this.ensureStagingCapacity(barCount, tailCellsSize);
-          const origin = this.priceOriginValue;
-          this.tailBarF32[0] = tailBar.open - origin;
-          this.tailBarF32[1] = tailBar.high - origin;
-          this.tailBarF32[2] = tailBar.low - origin;
-          this.tailBarF32[3] = tailBar.close - origin;
-          this.tailBarF32[4] = 0;
-          this.tailBarF32[5] = 0;
-          this.tailBarU32[6] = this.tailCellOffset;
-          this.tailBarU32[7] = tailCellsSize;
-
-          let cellWord = 0;
-          for (const cell of tailBar.cells.values()) {
-            this.cellStagingU32[cellWord] = tailIdx;
-            this.cellStagingF32[cellWord + 1] = cell.priceBin - origin;
-            this.cellStagingF32[cellWord + 2] = cell.buyVol;
-            this.cellStagingF32[cellWord + 3] = cell.sellVol;
-            cellWord += CELL_RECORD_WORDS;
+          if (!tailOhlcChanged && !tailCellChanged && (!needCells || !this.tailCellsDirty)) {
+            this.syncedRevision = series.revision;
+            return true;
           }
 
-          this.writeStorageBuffer(
-            this.barBuffer,
-            tailIdx * BAR_RECORD_BYTES,
-            this.tailBarBuffer,
-            BAR_RECORD_BYTES,
-          );
-          if (tailCellsSize > 0) {
-            this.writeStorageBuffer(
-              this.cellBuffer,
-              this.tailCellOffset * CELL_RECORD_BYTES,
-              this.cellStagingBuffer,
-              tailCellsSize * CELL_RECORD_BYTES,
-            );
+          if (!needCells) {
+            let dataBytes = 0;
+            if (tailOhlcChanged || tailCellChanged) {
+              this.ensureStagingCapacity(barCount, 0);
+              const origin = this.priceOriginValue;
+              this.tailBarF32[0] = tailBar.open - origin;
+              this.tailBarF32[1] = tailBar.high - origin;
+              this.tailBarF32[2] = tailBar.low - origin;
+              this.tailBarF32[3] = tailBar.close - origin;
+              this.tailBarF32[4] = 0;
+              this.tailBarF32[5] = 0;
+              this.tailBarU32[6] = this.tailCellOffset;
+              this.tailBarU32[7] = tailCellsSize;
+              if (tailOhlcChanged) {
+                this.writeStorageBuffer(
+                  this.barBuffer,
+                  tailIdx * BAR_RECORD_BYTES,
+                  this.tailBarBuffer,
+                  BAR_RECORD_BYTES,
+                );
+                dataBytes += BAR_RECORD_BYTES;
+              }
+              this.barCellOffsets[tailIdx] = this.tailCellOffset;
+              this.barCellCounts[tailIdx] = tailCellsSize;
+              this.recordBarMetadata(tailIdx, tailBar);
+              this.activeCellCount = this.tailCellOffset + tailCellsSize;
+            }
+            if (tailCellChanged && this.cellsSynced) {
+              this.tailCellsDirty = true;
+            }
+            if (dataBytes > 0) {
+              incrementPerformanceCounter("gpu.upload.bytes", dataBytes);
+              incrementPerformanceCounter("gpu.native.upload.dataBytes", dataBytes);
+            }
+            this.syncedRevision = series.revision;
+            this.syncedTailCellRevision = tailCellRev;
+            this.syncedTailOpen = tailBar.open;
+            this.syncedTailHigh = tailBar.high;
+            this.syncedTailLow = tailBar.low;
+            this.syncedTailClose = tailBar.close;
+            this.syncedTailCellCount = tailCellsSize;
+            return true;
           }
 
-          const dataBytes = BAR_RECORD_BYTES + tailCellsSize * CELL_RECORD_BYTES;
-          incrementPerformanceCounter("gpu.upload.bytes", dataBytes);
-          incrementPerformanceCounter("gpu.native.upload.dataBytes", dataBytes);
+          if (this.tailCellOffset + tailCellsSize <= this.cellCapacity) {
+            this.ensureStagingCapacity(barCount, tailCellsSize);
+            const origin = this.priceOriginValue;
+            const keysRev = getFootprintBarKeysRevision(tailBar) ?? 0;
+            const canPatchInPlace =
+              !this.tailCellsDirty
+              && keysRev === this.syncedTailKeysRevision
+              && tailCellsSize === this.syncedTailCellCount
+              && tailCellsSize > 0;
 
-          this.barCellOffsets[tailIdx] = this.tailCellOffset;
-          this.barCellCounts[tailIdx] = tailCellsSize;
-          this.recordBarMetadata(tailIdx, tailBar);
-          this.activeCellCount = this.tailCellOffset + tailCellsSize;
-          this.syncedRevision = series.revision;
-          this.syncedTailCellRevision = tailCellRev;
-          this.syncedTailOpen = tailBar.open;
-          this.syncedTailHigh = tailBar.high;
-          this.syncedTailLow = tailBar.low;
-          this.syncedTailClose = tailBar.close;
-          this.syncedTailCellCount = tailCellsSize;
-          this.dirtyStart = tailIdx;
-          this.dirtyCount = 1;
-          return true;
+            let dataBytes = 0;
+            let patchedInPlace = false;
+
+            if (canPatchInPlace) {
+              const sortedCells = getSortedFootprintBarCells(tailBar);
+              let changedCells = 0;
+              for (let i = 0; i < sortedCells.length; i++) {
+                const cell = sortedCells[i];
+                const rev = getFootprintCellRevision(cell);
+                if (rev !== this.syncedTailCellRevs[i]) {
+                  this.tailCellU32[0] = tailIdx;
+                  this.tailCellF32[1] = cell.priceBin - origin;
+                  this.tailCellF32[2] = cell.buyVol;
+                  this.tailCellF32[3] = cell.sellVol;
+                  this.writeStorageBuffer(
+                    this.cellBuffer,
+                    (this.tailCellOffset + i) * CELL_RECORD_BYTES,
+                    this.tailCellBuffer,
+                    CELL_RECORD_BYTES,
+                  );
+                  this.syncedTailCellRevs[i] = rev;
+                  dataBytes += CELL_RECORD_BYTES;
+                  changedCells++;
+                }
+              }
+              if (changedCells > 0 || !tailCellChanged) {
+                patchedInPlace = true;
+              }
+            }
+
+            if (!patchedInPlace) {
+              const sortedCells = getSortedFootprintBarCells(tailBar);
+              let cellWord = 0;
+              for (let i = 0; i < sortedCells.length; i++) {
+                const cell = sortedCells[i];
+                this.cellStagingU32[cellWord] = tailIdx;
+                this.cellStagingF32[cellWord + 1] = cell.priceBin - origin;
+                this.cellStagingF32[cellWord + 2] = cell.buyVol;
+                this.cellStagingF32[cellWord + 3] = cell.sellVol;
+                cellWord += CELL_RECORD_WORDS;
+              }
+              if (tailCellsSize > 0) {
+                this.writeStorageBuffer(
+                  this.cellBuffer,
+                  this.tailCellOffset * CELL_RECORD_BYTES,
+                  this.cellStagingBuffer,
+                  tailCellsSize * CELL_RECORD_BYTES,
+                );
+                dataBytes += tailCellsSize * CELL_RECORD_BYTES;
+              }
+              this.recordTailCellRevisions(tailBar);
+            }
+
+            if (tailOhlcChanged || !patchedInPlace) {
+              this.tailBarF32[0] = tailBar.open - origin;
+              this.tailBarF32[1] = tailBar.high - origin;
+              this.tailBarF32[2] = tailBar.low - origin;
+              this.tailBarF32[3] = tailBar.close - origin;
+              this.tailBarF32[4] = 0;
+              this.tailBarF32[5] = 0;
+              this.tailBarU32[6] = this.tailCellOffset;
+              this.tailBarU32[7] = tailCellsSize;
+              this.writeStorageBuffer(
+                this.barBuffer,
+                tailIdx * BAR_RECORD_BYTES,
+                this.tailBarBuffer,
+                BAR_RECORD_BYTES,
+              );
+              dataBytes += BAR_RECORD_BYTES;
+            }
+
+            if (dataBytes > 0) {
+              incrementPerformanceCounter("gpu.upload.bytes", dataBytes);
+              incrementPerformanceCounter("gpu.native.upload.dataBytes", dataBytes);
+            }
+
+            this.barCellOffsets[tailIdx] = this.tailCellOffset;
+            this.barCellCounts[tailIdx] = tailCellsSize;
+            this.recordBarMetadata(tailIdx, tailBar);
+            this.activeCellCount = this.tailCellOffset + tailCellsSize;
+            this.tailCellsDirty = false;
+            this.syncedRevision = series.revision;
+            this.syncedTailCellRevision = tailCellRev;
+            this.syncedTailOpen = tailBar.open;
+            this.syncedTailHigh = tailBar.high;
+            this.syncedTailLow = tailBar.low;
+            this.syncedTailClose = tailBar.close;
+            this.syncedTailCellCount = tailCellsSize;
+            this.dirtyStart = tailIdx;
+            this.dirtyCount = 1;
+            return true;
+          }
         }
       }
     }
@@ -1412,6 +1582,7 @@ export class WebGpuNativeScenePipeline {
     if (
       this.syncedSeries === series
       && this.syncedResetEpoch === series.resetEpoch
+      && (!needCells || this.cellsSynced)
       && this.syncedBarCount >= 1
       && barCount > this.syncedBarCount
       && barCount <= this.barCapacity
@@ -1450,27 +1621,29 @@ export class WebGpuNativeScenePipeline {
             if (b) appendCellCount += b.cells.size;
           }
 
-          if (this.tailCellOffset + appendCellCount <= this.cellCapacity) {
-            this.ensureStagingCapacity(barCount, Math.max(appendCellCount, 1));
+          if (!needCells || this.tailCellOffset + appendCellCount <= this.cellCapacity) {
+            this.ensureStagingCapacity(barCount, needCells ? Math.max(appendCellCount, 1) : 0);
             this.syncedBarRefs.length = barCount;
 
             const origin = this.priceOriginValue;
             let cellCursor = 0;
+            let runningCellOffset = this.tailCellOffset;
             for (let i = prevTailIdx; i < barCount; i++) {
               const bar = series.at(i);
-              const gpuCellOffset = this.tailCellOffset + cellCursor;
               cellCursor = this.packStagingBar(
                 i - prevTailIdx,
                 i,
                 bar,
                 origin,
-                gpuCellOffset,
+                runningCellOffset,
                 cellCursor,
+                needCells,
               );
+              runningCellOffset += bar?.cells.size ?? 0;
             }
 
             const barSliceBytes = appendBarCount * BAR_RECORD_BYTES;
-            const cellSliceBytes = appendCellCount * CELL_RECORD_BYTES;
+            const cellSliceBytes = needCells ? appendCellCount * CELL_RECORD_BYTES : 0;
             this.writeStorageBuffer(
               this.barBuffer,
               prevTailIdx * BAR_RECORD_BYTES,
@@ -1504,8 +1677,17 @@ export class WebGpuNativeScenePipeline {
             this.syncedTailLow = lastBar?.low ?? Number.NaN;
             this.syncedTailClose = lastBar?.close ?? Number.NaN;
             this.syncedTailCellCount = lastBar?.cells.size ?? 0;
-            this.dirtyStart = prevTailIdx;
-            this.dirtyCount = appendBarCount;
+            if (needCells) {
+              this.cellsSynced = true;
+              this.tailCellsDirty = false;
+              this.recordTailCellRevisions(lastBar);
+              this.dirtyStart = prevTailIdx;
+              this.dirtyCount = appendBarCount;
+            } else {
+              this.cellsSynced = false;
+              this.tailCellsDirty = false;
+              this.syncedTailKeysRevision = -1;
+            }
             return true;
           }
         }
@@ -1519,7 +1701,7 @@ export class WebGpuNativeScenePipeline {
       if (bar) totalCells += bar.cells.size;
     }
 
-    if (!this.ensureStorageCapacity(barCount, totalCells)) {
+    if (!this.ensureStorageCapacity(barCount, needCells ? totalCells : 0)) {
       this.overflowSeries = series;
       this.overflowResetEpoch = series.resetEpoch;
       return false;
@@ -1529,17 +1711,19 @@ export class WebGpuNativeScenePipeline {
     const firstLow = firstBar?.low ?? 0;
     const origin = Number.isFinite(firstLow) ? firstLow : 0;
 
-    this.ensureStagingCapacity(barCount, Math.max(totalCells, 1));
+    this.ensureStagingCapacity(barCount, needCells ? Math.max(totalCells, 1) : 0);
     this.syncedBarRefs.length = barCount;
 
     let cellCursor = 0;
+    let runningCellOffset = 0;
     for (let i = 0; i < barCount; i++) {
       const bar = series.at(i);
-      cellCursor = this.packStagingBar(i, i, bar, origin, cellCursor, cellCursor);
+      cellCursor = this.packStagingBar(i, i, bar, origin, runningCellOffset, cellCursor, needCells);
+      runningCellOffset += bar?.cells.size ?? 0;
     }
 
     const barBytes = barCount * BAR_RECORD_BYTES;
-    const cellBytes = totalCells * CELL_RECORD_BYTES;
+    const cellBytes = needCells ? totalCells * CELL_RECORD_BYTES : 0;
     this.writeStorageBuffer(this.barBuffer, 0, this.barStagingBuffer, barBytes);
     if (cellBytes > 0) {
       this.writeStorageBuffer(this.cellBuffer, 0, this.cellStagingBuffer, cellBytes);
@@ -1569,8 +1753,19 @@ export class WebGpuNativeScenePipeline {
     this.syncedTailLow = lastBar?.low ?? Number.NaN;
     this.syncedTailClose = lastBar?.close ?? Number.NaN;
     this.syncedTailCellCount = lastBar?.cells.size ?? 0;
-    this.dirtyStart = 0;
-    this.dirtyCount = barCount;
+    if (needCells) {
+      this.cellsSynced = true;
+      this.tailCellsDirty = false;
+      this.recordTailCellRevisions(lastBar);
+      this.dirtyStart = 0;
+      this.dirtyCount = barCount;
+    } else {
+      this.cellsSynced = false;
+      this.tailCellsDirty = false;
+      this.syncedTailKeysRevision = -1;
+      this.dirtyStart = 0;
+      this.dirtyCount = 0;
+    }
     return true;
   }
 
@@ -1817,7 +2012,7 @@ export class WebGpuNativeScenePipeline {
       return emptyFail;
     }
 
-    if (!this.syncSeries(scene.series)) {
+    if (!this.syncSeries(scene.series, scene.drawFootprint)) {
       return emptyFail;
     }
 

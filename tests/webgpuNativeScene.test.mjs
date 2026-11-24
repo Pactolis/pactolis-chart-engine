@@ -469,7 +469,7 @@ test("WebGpuNativeScenePipeline enforces 32B/16B layouts, priceOrigin precision,
     assert.equal(counters["gpu.native.upload.dataBytes"] - beforePanData, 0, "pan/zoom uploads 0 storage bytes");
     assert.equal(counters["gpu.native.upload.uniformBytes"] - beforePanUniform, VIEW_UNIFORM_BYTES);
 
-    // 3. Live tail update: add trade to last bar -> only tail BarRecord (32B) + tail cells (3 * 16 = 48B)
+    // 3. Live tail update: add trade to last bar -> only tail BarRecord (32B) + changed tail cell (1 * 16 = 16B)
     const beforeLiveData = counters["gpu.native.upload.dataBytes"];
     const beforeLiveUniform = counters["gpu.native.upload.uniformBytes"];
     const lastBar = series.at(series.length - 1);
@@ -492,7 +492,7 @@ test("WebGpuNativeScenePipeline enforces 32B/16B layouts, priceOrigin precision,
     assert.equal(cu32[1], 1, "dirtyCount is 1 bar");
 
     counters = snapshotPerformanceTelemetry().counters;
-    assert.equal(counters["gpu.native.upload.dataBytes"] - beforeLiveData, 32 + 3 * 16);
+    assert.equal(counters["gpu.native.upload.dataBytes"] - beforeLiveData, 32 + 16);
     assert.equal(counters["gpu.native.upload.uniformBytes"] - beforeLiveUniform, COMPUTE_UNIFORM_BYTES + VIEW_UNIFORM_BYTES);
 
     // 3b. Bar rollover incremental append: adds new bar without resetting prefix 0..2
