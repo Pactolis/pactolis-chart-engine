@@ -3,15 +3,148 @@ import {
   recordGpuBackendSelection,
   recordGpuContextEvent,
   recordGpuFallback,
+  setGpuAdapterInfo,
   setGpuLimits,
+  setGpuSelectionDecision,
+  type GpuAdapterInfo,
 } from "./gpuDiagnostics.js";
-import type { GpuBackendPreference } from "./gpuSettings.js";
+import {
+  readGpuSettings,
+  type GpuBackendPreference,
+  type WebGpuRolloutMode,
+} from "./gpuSettings.js";
 import type { GpuSurface } from "./gpuBackend.js";
 import { WebGl2Surface } from "./webgl2/webgl2Surface.js";
-import type { WebGpuDeviceHandle } from "./webgpu/webgpuDevice.js";
+import type { WebGpuDeviceHandle, WebGpuLimits } from "./webgpu/webgpuDevice.js";
 import type { ChartPowerPreference } from "../model/chartDisplayOptions.js";
 
 type PendingFallback = { from: string; to: string; reason: string };
+
+export const MIN_WEBGPU_MAX_BUFFER_SIZE = 64 * 1024 * 1024;
+export const MIN_WEBGPU_MAX_TEXTURE_DIMENSION_2D = 4096;
+
+const SOFTWARE_ADAPTER_PATTERNS = [
+  "swiftshader",
+  "microsoft basic render",
+  "llvmpipe",
+  "lavapipe",
+];
+
+export interface WebGpuQualificationOptions {
+  readonly preference?: GpuBackendPreference;
+  readonly webgpuRollout?: WebGpuRolloutMode;
+  readonly webgpuKillSwitch?: boolean;
+}
+
+export interface WebGpuQualificationResult {
+  readonly qualified: boolean;
+  readonly selectionReason: string;
+  readonly fallbackReason?: string;
+}
+
+type SessionWebGpuDecision =
+  | { kind: "qualified"; selectionReason: string }
+  | { kind: "fallback"; reason: string };
+
+let sessionWebGpuDecision: SessionWebGpuDecision | null = null;
+let clearWebGpuFatalReasonFn: (() => void) | null = null;
+
+function isSoftwareOrFallbackAdapter(adapterInfo?: GpuAdapterInfo): boolean {
+  if (!adapterInfo) return false;
+  if (adapterInfo.isFallbackAdapter === true) return true;
+  const text = [
+    adapterInfo.vendor,
+    adapterInfo.architecture,
+    adapterInfo.description,
+  ]
+    .filter((v): v is string => typeof v === "string" && v.length > 0)
+    .join(" ")
+    .toLowerCase();
+  if (!text) return false;
+  return SOFTWARE_ADAPTER_PATTERNS.some((pattern) => text.includes(pattern));
+}
+
+function hasSufficientLimits(
+  limits?: Partial<WebGpuLimits> | Record<string, number>,
+): boolean {
+  if (!limits) return false;
+  const maxBufferSize = limits.maxBufferSize;
+  const maxTextureDimension2D = limits.maxTextureDimension2D;
+  return (
+    typeof maxBufferSize === "number" &&
+    Number.isFinite(maxBufferSize) &&
+    maxBufferSize >= MIN_WEBGPU_MAX_BUFFER_SIZE &&
+    typeof maxTextureDimension2D === "number" &&
+    Number.isFinite(maxTextureDimension2D) &&
+    maxTextureDimension2D >= MIN_WEBGPU_MAX_TEXTURE_DIMENSION_2D
+  );
+}
+
+/**
+ * Conservatively evaluates whether WebGPU should be used for the current
+ * preference, rollout/kill-switch policy, adapter info, and device limits.
+ */
+export function evaluateWebGpuQualification(
+  adapterInfo: GpuAdapterInfo | undefined,
+  limits: Partial<WebGpuLimits> | Record<string, number> | undefined,
+  options?: WebGpuQualificationOptions,
+): WebGpuQualificationResult {
+  const preference = options?.preference ?? "auto";
+  if (preference === "webgl2") {
+    return { qualified: false, selectionReason: "user_forced_webgl2" };
+  }
+  if (preference === "canvas2d") {
+    return { qualified: false, selectionReason: "user_forced_canvas2d" };
+  }
+  if (
+    options?.webgpuKillSwitch === true ||
+    (preference === "auto" && options?.webgpuRollout === "off")
+  ) {
+    return {
+      qualified: false,
+      selectionReason: "kill_switch",
+      fallbackReason: "kill_switch",
+    };
+  }
+  if (preference === "webgpu") {
+    return { qualified: true, selectionReason: "user_forced_webgpu" };
+  }
+  if (isSoftwareOrFallbackAdapter(adapterInfo)) {
+    return {
+      qualified: false,
+      selectionReason: "fallback_adapter_rejected",
+      fallbackReason: "fallback_adapter_rejected",
+    };
+  }
+  if (!hasSufficientLimits(limits)) {
+    return {
+      qualified: false,
+      selectionReason: "insufficient_limits",
+      fallbackReason: "insufficient_limits",
+    };
+  }
+  return { qualified: true, selectionReason: "qualified_hardware" };
+}
+
+/**
+ * Pins the current session to WebGL2/Canvas2D fallback after qualification
+ * rejection or fatal runtime device-loss/OOM so subsequent panels do not
+ * repeatedly probe or recreate WebGPU canvases.
+ */
+export function latchWebGpuSessionFallback(reason: string): void {
+  const normalized = reason && reason.trim().length > 0 ? reason : "device_lost";
+  sessionWebGpuDecision = { kind: "fallback", reason: normalized };
+  setGpuSelectionDecision({
+    selectionReason: normalized,
+    nativeWebGpuActive: false,
+    nativeWebGpuDisabledReason: normalized,
+  });
+}
+
+export function resetWebGpuSessionDecisionForTest(): void {
+  sessionWebGpuDecision = null;
+  clearWebGpuFatalReasonFn?.();
+}
 
 function cleanupCanvas(canvas: HTMLCanvasElement, webgpuCtx?: any, removeFromDom = false): void {
   try {
@@ -54,6 +187,7 @@ function commitSelectionDiagnostics(
   pendingFallbacks: readonly PendingFallback[],
   contextCreateFailed: boolean,
   pendingLimits?: { maxBufferSize: number; maxTextureDimension2D: number },
+  selectionReason?: string,
 ): void {
   for (const fb of pendingFallbacks) {
     recordGpuFallback(fb.from, fb.to, fb.reason);
@@ -65,6 +199,13 @@ function commitSelectionDiagnostics(
     setGpuLimits(pendingLimits);
   }
   recordGpuBackendSelection(preference, actualKind);
+  if (selectionReason !== undefined) {
+    setGpuSelectionDecision({
+      selectionReason,
+      nativeWebGpuActive: actualKind === "webgpu",
+      nativeWebGpuDisabledReason: actualKind === "webgpu" ? undefined : selectionReason,
+    });
+  }
 }
 
 export function createGpuSurface(
@@ -81,12 +222,23 @@ export function createGpuSurface(
     }
     const surface = new Canvas2dSurface(canvas, ctx);
     recordGpuBackendSelection("canvas2d", "canvas2d");
+    setGpuSelectionDecision({
+      selectionReason: "user_forced_canvas2d",
+      nativeWebGpuActive: false,
+      nativeWebGpuDisabledReason: "user_forced_canvas2d",
+    });
     return surface;
   }
 
   let canvasLocked = false;
   const pendingFallbacks: PendingFallback[] = [];
   let contextCreateFailed = false;
+  let resolvedSelectionReason =
+    preference === "webgl2"
+      ? "user_forced_webgl2"
+      : preference === "auto"
+        ? (sessionWebGpuDecision?.kind === "fallback" ? sessionWebGpuDecision.reason : "webgpu_unsupported")
+        : "device_unavailable";
 
   if (preference === "webgpu") {
     let webgpuAttemptedInit = false;
@@ -111,17 +263,22 @@ export function createGpuSurface(
                   maxTextureDimension2D: webgpuHandle.limits.maxTextureDimension2D,
                 }
               : undefined;
-            commitSelectionDiagnostics(preference, "webgpu", pendingFallbacks, false, limits);
+            if (webgpuHandle.adapterInfo) {
+              setGpuAdapterInfo(webgpuHandle.adapterInfo);
+            }
+            commitSelectionDiagnostics(preference, "webgpu", pendingFallbacks, false, limits, "user_forced_webgpu");
             return surface;
           } catch {
             cleanupCanvas(canvas, webgpuCtx, false);
             pendingFallbacks.push({ from: "webgpu", to: "webgl2", reason: "surface_init_failed" });
+            resolvedSelectionReason = "surface_init_failed";
           }
         }
       }
     }
     if (!webgpuAttemptedInit) {
       pendingFallbacks.push({ from: "webgpu", to: "webgl2", reason: "device_unavailable" });
+      resolvedSelectionReason = "device_unavailable";
     }
   }
 
@@ -146,7 +303,7 @@ export function createGpuSurface(
       canvasLocked = true;
       try {
         const surface = new WebGl2Surface(webglCanvas, gl);
-        commitSelectionDiagnostics(preference, "webgl2", pendingFallbacks, false);
+        commitSelectionDiagnostics(preference, "webgl2", pendingFallbacks, false, undefined, resolvedSelectionReason);
         return surface;
       } catch {
         cleanupCanvas(webglCanvas, undefined, webglCanvas !== canvas);
@@ -189,7 +346,7 @@ export function createGpuSurface(
     if (ctx2d) {
       try {
         const surface = new Canvas2dSurface(c2dCanvas, ctx2d);
-        commitSelectionDiagnostics(preference, "canvas2d", pendingFallbacks, contextCreateFailed);
+        commitSelectionDiagnostics(preference, "canvas2d", pendingFallbacks, contextCreateFailed, undefined, resolvedSelectionReason);
         return surface;
       } catch {
         if (c2dCanvas !== canvas) cleanupCanvas(c2dCanvas, undefined, true);
@@ -207,7 +364,12 @@ export async function createGpuSurfaceAsync(
   preference: GpuBackendPreference = "webgl2",
   providedGl?: WebGL2RenderingContext | null,
   getWebGl2Context?: (canvas: HTMLCanvasElement) => WebGL2RenderingContext | null,
-  options?: { powerPreference?: ChartPowerPreference; createCanvas?: () => HTMLCanvasElement },
+  options?: {
+    powerPreference?: ChartPowerPreference;
+    createCanvas?: () => HTMLCanvasElement;
+    webgpuRollout?: WebGpuRolloutMode;
+    webgpuKillSwitch?: boolean;
+  },
 ): Promise<GpuSurface> {
   if (preference === "canvas2d") {
     return createGpuSurface(canvas, "canvas2d", undefined, undefined, options);
@@ -216,64 +378,156 @@ export async function createGpuSurfaceAsync(
   let canvasLocked = false;
   const pendingFallbacks: PendingFallback[] = [];
   let contextCreateFailed = false;
+  let resolvedSelectionReason =
+    preference === "webgl2" ? "user_forced_webgl2" : "device_unavailable";
 
   if (preference === "webgpu" || preference === "auto") {
-    let deviceFallbackReason: string | null = null;
-    let webgpuSurfaceInitFailed = false;
-    let webgpuCtx: any = null;
-    let createdSurface: GpuSurface | null = null;
+    const currentSettings = readGpuSettings();
+    const effectiveRollout = options?.webgpuRollout ?? currentSettings.webgpuRollout;
+    const effectiveKillSwitch = options?.webgpuKillSwitch ?? currentSettings.webgpuKillSwitch;
 
-    try {
-      const [{ requestWebGpuDevice }, { WebGpuSurface }] = await Promise.all([
-        import("./webgpu/webgpuDevice.js"),
-        import("./webgpu/webgpuSurface.js"),
-      ]);
-      if (typeof globalThis !== "undefined") {
-        (globalThis as any).__PactolisWebGpuSurface = WebGpuSurface;
-      }
-      const handle = await requestWebGpuDevice({
-        ...(options?.powerPreference ? { powerPreference: options.powerPreference } : {}),
-        onFallback: (reason) => {
-          deviceFallbackReason = reason;
-        },
+    if (
+      effectiveKillSwitch === true ||
+      (preference === "auto" && effectiveRollout === "off")
+    ) {
+      pendingFallbacks.push({ from: "webgpu", to: "webgl2", reason: "kill_switch" });
+      resolvedSelectionReason = "kill_switch";
+    } else if (preference === "auto" && sessionWebGpuDecision?.kind === "fallback") {
+      pendingFallbacks.push({
+        from: "webgpu",
+        to: "webgl2",
+        reason: sessionWebGpuDecision.reason,
       });
-      if (handle && !handle.isLost()) {
-        try {
-          webgpuCtx = canvas.getContext ? canvas.getContext("webgpu") : null;
-        } catch {
-          webgpuCtx = null;
-        }
-        if (webgpuCtx) {
-          canvasLocked = true;
-          createdSurface = new WebGpuSurface(canvas, handle);
-          await (createdSurface as { verifyInit?: () => Promise<void> }).verifyInit?.();
-          const limits = handle.limits
-            ? {
-                maxBufferSize: handle.limits.maxBufferSize,
-                maxTextureDimension2D: handle.limits.maxTextureDimension2D,
-              }
-            : undefined;
-          commitSelectionDiagnostics(preference, "webgpu", pendingFallbacks, false, limits);
-          return createdSurface;
-        }
-      }
-    } catch {
-      if (createdSurface) {
-        try { createdSurface.dispose(); } catch {}
-        createdSurface = null;
-      }
-      if (canvasLocked) {
-        webgpuSurfaceInitFailed = true;
-        cleanupCanvas(canvas, webgpuCtx, false);
-      }
-    }
+      resolvedSelectionReason = sessionWebGpuDecision.reason;
+    } else {
+      let deviceFallbackReason: string | null = null;
+      let webgpuSurfaceInitFailed = false;
+      let qualificationRejected = false;
+      let webgpuCtx: any = null;
+      let createdSurface: GpuSurface | null = null;
 
-    if (webgpuSurfaceInitFailed) {
-      pendingFallbacks.push({ from: "webgpu", to: "webgl2", reason: "surface_init_failed" });
-    } else if (deviceFallbackReason) {
-      pendingFallbacks.push({ from: "webgpu", to: "webgl2", reason: deviceFallbackReason });
-    } else if (preference === "webgpu") {
-      pendingFallbacks.push({ from: "webgpu", to: "webgl2", reason: "device_unavailable" });
+      try {
+        const [deviceMod, { WebGpuSurface }] = await Promise.all([
+          import("./webgpu/webgpuDevice.js"),
+          import("./webgpu/webgpuSurface.js"),
+        ]);
+        clearWebGpuFatalReasonFn = deviceMod.clearWebGpuFatalReasonForTest;
+        deviceMod.registerWebGpuSessionHandlers({
+          onFatal: latchWebGpuSessionFallback,
+          onReset: () => {
+            sessionWebGpuDecision = null;
+          },
+        });
+
+        const fatalReason = deviceMod.getWebGpuFatalReason();
+        if (preference === "auto" && fatalReason !== null) {
+          latchWebGpuSessionFallback(fatalReason);
+          pendingFallbacks.push({ from: "webgpu", to: "webgl2", reason: fatalReason });
+          resolvedSelectionReason = fatalReason;
+          qualificationRejected = true;
+        } else {
+          if (typeof globalThis !== "undefined") {
+            (globalThis as any).__PactolisWebGpuSurface = WebGpuSurface;
+          }
+          const handle = await deviceMod.requestWebGpuDevice({
+            ...(options?.powerPreference ? { powerPreference: options.powerPreference } : {}),
+            onFallback: (reason) => {
+              deviceFallbackReason = reason;
+            },
+          });
+
+          if (handle && !handle.isLost()) {
+            const limits = handle.limits
+              ? {
+                  maxBufferSize: handle.limits.maxBufferSize,
+                  maxTextureDimension2D: handle.limits.maxTextureDimension2D,
+                }
+              : undefined;
+            if (handle.adapterInfo) {
+              setGpuAdapterInfo(handle.adapterInfo);
+            }
+            if (limits) {
+              setGpuLimits(limits);
+            }
+
+            let allowWebGpu = true;
+            if (preference === "auto") {
+              if (sessionWebGpuDecision?.kind === "qualified") {
+                resolvedSelectionReason = sessionWebGpuDecision.selectionReason;
+              } else {
+                const qual = evaluateWebGpuQualification(handle.adapterInfo, handle.limits, {
+                  preference,
+                  webgpuRollout: effectiveRollout,
+                  webgpuKillSwitch: effectiveKillSwitch,
+                });
+                if (!qual.qualified) {
+                  const fbReason = qual.fallbackReason ?? qual.selectionReason;
+                  latchWebGpuSessionFallback(fbReason);
+                  pendingFallbacks.push({ from: "webgpu", to: "webgl2", reason: fbReason });
+                  resolvedSelectionReason = qual.selectionReason;
+                  qualificationRejected = true;
+                  allowWebGpu = false;
+                } else {
+                  sessionWebGpuDecision = {
+                    kind: "qualified",
+                    selectionReason: qual.selectionReason,
+                  };
+                  resolvedSelectionReason = qual.selectionReason;
+                }
+              }
+            } else {
+              resolvedSelectionReason = "user_forced_webgpu";
+            }
+
+            if (allowWebGpu) {
+              try {
+                webgpuCtx = canvas.getContext ? canvas.getContext("webgpu") : null;
+              } catch {
+                webgpuCtx = null;
+              }
+              if (webgpuCtx) {
+                canvasLocked = true;
+                createdSurface = new WebGpuSurface(canvas, handle);
+                await (createdSurface as { verifyInit?: () => Promise<void> }).verifyInit?.();
+                commitSelectionDiagnostics(
+                  preference,
+                  "webgpu",
+                  pendingFallbacks,
+                  false,
+                  limits,
+                  resolvedSelectionReason,
+                );
+                return createdSurface;
+              }
+            }
+          }
+        }
+      } catch {
+        if (createdSurface) {
+          try { createdSurface.dispose(); } catch {}
+          createdSurface = null;
+        }
+        if (canvasLocked) {
+          webgpuSurfaceInitFailed = true;
+          cleanupCanvas(canvas, webgpuCtx, false);
+        }
+      }
+
+      if (!qualificationRejected) {
+        if (webgpuSurfaceInitFailed) {
+          if (preference === "auto") {
+            latchWebGpuSessionFallback("surface_init_failed");
+          }
+          pendingFallbacks.push({ from: "webgpu", to: "webgl2", reason: "surface_init_failed" });
+          resolvedSelectionReason = "surface_init_failed";
+        } else if (deviceFallbackReason) {
+          pendingFallbacks.push({ from: "webgpu", to: "webgl2", reason: deviceFallbackReason });
+          resolvedSelectionReason = deviceFallbackReason;
+        } else {
+          pendingFallbacks.push({ from: "webgpu", to: "webgl2", reason: "device_unavailable" });
+          resolvedSelectionReason = "device_unavailable";
+        }
+      }
     }
   }
 
@@ -305,7 +559,14 @@ export async function createGpuSurfaceAsync(
       canvasLocked = true;
       try {
         const surface = new WebGl2Surface(webglCanvas, gl);
-        commitSelectionDiagnostics(preference, "webgl2", pendingFallbacks, false);
+        commitSelectionDiagnostics(
+          preference,
+          "webgl2",
+          pendingFallbacks,
+          false,
+          undefined,
+          resolvedSelectionReason,
+        );
         return surface;
       } catch {
         cleanupCanvas(webglCanvas, undefined, webglCanvas !== canvas);
@@ -347,7 +608,14 @@ export async function createGpuSurfaceAsync(
     if (ctx2d) {
       try {
         const surface = new Canvas2dSurface(c2dCanvas, ctx2d);
-        commitSelectionDiagnostics(preference, "canvas2d", pendingFallbacks, contextCreateFailed);
+        commitSelectionDiagnostics(
+          preference,
+          "canvas2d",
+          pendingFallbacks,
+          contextCreateFailed,
+          undefined,
+          resolvedSelectionReason,
+        );
         return surface;
       } catch {
         if (c2dCanvas !== canvas) cleanupCanvas(c2dCanvas, undefined, true);
