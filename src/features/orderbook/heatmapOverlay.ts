@@ -115,6 +115,10 @@ const RETRY_MS = 30_000;
 const MAX_PARALLEL_CHUNKS = 2;
 const HOVER_DEBOUNCE_MS = 120;
 const HOVER_CACHE_LIMIT = 40;
+/** Maximum number of live-pushed 1m tail bars retained outside visible history. */
+const MAX_LIVE_TAIL_BARS = 1_000;
+/** Maximum total cell records retained across live-pushed tail bars before evicting oldest non-visible bars. */
+const MAX_LIVE_TAIL_CELLS = 250_000;
 /** Bounded live tail invalidation coalescing window (ms). */
 const DEFAULT_LIVE_DEBOUNCE_MS = 200;
 /** Timeout after which an idle/silent live-tail subscription falls back to timer refreshes (ms). */
@@ -175,6 +179,13 @@ interface HoverWindow {
   bars: Map<number, OrderbookHeatmapBar>;
 }
 
+interface HoverRangeRequest {
+  key: string;
+  controller: AbortController;
+  promise: Promise<OrderbookHeatmapResponse>;
+  consumers: Set<string>;
+}
+
 export interface OrderbookHeatmapOverlayOptions {
   fetch: OrderbookHeatmapFetch;
   invalidate: () => void;
@@ -225,6 +236,7 @@ export class OrderbookHeatmapOverlay {
   /** Identifies what the cached bars were fetched for; any change drops the cache. */
   private dataKey = "";
   private bars = new Map<number, OrderbookHeatmapBar>();
+  private liveBarTimes = new Set<number>();
   private canonicalTailBars = new Map<number, CanonicalHeatmapTailBar>();
   private canonicalProjectionKey = "";
   private chunks = new Map<number, ChunkState>();
@@ -235,6 +247,8 @@ export class OrderbookHeatmapOverlay {
   private readonly statusListeners = new Set<(status: OrderbookHeatmapRuntimeStatus) => void>();
   private inFlight = new Set<AbortController>();
   private hoverWindows = new Map<string, HoverWindow>();
+  private hoverRangeRequests = new Map<string, HoverRangeRequest>();
+  private hoverConsumerRanges = new Map<string, Set<string>>();
   private hoverTimer: ReturnType<typeof setTimeout> | null = null;
   private pendingHoverKey = "";
   /** Resolved floor and ceiling of the last drawn/prepared frame. */
@@ -293,6 +307,7 @@ export class OrderbookHeatmapOverlay {
         } else {
           for (const controller of this.inFlight) controller.abort();
           this.inFlight.clear();
+          this.abortAllHoverRequests();
           for (const [chunkStart, state] of this.chunks) {
             if (state.status !== "ready") this.chunks.delete(chunkStart);
           }
@@ -460,9 +475,17 @@ export class OrderbookHeatmapOverlay {
     });
   }
 
+  private mergeIntoBars(bars: readonly OrderbookHeatmapBar[]): OrderbookHeatmapBar[] {
+    const prevSize = this.bars.size;
+    const changed = mergeHeatmapBarsWithDiff(this.bars, bars);
+    if (this.bars.size !== prevSize) {
+      this.barKeysRevision++;
+    }
+    return changed;
+  }
+
   private bumpBarsRevision(bars?: readonly OrderbookHeatmapBar[], allowLiveOnly = false): void {
     if (bars !== undefined && bars.length === 0) return;
-    this.sortedBarTimesDirty = true;
     let minChangedTime = Number.POSITIVE_INFINITY;
     if (bars !== undefined) {
       for (const bar of bars) {
@@ -496,19 +519,47 @@ export class OrderbookHeatmapOverlay {
     this.residentDirtyFromTime = Number.POSITIVE_INFINITY;
   }
 
-  private reprojectCanonicalTailBars(settings: OrderbookHeatmapSettings, tier: HeatmapTier): void {
-    if (this.canonicalTailBars.size === 0) return;
+  private reprojectCanonicalTailBars(
+    settings: OrderbookHeatmapSettings,
+    tier: HeatmapTier,
+    extraChangedBars: readonly OrderbookHeatmapBar[] = [],
+    allowLiveOnly = true,
+  ): void {
+    if (this.canonicalTailBars.size === 0) {
+      this.bumpBarsRevision(extraChangedBars, allowLiveOnly);
+      return;
+    }
     const projected: OrderbookHeatmapBar[] = [];
     for (const bar of this.canonicalTailBars.values()) {
       projected.push(this.projectCanonicalBar(bar, settings));
     }
-    const changed = mergeHeatmapBarsWithDiff(this.bars, projected);
+    const reprojectedChanged = this.mergeIntoBars(projected);
     this.canonicalProjectionKey = this.canonicalProjectionKeyFor(settings, tier);
     const threshold = activeOrderbookHeatmapThreshold(settings);
     if (Number.isFinite(this.residentCoverageThreshold) && threshold > this.residentCoverageThreshold) {
       this.residentCoverageThreshold = threshold;
     }
-    this.bumpBarsRevision(changed, true);
+    let combinedChanged: readonly OrderbookHeatmapBar[];
+    if (extraChangedBars.length === 0) {
+      combinedChanged = reprojectedChanged;
+    } else if (reprojectedChanged.length === 0) {
+      combinedChanged = extraChangedBars;
+    } else {
+      const seenTimes = new Set<number>();
+      const merged: OrderbookHeatmapBar[] = [];
+      for (const bar of extraChangedBars) {
+        if (seenTimes.has(bar.t)) continue;
+        seenTimes.add(bar.t);
+        merged.push(bar);
+      }
+      for (const bar of reprojectedChanged) {
+        if (seenTimes.has(bar.t)) continue;
+        seenTimes.add(bar.t);
+        merged.push(bar);
+      }
+      combinedChanged = merged;
+    }
+    this.bumpBarsRevision(combinedChanged, allowLiveOnly);
   }
 
   private syncCanonicalTailProjection(settings: OrderbookHeatmapSettings, tier: HeatmapTier): void {
@@ -548,15 +599,19 @@ export class OrderbookHeatmapOverlay {
         this.canonicalProjectionKey = this.canonicalProjectionKeyFor(settings, this.currentTier);
       }
       if (barsToMerge && barsToMerge.length > 0) {
-        const changed = mergeHeatmapBarsWithDiff(this.bars, barsToMerge);
+        const changed = this.mergeIntoBars(barsToMerge);
+        for (const bar of barsToMerge) {
+          this.liveBarTimes.add(bar.t);
+        }
         this.bumpBarsRevision(changed, true);
+        const evicted = this.evictStaleLiveBars(this.currentTier);
         // Mark current live chunk as refreshed if loaded
         const liveChunkStart = heatmapChunkStart(now, this.currentTier);
         const existing = this.chunks.get(liveChunkStart);
         if (existing && existing.status === "ready") {
           existing.fetchedAt = now;
         }
-        if (changed.length > 0) this.invalidate();
+        if (changed.length > 0 || evicted) this.invalidate();
       }
       return;
     }
@@ -624,13 +679,13 @@ export class OrderbookHeatmapOverlay {
       to: chunkEnd,
     }, controller.signal).then((response) => {
       if (key !== this.dataKey || controller.signal.aborted) return;
-      const changed = mergeHeatmapBarsWithDiff(this.bars, response.bars);
+      const changed = this.mergeIntoBars(response.bars);
       this.recordChunkCoverage(chunkStart, response);
       const liveSettings = this.settings;
       let dataChanged = changed.length > 0;
       if (liveSettings.mode === "custom" && tier.name === "1m" && this.canonicalTailBars.size > 0 && this.isLiveTailHealthy(this.now())) {
         const prevRev = this.barsRevision;
-        this.reprojectCanonicalTailBars(liveSettings, tier);
+        this.reprojectCanonicalTailBars(liveSettings, tier, changed, refreshFrom > chunkStart);
         dataChanged = dataChanged || this.barsRevision !== prevRev;
       } else {
         this.bumpBarsRevision(changed, refreshFrom > chunkStart);
@@ -725,7 +780,8 @@ export class OrderbookHeatmapOverlay {
     this.autoScaleBarsRevision = -1;
     this.residentDirtyFromTime = Number.POSITIVE_INFINITY;
     this.sortedBarTimes = [];
-    this.sortedBarTimesDirty = true;
+    this.barKeysRevision++;
+    this.sortedBarTimesKeysRevision = -1;
     this.residentCoverageThreshold = Number.NaN;
     this.lastResidentSeries = null;
     this.lastResidentSeriesStructureRevision = -1;
@@ -734,8 +790,10 @@ export class OrderbookHeatmapOverlay {
     this.lastLiveEventAt = 0;
     for (const controller of this.inFlight) controller.abort();
     this.inFlight.clear();
+    this.abortAllHoverRequests();
     this.dataKey = key;
     this.bars = new Map();
+    this.liveBarTimes.clear();
     this.canonicalProjectionKey = "";
     this.chunks = new Map();
     this.chunkCoverage = new Map();
@@ -2533,11 +2591,11 @@ export class OrderbookHeatmapOverlay {
 
   private subBarTimesFor(series: FootprintSeries, tier: HeatmapTier): readonly number[] | undefined {
     if (series.config.intervalMs <= tier.periodMs) return undefined;
-    if (this.sortedBarTimesDirty) {
+    if (this.sortedBarTimesKeysRevision !== this.barKeysRevision) {
       const times = Array.from(this.bars.keys());
       times.sort((a, b) => a - b);
       this.sortedBarTimes = times;
-      this.sortedBarTimesDirty = false;
+      this.sortedBarTimesKeysRevision = this.barKeysRevision;
     }
     return this.sortedBarTimes;
   }
@@ -2734,6 +2792,8 @@ export class OrderbookHeatmapOverlay {
   private visibleThreshold = 0;
   /** Bumped whenever acknowledged book data merges; part of the collection memo key. */
   private barsRevision = 0;
+  /** Bumped only when bar timestamp keys are added, deleted, evicted, or reset. */
+  private barKeysRevision = 0;
   /** Bumped only when non-live historical bars or resets/evictions change. */
   private historicalBarsRevision = 0;
   /** Bumped when GPU-resident dataset must rebuild (reset, eviction, history shift, unit/threshold change). */
@@ -2752,7 +2812,7 @@ export class OrderbookHeatmapOverlay {
   private residentPriceOriginInitializedFromBars = false;
   private residentDirtyFromTime = Number.POSITIVE_INFINITY;
   private sortedBarTimes: number[] = [];
-  private sortedBarTimesDirty = true;
+  private sortedBarTimesKeysRevision = -1;
   private gpuFrameContentRevision = 0;
   private scaleViewportKey = "";
   private scaleViewportChangedAt = Number.NEGATIVE_INFINITY;
@@ -2871,7 +2931,10 @@ export class OrderbookHeatmapOverlay {
   }
 
   private evictStaleChunks(tier: HeatmapTier): void {
-    if (this.chunks.size <= OrderbookHeatmapOverlay.MAX_CACHED_CHUNKS) return;
+    if (this.chunks.size <= OrderbookHeatmapOverlay.MAX_CACHED_CHUNKS) {
+      this.evictStaleLiveBars(tier);
+      return;
+    }
     const now = this.now();
     const candidates: Array<{ chunkStart: number; chunkEnd: number; fetchedAt: number }> = [];
 
@@ -2895,15 +2958,80 @@ export class OrderbookHeatmapOverlay {
       for (const barTime of [...this.bars.keys()]) {
         if (barTime >= chunkStart && barTime < chunkEnd) {
           this.bars.delete(barTime);
+          this.liveBarTimes.delete(barTime);
           evictedAny = true;
         }
       }
     }
 
     if (evictedAny) {
-      this.sortedBarTimesDirty = true;
+      this.barKeysRevision++;
       this.bumpBarsRevision();
     }
+    this.evictStaleLiveBars(tier);
+  }
+
+  private evictStaleLiveBars(tier: HeatmapTier): boolean {
+    if (this.liveBarTimes.size === 0) return false;
+    const hasVisibleRange = this.lastVisibleToMs > this.lastVisibleFromMs;
+    const nonVisibleLiveTimes: number[] = [];
+    let totalLiveCells = 0;
+
+    for (const barTime of [...this.liveBarTimes]) {
+      const bar = this.bars.get(barTime);
+      if (!bar) {
+        this.liveBarTimes.delete(barTime);
+        continue;
+      }
+      totalLiveCells += bar.cells.length;
+      const isVisible = hasVisibleRange && barTime >= this.lastVisibleFromMs && barTime <= this.lastVisibleToMs;
+      if (!isVisible) {
+        nonVisibleLiveTimes.push(barTime);
+      }
+    }
+
+    if (nonVisibleLiveTimes.length <= MAX_LIVE_TAIL_BARS && totalLiveCells <= MAX_LIVE_TAIL_CELLS) {
+      return false;
+    }
+
+    nonVisibleLiveTimes.sort((a, b) => a - b);
+    let remainingNonVisible = nonVisibleLiveTimes.length;
+    let remainingCells = totalLiveCells;
+    const now = this.now();
+    const touchedChunks = new Set<number>();
+    let evictedAny = false;
+
+    for (const barTime of nonVisibleLiveTimes) {
+      if (remainingNonVisible <= 1) break;
+      if (remainingNonVisible <= MAX_LIVE_TAIL_BARS && remainingCells <= MAX_LIVE_TAIL_CELLS) break;
+      const bar = this.bars.get(barTime);
+      if (bar) {
+        remainingCells -= bar.cells.length;
+      }
+      this.bars.delete(barTime);
+      this.liveBarTimes.delete(barTime);
+      remainingNonVisible--;
+      touchedChunks.add(heatmapChunkStart(barTime, tier));
+      evictedAny = true;
+    }
+
+    for (const chunkStart of touchedChunks) {
+      const state = this.chunks.get(chunkStart);
+      if (!state || state.status === "loading") continue;
+      const chunkEnd = heatmapChunkEnd(chunkStart, tier);
+      const isLiveChunk = now <= chunkEnd + tier.periodMs;
+      const isVisibleChunk = hasVisibleRange && chunkEnd >= this.lastVisibleFromMs && chunkStart <= this.lastVisibleToMs;
+      if (!isLiveChunk && !isVisibleChunk) {
+        this.chunks.delete(chunkStart);
+        this.chunkCoverage.delete(chunkStart);
+      }
+    }
+
+    if (evictedAny) {
+      this.barKeysRevision++;
+      this.bumpBarsRevision();
+    }
+    return evictedAny;
   }
 
   private ensureChunks(from: number, to: number, tier: HeatmapTier): void {
@@ -2958,13 +3086,13 @@ export class OrderbookHeatmapOverlay {
         to: chunkEnd,
       }, controller.signal).then((response) => {
         if (key !== this.dataKey || controller.signal.aborted) return;
-        const changed = mergeHeatmapBarsWithDiff(this.bars, response.bars);
+        const changed = this.mergeIntoBars(response.bars);
         this.recordChunkCoverage(chunkStart, response);
         const liveSettings = this.settings;
         let dataChanged = changed.length > 0;
         if (liveSettings.mode === "custom" && tier.name === "1m" && this.canonicalTailBars.size > 0 && this.isLiveTailHealthy(this.now())) {
           const prevRev = this.barsRevision;
-          this.reprojectCanonicalTailBars(liveSettings, tier);
+          this.reprojectCanonicalTailBars(liveSettings, tier, changed, refreshFrom > chunkStart);
           dataChanged = dataChanged || this.barsRevision !== prevRev;
         } else {
           this.bumpBarsRevision(changed, refreshFrom > chunkStart);
@@ -3065,6 +3193,19 @@ export class OrderbookHeatmapOverlay {
     });
   }
 
+  private abortAllHoverRequests(): void {
+    for (const req of this.hoverRangeRequests.values()) {
+      req.controller.abort();
+    }
+    this.hoverRangeRequests.clear();
+    for (const [hoverKey, hover] of this.hoverWindows) {
+      if (hover.status === "loading") {
+        this.hoverWindows.delete(hoverKey);
+      }
+    }
+    this.hoverConsumerRanges.clear();
+  }
+
   private scheduleHover(
     hoverKey: string,
     series: FootprintSeries,
@@ -3087,23 +3228,75 @@ export class OrderbookHeatmapOverlay {
         if (this.pendingHoverKey === hoverKey) this.pendingHoverKey = "";
         return;
       }
-      const controller = new AbortController();
-      this.inFlight.add(controller);
+      const market = this.getMarket();
+      const rangeKeys = ranges.map(([from, to]) => `${market}|${key}|${priceFrom}|${priceTo}|${tier.name}|${from}|${to}`);
+      const neededKeys = new Set(rangeKeys);
+
+      // Drop superseded hover consumers and abort only unshared old range requests first so the new hover is prioritized.
+      for (const [otherHoverKey, otherRanges] of [...this.hoverConsumerRanges]) {
+        if (otherHoverKey === hoverKey) continue;
+        for (const rKey of otherRanges) {
+          const req = this.hoverRangeRequests.get(rKey);
+          if (!req) continue;
+          req.consumers.delete(otherHoverKey);
+          if (req.consumers.size === 0 && !neededKeys.has(rKey)) {
+            req.controller.abort();
+            this.hoverRangeRequests.delete(rKey);
+          }
+        }
+        this.hoverConsumerRanges.delete(otherHoverKey);
+        const otherHover = this.hoverWindows.get(otherHoverKey);
+        if (otherHover?.status === "loading") {
+          this.hoverWindows.delete(otherHoverKey);
+        }
+      }
+
       const hover: HoverWindow = { status: "loading", bars: new Map() };
       this.rememberHover(hoverKey, hover);
-      Promise.all(ranges.map(([from, to]) => this.fetchHeatmap({ ...base, from, to, priceFrom, priceTo }, controller.signal)))
+      this.hoverConsumerRanges.set(hoverKey, new Set(rangeKeys));
+
+      const rangePromises = ranges.map(([from, to], idx) => {
+        const rKey = rangeKeys[idx];
+        const existing = this.hoverRangeRequests.get(rKey);
+        if (existing && !existing.controller.signal.aborted) {
+          existing.consumers.add(hoverKey);
+          return existing.promise;
+        }
+        const controller = new AbortController();
+        const req: HoverRangeRequest = {
+          key: rKey,
+          controller,
+          promise: null as unknown as Promise<OrderbookHeatmapResponse>,
+          consumers: new Set([hoverKey]),
+        };
+        const promise = this.fetchHeatmap({ ...base, from, to, priceFrom, priceTo }, controller.signal)
+          .finally(() => {
+            if (this.hoverRangeRequests.get(rKey) === req) {
+              this.hoverRangeRequests.delete(rKey);
+            }
+          });
+        req.promise = promise;
+        this.hoverRangeRequests.set(rKey, req);
+        return promise;
+      });
+
+      Promise.all(rangePromises)
         .then((responses) => {
-          if (key !== this.dataKey || controller.signal.aborted) return;
+          if (key !== this.dataKey || market !== this.getMarket() || this.disposed) return;
+          if (this.hoverWindows.get(hoverKey) !== hover) return;
           for (const response of responses) mergeHeatmapBars(hover.bars, response.bars);
           hover.status = "ready";
         }, () => {
-          if (key !== this.dataKey || controller.signal.aborted) return;
+          if (key !== this.dataKey || market !== this.getMarket() || this.disposed) return;
+          if (this.hoverWindows.get(hoverKey) !== hover) return;
           hover.status = "error";
         })
         .finally(() => {
-          this.inFlight.delete(controller);
+          this.hoverConsumerRanges.delete(hoverKey);
           if (this.pendingHoverKey === hoverKey) this.pendingHoverKey = "";
-          if (key === this.dataKey && !controller.signal.aborted) this.invalidate();
+          if (key === this.dataKey && market === this.getMarket() && !this.disposed && this.hoverWindows.get(hoverKey) === hover) {
+            this.invalidate();
+          }
         });
     }, HOVER_DEBOUNCE_MS);
   }
