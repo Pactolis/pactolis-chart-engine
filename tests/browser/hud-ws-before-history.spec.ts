@@ -638,7 +638,9 @@ test("timeframe switches (1w -> 3d -> 1d -> 12M) scope readiness by generation a
             : 1_247_050_078;
     const bars = isRepair
       ? [makeWireBar(open, { count })]
-      : [makeWireBar(utcBucketStart(open - 1, interval), { count: count - 10 }), makeWireBar(open, { count })];
+      : holdByInterval && interval === TF_MS["12M"]
+        ? [makeWireBar(utcBucketStart(open - 1, interval), { count: count - 10 })]
+        : [makeWireBar(utcBucketStart(open - 1, interval), { count: count - 10 }), makeWireBar(open, { count })];
     await route.fulfill({
       contentType: "application/json",
       body: JSON.stringify(isRepair ? repairEnvelope(url, bars, { watermark: "100" }) : historyEnvelope(url, bars)),

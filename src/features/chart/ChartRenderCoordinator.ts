@@ -4,6 +4,7 @@ import { resolveLayerOrder } from "../../core/render/scene/chartLayerPreset.js";
 import type { ChartViewConfig } from "../../core/settings.js";
 import type { IndicatorInstance } from "../indicators/types.js";
 import type { ChartSession } from "./ChartSession.js";
+import type { ChartRenderPriority } from "./globalRenderScheduler.js";
 
 export interface ChartRenderCoordinatorHost {
   readonly session: ChartSession;
@@ -58,6 +59,10 @@ export class ChartRenderCoordinator {
     this.annotationLayerOrder = resolved.annotation;
     this.interactionLayerOrder = resolved.interaction;
     this.appliedConfigKey = nextKey;
+  }
+
+  setPanelPriority(priority: ChartRenderPriority): void {
+    this.host.session.setRenderPriority?.(priority);
   }
 
   getGpuLayerIds(): ReadonlySet<string> { return this.gpuLayerIds; }

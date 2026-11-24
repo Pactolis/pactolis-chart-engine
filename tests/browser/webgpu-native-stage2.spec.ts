@@ -183,6 +183,19 @@ async function probeWebGpu(page: Page): Promise<boolean> {
   });
 }
 
+async function waitForReadyWebGpuRuntime(page: Page, id: string, minBars: number): Promise<void> {
+  await expect.poll(
+    () => page.evaluate(async ({ id, minBars }) => {
+      const { getChartRuntime } = await import("/harness/chart.ts");
+      const { getGpuDiagnostics } = await import("/src/core/gpu/gpuDiagnostics.ts");
+      const r: any = getChartRuntime(id);
+      if (!r || !r.pipeline?.series || r.pipeline.series.length < minBars) return false;
+      return getGpuDiagnostics().active === "webgpu" || r.session?.getSurface?.()?.kind === "webgpu";
+    }, { id, minBars }),
+    { timeout: 20_000 },
+  ).toBe(true);
+}
+
 test("Stage 2 SwiftShader WebGPU verifies pixel-bucket LOD, sub-pixel merged-cells LOD, and WebGPU resident heatmap parity", async ({ baseURL }, testInfo) => {
   test.setTimeout(180_000);
   const resolvedBaseURL = baseURL ?? testInfo.project.use.baseURL ?? "http://127.0.0.1:4173";
@@ -216,6 +229,7 @@ test("Stage 2 SwiftShader WebGPU verifies pixel-bucket LOD, sub-pixel merged-cel
       await expect(hook).toHaveAttribute("data-history-loading", "false");
       const id = await hook.getAttribute("data-panel-id");
       if (!id) throw new Error("Missing chart panel id");
+      await waitForReadyWebGpuRuntime(page, id, bars.length);
 
       const out = await page.evaluate(async ({ id }) => {
         const { getChartRuntime } = await import("/harness/chart.ts");
@@ -240,9 +254,13 @@ test("Stage 2 SwiftShader WebGPU verifies pixel-bucket LOD, sub-pixel merged-cel
 
         // 1. pixel-bucket LOD (colWidth = 0.5)
         r.updateState({ ...r.getState(), chartType: "candlestick", scaleMode: "linear" });
+        r.invalidate();
+        await r.session.captureCompositePng();
+        v.setPriceAutoScale(false);
         v.colWidth = 0.5;
         v.offsetX = 0;
         v.fitPriceRange(59_800, 61_500, 0.05);
+        v.setPriceAutoScale(false);
         r.invalidate();
         const pbFrame = await r.session.captureCompositePng();
         const pbPath = getGpuDiagnostics().featurePaths?.scene ?? null;
@@ -250,9 +268,13 @@ test("Stage 2 SwiftShader WebGPU verifies pixel-bucket LOD, sub-pixel merged-cel
 
         // 2. merged-cells LOD (footprint with rowHeight < CELL_PIXEL_MERGE_HEIGHT = 2)
         r.updateState({ ...r.getState(), chartType: "footprint", scaleMode: "linear" });
+        r.invalidate();
+        await r.session.captureCompositePng();
+        v.setPriceAutoScale(false);
         v.colWidth = 20;
         v.offsetX = 0;
         v.fitPriceRange(52_000, 72_000, 0.05); // ~20k range / ~750px -> pricePerPx ~26.7 -> rowHeight = 50/26.7 ~ 1.87 < 2
+        v.setPriceAutoScale(false);
         r.invalidate();
         const mcFrame = await r.session.captureCompositePng();
         const mcPath = getGpuDiagnostics().featurePaths?.scene ?? null;
@@ -344,6 +366,7 @@ test("Stage 2 SwiftShader WebGPU verifies pixel-bucket LOD, sub-pixel merged-cel
     await expect(hmHook).toHaveAttribute("data-history-loading", "false");
     const hmId = await hmHook.getAttribute("data-panel-id");
     if (!hmId) throw new Error("Missing heatmap panel id");
+    await waitForReadyWebGpuRuntime(hmPage, hmId, bars.length);
 
     await hmPage.evaluate(async ({ id }) => {
       const { getChartRuntime, updateOrderbookHeatmapSettings, setOrderbookHeatmapModeFor } =
