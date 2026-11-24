@@ -137,7 +137,6 @@ export class ChartWorkerPanelRuntime {
   private frameCount = 0;
   private paused = false;
   private disposed = false;
-  private dirty = false;
   private pendingChanges: number = ChartChange.None;
   private scheduledFrame: { cancel: () => void } | null = null;
   private initPromise: Promise<void> = Promise.resolve();
@@ -214,7 +213,6 @@ export class ChartWorkerPanelRuntime {
     this.endpoint.flushInputs();
 
     const changes = this.pendingChanges === ChartChange.None ? ChartChange.All : this.pendingChanges;
-    this.dirty = false;
     this.pendingChanges = ChartChange.None;
 
     this.renderer.render(this.view, this.series);
@@ -738,7 +736,6 @@ export class ChartWorkerPanelRuntime {
 
   private invalidate(changes: number): void {
     if (this.disposed) return;
-    this.dirty = true;
     this.pendingChanges |= changes;
     if (this.paused || this.scheduledFrame) return;
     this.scheduledFrame = scheduleWorkerFrame(() => {
