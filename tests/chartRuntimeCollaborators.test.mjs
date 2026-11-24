@@ -459,8 +459,19 @@ test("ChartHeatmapGpuCoordinator: caches prepared GPU frames across unchanged re
     coordinator.renderHeatmapGpuCells(frame2, view, series);
     assert.equal(gpuRenderer.preparedLeaseBytes, initialLeaseBytes);
 
-    // 3. Key change (viewport pan): old lease released once and new frame prepared
+    // 3. Same-range viewport pan (#356): hits prepared cache with panOffsetX delta, 0 prepareCalls
     view.offsetX = 12;
+    coordinator.beginFrameAttempt();
+    const frame3Pan = coordinator.prepareHeatmapGpuCells(view, series);
+    assert.ok(frame3Pan);
+    assert.equal(prepareCalls, 1, "same-range pan hits prepared cache");
+    assert.equal(frame3Pan.panOffsetX, 12);
+    assert.equal(releasedCount, 0);
+    assert.equal(gpuRenderer.preparedLeaseBytes, initialLeaseBytes);
+    coordinator.renderHeatmapGpuCells(frame3Pan, view, series);
+
+    // 3b. Key change (price-scale change): old lease released once and new frame prepared
+    view.priceTop += 25;
     coordinator.beginFrameAttempt();
     const frame3 = coordinator.prepareHeatmapGpuCells(view, series);
     assert.ok(frame3);

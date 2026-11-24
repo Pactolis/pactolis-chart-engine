@@ -7,7 +7,7 @@ import { settings } from "../dist/core/settings.js";
 import { footprintAutoscaleSource, footprintVisiblePriceRange } from "../dist/core/model/footprintAutoscale.js";
 import { configurePerformanceTelemetry, incrementPerformanceCounter, isPerformanceTelemetryEnabled, measurePerformance, snapshotPerformanceTelemetry } from "../dist/core/performanceTelemetry.js";
 import { getGpuDiagnostics, resetGpuDiagnostics } from "../dist/core/gpu/gpuDiagnostics.js";
-import { configureOrderbookHeatmapSettingsSource, getOrderbookHeatmapSettings } from "../dist/core/orderbookHeatmap/settings.js";
+import { configureOrderbookHeatmapSettingsSource, orderbookHeatmapSettingsSource } from "../dist/features/orderbook/heatmapSettingsSource.js";
 import { ChartInputController } from "../dist/features/chart/ChartInputController.js";
 import { ChartHeatmapGpuCoordinator } from "../dist/features/chart/ChartHeatmapGpuCoordinator.js";
 import { HeatmapGpuRenderer } from "../dist/features/chart/heatmap/gpu/heatmapGpuRenderer.js";
@@ -16,12 +16,13 @@ import { OrderbookHeatmapOverlay } from "../dist/features/orderbook/heatmapOverl
 const MARKET = "BINANCE_FUTURES:btcusdt";
 const MINUTE = 60_000;
 
-async function withHeatmapSettings(getSettings, work) {
-  const prev = getOrderbookHeatmapSettings;
+async function withHeatmapSettings(settingsFor, work) {
+  let prev = null;
+  try { prev = orderbookHeatmapSettingsSource(); } catch {}
   const listeners = new Set();
   configureOrderbookHeatmapSettingsSource({
-    getSettings,
-    subscribe(listener) {
+    settingsFor,
+    onChange(listener) {
       listeners.add(listener);
       return () => listeners.delete(listener);
     },
