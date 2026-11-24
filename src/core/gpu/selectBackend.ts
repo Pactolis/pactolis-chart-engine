@@ -1,5 +1,11 @@
 import { Canvas2dSurface } from "./canvas2d/canvas2dSurface.js";
 import {
+  getCanvasOwnerDocument,
+  isOffscreenCanvas,
+  type Canvas2dContext,
+  type CanvasTarget,
+} from "./canvasTarget.js";
+import {
   recordGpuBackendSelection,
   recordGpuContextEvent,
   recordGpuFallback,
@@ -146,7 +152,7 @@ export function resetWebGpuSessionDecisionForTest(): void {
   clearWebGpuFatalReasonFn?.();
 }
 
-function cleanupCanvas(canvas: HTMLCanvasElement, webgpuCtx?: any, removeFromDom = false): void {
+function cleanupCanvas(canvas: CanvasTarget, webgpuCtx?: any, removeFromDom = false): void {
   try {
     webgpuCtx?.unconfigure?.();
   } catch {
@@ -158,7 +164,7 @@ function cleanupCanvas(canvas: HTMLCanvasElement, webgpuCtx?: any, removeFromDom
   } catch {
     // ignore
   }
-  if (removeFromDom) {
+  if (!isOffscreenCanvas(canvas) && removeFromDom) {
     try {
       canvas.remove?.();
     } catch {
@@ -168,14 +174,21 @@ function cleanupCanvas(canvas: HTMLCanvasElement, webgpuCtx?: any, removeFromDom
 }
 
 function allocateReplacementCanvas(
-  baseCanvas: HTMLCanvasElement,
-  createCanvas?: () => HTMLCanvasElement,
-): HTMLCanvasElement | null {
+  baseCanvas: CanvasTarget,
+  createCanvas?: () => CanvasTarget,
+): CanvasTarget | null {
   try {
     if (createCanvas) {
       return createCanvas() ?? null;
     }
-    return baseCanvas.ownerDocument?.createElement?.("canvas") ?? null;
+    const ownerDoc = getCanvasOwnerDocument(baseCanvas);
+    if (ownerDoc && typeof ownerDoc.createElement === "function") {
+      return ownerDoc.createElement("canvas");
+    }
+    if (isOffscreenCanvas(baseCanvas) && typeof OffscreenCanvas === "function") {
+      return new OffscreenCanvas(Math.max(1, baseCanvas.width || 1), Math.max(1, baseCanvas.height || 1));
+    }
+    return null;
   } catch {
     return null;
   }
@@ -209,14 +222,14 @@ function commitSelectionDiagnostics(
 }
 
 export function createGpuSurface(
-  canvas: HTMLCanvasElement,
+  canvas: CanvasTarget,
   preference: GpuBackendPreference = "webgl2",
   providedGl?: WebGL2RenderingContext | null,
   webgpuHandle?: WebGpuDeviceHandle | null,
-  options?: { createCanvas?: () => HTMLCanvasElement },
+  options?: { createCanvas?: () => CanvasTarget },
 ): GpuSurface {
   if (preference === "canvas2d") {
-    const ctx = canvas.getContext("2d");
+    const ctx = canvas.getContext("2d") as Canvas2dContext | null;
     if (!ctx) {
       throw new Error("selectBackend: failed to acquire 2D rendering context");
     }
@@ -283,7 +296,7 @@ export function createGpuSurface(
   }
 
   // Acquire WebGL2 on a fresh canvas if the original canvas was locked by WebGPU
-  let webglCanvas: HTMLCanvasElement | null = canvas;
+  let webglCanvas: CanvasTarget | null = canvas;
   if (canvasLocked) {
     webglCanvas = allocateReplacementCanvas(canvas, options?.createCanvas);
     canvasLocked = false;
@@ -321,14 +334,14 @@ export function createGpuSurface(
   }
 
   // Fallback to Canvas2D on a fresh canvas if the current canvas was locked by WebGL2
-  let c2dCanvas: HTMLCanvasElement | null = canvasLocked
+  let c2dCanvas: CanvasTarget | null = canvasLocked
     ? allocateReplacementCanvas(canvas, options?.createCanvas)
     : (webglCanvas === canvas ? canvas : allocateReplacementCanvas(canvas, options?.createCanvas));
 
   if (c2dCanvas) {
-    let ctx2d: CanvasRenderingContext2D | null = null;
+    let ctx2d: Canvas2dContext | null = null;
     try {
-      ctx2d = c2dCanvas.getContext("2d") as CanvasRenderingContext2D | null;
+      ctx2d = c2dCanvas.getContext("2d") as Canvas2dContext | null;
     } catch {
       ctx2d = null;
     }
@@ -337,7 +350,7 @@ export function createGpuSurface(
       if (replacement) {
         c2dCanvas = replacement;
         try {
-          ctx2d = c2dCanvas.getContext("2d") as CanvasRenderingContext2D | null;
+          ctx2d = c2dCanvas.getContext("2d") as Canvas2dContext | null;
         } catch {
           ctx2d = null;
         }
@@ -360,13 +373,13 @@ export function createGpuSurface(
 }
 
 export async function createGpuSurfaceAsync(
-  canvas: HTMLCanvasElement,
+  canvas: CanvasTarget,
   preference: GpuBackendPreference = "webgl2",
   providedGl?: WebGL2RenderingContext | null,
-  getWebGl2Context?: (canvas: HTMLCanvasElement) => WebGL2RenderingContext | null,
+  getWebGl2Context?: (canvas: CanvasTarget) => WebGL2RenderingContext | null,
   options?: {
     powerPreference?: ChartPowerPreference;
-    createCanvas?: () => HTMLCanvasElement;
+    createCanvas?: () => CanvasTarget;
     webgpuRollout?: WebGpuRolloutMode;
     webgpuKillSwitch?: boolean;
   },
@@ -531,7 +544,7 @@ export async function createGpuSurfaceAsync(
     }
   }
 
-  let webglCanvas: HTMLCanvasElement | null = canvas;
+  let webglCanvas: CanvasTarget | null = canvas;
   if (canvasLocked) {
     webglCanvas = allocateReplacementCanvas(canvas, options?.createCanvas);
     canvasLocked = false;
@@ -583,14 +596,14 @@ export async function createGpuSurfaceAsync(
     contextCreateFailed = true;
   }
 
-  let c2dCanvas: HTMLCanvasElement | null = canvasLocked
+  let c2dCanvas: CanvasTarget | null = canvasLocked
     ? allocateReplacementCanvas(canvas, options?.createCanvas)
     : (webglCanvas === canvas ? canvas : allocateReplacementCanvas(canvas, options?.createCanvas));
 
   if (c2dCanvas) {
-    let ctx2d: CanvasRenderingContext2D | null = null;
+    let ctx2d: Canvas2dContext | null = null;
     try {
-      ctx2d = c2dCanvas.getContext("2d") as CanvasRenderingContext2D | null;
+      ctx2d = c2dCanvas.getContext("2d") as Canvas2dContext | null;
     } catch {
       ctx2d = null;
     }
@@ -599,7 +612,7 @@ export async function createGpuSurfaceAsync(
       if (replacement) {
         c2dCanvas = replacement;
         try {
-          ctx2d = c2dCanvas.getContext("2d") as CanvasRenderingContext2D | null;
+          ctx2d = c2dCanvas.getContext("2d") as Canvas2dContext | null;
         } catch {
           ctx2d = null;
         }

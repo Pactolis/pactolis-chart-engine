@@ -5,6 +5,12 @@ import { axisLayoutForChartView } from "../model/axisLayout.js";
 import type { ResolvedChartDisplayOptions } from "../model/chartDisplayOptions.js";
 import type { FootprintSeries } from "../model/footprint.js";
 import { incrementPerformanceCounter } from "../performanceTelemetry.js";
+import {
+  createScratchCanvas,
+  getCanvasOwnerDocument,
+  getScratch2dContext,
+  type CanvasTarget,
+} from "../gpu/canvasTarget.js";
 import { axisMajorLabelColor, axisMajorTickColor, uiColor } from "../ui/seriesPalette.js";
 import {
   drawPriceAxis,
@@ -61,8 +67,8 @@ interface TimeAxisCacheEntry {
  * over plot content stays pixel-identical, and `"last-price"` / price markers always render live.
  */
 export class AxisLayerCache {
-  private priceCanvas: HTMLCanvasElement | null = null;
-  private timeCanvas: HTMLCanvasElement | null = null;
+  private priceCanvas: CanvasTarget | null = null;
+  private timeCanvas: CanvasTarget | null = null;
   private priceEntry: PriceAxisCacheEntry | null = null;
   private timeEntry: TimeAxisCacheEntry | null = null;
   private hasLastTimeViewport = false;
@@ -170,8 +176,8 @@ export class AxisLayerCache {
     }
 
     const offscreen = this.ensurePriceCanvas(env.doc, bounds.devW, bounds.devH);
-    const offCtx = offscreen.getContext("2d");
-    if (!offCtx || typeof offCtx.setTransform !== "function") {
+    const offCtx = getScratch2dContext(offscreen);
+    if (!offscreen || !offCtx || typeof offCtx.setTransform !== "function") {
       this.priceEntry = null;
       this.hasLastPriceViewport = false;
       this.priceMoveStreak = 0;
@@ -184,7 +190,7 @@ export class AxisLayerCache {
     offCtx.setTransform(1, 0, 0, 1, 0, 0);
     offCtx.clearRect(0, 0, bounds.devW, bounds.devH);
     offCtx.setTransform(env.tx.a, 0, 0, env.tx.d, env.tx.e - bounds.devX, env.tx.f - bounds.devY);
-    const gridYs = drawPriceAxisStrip(offCtx, view, priceStep, pricePrecision, keepOut, displayOptions);
+    const gridYs = drawPriceAxisStrip(offCtx as CanvasRenderingContext2D, view, priceStep, pricePrecision, keepOut, displayOptions);
     offCtx.restore();
 
     const separatorTop = layout.priceAxisRect.top + gutterFillH;
@@ -284,8 +290,8 @@ export class AxisLayerCache {
     }
 
     const offscreen = this.ensureTimeCanvas(env.doc, bounds.devW, bounds.devH);
-    const offCtx = offscreen.getContext("2d");
-    if (!offCtx || typeof offCtx.setTransform !== "function") {
+    const offCtx = getScratch2dContext(offscreen);
+    if (!offscreen || !offCtx || typeof offCtx.setTransform !== "function") {
       this.timeEntry = null;
       this.hasLastTimeViewport = false;
       this.timeViewportMoveStreak = 0;
@@ -298,7 +304,7 @@ export class AxisLayerCache {
     offCtx.setTransform(1, 0, 0, 1, 0, 0);
     offCtx.clearRect(0, 0, bounds.devW, bounds.devH);
     offCtx.setTransform(env.tx.a, 0, 0, env.tx.d, env.tx.e - bounds.devX, env.tx.f - bounds.devY);
-    drawTimeAxis(offCtx, view, series, undefined, timeMarkers);
+    drawTimeAxis(offCtx as CanvasRenderingContext2D, view, series, undefined, timeMarkers);
     offCtx.restore();
 
     const entry: TimeAxisCacheEntry = {
@@ -340,19 +346,21 @@ export class AxisLayerCache {
     this.timeCanvas = null;
   }
 
-  private ensurePriceCanvas(doc: Document, width: number, height: number): HTMLCanvasElement {
+  private ensurePriceCanvas(doc: Document | null, width: number, height: number): CanvasTarget | null {
     if (!this.priceCanvas) {
-      this.priceCanvas = doc.createElement("canvas");
+      this.priceCanvas = createScratchCanvas(width, height, doc);
     }
+    if (!this.priceCanvas) return null;
     if (this.priceCanvas.width !== width) this.priceCanvas.width = width;
     if (this.priceCanvas.height !== height) this.priceCanvas.height = height;
     return this.priceCanvas;
   }
 
-  private ensureTimeCanvas(doc: Document, width: number, height: number): HTMLCanvasElement {
+  private ensureTimeCanvas(doc: Document | null, width: number, height: number): CanvasTarget | null {
     if (!this.timeCanvas) {
-      this.timeCanvas = doc.createElement("canvas");
+      this.timeCanvas = createScratchCanvas(width, height, doc);
     }
+    if (!this.timeCanvas) return null;
     if (this.timeCanvas.width !== width) this.timeCanvas.width = width;
     if (this.timeCanvas.height !== height) this.timeCanvas.height = height;
     return this.timeCanvas;
@@ -362,15 +370,17 @@ export class AxisLayerCache {
 function resolveOffscreenEnvironment(
   ctx: CanvasRenderingContext2D,
   view: View,
-): { doc: Document; canvasW: number; canvasH: number; tx: AxisTransform } | null {
+): { doc: Document | null; canvasW: number; canvasH: number; tx: AxisTransform } | null {
   const canvasW = ctx.canvas?.width ?? 0;
   const canvasH = ctx.canvas?.height ?? 0;
-  const doc = ctx.canvas?.ownerDocument;
+  const doc = getCanvasOwnerDocument(ctx.canvas);
+  const canCreateScratch = Boolean(
+    (doc && typeof doc.createElement === "function") || typeof OffscreenCanvas === "function",
+  );
   if (
     !(canvasW > 0) ||
     !(canvasH > 0) ||
-    !doc ||
-    typeof doc.createElement !== "function" ||
+    !canCreateScratch ||
     typeof ctx.drawImage !== "function" ||
     typeof ctx.setTransform !== "function"
   ) {
@@ -538,7 +548,7 @@ function safeLocaleAndTimezoneKey(): string {
 
 function blitOffscreenCanvas(
   ctx: CanvasRenderingContext2D,
-  offscreen: HTMLCanvasElement,
+  offscreen: CanvasTarget,
   devX: number,
   devY: number,
 ): void {
@@ -557,7 +567,7 @@ function strokeSubPaneSeparator(ctx: CanvasRenderingContext2D, entry: PriceAxisC
   ctx.stroke();
 }
 
-function releaseCanvas(canvas: HTMLCanvasElement | null): void {
+function releaseCanvas(canvas: HTMLCanvasElement | OffscreenCanvas | null): void {
   if (!canvas) return;
   canvas.width = 0;
   canvas.height = 0;

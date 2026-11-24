@@ -1649,7 +1649,9 @@ class ChartRuntimeImpl implements ChartRuntime, ChartInputHost {
     this.pipeline.dispose();
     this.indicatorController.dispose();
     for (const element of this.ownedElements) element.remove();
-    this.currentGpuSurface.canvas.remove?.();
+    if ("remove" in this.currentGpuSurface.canvas) {
+      this.currentGpuSurface.canvas.remove?.();
+    }
     this.surface.historyOverlay = false;
     this.surface.historyBackground = false;
     // The host-wide drawing manager remembers the last chart that drew; let go of this one.
@@ -2251,7 +2253,7 @@ async function buildChartRuntime(
         gpuCanvas,
         gpuSettings.backend,
         undefined,
-        (c) => getChartWebGl2Context(c, display.webgl),
+        (c) => getChartWebGl2Context(c as HTMLCanvasElement, display.webgl),
         { powerPreference: display.webgl.powerPreference },
       );
       gl = gpuSurface.kind === "webgl2" ? (gpuSurface.getGlContext?.() ?? null) : null;
@@ -2267,19 +2269,20 @@ async function buildChartRuntime(
   }
 
   if (gpuSurface.canvas !== gpuCanvas) {
-    gpuSurface.canvas.dataset.chartSurface = "gpu-scene";
-    gpuSurface.canvas.setAttribute?.("aria-hidden", "true");
+    const resolvedGpuCanvas = gpuSurface.canvas as HTMLCanvasElement;
+    resolvedGpuCanvas.dataset.chartSurface = "gpu-scene";
+    resolvedGpuCanvas.setAttribute?.("aria-hidden", "true");
     if (gpuCanvas.style?.cssText) {
-      gpuSurface.canvas.style.cssText = gpuCanvas.style.cssText;
+      resolvedGpuCanvas.style.cssText = gpuCanvas.style.cssText;
     }
     if (gpuCanvas.parentNode) {
-      gpuCanvas.replaceWith(gpuSurface.canvas);
+      gpuCanvas.replaceWith(resolvedGpuCanvas);
     } else {
-      panelRoot.insertBefore(gpuSurface.canvas, annotationCanvas);
+      panelRoot.insertBefore(resolvedGpuCanvas, annotationCanvas);
     }
     gpuCanvas.width = 0;
     gpuCanvas.height = 0;
-    gpuCanvas = gpuSurface.canvas;
+    gpuCanvas = resolvedGpuCanvas;
   }
   hook.setAttribute("data-gpu-backend", gpuSurface.kind);
 
@@ -2321,11 +2324,13 @@ async function buildChartRuntime(
 
   let currentBackendPref = gpuSettings.backend;
   let swapRequestId = 0;
-  const cleanupDetachedCanvas = (canvas: HTMLCanvasElement | null | undefined): void => {
+  const cleanupDetachedCanvas = (canvas: HTMLCanvasElement | OffscreenCanvas | null | undefined): void => {
     if (!canvas) return;
     try { canvas.width = 0; } catch {}
     try { canvas.height = 0; } catch {}
-    try { canvas.remove?.(); } catch {}
+    if ("remove" in canvas) {
+      try { canvas.remove?.(); } catch {}
+    }
   };
   const unbindGpuSettings = onGpuSettingsChange(async () => {
     if (runtime.getDiagnostics().disposed) return;
@@ -2346,7 +2351,7 @@ async function buildChartRuntime(
         nextCanvas,
         nextSettings.backend,
         undefined,
-        (c) => getChartWebGl2Context(c, display.webgl),
+        (c) => getChartWebGl2Context(c as HTMLCanvasElement, display.webgl),
         { powerPreference: runtime.displayOptions.webgl.powerPreference },
       );
       if (runtime.getDiagnostics().disposed || requestId !== swapRequestId) {

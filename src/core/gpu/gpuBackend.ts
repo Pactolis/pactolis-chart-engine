@@ -3,7 +3,9 @@ import type { ChartArea } from "../engine/view.js";
 import type { FootprintSeries } from "../model/footprint.js";
 import type { OrderbookHeatmapPalette } from "../orderbookHeatmap/settings.js";
 
-export type { RGBA };
+import type { Canvas2dContext, CanvasTarget } from "./canvasTarget.js";
+
+export type { Canvas2dContext, CanvasTarget, RGBA };
 
 export type GpuBackendKind = "webgpu" | "webgl2" | "canvas2d";
 
@@ -135,7 +137,7 @@ export interface GpuNativeHeatmapResidentFrame {
 
 export interface GpuSurface {
   readonly kind: GpuBackendKind;
-  readonly canvas: HTMLCanvasElement;
+  readonly canvas: CanvasTarget;
   getGlContext?(): WebGL2RenderingContext | null;
   resize(bitmapWidth: number, bitmapHeight: number, dpr?: number): void;
   beginFrame(clear: RGBA): GpuFrame;
@@ -159,7 +161,7 @@ export interface GpuProbe {
 }
 
 export interface GpuSurfaceInit {
-  readonly canvas: HTMLCanvasElement;
+  readonly canvas: CanvasTarget;
   readonly options?: unknown;
 }
 

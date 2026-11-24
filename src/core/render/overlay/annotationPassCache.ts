@@ -1,3 +1,9 @@
+import {
+  createScratchCanvas,
+  getCanvasOwnerDocument,
+  getScratch2dContext,
+  type CanvasTarget,
+} from "../../gpu/canvasTarget.js";
 import { ChartChange } from "../scene/chartScene.js";
 
 /** A pass names its semantic dependencies independently of its physical canvas. */
@@ -20,7 +26,7 @@ export function annotationPass(id: string, live = false): ChartRenderPass {
 }
 
 const MAX_RETAINED_BYTES = 16 * 1024 * 1024;
-interface Entry<T> { canvas: HTMLCanvasElement; effects: T; key: string; valid: boolean }
+interface Entry<T> { canvas: CanvasTarget; effects: T; key: string; valid: boolean }
 
 export interface AnnotationDirtyRect {
   readonly x: number;
@@ -143,13 +149,18 @@ export class AnnotationPassCache<T> {
     // Reserve one bitmap for the axis pass, which is last in scene order. At
     // high DPR, earlier static layers must not consume its whole cache budget.
     const reserve = pass.id === "axis" || this.entries.has("axis") ? 0 : required;
-    if (!canvas.ownerDocument?.createElement || !ctx.getTransform || required + reserve > MAX_RETAINED_BYTES - this.bytes + previousBytes) return false;
+    const ownerDoc = getCanvasOwnerDocument(canvas);
+    const canCreateScratch = Boolean(
+      (ownerDoc && typeof ownerDoc.createElement === "function") || typeof OffscreenCanvas === "function",
+    );
+    if (!canCreateScratch || !ctx.getTransform || required + reserve > MAX_RETAINED_BYTES - this.bytes + previousBytes) return false;
     // Reuse each pass's own backing store during full/history frames. Repeated
     // streaming-history invalidations must not allocate fresh full-size canvases.
-    const bitmap = retained?.canvas ?? canvas.ownerDocument.createElement("canvas");
+    const bitmap = retained?.canvas ?? createScratchCanvas(canvas.width, canvas.height, ownerDoc);
+    if (!bitmap) return false;
     if (bitmap.width !== canvas.width) bitmap.width = canvas.width;
     if (bitmap.height !== canvas.height) bitmap.height = canvas.height;
-    const target = bitmap.getContext("2d");
+    const target = getScratch2dContext(bitmap);
     if (!target) return false;
     target.setTransform(1, 0, 0, 1, 0, 0);
     target.clearRect(0, 0, bitmap.width, bitmap.height);
@@ -162,7 +173,7 @@ export class AnnotationPassCache<T> {
     } else {
       const tx = ctx.getTransform();
       target.setTransform(tx.a, tx.b, tx.c, tx.d, tx.e, tx.f);
-      effects = draw(target);
+      effects = draw(target as CanvasRenderingContext2D);
       this.blit(ctx, bitmap);
     }
     this.entries.set(pass.id, { canvas: bitmap, effects, key, valid: true });
@@ -171,7 +182,7 @@ export class AnnotationPassCache<T> {
   }
 
   /** Blit a device-pixel sub-rectangle from a retained bitmap onto ctx, clamped to canvas bounds. */
-  blitRegion(ctx: CanvasRenderingContext2D, bitmap: HTMLCanvasElement, rect: AnnotationDirtyRect): void {
+  blitRegion(ctx: CanvasRenderingContext2D, bitmap: CanvasTarget, rect: AnnotationDirtyRect): void {
     const maxW = Math.min(ctx.canvas.width, bitmap.width);
     const maxH = Math.min(ctx.canvas.height, bitmap.height);
     if (maxW <= 0 || maxH <= 0) return;
@@ -188,7 +199,7 @@ export class AnnotationPassCache<T> {
     ctx.restore();
   }
 
-  private blit(ctx: CanvasRenderingContext2D, bitmap: HTMLCanvasElement): void {
+  private blit(ctx: CanvasRenderingContext2D, bitmap: CanvasTarget): void {
     ctx.save();
     ctx.setTransform(1, 0, 0, 1, 0, 0);
     ctx.drawImage(bitmap, 0, 0);

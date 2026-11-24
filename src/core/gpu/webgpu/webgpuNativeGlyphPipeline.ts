@@ -1,5 +1,6 @@
 import type { ChartArea } from "../../engine/view.js";
 import { incrementPerformanceCounter } from "../../performanceTelemetry.js";
+import { createScratchCanvas, type Canvas2dContext } from "../canvasTarget.js";
 import type { NativeGlyphSink } from "../gpuBackend.js";
 
 export const GLYPH_CHARSET = "0123456789.+-kM%,KB ";
@@ -188,17 +189,12 @@ function buildGlyphAtlasData(): GlyphAtlasData {
   const pixels = new Uint8Array(GLYPH_ATLAS_WIDTH * GLYPH_ATLAS_HEIGHT * 4);
   let advanceRatio = DEFAULT_ADVANCE_RATIO;
 
-  const canUseCanvas = typeof document !== "undefined" && typeof document.createElement === "function";
-  let ctx: CanvasRenderingContext2D | null = null;
-  if (canUseCanvas) {
-    try {
-      const canvas = document.createElement("canvas");
-      canvas.width = GLYPH_CELL_SIZE;
-      canvas.height = GLYPH_CELL_SIZE;
-      ctx = canvas.getContext("2d", { willReadFrequently: true }) as CanvasRenderingContext2D | null;
-    } catch {
-      ctx = null;
-    }
+  let ctx: Canvas2dContext | null = null;
+  try {
+    const canvas = createScratchCanvas(GLYPH_CELL_SIZE, GLYPH_CELL_SIZE);
+    ctx = canvas ? (canvas.getContext("2d", { willReadFrequently: true }) as Canvas2dContext | null) : null;
+  } catch {
+    ctx = null;
   }
 
   if (ctx) {

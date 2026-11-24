@@ -19,6 +19,7 @@
 import { createProgram } from "../../../../core/engine/gl.js";
 import { isPerformanceTelemetryEnabled, recordPerformanceDuration } from "../../../../core/performanceTelemetry.js";
 import { HEATMAP_MIN_CEILING_RATIO, heatmapPaletteIndex } from "../../../orderbook/heatmapModel.js";
+import { getCanvasOwnerDocument, type CanvasTarget } from "../../../../core/gpu/canvasTarget.js";
 import type { OrderbookHeatmapPalette } from "../../../../core/orderbookHeatmap/settings.js";
 import { HEATMAP_GPU_FRAG_SRC, HEATMAP_GPU_VERT_SRC } from "./heatmapGpuShaders.js";
 
@@ -216,8 +217,8 @@ export class HeatmapGpuRenderer {
     if (!f32(panOffsetX)) return false;
     if (!Number.isFinite(opacity) || opacity < 0 || opacity > 1) return false;
     if (!(plot.width > 0) || !(plot.height > 0)) return false;
-    const canvas = gl.canvas as HTMLCanvasElement;
-    const ownerWindow = canvas.ownerDocument?.defaultView;
+    const canvas = gl.canvas as CanvasTarget | undefined;
+    const ownerWindow = getCanvasOwnerDocument(canvas)?.defaultView;
     const dpr = plot.pixelRatio ?? (ownerWindow?.devicePixelRatio || 1);
     const bufferWidth = gl.drawingBufferWidth;
     const bufferHeight = gl.drawingBufferHeight;
@@ -830,8 +831,8 @@ export class HeatmapGpuRenderer {
   }
 
   private draw(gl: WebGL2RenderingContext, frame: HeatmapGpuCellFrame, plot: HeatmapGpuPlot): void {
-    const canvas = gl.canvas as HTMLCanvasElement;
-    const ownerWindow = canvas.ownerDocument?.defaultView;
+    const canvas = gl.canvas as CanvasTarget | undefined;
+    const ownerWindow = getCanvasOwnerDocument(canvas)?.defaultView;
     const dpr = plot.pixelRatio ?? (ownerWindow?.devicePixelRatio || 1);
     const bufferWidth = gl.drawingBufferWidth;
     const bufferHeight = gl.drawingBufferHeight;

@@ -1,4 +1,5 @@
 import type {
+  CanvasTarget,
   GpuFrame,
   GpuLossReason,
   GpuNativeHeatmapFrame,
@@ -77,7 +78,7 @@ export class WebGpuSurface implements GpuSurface {
   private initVerificationPromise: Promise<void> | null = null;
 
   constructor(
-    public readonly canvas: HTMLCanvasElement,
+    public readonly canvas: CanvasTarget,
     private readonly handle: WebGpuDeviceHandle,
     pipeline?: WebGpuQuadPipeline,
   ) {

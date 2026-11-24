@@ -167,6 +167,8 @@ export type MainWorkerMessage =
       {
         surfaces: ReadonlyArray<WorkerSurfaceDescriptor>;
         viewport: { width: number; height: number; dpr: number };
+        backendPreference?: "auto" | "webgpu" | "webgl2" | "canvas2d";
+        offscreenCanvases?: Partial<Record<WorkerSurfaceRole, OffscreenCanvas>>;
       }
     >
   | WorkerEnvelopeBase<
@@ -244,6 +246,8 @@ export type MainWorkerMessage =
       {
         action: "pause" | "resume" | "rehome" | "dispose" | "epoch-bump" | "abort";
         reason?: string;
+        surfaces?: ReadonlyArray<WorkerSurfaceDescriptor>;
+        offscreenCanvases?: Partial<Record<WorkerSurfaceRole, OffscreenCanvas>>;
       }
     >
   | WorkerEnvelopeBase<"main", "main:credit", { granted: number }>

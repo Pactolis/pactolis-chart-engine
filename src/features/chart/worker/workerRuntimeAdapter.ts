@@ -17,7 +17,21 @@ import {
   type WorkerPortChannel,
   type WorkerProtocolMessage,
   type WorkerSurfaceDescriptor,
+  type WorkerSurfaceRole,
 } from "./workerProtocol.js";
+
+function collectOffscreenTransfers(
+  offscreenCanvases?: Partial<Record<WorkerSurfaceRole, OffscreenCanvas>>,
+): Transferable[] {
+  if (!offscreenCanvases) return [];
+  const transfers: Transferable[] = [];
+  for (const canvas of Object.values(offscreenCanvases)) {
+    if (canvas && !transfers.includes(canvas as unknown as Transferable)) {
+      transfers.push(canvas as unknown as Transferable);
+    }
+  }
+  return transfers;
+}
 
 export interface MessagePortLike {
   postMessage(message: unknown, transfer?: Transferable[]): void;
@@ -211,7 +225,12 @@ export class WorkerChartHostBridge {
   sendInit(
     surfaces: ReadonlyArray<WorkerSurfaceDescriptor>,
     viewport: { width: number; height: number; dpr: number },
+    options?: {
+      backendPreference?: "auto" | "webgpu" | "webgl2" | "canvas2d";
+      offscreenCanvases?: Partial<Record<WorkerSurfaceRole, OffscreenCanvas>>;
+    },
   ): void {
+    const transfer = collectOffscreenTransfers(options?.offscreenCanvases);
     this.enqueueAndFlush({
       channel: "main",
       kind: "main:init",
@@ -220,7 +239,13 @@ export class WorkerChartHostBridge {
       generation: this.generation,
       seq: ++this.seq,
       revision: ++this.revision,
-      payload: { surfaces, viewport },
+      ...(transfer.length > 0 ? { transfer } : {}),
+      payload: {
+        surfaces,
+        viewport,
+        ...(options?.backendPreference !== undefined ? { backendPreference: options.backendPreference } : {}),
+        ...(options?.offscreenCanvases !== undefined ? { offscreenCanvases: options.offscreenCanvases } : {}),
+      },
     });
   }
 
@@ -253,7 +278,12 @@ export class WorkerChartHostBridge {
   sendLifecycle(
     action: "pause" | "resume" | "rehome" | "dispose" | "epoch-bump" | "abort",
     reason?: string,
+    options?: {
+      surfaces?: ReadonlyArray<WorkerSurfaceDescriptor>;
+      offscreenCanvases?: Partial<Record<WorkerSurfaceRole, OffscreenCanvas>>;
+    },
   ): void {
+    const transfer = collectOffscreenTransfers(options?.offscreenCanvases);
     this.enqueueAndFlush({
       channel: "main",
       kind: "main:lifecycle",
@@ -262,7 +292,13 @@ export class WorkerChartHostBridge {
       generation: this.generation,
       seq: ++this.seq,
       revision: ++this.revision,
-      payload: { action, ...(reason ? { reason } : {}) },
+      ...(transfer.length > 0 ? { transfer } : {}),
+      payload: {
+        action,
+        ...(reason ? { reason } : {}),
+        ...(options?.surfaces ? { surfaces: options.surfaces } : {}),
+        ...(options?.offscreenCanvases ? { offscreenCanvases: options.offscreenCanvases } : {}),
+      },
     });
   }
 
@@ -494,7 +530,9 @@ export interface WorkerEndpointHandlers {
   onCapture?: (
     payload: Extract<MainWorkerMessage, { kind: "main:capture-request" }>["payload"],
     envelope: MainWorkerMessage,
-  ) => Extract<MainWorkerMessage, { kind: "main:capture-response" }>["payload"];
+  ) =>
+    | Extract<MainWorkerMessage, { kind: "main:capture-response" }>["payload"]
+    | Promise<Extract<MainWorkerMessage, { kind: "main:capture-response" }>["payload"]>;
   onHitTest?: (
     payload: Extract<MainWorkerMessage, { kind: "main:hit-test-request" }>["payload"],
     envelope: MainWorkerMessage,
@@ -795,17 +833,41 @@ export class WorkerChartEndpoint {
     }
 
     if (msg.kind === "main:capture-request" && this.mainPort) {
+      const sendCapture = (
+        resolved: Extract<MainWorkerMessage, { kind: "main:capture-response" }>["payload"],
+      ): void => {
+        if (this.disposed || !this.mainPort) return;
+        const transfer = resolved.buffer ? [resolved.buffer] : undefined;
+        this.postMainResponse(
+          "main:capture-response",
+          msg.requestId,
+          msg.generation,
+          resolved,
+          transfer,
+        );
+      };
+
       const result = this.handlers.onCapture
         ? this.handlers.onCapture(msg.payload, msg)
         : { ok: false, error: "No capture handler registered" };
-      const transfer = result.buffer ? [result.buffer] : undefined;
-      this.postMainResponse(
-        "main:capture-response",
-        msg.requestId,
-        msg.generation,
-        result,
-        transfer,
-      );
+      if (result && typeof (result as PromiseLike<unknown>).then === "function") {
+        (
+          result as Promise<
+            Extract<MainWorkerMessage, { kind: "main:capture-response" }>["payload"]
+          >
+        ).then(
+          (resolved) => sendCapture(resolved),
+          (err) =>
+            sendCapture({
+              ok: false,
+              error: err instanceof Error ? err.message : String(err),
+            }),
+        );
+      } else {
+        sendCapture(
+          result as Extract<MainWorkerMessage, { kind: "main:capture-response" }>["payload"],
+        );
+      }
       return;
     }
 

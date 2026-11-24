@@ -1,3 +1,4 @@
+import type { Canvas2dContext } from "../gpu/canvasTarget.js";
 import { ChartChange } from "./scene/chartScene.js";
 import {
   alignDirtyRectToDevicePixels,
@@ -174,8 +175,11 @@ export class Overlay {
     };
   }
 
+  private ctx: CanvasRenderingContext2D;
+  private interactionCtx?: CanvasRenderingContext2D;
+
   constructor(
-    private ctx: CanvasRenderingContext2D,
+    ctx: Canvas2dContext,
     private readonly drawForeground?: (
       ctx: CanvasRenderingContext2D,
       view: View,
@@ -205,7 +209,7 @@ export class Overlay {
       rect: { top: number; height: number }
     ) => void,
     private readonly isMainChartSuppressed?: () => boolean,
-    private interactionCtx?: CanvasRenderingContext2D,
+    interactionCtx?: Canvas2dContext,
     private readonly drawInteractionForeground?: (ctx: CanvasRenderingContext2D, view: View, series: FootprintSeries) => void,
     /** Orderbook heatmap cells, drawn under every other annotation. */
     private readonly drawOrderbookHeatmap?: (
@@ -227,6 +231,8 @@ export class Overlay {
     private readonly shouldSkipFootprintText?: () => boolean,
     private readonly onShowNotionalChange?: (show: boolean) => void,
   ) {
+    this.ctx = ctx as CanvasRenderingContext2D;
+    this.interactionCtx = interactionCtx as CanvasRenderingContext2D | undefined;
     const self = this;
     this.hudDeps = {
       get showNotional() { return self.showNotional; },
@@ -331,14 +337,14 @@ export class Overlay {
   }
 
   /** Replace the annotation 2D context after context restoration and drop warm caches. */
-  updateContext(ctx: CanvasRenderingContext2D): void {
-    this.ctx = ctx;
+  updateContext(ctx: Canvas2dContext): void {
+    this.ctx = ctx as CanvasRenderingContext2D;
     this.invalidateWarmCaches();
   }
 
   /** Replace the interaction 2D context after context restoration. */
-  updateInteractionContext(ctx: CanvasRenderingContext2D): void {
-    this.interactionCtx = ctx;
+  updateInteractionContext(ctx: Canvas2dContext): void {
+    this.interactionCtx = ctx as CanvasRenderingContext2D;
   }
 
   /** Release offscreen axis canvases and transient overlay buffers. */

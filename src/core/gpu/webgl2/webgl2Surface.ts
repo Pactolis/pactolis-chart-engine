@@ -1,5 +1,5 @@
 import { QuadBatch } from "../../engine/quadBatch.js";
-import type { GpuFrame, GpuLossReason, GpuSurface, QuadSink, RGBA, RgbaFrame } from "../gpuBackend.js";
+import type { CanvasTarget, GpuFrame, GpuLossReason, GpuSurface, QuadSink, RGBA, RgbaFrame } from "../gpuBackend.js";
 import { flipRgbaRows } from "../../../features/chart/nativeCapture.js";
 
 function hasWebGl2ShaderCapabilities(gl: WebGL2RenderingContext): boolean {
@@ -43,7 +43,7 @@ export class WebGl2Surface implements GpuSurface {
   };
 
   constructor(
-    public readonly canvas: HTMLCanvasElement,
+    public readonly canvas: CanvasTarget,
     private gl: WebGL2RenderingContext,
     batch?: QuadBatch,
   ) {
