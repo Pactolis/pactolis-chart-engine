@@ -68,7 +68,7 @@ function createCanvasMock() {
     roundRect() {},
     fill() {},
     measureText(text) {
-      return { width: String(text).length * 6 };
+      return { width: String(text).length * 3 };
     },
     fillText(text, x, y) {
       fillTexts.push({ text: String(text), x, y });

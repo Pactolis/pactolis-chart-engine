@@ -224,10 +224,36 @@ test("FRVP safely recomputes on in-range repair, OHLCV->footprint transition, pr
   drawAnalysisDrawings(canvas, view, series, timeCtx, [drawing], "BTCUSDT");
   assert.equal(snapshotPerformanceTelemetry().counters["analysis.drawings.frvp.cache.miss"], 1);
 
-  // 4. Prepend before range
+  // 4. Prepend before range -> slow-path hit updates firstIndex/afterLastIndex, then tail live trade still hits O(1) with 0 cells.size reads
   resetPerformanceTelemetry();
   const prependedBar = makeBar(-1, false);
   series.upsertBar(prependedBar);
+  drawAnalysisDrawings(canvas, view, series, timeCtx, [drawing], "BTCUSDT");
+  let step4Snap = snapshotPerformanceTelemetry();
+  assert.equal(step4Snap.counters["analysis.drawings.frvp.cache.hit"], 1);
+  assert.equal(step4Snap.counters["analysis.drawings.frvp.cache.miss"] ?? 0, 0);
+
+  const postPrependCounter = { reads: 0 };
+  const currentBars = series.listReadonly();
+  // Instrument bars inside [fromTime, toTime] (indices 1..2500 after prepend)
+  instrumentCellsSizeCounter(currentBars.slice(1, 2501), postPrependCounter);
+  resetPerformanceTelemetry();
+  series.addTrade({
+    id: 88_888,
+    time: BASE_TIME + 2500 * INTERVAL_MS + 250,
+    price: 101,
+    qty: 1,
+    isBuy: true,
+  });
+  drawAnalysisDrawings(canvas, view, series, timeCtx, [drawing], "BTCUSDT");
+  step4Snap = snapshotPerformanceTelemetry();
+  assert.equal(postPrependCounter.reads, 0);
+  assert.equal(step4Snap.counters["analysis.drawings.frvp.cache.hit"], 1);
+  assert.equal(step4Snap.counters["analysis.drawings.frvp.cache.miss"] ?? 0, 0);
+
+  // 4b. Prune first in-range bar -> cache miss & recompute
+  resetPerformanceTelemetry();
+  series.replaceRange(BASE_TIME, BASE_TIME + INTERVAL_MS, []);
   drawAnalysisDrawings(canvas, view, series, timeCtx, [drawing], "BTCUSDT");
   assert.equal(snapshotPerformanceTelemetry().counters["analysis.drawings.frvp.cache.miss"], 1);
 
