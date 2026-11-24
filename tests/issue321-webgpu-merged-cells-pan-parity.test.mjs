@@ -7,7 +7,7 @@ import {
   WebGpuNativeScenePipeline,
 } from "../dist/core/gpu/webgpu/webgpuNativeScenePipeline.js";
 import { FootprintSeries } from "../dist/core/model/footprint.js";
-import { buildPixelCellBuckets } from "../dist/core/render/footprint/pixelBuckets.js";
+import { buildPixelCellBuckets } from "../dist/core/render/chartLod.js";
 import { isWebGpuSupported } from "../dist/core/gpu/webgpu/webgpuDevice.js";
 
 const T0 = Date.UTC(2024, 0, 1);

@@ -1209,7 +1209,7 @@ export class WebGpuNativeScenePipeline {
       this.syncedTailKeysRevision = -1;
       return;
     }
-    this.syncedTailKeysRevision = getFootprintBarKeysRevision(bar) ?? -1;
+    this.syncedTailKeysRevision = getFootprintBarKeysRevision(bar) ?? 0;
     const cellCount = bar.cells.size;
     if (cellCount === 0) return;
     this.ensureTailCellRevCapacity(cellCount);
@@ -1475,10 +1475,9 @@ export class WebGpuNativeScenePipeline {
           if (this.tailCellOffset + tailCellsSize <= this.cellCapacity) {
             this.ensureStagingCapacity(barCount, tailCellsSize);
             const origin = this.priceOriginValue;
-            const keysRev = getFootprintBarKeysRevision(tailBar);
+            const keysRev = getFootprintBarKeysRevision(tailBar) ?? 0;
             const canPatchInPlace =
               !this.tailCellsDirty
-              && keysRev !== undefined
               && keysRev === this.syncedTailKeysRevision
               && tailCellsSize === this.syncedTailCellCount
               && tailCellsSize > 0;

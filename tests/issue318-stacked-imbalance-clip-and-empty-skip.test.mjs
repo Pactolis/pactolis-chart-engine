@@ -12,15 +12,18 @@ const T0 = Date.UTC(2024, 0, 1);
 
 function makeSpySurface() {
   const quads = [];
+  const sink = {
+    rect(x, y, w, h, color) {
+      quads.push({ x, y, w, h, r: color.r, g: color.g, b: color.b, a: color.a });
+    },
+  };
   const surface = {
     backend: "canvas2d",
     canvas: null,
     beginFrame() {
       quads.length = 0;
       return {
-        rect(x, y, w, h, color) {
-          quads.push({ x, y, w, h, r: color.r, g: color.g, b: color.b, a: color.a });
-        },
+        quads: sink,
         flush() {},
       };
     },
@@ -82,89 +85,107 @@ function makeConfig(overrides = {}) {
 }
 
 test("#318: empty footprint output visits 0 cells and emits 0 quads while keeping text layer independent", () => {
-  const series = makeImbalanceSeries();
-  const bar = series.at(0);
-  let cellVisits = 0;
-  const origValues = bar.cells.values.bind(bar.cells);
-  bar.cells.values = () => {
-    cellVisits++;
-    return origValues();
-  };
+  const prevGrid = settings.grid;
+  settings.grid = false;
+  try {
+    const series = makeImbalanceSeries();
+    const bar = series.at(0);
+    let cellVisits = 0;
+    const origValues = bar.cells.values.bind(bar.cells);
+    bar.cells.values = () => {
+      cellVisits++;
+      return origValues();
+    };
 
-  const { surface, quads } = makeSpySurface();
-  const renderer = new FootprintRenderer(surface);
-  renderer.setChartConfig(makeConfig({
-    candles: false,
-    heat: false,
-    poc: false,
-    stackedImbalance: false,
-    cellNumbers: true,
-  }));
+    const { surface, quads } = makeSpySurface();
+    const renderer = new FootprintRenderer(surface);
+    renderer.setChartConfig(makeConfig({
+      candles: false,
+      heat: false,
+      poc: false,
+      stackedImbalance: false,
+      cellNumbers: true,
+    }));
 
-  const view = makeView({ top: 0, height: 300, priceTop: 200, pricePerPx: 0.5 });
-  renderer.render(view, series, { chartType: "footprint" });
+    const view = makeView({ top: 0, height: 300, priceTop: 200, pricePerPx: 0.5 });
+    renderer.render(view, series, { chartType: "footprint" });
 
-  assert.equal(cellVisits, 0, "empty output must visit 0 cells");
-  assert.equal(quads.length, 0, "empty output must emit 0 quads");
+    assert.equal(cellVisits, 0, "empty output must visit 0 cells");
+    assert.equal(quads.length, 0, "empty output must emit 0 quads");
+  } finally {
+    settings.grid = prevGrid;
+  }
 });
 
 test("#318: stackedImbalance-only skips heat/POC cell loop and clips strips to plot vertical bounds", () => {
-  const series = makeImbalanceSeries();
-  const { surface, quads } = makeSpySurface();
-  const renderer = new FootprintRenderer(surface);
-  renderer.setChartConfig(makeConfig({
-    candles: false,
-    heat: false,
-    poc: false,
-    stackedImbalance: true,
-  }));
+  const prevGrid = settings.grid;
+  settings.grid = false;
+  try {
+    const series = makeImbalanceSeries();
+    const { surface, quads } = makeSpySurface();
+    const renderer = new FootprintRenderer(surface);
+    renderer.setChartConfig(makeConfig({
+      candles: false,
+      heat: false,
+      poc: false,
+      stackedImbalance: true,
+    }));
 
-  // View area [50, 150], priceTop=145, pricePerPx=0.5:
-  // bin 150 ([150, 160]): y = 50 + (145 - 160)/0.5 = 20 .. 40 (completely above top=50 -> skipped)
-  // bin 140 ([140, 150]): y = 50 + (145 - 150)/0.5 = 40 .. 60 (partially clipped to [50, 59])
-  // bin 130 ([130, 140]): y = 60 .. 80 (inside)
-  // bin 120 ([120, 130]): y = 80 .. 100 (inside)
-  // bin 110 ([110, 120]): y = 100 .. 120 (inside)
-  const view = makeView({ top: 50, height: 100, priceTop: 145, pricePerPx: 0.5 });
-  renderer.render(view, series, { chartType: "footprint" });
+    // View area [50, 150], priceTop=145, pricePerPx=0.5:
+    // bin 150 ([150, 160]): y = 50 + (145 - 160)/0.5 = 20 .. 40 (completely above top=50 -> skipped)
+    // bin 140 ([140, 150]): y = 50 + (145 - 150)/0.5 = 40 .. 60 (partially clipped to [50, 59])
+    // bin 130 ([130, 140]): y = 60 .. 80 (inside)
+    // bin 120 ([120, 130]): y = 80 .. 100 (inside)
+    // bin 110 ([110, 120]): y = 100 .. 120 (inside)
+    const view = makeView({ top: 50, height: 100, priceTop: 145, pricePerPx: 0.5 });
+    renderer.render(view, series, { chartType: "footprint" });
 
-  // Only stacked imbalance strips should be emitted (4 visible/partial bins out of 5-bin stack)
-  assert.equal(quads.length, 4, "off-screen stack cell must be skipped while preserving stack membership");
-  for (const q of quads) {
-    assert.ok(q.y >= view.area.top, `quad y=${q.y} must be >= area.top=${view.area.top}`);
-    assert.ok(q.y + q.h <= view.area.top + view.area.height, `quad bottom=${q.y + q.h} must be <= area.bottom`);
-    assert.ok(q.h > 0, "emitted quad must have positive height");
+    // Only stacked imbalance strips should be emitted (4 visible/partial bins out of 5-bin stack)
+    assert.equal(quads.length, 4, "off-screen stack cell must be skipped while preserving stack membership");
+    for (const q of quads) {
+      assert.ok(q.y >= view.area.top, `quad y=${q.y} must be >= area.top=${view.area.top}`);
+      assert.ok(q.y + q.h <= view.area.top + view.area.height, `quad bottom=${q.y + q.h} must be <= area.bottom`);
+      assert.ok(q.h > 0, "emitted quad must have positive height");
+    }
+    assert.equal(Math.min(...quads.map((q) => q.y)), 50, "partially off-top bin must clip exactly at view.area.top");
+  } finally {
+    settings.grid = prevGrid;
   }
-  assert.equal(quads[3].y, 50, "partially off-top bin must clip exactly at view.area.top");
 });
 
 test("#318: stacked imbalance clipping holds under fractional DPR, vertical pan, and log scale", () => {
-  const series = makeImbalanceSeries();
-  const { surface, quads } = makeSpySurface();
-  const renderer = new FootprintRenderer(surface);
-  renderer.setChartConfig(makeConfig({
-    candles: false,
-    heat: false,
-    poc: false,
-    stackedImbalance: true,
-  }));
+  const prevGrid = settings.grid;
+  settings.grid = false;
+  try {
+    const series = makeImbalanceSeries();
+    const { surface, quads } = makeSpySurface();
+    const renderer = new FootprintRenderer(surface);
+    renderer.setChartConfig(makeConfig({
+      candles: false,
+      heat: false,
+      poc: false,
+      stackedImbalance: true,
+    }));
 
-  // Fractional DPR + vertical pan clipping bottom edge
-  const panView = makeView({ top: 40, height: 80, priceTop: 180, pricePerPx: 0.5, dpr: 1.25 });
-  renderer.render(panView, series, { chartType: "footprint" });
-  assert.ok(quads.length > 0);
-  for (const q of quads) {
-    assert.ok(q.y >= panView.area.top);
-    assert.ok(q.y + q.h <= panView.area.top + panView.area.height);
-  }
+    // Fractional DPR + vertical pan clipping bottom edge
+    const panView = makeView({ top: 40, height: 80, priceTop: 180, pricePerPx: 0.5, dpr: 1.25 });
+    renderer.render(panView, series, { chartType: "footprint" });
+    assert.ok(quads.length > 0);
+    for (const q of quads) {
+      assert.ok(q.y >= panView.area.top);
+      assert.ok(q.y + q.h <= panView.area.top + panView.area.height);
+    }
 
-  // Log scale clipping
-  const logView = makeView({ top: 50, height: 70, priceTop: 145, pricePerPx: 0.5, dpr: 1.5 });
-  logView.setScaleMode("log");
-  renderer.render(logView, series, { chartType: "footprint" });
-  assert.ok(quads.length > 0);
-  for (const q of quads) {
-    assert.ok(q.y >= logView.area.top);
-    assert.ok(q.y + q.h <= logView.area.top + logView.area.height);
+    // Log scale clipping
+    const logView = makeView({ top: 50, height: 70, priceTop: 145, pricePerPx: 0.5, dpr: 1.5 });
+    logView.setScaleMode("log");
+    renderer.render(logView, series, { chartType: "footprint" });
+    assert.ok(quads.length > 0);
+    for (const q of quads) {
+      assert.ok(q.y >= logView.area.top);
+      assert.ok(q.y + q.h <= logView.area.top + logView.area.height);
+    }
+  } finally {
+    settings.grid = prevGrid;
   }
 });
