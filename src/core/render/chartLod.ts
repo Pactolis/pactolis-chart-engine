@@ -70,6 +70,9 @@ export interface PixelCellBucket {
   sellVol: number;
 }
 
+const scratchCellBucketIndex = new Map<number, number>();
+let scratchCellBucketIndexInUse = false;
+
 /**
  * Merge price cells that land on the same screen pixel into one row.
  *
@@ -82,24 +85,41 @@ export function buildPixelCellBuckets(
   cells: Iterable<PriceCellLike>,
   step: number,
   yOfPrice: (price: number) => number,
+  out: PixelCellBucket[] = [],
 ): PixelCellBucket[] {
-  const byPixel = new Map<number, PixelCellBucket>();
-  for (const cell of cells) {
-    const yTop = Math.floor(yOfPrice(cell.priceBin + step));
-    const existing = byPixel.get(yTop);
-    if (existing) {
-      existing.buyVol += cell.buyVol;
-      existing.sellVol += cell.sellVol;
-      continue;
-    }
-    byPixel.set(yTop, {
-      yTop,
-      height: Math.max(yOfPrice(cell.priceBin) - yTop, 1),
-      buyVol: cell.buyVol,
-      sellVol: cell.sellVol,
-    });
+  out.length = 0;
+  const useScratchMap = !scratchCellBucketIndexInUse;
+  const byPixel = useScratchMap ? scratchCellBucketIndex : new Map<number, number>();
+  if (useScratchMap) {
+    scratchCellBucketIndexInUse = true;
+    byPixel.clear();
   }
-  return [...byPixel.values()].sort((a, b) => a.yTop - b.yTop);
+  try {
+    for (const cell of cells) {
+      const yTop = Math.floor(yOfPrice(cell.priceBin + step));
+      const existingIndex = byPixel.get(yTop);
+      if (existingIndex !== undefined) {
+        const existing = out[existingIndex];
+        existing.buyVol += cell.buyVol;
+        existing.sellVol += cell.sellVol;
+        continue;
+      }
+      byPixel.set(yTop, out.length);
+      out.push({
+        yTop,
+        height: Math.max(yOfPrice(cell.priceBin) - yTop, 1),
+        buyVol: cell.buyVol,
+        sellVol: cell.sellVol,
+      });
+    }
+    out.sort((a, b) => a.yTop - b.yTop);
+    return out;
+  } finally {
+    if (useScratchMap) {
+      byPixel.clear();
+      scratchCellBucketIndexInUse = false;
+    }
+  }
 }
 
 /**
@@ -111,8 +131,9 @@ export function buildPixelCandleBuckets(
   to: number,
   barAt: (index: number) => OhlcBarLike | undefined,
   xOfIndex: (index: number) => number,
+  out: PixelCandleBucket[] = [],
 ): PixelCandleBucket[] {
-  const buckets: PixelCandleBucket[] = [];
+  out.length = 0;
   let current: PixelCandleBucket | undefined;
 
   for (let index = from; index < to; index++) {
@@ -130,7 +151,7 @@ export function buildPixelCandleBuckets(
         low: bar.low,
         close: bar.close,
       };
-      buckets.push(current);
+      out.push(current);
       continue;
     }
 
@@ -140,5 +161,5 @@ export function buildPixelCandleBuckets(
     current.close = bar.close;
   }
 
-  return buckets;
+  return out;
 }

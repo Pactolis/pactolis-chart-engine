@@ -20,6 +20,7 @@ import {
   cellTextModeFor,
   chartLodForSpacing,
   type OhlcBarLike,
+  type PixelCandleBucket,
   type PixelCellBucket,
 } from "./chartLod.js";
 import { resolveBuiltInLayerPreset, type BuiltInChartType } from "./scene/chartLayerPreset.js";
@@ -110,9 +111,12 @@ export class FootprintRenderer {
   private batch: QuadSink = { rect: () => {} };
   private surface: GpuSurface;
   private currentFrame: GpuFrame | null = null;
-  private readonly heatCache = new WeakMap<FootprintBar, BarHeatCache>();
-  private readonly imbalanceCache = new WeakMap<FootprintBar, BarImbalanceCache>();
-  private readonly pixelBucketCache = new WeakMap<FootprintBar, CachedPixelBuckets>();
+  private heatCache = new WeakMap<FootprintBar, BarHeatCache>();
+  private imbalanceCache = new WeakMap<FootprintBar, BarImbalanceCache>();
+  private pixelBucketCache = new WeakMap<FootprintBar, CachedPixelBuckets>();
+  private readonly scratchCandleBuckets: PixelCandleBucket[] = [];
+  private readonly scratchCellBuckets: PixelCellBucket[] = [];
+  private readonly scratchVisibleRange = { from: 0, to: 0 };
   private readonly scratchCellRect = { yTop: 0, height: 0 };
   private readonly scratchClipRect = { yTop: 0, height: 0 };
   private static readonly LAYER_PRESET_CACHE = new Map<BuiltInChartType, ReadonlySet<string>>();
@@ -125,8 +129,8 @@ export class FootprintRenderer {
     }
     return cached;
   }
-  private readonly profileCache = new WeakMap<FootprintBar, BarProfileCache>();
-  private readonly cellTextCache = new WeakMap<FootprintBar, BarCellTextCacheEntry>();
+  private profileCache = new WeakMap<FootprintBar, BarProfileCache>();
+  private cellTextCache = new WeakMap<FootprintBar, BarCellTextCacheEntry>();
   /** Per-chart görünüm config'i (runtime set eder); null ise global settings. */
   private chartConfig: ChartViewConfig | null = null;
   private showNotional = true;
@@ -163,10 +167,27 @@ export class FootprintRenderer {
     return this.chartConfig ?? settings;
   }
 
+  clearScratch(): void {
+    this.scratchCandleBuckets.length = 0;
+    this.scratchCellBuckets.length = 0;
+    this.scratchVisibleRange.from = 0;
+    this.scratchVisibleRange.to = 0;
+    this.scratchCellRect.yTop = 0;
+    this.scratchCellRect.height = 0;
+    this.scratchClipRect.yTop = 0;
+    this.scratchClipRect.height = 0;
+  }
+
   dispose(): void {
     this.currentFrame = null;
     this.batch = { rect: () => {} };
     this.lastRenderedNativeFootprintText = false;
+    this.clearScratch();
+    this.heatCache = new WeakMap<FootprintBar, BarHeatCache>();
+    this.imbalanceCache = new WeakMap<FootprintBar, BarImbalanceCache>();
+    this.pixelBucketCache = new WeakMap<FootprintBar, CachedPixelBuckets>();
+    this.profileCache = new WeakMap<FootprintBar, BarProfileCache>();
+    this.cellTextCache = new WeakMap<FootprintBar, BarCellTextCacheEntry>();
   }
 
   /**
@@ -197,6 +218,12 @@ export class FootprintRenderer {
       this.currentFrame.end();
       this.currentFrame = null;
     }
+  }
+
+  private computeVisibleRange(view: View, total: number): { from: number; to: number } {
+    this.scratchVisibleRange.from = Math.max(0, Math.floor(view.indexOfX(view.area.left)));
+    this.scratchVisibleRange.to = Math.min(total, Math.ceil(view.indexOfX(view.area.left + view.area.width)) + 1);
+    return this.scratchVisibleRange;
   }
 
   /**
@@ -262,7 +289,7 @@ export class FootprintRenderer {
     this.currentFrame = frame;
     this.batch = frame.quads;
 
-    const [from, to] = this.visibleRange(view, series.length);
+    const { from, to } = this.computeVisibleRange(view, series.length);
     const timeScale = TimeScaleModel.fromSeries(series);
     if (DEBUG_RENDER) {
       const firstBar = series.at(from);
@@ -310,6 +337,7 @@ export class FootprintRenderer {
             from, to,
             (index) => series.at(index),
             (index) => view.xOfIndex(index),
+            this.scratchCandleBuckets,
           );
           for (const bucket of buckets) this.drawPixelBucketCandle(view, bucket);
         } else {
@@ -410,7 +438,7 @@ export class FootprintRenderer {
     const candleStyle = lod === "pixel-bucket" ? "full" : candleStyleFor(lod, chartType, cfg.candles);
     const drawCandles = activeLayers.has("candles") && (lod === "pixel-bucket" || candleStyle !== "none");
     const drawFootprint = isFootprintCells && activeLayers.has("footprint");
-    const [from, to] = this.visibleRange(view, series.length);
+    const { from, to } = this.computeVisibleRange(view, series.length);
     const w = (this.surface.canvas.width ?? 0) / dpr || (view.area.left + view.area.width);
     const h = (this.surface.canvas.height ?? 0) / dpr || (view.area.top + view.area.height);
     if (clearStartedAt !== null) {
@@ -765,19 +793,35 @@ export class FootprintRenderer {
       buckets = cached.buckets;
       mergedMax = cached.mergedMax;
     } else {
-      buckets = buildPixelCellBuckets(bar.cells.values(), step, (price) => view.yOfPrice(price));
+      const targetBuckets = cached ? cached.buckets : this.scratchCellBuckets;
+      buildPixelCellBuckets(
+        bar.cells.values(),
+        step,
+        (price) => view.yOfPrice(price),
+        targetBuckets,
+      );
+      buckets = cached ? targetBuckets : targetBuckets.slice();
       mergedMax = 0;
       for (const bucket of buckets) {
         mergedMax = Math.max(mergedMax, bucket.buyVol, bucket.sellVol);
       }
-      this.pixelBucketCache.set(bar, {
-        cellRevision: revision,
-        step,
-        yHigh,
-        yLow,
-        buckets,
-        mergedMax,
-      });
+      if (cached) {
+        cached.cellRevision = revision;
+        cached.step = step;
+        cached.yHigh = yHigh;
+        cached.yLow = yLow;
+        cached.buckets = buckets;
+        cached.mergedMax = mergedMax;
+      } else {
+        this.pixelBucketCache.set(bar, {
+          cellRevision: revision,
+          step,
+          yHigh,
+          yLow,
+          buckets,
+          mergedMax,
+        });
+      }
     }
 
     if (mergedMax <= 0) return;
@@ -798,8 +842,9 @@ export class FootprintRenderer {
 
   /** Compute (and cache) the busiest-cell volume/POC bin for a bar. */
   private heatStats(bar: FootprintBar, step: number): { maxVol: number; pocBin: number } {
+    const revision = bar.cellRevision ?? 0;
     const cached = this.heatCache.get(bar);
-    if (cached && cached.cellRevision === (bar.cellRevision ?? 0) && cached.step === step) {
+    if (cached && cached.cellRevision === revision && cached.step === step) {
       return cached;
     }
     let maxVol = 0;
@@ -811,7 +856,14 @@ export class FootprintRenderer {
         pocBin = cell.priceBin;
       }
     }
-    const entry: BarHeatCache = { cellRevision: bar.cellRevision ?? 0, step, maxVol, pocBin };
+    if (cached) {
+      cached.cellRevision = revision;
+      cached.step = step;
+      cached.maxVol = maxVol;
+      cached.pocBin = pocBin;
+      return cached;
+    }
+    const entry: BarHeatCache = { cellRevision: revision, step, maxVol, pocBin };
     this.heatCache.set(bar, entry);
     return entry;
   }
@@ -840,29 +892,45 @@ export class FootprintRenderer {
 
   /** Compute (and cache) sorted cells + stacked imbalance flag arrays for a bar. */
   private imbalanceStats(bar: FootprintBar, step: number): BarImbalanceCache | null {
+    const revision = bar.cellRevision ?? 0;
     const cached = this.imbalanceCache.get(bar);
-    if (cached && cached.cellRevision === (bar.cellRevision ?? 0) && cached.step === step) {
+    if (cached && cached.cellRevision === revision && cached.step === step) {
       return cached.cells.length < IMB_STACK ? null : cached;
     }
     const cells = getSortedFootprintBarCells(bar) as FootprintCell[];
-    const entry: BarImbalanceCache = {
-      cellRevision: bar.cellRevision ?? 0,
-      step,
-      cells,
-      buyImb: [],
-      sellImb: [],
-    };
-    this.imbalanceCache.set(bar, entry);
-    if (cells.length < IMB_STACK) return null;
+    let entry: BarImbalanceCache;
+    if (cached) {
+      entry = cached;
+      entry.cellRevision = revision;
+      entry.step = step;
+      entry.cells = cells;
+    } else {
+      entry = {
+        cellRevision: revision,
+        step,
+        cells,
+        buyImb: [],
+        sellImb: [],
+      };
+      this.imbalanceCache.set(bar, entry);
+    }
+    if (cells.length < IMB_STACK) {
+      entry.buyImb.length = 0;
+      entry.sellImb.length = 0;
+      return null;
+    }
 
-    for (const c of cells) {
+    entry.buyImb.length = cells.length;
+    entry.sellImb.length = cells.length;
+    for (let i = 0; i < cells.length; i++) {
+      const c = cells[i];
       // neighbourBin (not raw +/- step) -- fractional steps miss the quantized Map key on
       // ~20-30% of lookups with plain arithmetic, wrongly zeroing the neighbour and
       // producing spurious/mispositioned imbalance highlighting. See its doc comment.
       const below = bar.cells.get(neighbourBin(c.priceBin, step, -1));
       const above = bar.cells.get(neighbourBin(c.priceBin, step, 1));
-      entry.buyImb.push(c.buyVol >= IMB_RATIO * (below ? below.sellVol : 0) && c.buyVol > 0);
-      entry.sellImb.push(c.sellVol >= IMB_RATIO * (above ? above.buyVol : 0) && c.sellVol > 0);
+      entry.buyImb[i] = c.buyVol >= IMB_RATIO * (below ? below.sellVol : 0) && c.buyVol > 0;
+      entry.sellImb[i] = c.sellVol >= IMB_RATIO * (above ? above.buyVol : 0) && c.sellVol > 0;
     }
     return entry;
   }
@@ -988,8 +1056,9 @@ export class FootprintRenderer {
 
   /** Compute (and cache) the profile-mode peak scan for a bar, mirroring heatStats. */
   private profileStats(bar: FootprintBar, mode: FootprintCellData): BarProfileCache {
+    const revision = bar.cellRevision ?? 0;
     const cached = this.profileCache.get(bar);
-    if (cached && cached.cellRevision === (bar.cellRevision ?? 0) && cached.mode === mode) {
+    if (cached && cached.cellRevision === revision && cached.mode === mode) {
       return cached;
     }
     let maxVol = 0;
@@ -1003,7 +1072,15 @@ export class FootprintRenderer {
       }
       maxMetric = Math.max(maxMetric, this.profileCellMagnitude(cell, mode));
     }
-    const entry: BarProfileCache = { cellRevision: bar.cellRevision ?? 0, mode, maxVol, pocBin, maxMetric };
+    if (cached) {
+      cached.cellRevision = revision;
+      cached.mode = mode;
+      cached.maxVol = maxVol;
+      cached.pocBin = pocBin;
+      cached.maxMetric = maxMetric;
+      return cached;
+    }
+    const entry: BarProfileCache = { cellRevision: revision, mode, maxVol, pocBin, maxMetric };
     this.profileCache.set(bar, entry);
     return entry;
   }
