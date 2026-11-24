@@ -2028,8 +2028,11 @@ export class OrderbookHeatmapOverlay {
     let clipPxTop = 0;
     let clipPxRight = 0;
     let clipPxBottom = 0;
+    // Narrow overlapping columns (colWidth < 1, where drawWidth = 1 > colWidth) fall back
+    // to fillRect to preserve exact Skia 8-bit premultiplied multi-layer coverage parity.
     if (
       imageDataTransform &&
+      colWidth >= 1 &&
       imageDataTransform.b === 0 &&
       imageDataTransform.c === 0 &&
       imageDataTransform.a > 0 &&
