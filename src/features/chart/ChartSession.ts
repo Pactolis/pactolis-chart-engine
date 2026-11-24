@@ -20,6 +20,11 @@ import { effectivePixelRatio } from "../../core/model/chartDisplayOptions.js";
 import type { ChartWebGlOptions } from "../../core/model/chartDisplayOptions.js";
 import type { FootprintSeries } from "../../core/model/footprint.js";
 import type { Crosshair } from "../../core/render/overlay.js";
+import type {
+  InteractionQualityController,
+  InteractionQualityMotionSample,
+  InteractionQualitySnapshot,
+} from "../../core/render/interactionQuality.js";
 import {
   ChartChange,
   ChartSurfaceDirty,
@@ -72,6 +77,7 @@ export interface ChartSessionAnnotation {
   render(view: View, series: FootprintSeries, crosshair: Crosshair, range: [number, number], changes?: ChartChange): void;
   /** Some legacy indicator readouts still depend on crosshair until their own interaction pass lands. */
   requiresInteractionRedraw?(): boolean;
+  setInteractionQualityController?(controller: InteractionQualityController | null): void;
 }
 
 export interface ChartSessionInteraction {
@@ -207,6 +213,8 @@ export class ChartSession {
    * never strands the guard and future invalidations schedule normally again.
    */
   private inPreSnapshotFrame = false;
+  private interactionQualityController: InteractionQualityController | null = null;
+  private interactionQualityUnsubscribe: (() => void) | null = null;
 
   get needsRender(): boolean {
     return this.dirtySurfaces !== ChartSurfaceDirty.None;
@@ -279,8 +287,36 @@ export class ChartSession {
   deactivate(): void {
     this.active = false;
     this.pendingLiveUpdateStartedAt = null;
+    this.interactionQualityController?.cancel();
     this.cancelRaf();
     this.rejectPendingCapture("chart session was deactivated during capture");
+  }
+
+  /** Attach or detach an optional adaptive pan/zoom interaction quality controller. */
+  setInteractionQualityController(controller: InteractionQualityController | null): void {
+    this.interactionQualityUnsubscribe?.();
+    this.interactionQualityUnsubscribe = null;
+    this.interactionQualityController = controller;
+    this.annotationRenderer.setInteractionQualityController?.(controller);
+    if (controller) {
+      this.interactionQualityUnsubscribe = controller.onSettle(() => {
+        if (this.active && this.interactionQualityController === controller) {
+          this.invalidate(ChartChange.Style);
+        }
+      });
+    }
+  }
+
+  /** Report pan/zoom motion to the optional interaction quality controller. */
+  notifyInteractionMotion(sample?: InteractionQualityMotionSample): InteractionQualitySnapshot | null {
+    if (!this.interactionQualityController) return null;
+    return this.interactionQualityController.noteMotion(sample);
+  }
+
+  /** Signal end of pan/zoom motion so reduced quality deterministically settles to full. */
+  endInteractionMotion(): InteractionQualitySnapshot | null {
+    if (!this.interactionQualityController) return null;
+    return this.interactionQualityController.endInteraction();
   }
 
   /** Correlate a live pipeline update with the next frame without changing scheduling. */
@@ -416,6 +452,10 @@ export class ChartSession {
   destroy(): void {
     this.active = false;
     this.pendingLiveUpdateStartedAt = null;
+    this.interactionQualityUnsubscribe?.();
+    this.interactionQualityUnsubscribe = null;
+    this.interactionQualityController?.dispose();
+    this.interactionQualityController = null;
     this.cancelRaf();
     this.rejectPendingCapture("chart session was destroyed during capture");
     this.lifecycle.dispose();
