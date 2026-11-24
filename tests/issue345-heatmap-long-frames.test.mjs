@@ -297,7 +297,7 @@ test("#345 sparse positive-threshold index shrinks scanned cells while preservin
     try {
       overlay = new OrderbookHeatmapOverlay({
         fetch: async (req) => {
-          if (req.threshold === 0) hoverFetchCount++;
+          if (req.minBtc === undefined && req.minUsd === undefined && req.priceFrom !== undefined) hoverFetchCount++;
           return {
             schemaVersion: 1,
             generatedAt: now,
