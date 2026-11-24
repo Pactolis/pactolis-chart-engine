@@ -81,7 +81,7 @@ export class ChartHeatmapGpuCoordinator {
       this.clearPreparedCache();
       this.surface?.disposeNativeHeatmap?.();
       setGpuFeaturePath(HEATMAP_GPU_FEATURE, undefined);
-      setGpuFeaturePath("heatmap", undefined);
+      setGpuFeaturePath("heatmap", "off");
     }
     this.host.invalidateSession();
   }
@@ -97,7 +97,7 @@ export class ChartHeatmapGpuCoordinator {
   private supportsHeatmapGpu(): boolean {
     if (!this.heatmapTexturePrototypeEnabled) {
       setGpuFeaturePath(HEATMAP_GPU_FEATURE, undefined);
-      setGpuFeaturePath("heatmap", undefined);
+      setGpuFeaturePath("heatmap", "off");
       return false;
     }
     const backend = this.host.backendKind ?? "webgl2";
@@ -274,15 +274,22 @@ export class ChartHeatmapGpuCoordinator {
       return null;
     }
     const hasCacheKeyFn = typeof overlay.getPrepareCacheKey === "function";
-    const cacheKey = hasCacheKeyFn ? overlay.getPrepareCacheKey(v, s, range) : null;
-    if (hasCacheKeyFn && cacheKey === null) {
+    const rawCacheKey = hasCacheKeyFn ? overlay.getPrepareCacheKey(v, s, range) : null;
+    if (hasCacheKeyFn && rawCacheKey === null) {
       this.clearPreparedCache();
       return null;
     }
+    const cacheKey = rawCacheKey === null
+      ? null
+      : (isWebGpu ? `${rawCacheKey}|offsetX:${v.offsetX}` : rawCacheKey);
 
     if (cacheKey !== null && cacheKey === this.cachedPrepareKey && this.cachedPrepareFrame) {
+      const panOffsetX = !isWebGpu && this.cachedPrepareFrame.anchorOffsetX !== undefined
+        ? v.offsetX - this.cachedPrepareFrame.anchorOffsetX
+        : 0;
       return {
         ...this.cachedPrepareFrame,
+        panOffsetX,
         ...(typeof (overlay as { getActivePalette?: () => unknown }).getActivePalette === "function"
           ? { palette: (overlay as { getActivePalette: () => HeatmapGpuCellFrame["palette"] }).getActivePalette() }
           : {}),

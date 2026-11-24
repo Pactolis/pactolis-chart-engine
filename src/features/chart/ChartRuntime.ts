@@ -224,6 +224,18 @@ class ChartRuntimeImpl implements ChartRuntime, ChartInputHost {
   private readonly orderbookHeatmap: OrderbookHeatmapOverlay | null;
   private readonly tpoMergeLeftSessionStarts = new Set<number>();
   private lastAutoFitSnapshot: LiveAutoFitSnapshot | null = null;
+  private lastAutoFitCache: {
+    from: number;
+    to: number;
+    seriesRevision: number;
+    areaHeight: number;
+    priceScaleMode: string;
+    priceTop: number;
+    pricePerPx: number;
+    marginTop: number;
+    marginBottom: number;
+    offsetX: number;
+  } | null = null;
   private analysisSelectionGeneration = 0;
   private hostActive = true;
   /** Set once construction is done: from then on every non-interaction invalidation refreshes the test hook. */
@@ -1955,6 +1967,7 @@ class ChartRuntimeImpl implements ChartRuntime, ChartInputHost {
     const series = this.pipeline.series;
     if (series.length === 0) {
       this.lastAutoFitSnapshot = null;
+      this.lastAutoFitCache = null;
       return;
     }
     const [from, to] = this.renderer.autoscaleRange(this.view, series.length);
@@ -1981,6 +1994,7 @@ class ChartRuntimeImpl implements ChartRuntime, ChartInputHost {
       };
     } else {
       this.lastAutoFitSnapshot = null;
+      this.lastAutoFitCache = null;
     }
   }
 
@@ -2005,8 +2019,45 @@ class ChartRuntimeImpl implements ChartRuntime, ChartInputHost {
 
   private _autoFit(): void {
     if (!this.view.isPriceAutoScale()) return;
+    const series = this.pipeline.series;
+    if (series.length > 0 && this.lastAutoFitCache) {
+      const [from, to] = this.renderer.autoscaleRange(this.view, series.length);
+      const cache = this.lastAutoFitCache;
+      if (
+        cache.from === from
+        && cache.to === to
+        && cache.seriesRevision === series.revision
+        && cache.areaHeight === this.view.area.height
+        && cache.priceScaleMode === this.view.priceScaleMode
+        && cache.priceTop === this.view.priceTop
+        && cache.pricePerPx === this.view.pricePerPx
+        && cache.marginTop === settings.scaleMarginTop
+        && cache.marginBottom === settings.scaleMarginBottom
+        && cache.offsetX !== this.view.offsetX
+      ) {
+        cache.offsetX = this.view.offsetX;
+        incrementPerformanceCounter("chart.autoFit.skip.subbar-pan");
+        return;
+      }
+    }
     incrementPerformanceCounter("chart.autoFit.count");
     measurePerformance("chart.autoFit", () => this._fitToData());
+    if (series.length > 0 && this.lastAutoFitSnapshot !== null) {
+      this.lastAutoFitCache = {
+        from: this.lastAutoFitSnapshot.from,
+        to: this.lastAutoFitSnapshot.to,
+        seriesRevision: series.revision,
+        areaHeight: this.view.area.height,
+        priceScaleMode: this.view.priceScaleMode,
+        priceTop: this.view.priceTop,
+        pricePerPx: this.view.pricePerPx,
+        marginTop: settings.scaleMarginTop,
+        marginBottom: settings.scaleMarginBottom,
+        offsetX: this.view.offsetX,
+      };
+    } else {
+      this.lastAutoFitCache = null;
+    }
   }
 
   private _applyLayout(width: number, height: number): void {

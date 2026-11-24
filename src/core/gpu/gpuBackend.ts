@@ -65,6 +65,8 @@ export interface GpuNativeHeatmapFrame {
   readonly palette?: OrderbookHeatmapPalette;
   readonly dataKey: string;
   readonly contentRevision?: number;
+  readonly anchorOffsetX?: number;
+  readonly panOffsetX?: number;
   readonly preparedLease?: { release(): void };
 }
 
