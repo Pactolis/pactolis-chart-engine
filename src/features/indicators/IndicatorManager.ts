@@ -7,7 +7,13 @@ import { uiColor, indicatorPaneBackgroundColor } from "../../core/ui/seriesPalet
 import { defaultIndicatorPlacement, getIndicatorDefinition, isIndicatorPlacementSupported } from "./registry.js";
 import { chartLocale } from "../../core/chartLocale.js";
 import { incrementPerformanceCounter, measurePerformance } from "../../core/performanceTelemetry.js";
-import { IndicatorPrepareCache } from "./prepareCache.js";
+import { IndicatorPrepareCache, type IndicatorPrepareCacheKey } from "./prepareCache.js";
+import {
+  IndicatorPrepareScheduler,
+  sameIndicatorPrepareRevisionStamp,
+  type IndicatorPrepareRevisionStamp,
+  type IndicatorPrepareRunner,
+} from "./prepareScheduler.js";
 import { purgeIndicatorBuiltinState } from "./builtins/stateRegistry.js";
 import { buildIndicatorAnalysisSnapshot } from "./analysisSnapshot.js";
 import {
@@ -52,6 +58,20 @@ interface IndicatorManagerOptions {
   queuePriceLabel?: (price: number, text: string, color: string, priority?: number) => void;
   /** View model the ChartSurface renders pane headers from. */
   headers?: IndicatorPaneHeadersModel;
+}
+
+export interface PrewarmPreparedDataOptions {
+  budgetMs?: number;
+  runner?: IndicatorPrepareRunner<IndicatorPreparedData | undefined, IndicatorDrawContext>;
+  now?: () => number;
+}
+
+export interface PrewarmPreparedDataResult {
+  prepared: number;
+  cacheHits: number;
+  deferred: number;
+  skipped: number;
+  completed: Promise<void>;
 }
 
 function cloneInstances(value?: IndicatorInstance[]): IndicatorInstance[] {
@@ -272,6 +292,9 @@ export class IndicatorManager {
   private lastVisibilityTimeframe = "";
   private maximizedPane: "chart" | string | null = null;
   private readonly preparedDataCache = new IndicatorPrepareCache();
+  private readonly prepareScheduler = new IndicatorPrepareScheduler();
+  private managerGeneration = 0;
+  private readonly instanceSettingsRevisions = new Map<string, number>();
   private settingsModalToken = 0;
   private lastRemovedSnapshot: IndicatorInstance[] | null = null;
   private activeSettingsSession: {
@@ -321,6 +344,9 @@ export class IndicatorManager {
   }
 
   dispose(): void {
+    this.managerGeneration++;
+    this.prepareScheduler.dispose();
+    this.instanceSettingsRevisions.clear();
     this.dismissSettingsSession("dispose");
     this.unsubscribeHeaderLocale();
     this.preparedDataCache.clear();
@@ -349,6 +375,9 @@ export class IndicatorManager {
   restore(instances?: IndicatorInstance[]): void {
     if (this.lastRemovedSnapshot) this.dismissRemoveUndo();
     const prevIds = this.instances.map((item) => item.id);
+    this.managerGeneration++;
+    this.prepareScheduler.cancelAll();
+    this.instanceSettingsRevisions.clear();
     this.preparedDataCache.clear();
     this.instances = cloneInstances(instances);
     const nextIds = new Set(this.instances.map((item) => item.id));
@@ -461,6 +490,8 @@ export class IndicatorManager {
     const factor = Math.max(0.05, Math.min(20, (Number(instance.settings.paneScaleFactor) || 1) * factorMultiplier));
     const nextSettings = { ...instance.settings, paneScaleAuto: false, paneScaleFactor: factor };
     if (!persist) {
+      this.bumpSettingsRevision(id);
+      this.prepareScheduler.cancel(id);
       this.instances = this.instances.map((item) => item.id === id ? { ...item, settings: nextSettings } : item);
       this.renderRevision++;
       this.onInvalidate(ChartChange.Style);
@@ -653,6 +684,185 @@ export class IndicatorManager {
     }
   }
 
+  prewarmPreparedData(
+    view: View,
+    series: FootprintSeries,
+    range: [number, number],
+    options?: PrewarmPreparedDataOptions,
+  ): PrewarmPreparedDataResult {
+    const now = options?.now ?? (() => (typeof performance !== "undefined" ? performance.now() : Date.now()));
+    const budgetMs = options?.budgetMs ?? 4;
+    const startMs = now();
+    const chart = this.getChartContext?.();
+
+    const separateCandidates = this.renderedSeparateInstances().filter((instance) => !instance.collapsed);
+    const overlayCandidates = this.instances.filter((instance) =>
+      instancePlacement(instance) === "price-overlay"
+      && instance.visible !== false
+      && visibleAtTimeframe(instance.settings, chart));
+    const candidates = [...separateCandidates, ...overlayCandidates];
+
+    let prepared = 0;
+    let cacheHits = 0;
+    let deferred = 0;
+    let skipped = 0;
+    let appliedDeferred = 0;
+    const deferredPromises: Promise<unknown>[] = [];
+
+    for (const instance of candidates) {
+      const definition = getIndicatorDefinition(instance.type);
+      if (!definition?.prepareData || definition.inputSource === "view" || !definition.prepareCache) {
+        skipped++;
+        continue;
+      }
+
+      const maxAgeMs = typeof definition.prepareCache === "string" ? 0 : Math.max(1, definition.prepareCache.maxAgeMs);
+      const timeBucket = maxAgeMs > 0 ? Math.floor(Date.now() / maxAgeMs) : 0;
+      const key = this.buildPrepareKey(instance, definition, series, range, chart, timeBucket);
+
+      if (this.preparedDataCache.peek(instance.id, key) !== undefined) {
+        cacheHits++;
+        continue;
+      }
+
+      const rect: IndicatorPaneRect = isSeparatePane(instance)
+        ? { top: view.area.top + view.area.height, height: paneHeightForInstance(instance) }
+        : { top: view.area.top, height: view.area.height };
+      const drawContext: IndicatorDrawContext = {
+        ctx: undefined as unknown as CanvasRenderingContext2D,
+        view,
+        series,
+        rect,
+        range,
+        instance: instance as IndicatorInstance<IndicatorSettings>,
+        settings: effectiveSettings(definition, instance.settings),
+        chart,
+        requestRefresh: () => this.onInvalidate(),
+        queuePriceLabel: this.queuePriceLabel,
+      };
+
+      const budgetExhausted = budgetMs <= 0 || (prepared > 0 && (now() - startMs) >= budgetMs);
+      if (!budgetExhausted && !options?.runner) {
+        const value = measurePerformance(
+          `indicator.prepare.${instance.type}`,
+          () => definition.prepareData!(drawContext),
+        );
+        this.preparedDataCache.store(instance.id, key, value);
+        prepared++;
+        continue;
+      }
+
+      deferred++;
+      const stamp = this.buildRevisionStamp(key);
+      const runner: IndicatorPrepareRunner<IndicatorPreparedData | undefined, IndicatorDrawContext> = options?.runner
+        ?? ((req) => Promise.resolve().then(() => {
+          if (req.signal.aborted) return undefined;
+          return measurePerformance(
+            `indicator.prepare.${instance.type}`,
+            () => definition.prepareData!(req.context),
+          );
+        }));
+
+      const job = this.prepareScheduler.schedule({
+        instanceId: instance.id,
+        definitionType: instance.type,
+        stamp,
+        context: drawContext,
+        runner,
+        onApply: (value, appliedStamp) => {
+          const currentInstance = this.instances.find((item) => item.id === instance.id);
+          if (!currentInstance) {
+            incrementPerformanceCounter(`indicator.prepare.staleDropped.${instance.type}`);
+            return;
+          }
+          const currentKey = this.buildPrepareKey(
+            currentInstance,
+            definition,
+            series,
+            range,
+            this.getChartContext?.(),
+            timeBucket,
+          );
+          const currentStamp = this.buildRevisionStamp(currentKey);
+          if (!sameIndicatorPrepareRevisionStamp(currentStamp, appliedStamp)) {
+            incrementPerformanceCounter(`indicator.prepare.staleDropped.${instance.type}`);
+            return;
+          }
+          this.preparedDataCache.store(instance.id, currentKey, value);
+          appliedDeferred++;
+        },
+      });
+      deferredPromises.push(job);
+    }
+
+    const completed = deferredPromises.length === 0
+      ? Promise.resolve()
+      : Promise.all(deferredPromises).then(() => {
+        if (appliedDeferred > 0 && !this.prepareScheduler.isDisposed) {
+          this.onInvalidate(ChartChange.Data);
+        }
+      });
+
+    return {
+      prepared,
+      cacheHits,
+      deferred,
+      skipped,
+      completed,
+    };
+  }
+
+  private getSettingsRevision(id: string): number {
+    return this.instanceSettingsRevisions.get(id) ?? 0;
+  }
+
+  private bumpSettingsRevision(id: string): number {
+    const next = this.getSettingsRevision(id) + 1;
+    this.instanceSettingsRevisions.set(id, next);
+    return next;
+  }
+
+  private buildPrepareKey(
+    instance: IndicatorInstance,
+    definition: IndicatorDefinition,
+    series: FootprintSeries,
+    range: readonly [number, number],
+    chart?: IndicatorChartContext,
+    timeBucket = 0,
+  ): IndicatorPrepareCacheKey {
+    return {
+      definitionType: definition.type,
+      instance,
+      series,
+      rangeFrom: range[0],
+      rangeTo: range[1],
+      market: chart?.market ?? "",
+      timeframe: chart?.timeframe ?? "",
+      intervalMs: chart?.intervalMs ?? series.config.intervalMs,
+      timeBucket,
+      generation: this.managerGeneration,
+      nonTailRevision: series.nonTailRevision,
+      resetEpoch: series.resetEpoch,
+      settingsRevision: this.getSettingsRevision(instance.id),
+    };
+  }
+
+  private buildRevisionStamp(key: IndicatorPrepareCacheKey): IndicatorPrepareRevisionStamp {
+    return {
+      generation: key.generation ?? this.managerGeneration,
+      market: key.market,
+      timeframe: key.timeframe,
+      intervalMs: key.intervalMs,
+      seriesRevision: key.series.revision,
+      nonTailRevision: key.nonTailRevision ?? key.series.nonTailRevision ?? 0,
+      resetEpoch: key.resetEpoch ?? key.series.resetEpoch ?? 0,
+      settingsRevision: key.settingsRevision ?? 0,
+      rangeFrom: key.rangeFrom,
+      rangeTo: key.rangeTo,
+      timeBucket: key.timeBucket ?? 0,
+    };
+  }
+
   private prepareData(
     instance: IndicatorInstance,
     definition: IndicatorDefinition,
@@ -667,21 +877,23 @@ export class IndicatorManager {
     if (!cachePolicy) return compute();
     const maxAgeMs = typeof cachePolicy === "string" ? 0 : Math.max(1, cachePolicy.maxAgeMs);
 
-    let computed = false;
-    const prepared = this.preparedDataCache.resolve(instance.id, {
-      definitionType: definition.type,
+    const key = this.buildPrepareKey(
       instance,
-      series: drawContext.series,
-      rangeFrom: drawContext.range[0],
-      rangeTo: drawContext.range[1],
-      market: drawContext.chart?.market ?? "",
-      timeframe: drawContext.chart?.timeframe ?? "",
-      intervalMs: drawContext.chart?.intervalMs ?? drawContext.series.config.intervalMs,
-      timeBucket: maxAgeMs > 0 ? Math.floor(Date.now() / maxAgeMs) : 0,
-    }, () => {
+      definition,
+      drawContext.series,
+      drawContext.range,
+      drawContext.chart,
+      maxAgeMs > 0 ? Math.floor(Date.now() / maxAgeMs) : 0,
+    );
+    const invalidation = this.preparedDataCache.classifyInvalidation(instance.id, key);
+    let computed = false;
+    const prepared = this.preparedDataCache.resolve(instance.id, key, () => {
       computed = true;
       return compute();
     });
+    if (computed) {
+      incrementPerformanceCounter(`indicator.prepare.invalidation.${invalidation}.${instance.type}`);
+    }
     incrementPerformanceCounter(`indicator.prepare.cache.${computed ? "miss" : "hit"}.${instance.type}`);
     return prepared;
   }
@@ -719,6 +931,8 @@ export class IndicatorManager {
     this.lastRemovedSnapshot = this.serialize();
     this.headers.lastRemovedTitle = instance.title;
     if (this.activeSettingsSession?.instanceId === id) this.dismissSettingsSession("dispose");
+    this.prepareScheduler.cancel(id);
+    this.instanceSettingsRevisions.delete(id);
     this.preparedDataCache.delete(id);
     purgeIndicatorBuiltinState(id);
     this.instances = this.instances.filter((item) => item.id !== id).map((item, order) => ({ ...item, order }));
@@ -778,6 +992,8 @@ export class IndicatorManager {
     const visibilityChanged = JSON.stringify(current?.settings.timeframeVisibility ?? null)
       !== JSON.stringify(settings.timeframeVisibility ?? null);
     this.dismissRemoveUndo();
+    this.bumpSettingsRevision(id);
+    this.prepareScheduler.cancel(id);
     this.instances = this.instances.map((item) => item.id === id ? { ...item, settings } : item);
     this.emit(visibilityChanged, visibilityChanged ? ChartChange.Style | ChartChange.Visibility : ChartChange.Style);
   }
