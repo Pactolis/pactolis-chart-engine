@@ -33,8 +33,11 @@ import {
   HEATMAP_HOVER_SPAN,
   HEATMAP_MIN_CEILING_RATIO,
   HEATMAP_WINDOW_MAX_BARS,
+  blendPackedRgbaOver,
   formatHeatmapValue,
   getHeatmapColorLut,
+  getHeatmapPackedRgbaLut,
+  getHeatmapThresholdSparseBar,
   heatmapCellUsd,
   heatmapChunkEnd,
   heatmapChunkStart,
@@ -971,6 +974,8 @@ export class OrderbookHeatmapOverlay {
     this.rasterCacheOriginX = 0;
     this.rasterCacheOriginY = 0;
     this.rasterCacheBlitBounds = null;
+    this.rasterImageData = null;
+    this.rasterImageDataU32 = null;
     if (this.rasterCacheCanvas) {
       try {
         this.rasterCacheCanvas.width = 0;
@@ -1229,6 +1234,7 @@ export class OrderbookHeatmapOverlay {
             frame.last,
             undefined,
             paintBounds,
+            transform,
           );
           offCtx.restore();
           if (paintedCells === 0) {
@@ -1292,15 +1298,33 @@ export class OrderbookHeatmapOverlay {
                 croppedCtx.save();
                 croppedCtx.setTransform?.(1, 0, 0, 1, 0, 0);
                 croppedCtx.clearRect(0, 0, rw, rh);
+                const croppedTransform = {
+                  a: transform.a,
+                  b: transform.b,
+                  c: transform.c,
+                  d: transform.d,
+                  e: transform.e - rx,
+                  f: transform.f - ry,
+                };
                 croppedCtx.setTransform?.(
-                  transform.a,
-                  transform.b,
-                  transform.c,
-                  transform.d,
-                  transform.e - rx,
-                  transform.f - ry,
+                  croppedTransform.a,
+                  croppedTransform.b,
+                  croppedTransform.c,
+                  croppedTransform.d,
+                  croppedTransform.e,
+                  croppedTransform.f,
                 );
-                const paintedCells = this.paintCellsToContext(croppedCtx, view, series, frame);
+                const paintedCells = this.paintCellsToContext(
+                  croppedCtx,
+                  view,
+                  series,
+                  frame,
+                  frame.first,
+                  frame.last,
+                  undefined,
+                  undefined,
+                  croppedTransform,
+                );
                 croppedCtx.restore();
                 if (paintedCells === 0) {
                   this.releaseRasterCache();
@@ -1465,11 +1489,10 @@ export class OrderbookHeatmapOverlay {
   ): boolean {
     const cachedView = this.rasterCacheView;
     const isLog = typeof view.isLogScale === "function" && view.isLogScale();
+    const hasCroppedOrigin = this.rasterCacheOriginX !== 0 || this.rasterCacheOriginY !== 0;
     if (
       !this.rasterCacheCanvas ||
       !this.rasterCacheHasCells ||
-      this.rasterCacheOriginX !== 0 ||
-      this.rasterCacheOriginY !== 0 ||
       isLog ||
       this.rasterCacheDataSig !== rasterDataSig ||
       !cachedView ||
@@ -1478,8 +1501,10 @@ export class OrderbookHeatmapOverlay {
       !(transform.a > 0 && transform.d > 0) ||
       !(cachedView.colWidth > 0 && view.colWidth > 0) ||
       !(cachedView.pricePerPx > 0 && view.pricePerPx > 0) ||
-      this.rasterCacheCanvas.width !== canvasWidth ||
-      this.rasterCacheCanvas.height !== canvasHeight ||
+      (!hasCroppedOrigin && (
+        this.rasterCacheCanvas.width !== canvasWidth ||
+        this.rasterCacheCanvas.height !== canvasHeight
+      )) ||
       cachedView.transformA !== transform.a ||
       cachedView.transformD !== transform.d ||
       cachedView.transformE !== transform.e ||
@@ -1541,15 +1566,17 @@ export class OrderbookHeatmapOverlay {
     const srcTopCss = cachedView.areaTop + (cachedView.priceTop - view.priceTop) / cachedView.pricePerPx + (destTop - areaTop) / scaleY;
     const srcBottomCss = cachedView.areaTop + (cachedView.priceTop - view.priceTop) / cachedView.pricePerPx + (destBottom - areaTop) / scaleY;
 
-    const sxRaw = srcLeftCss * cachedView.transformA + cachedView.transformE;
-    const syRaw = srcTopCss * cachedView.transformD + cachedView.transformF;
+    const sxRaw = srcLeftCss * cachedView.transformA + cachedView.transformE - this.rasterCacheOriginX;
+    const syRaw = srcTopCss * cachedView.transformD + cachedView.transformF - this.rasterCacheOriginY;
     const swRaw = (srcRightCss - srcLeftCss) * cachedView.transformA;
     const shRaw = (srcBottomCss - srcTopCss) * cachedView.transformD;
     if (!(swRaw > 0 && shRaw > 0)) return false;
+    const cacheWidth = this.rasterCacheCanvas.width;
+    const cacheHeight = this.rasterCacheCanvas.height;
     const sx = Math.max(0, sxRaw);
     const sy = Math.max(0, syRaw);
-    const sw = Math.min(canvasWidth - sx, swRaw - (sx - sxRaw));
-    const sh = Math.min(canvasHeight - sy, shRaw - (sy - syRaw));
+    const sw = Math.min(cacheWidth - sx, swRaw - (sx - sxRaw));
+    const sh = Math.min(cacheHeight - sy, shRaw - (sy - syRaw));
     if (!(sw > 0 && sh > 0)) return false;
 
     const fixedCeiling = this.resolveFixedCeiling(frame.settings);
@@ -1577,6 +1604,7 @@ export class OrderbookHeatmapOverlay {
     const rawShiftXPx = (view.offsetX - cachedView.offsetX) * a;
     const rawShiftYPx = ((view.priceTop - cachedView.priceTop) / view.pricePerPx) * d;
     const isIntegerPan =
+      !hasCroppedOrigin &&
       scaleX === 1 &&
       scaleY === 1 &&
       areaMatches &&
@@ -1966,6 +1994,7 @@ export class OrderbookHeatmapOverlay {
     barLast = frame.last,
     clipRect?: { left: number; top: number; width: number; height: number },
     outBounds?: { minX: number; minY: number; maxX: number; maxY: number },
+    imageDataTransform?: { a: number; b: number; c: number; d: number; e: number; f: number },
   ): number {
     const { left, top, width, height } = view.area;
     const clipLeft = clipRect ? clipRect.left : left;
@@ -1975,7 +2004,6 @@ export class OrderbookHeatmapOverlay {
     if (!(clipWidth > 0 && clipHeight > 0) || barLast < barFirst) return 0;
 
     const palette = resolveOrderbookHeatmapPalette(frame.settings.palette);
-    const mainLut = getHeatmapColorLut(1, this.visibleOpacity, palette);
     const floor = this.visibleFloor;
     const ceiling = this.visibleCeiling;
     const colWidth = view.colWidth;
@@ -1987,10 +2015,71 @@ export class OrderbookHeatmapOverlay {
     let lastFillStyle = "";
     let paintedCount = 0;
 
-    targetCtx.save();
-    targetCtx.beginPath();
-    targetCtx.rect(clipLeft, clipTop, clipWidth, clipHeight);
-    targetCtx.clip();
+    const canvasW = targetCtx.canvas?.width ?? 0;
+    const canvasH = targetCtx.canvas?.height ?? 0;
+    let imgData: ImageData | null = null;
+    let u32: Uint32Array | null = null;
+    let ta = 1;
+    let td = 1;
+    let te = 0;
+    let tf = 0;
+    let clipPxLeft = 0;
+    let clipPxTop = 0;
+    let clipPxRight = 0;
+    let clipPxBottom = 0;
+    if (
+      imageDataTransform &&
+      imageDataTransform.b === 0 &&
+      imageDataTransform.c === 0 &&
+      imageDataTransform.a > 0 &&
+      imageDataTransform.d > 0 &&
+      canvasW > 0 &&
+      canvasH > 0 &&
+      typeof targetCtx.createImageData === "function" &&
+      typeof targetCtx.putImageData === "function"
+    ) {
+      let cached = this.rasterImageData;
+      if (!cached || cached.width !== canvasW || cached.height !== canvasH) {
+        try {
+          cached = targetCtx.createImageData(canvasW, canvasH);
+        } catch {
+          cached = null;
+        }
+        if (cached && cached.data && cached.data.buffer) {
+          this.rasterImageData = cached;
+          this.rasterImageDataU32 = new Uint32Array(
+            cached.data.buffer,
+            cached.data.byteOffset,
+            cached.data.byteLength >>> 2,
+          );
+        } else {
+          cached = null;
+        }
+      }
+      if (cached && this.rasterImageDataU32) {
+        imgData = cached;
+        u32 = this.rasterImageDataU32;
+        u32.fill(0);
+        ta = imageDataTransform.a;
+        td = imageDataTransform.d;
+        te = imageDataTransform.e;
+        tf = imageDataTransform.f;
+        clipPxLeft = Math.max(0, Math.floor(clipLeft * ta + te));
+        clipPxTop = Math.max(0, Math.floor(clipTop * td + tf));
+        clipPxRight = Math.min(canvasW, Math.ceil((clipLeft + clipWidth) * ta + te));
+        clipPxBottom = Math.min(canvasH, Math.ceil((clipTop + clipHeight) * td + tf));
+      }
+    }
+
+    const packedLut = u32 ? getHeatmapPackedRgbaLut(1, this.visibleOpacity, palette) : null;
+    const mainLut = u32 ? null : getHeatmapColorLut(1, this.visibleOpacity, palette);
+
+    if (!u32) {
+      targetCtx.save();
+      targetCtx.beginPath();
+      targetCtx.rect(clipLeft, clipTop, clipWidth, clipHeight);
+      targetCtx.clip();
+    }
     this.forEachVisibleCell(
       view,
       series,
@@ -2013,12 +2102,40 @@ export class OrderbookHeatmapOverlay {
           }
         }
         const q = Math.round(k * 1000);
-        const mainColor = mainLut[q];
-        if (mainColor !== lastFillStyle) {
-          targetCtx.fillStyle = mainColor;
-          lastFillStyle = mainColor;
+        if (u32 && packedLut) {
+          const srcPacked = packedLut[q];
+          if (srcPacked !== 0) {
+            const px0 = x * ta + te;
+            const px1 = (x + drawWidth) * ta + te;
+            const py0 = yTop * td + tf;
+            const py1 = (yTop + cellHeight) * td + tf;
+            let ix0 = Math.round(px0);
+            let ix1 = Math.round(px1);
+            let iy0 = Math.round(py0);
+            let iy1 = Math.round(py1);
+            if (ix1 <= ix0 && px1 > px0) ix1 = ix0 + 1;
+            if (iy1 <= iy0 && py1 > py0) iy1 = iy0 + 1;
+            if (ix0 < clipPxLeft) ix0 = clipPxLeft;
+            if (ix1 > clipPxRight) ix1 = clipPxRight;
+            if (iy0 < clipPxTop) iy0 = clipPxTop;
+            if (iy1 > clipPxBottom) iy1 = clipPxBottom;
+            for (let py = iy0; py < iy1; py++) {
+              const rowOffset = py * canvasW;
+              for (let px = ix0; px < ix1; px++) {
+                const idx = rowOffset + px;
+                const dstPacked = u32[idx];
+                u32[idx] = dstPacked === 0 ? srcPacked : blendPackedRgbaOver(dstPacked, srcPacked);
+              }
+            }
+          }
+        } else if (mainLut) {
+          const mainColor = mainLut[q];
+          if (mainColor !== lastFillStyle) {
+            targetCtx.fillStyle = mainColor;
+            lastFillStyle = mainColor;
+          }
+          targetCtx.fillRect(x, yTop, drawWidth, cellHeight);
         }
-        targetCtx.fillRect(x, yTop, drawWidth, cellHeight);
         if (outBounds) {
           const cx0 = Math.max(clipLeft, x);
           const cy0 = Math.max(clipTop, yTop);
@@ -2038,7 +2155,13 @@ export class OrderbookHeatmapOverlay {
       clipTop,
       clipHeight,
     );
-    targetCtx.restore();
+    if (u32 && imgData) {
+      if (paintedCount > 0) {
+        targetCtx.putImageData(imgData, 0, 0);
+      }
+    } else {
+      targetCtx.restore();
+    }
     return paintedCount;
   }
 
@@ -2124,6 +2247,13 @@ export class OrderbookHeatmapOverlay {
     const unit = frame.settings.unit;
     const liveIndex = this.isReplayActive() ? -1 : series.length - 1;
     const sortedTimes = this.subBarTimesFor(series, frame.tier);
+    const isLinearFast =
+      !(typeof view.isLogScale === "function" && view.isLogScale()) &&
+      Number.isFinite(view.priceTop) &&
+      view.pricePerPx > 0;
+    const areaTop = view.area.top;
+    const priceTop = view.priceTop;
+    const pricePerPx = view.pricePerPx;
     let ceiling = 0;
     let emitted = 0;
     for (let index = barFirst; index <= barLast; index++) {
@@ -2131,16 +2261,28 @@ export class OrderbookHeatmapOverlay {
       const bar = (live ? liveHeatmapSubBar : lastHeatmapSubBar)(
         this.bars, series.timeOfIndex(index), series.timeOfIndex(index + 1), frame.tier, sortedTimes);
       if (!bar || bar.cells.length === 0) continue;
+      let cells = bar.cells;
+      let sparseValues: readonly number[] | null = null;
+      if (threshold > 0) {
+        const sparse = getHeatmapThresholdSparseBar(bar, unit, threshold, step);
+        if (sparse.maxValue < threshold || sparse.cells.length === 0) continue;
+        cells = sparse.cells;
+        sparseValues = sparse.values;
+      }
       const x = view.xOfIndex(index);
-      const { start: cStart, end: cEnd } = visibleHeatmapCellBounds(bar.cells, minVisPrice, maxVisPrice, step);
+      const { start: cStart, end: cEnd } = visibleHeatmapCellBounds(cells, minVisPrice, maxVisPrice, step);
       for (let c = cStart; c < cEnd; c++) {
-        const cell = bar.cells[c];
+        const cell = cells[c];
         const priceStart = cell[0];
         if (priceStart + step < minVisPrice || priceStart > maxVisPrice) continue;
-        const yTop = view.yOfPrice(priceStart + step);
-        const yBottom = view.yOfPrice(priceStart);
+        const yTop = isLinearFast
+          ? areaTop + (priceTop - (priceStart + step)) / pricePerPx
+          : view.yOfPrice(priceStart + step);
+        const yBottom = isLinearFast
+          ? areaTop + (priceTop - priceStart) / pricePerPx
+          : view.yOfPrice(priceStart);
         if (yBottom < clipTop || yTop > clipBottom) continue;
-        const value = heatmapValueInUnit(heatmapCellUsd(cell), priceStart, step, unit);
+        const value = sparseValues ? sparseValues[c] : heatmapValueInUnit(heatmapCellUsd(cell), priceStart, step, unit);
         if (threshold > 0 && value < threshold) continue;
         if (value > ceiling) ceiling = value;
         if (cellLimit !== null && emitted >= cellLimit) return ceiling;
@@ -2222,23 +2364,35 @@ export class OrderbookHeatmapOverlay {
 
     let mainCount = 0;
     const liveIndex = replayActive ? -1 : series.length - 1;
+    const isLinearFast =
+      !(typeof view.isLogScale === "function" && view.isLogScale()) &&
+      Number.isFinite(view.priceTop) &&
+      view.pricePerPx > 0;
+    const priceTop = view.priceTop;
+    const pricePerPx = view.pricePerPx;
     for (let index = preamble.first; index <= preamble.last; index++) {
       const live = index === liveIndex;
       const bar = (live ? liveHeatmapSubBar : lastHeatmapSubBar)(
         this.bars, series.timeOfIndex(index), series.timeOfIndex(index + 1), preamble.tier, sortedTimes);
       if (!bar || bar.cells.length === 0) continue;
-      const { start: cStart, end: cEnd } = visibleHeatmapCellBounds(bar.cells, minVisPrice, maxVisPrice, step);
+      let cells = bar.cells;
+      if (preamble.threshold > 0) {
+        const sparse = getHeatmapThresholdSparseBar(bar, preamble.settings.unit, preamble.threshold, step);
+        if (sparse.maxValue < preamble.threshold || sparse.cells.length === 0) continue;
+        cells = sparse.cells;
+      }
+      const { start: cStart, end: cEnd } = visibleHeatmapCellBounds(cells, minVisPrice, maxVisPrice, step);
       for (let c = cStart; c < cEnd; c++) {
-        const cell = bar.cells[c];
+        const cell = cells[c];
         const priceStart = cell[0];
         if (priceStart + step < minVisPrice || priceStart > maxVisPrice) continue;
-        const yTop = view.yOfPrice(priceStart + step);
-        const yBottom = view.yOfPrice(priceStart);
+        const yTop = isLinearFast
+          ? top + (priceTop - (priceStart + step)) / pricePerPx
+          : view.yOfPrice(priceStart + step);
+        const yBottom = isLinearFast
+          ? top + (priceTop - priceStart) / pricePerPx
+          : view.yOfPrice(priceStart);
         if (yBottom < top || yTop > top + height) continue;
-        if (preamble.threshold > 0) {
-          const value = heatmapValueInUnit(heatmapCellUsd(cell), priceStart, step, preamble.settings.unit);
-          if (value < preamble.threshold) continue;
-        }
         mainCount++;
       }
     }
@@ -2864,6 +3018,8 @@ export class OrderbookHeatmapOverlay {
   private rasterCacheOriginX = 0;
   private rasterCacheOriginY = 0;
   private rasterCacheBlitBounds: { x: number; y: number; w: number; h: number } | null = null;
+  private rasterImageData: ImageData | null = null;
+  private rasterImageDataU32: Uint32Array | null = null;
 
   private frameCacheKey(
     view: View,
