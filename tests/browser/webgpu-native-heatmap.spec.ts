@@ -357,16 +357,20 @@ async function measureHeatmapMode({
     const pngB64 = await blobToB64(staticCapture.blob);
     const paths = { ...(getGpuDiagnostics().featurePaths ?? {}) };
 
-    // Settle any pending heatmap chunk/texture uploads before timed pan/zoom loops.
+    // Settle any pending heatmap chunk/texture uploads and warm up pan-edge chunks before timed pan/zoom loops.
     r.invalidate();
     await nextRaf();
-    if ((r.orderbookHeatmap?.inFlight?.size ?? 0) > 0) {
-      for (let settle = 0; settle < 120 && (r.orderbookHeatmap?.inFlight?.size ?? 0) > 0; settle++) {
-        await nextRaf();
-      }
-      r.invalidate();
+    r.view.panX(-16);
+    r.invalidate();
+    await nextRaf();
+    r.view.panX(16);
+    r.invalidate();
+    await nextRaf();
+    for (let settle = 0; settle < 120 && (r.orderbookHeatmap?.inFlight?.size ?? 0) > 0; settle++) {
       await nextRaf();
     }
+    r.invalidate();
+    await nextRaf();
 
     const heatmapMetric = residentEnabled ? "chart.gpu.heatmap.render.ms" : "chart.annotation.layer.orderbook-heatmap.ms";
     let activeFrameSamples: number[] = [];
