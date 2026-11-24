@@ -824,7 +824,6 @@ export class FootprintSeries {
         sources: [trade.source ?? "live"],
         updatedAt: trade.receivedAt ?? Date.now(),
         cellRevision: 0,
-        cellKeysRevision: 0,
       };
       this.bars.set(start, bar);
       this.insertOrdered(start);
@@ -884,11 +883,11 @@ export class FootprintSeries {
       const bin = quantizeToStep(price, this.cfg.priceStep);
       let cell = bar.cells.get(bin);
       if (!cell) {
-        cell = { priceBin: bin, buyVol: 0, sellVol: 0, count: 0, buyCount: 0, sellCount: 0, liquidationBuyVol: 0, liquidationSellVol: 0, revision: 0 };
+        cell = { priceBin: bin, buyVol: 0, sellVol: 0, count: 0, buyCount: 0, sellCount: 0, liquidationBuyVol: 0, liquidationSellVol: 0 };
         bar.cells.set(bin, cell);
-        bar.cellKeysRevision = (bar.cellKeysRevision ?? 0) + 1;
-      } else if (bar.cellKeysRevision === undefined) {
-        bar.cellKeysRevision = 0;
+        bumpFootprintBarKeysRevision(bar);
+      } else {
+        ensureFootprintBarKeysRevision(bar);
       }
       if (isLiq) {
         if (trade.isBuy) {
@@ -903,7 +902,7 @@ export class FootprintSeries {
         if (trade.isBuy) { cell.buyCount = (cell.buyCount ?? 0) + tradeCount; cell.buyVol += trade.qty; }
         else { cell.sellCount = (cell.sellCount ?? 0) + tradeCount; cell.sellVol += trade.qty; }
       }
-      cell.revision = (cell.revision ?? 0) + 1;
+      bumpFootprintCellRevision(cell);
     }
     if (includeCandle && !isLiq) { bar.volume += trade.qty; bar.count += tradeCount; }
     const source = trade.source ?? "live";
@@ -1087,6 +1086,31 @@ export function cellImbalance(cell: FootprintCell): number {
   return (cell.buyVol - cell.sellVol) / total;
 }
 
+const cellRevisions = new WeakMap<FootprintCell, number>();
+const barCellKeysRevisions = new WeakMap<FootprintBar, number>();
+
+function bumpFootprintCellRevision(cell: FootprintCell): void {
+  cellRevisions.set(cell, (cellRevisions.get(cell) ?? 0) + 1);
+}
+
+function ensureFootprintBarKeysRevision(bar: FootprintBar): void {
+  if (!barCellKeysRevisions.has(bar)) {
+    barCellKeysRevisions.set(bar, 0);
+  }
+}
+
+function bumpFootprintBarKeysRevision(bar: FootprintBar): void {
+  barCellKeysRevisions.set(bar, (barCellKeysRevisions.get(bar) ?? 0) + 1);
+}
+
+export function getFootprintCellRevision(cell: FootprintCell): number {
+  return cellRevisions.get(cell) ?? 0;
+}
+
+export function getFootprintBarKeysRevision(bar: FootprintBar): number | undefined {
+  return barCellKeysRevisions.get(bar);
+}
+
 const sortedBarCellsCache = new WeakMap<
   FootprintBar,
   { keyRev: number; size: number; cells: FootprintCell[] }
@@ -1097,7 +1121,7 @@ const sortedBarCellsCache = new WeakMap<
  * new price bin is inserted (`cellKeysRevision`) or `bar.cells.size` changes (#293).
  */
 export function getSortedFootprintBarCells(bar: FootprintBar): readonly FootprintCell[] {
-  const keyRev = bar.cellKeysRevision ?? (bar.cellRevision ?? 0);
+  const keyRev = barCellKeysRevisions.get(bar) ?? (bar.cellRevision ?? 0);
   const size = bar.cells.size;
   const cached = sortedBarCellsCache.get(bar);
   if (cached && cached.keyRev === keyRev && cached.size === size) {

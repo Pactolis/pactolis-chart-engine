@@ -12,7 +12,7 @@ import {
 } from "../dist/core/render/overlay/footprintCellText.js";
 
 const WEEK_MS = 7 * 24 * 60 * 60_000;
-const BASE_TIME = 1_700_000_040_000;
+const BASE_TIME = 1_699_833_600_000;
 
 test("#293: narrow vertical zoom binary-searches dense 1W bar cells and live trade invalidates only mutated bin text", () => {
   const series = new FootprintSeries({ intervalMs: WEEK_MS, priceStep: 10 });
@@ -26,7 +26,6 @@ test("#293: narrow vertical zoom binary-searches dense 1W bar cells and live tra
       count: 2,
       buyCount: 1,
       sellCount: 1,
-      revision: 0,
     });
   }
   series.loadBars([{
@@ -41,7 +40,6 @@ test("#293: narrow vertical zoom binary-searches dense 1W bar cells and live tra
     cells,
     hasRef: true,
     cellRevision: 1,
-    cellKeysRevision: 1,
   }]);
 
   const bar = series.at(0);

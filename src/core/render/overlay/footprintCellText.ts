@@ -1,4 +1,9 @@
-import { cellImbalance, type FootprintSeries } from "../../model/footprint.js";
+import {
+  cellImbalance,
+  getFootprintBarKeysRevision,
+  getFootprintCellRevision,
+  type FootprintSeries,
+} from "../../model/footprint.js";
 import { cellAverageTradeSize, cellAverageTradeSizes, cellDeltaPercent, cellTradeCounts } from "../../model/footprintCellMetrics.js";
 import type { FootprintCellData } from "../../settings.js";
 import type { FootprintBar, FootprintCell } from "../../types.js";
@@ -116,17 +121,18 @@ export function getOrCreateBarCellTextCache(
   cacheKey: string,
 ): BarCellTextCacheEntry | null {
   if (bar.cellRevision === undefined) return null;
+  const barKeysRev = getFootprintBarKeysRevision(bar);
   const existing = cache.get(bar);
   if (existing && existing.key === cacheKey) {
     if (existing.cellRevision === bar.cellRevision) {
       return existing;
     }
     if (
-      bar.cellKeysRevision !== undefined
+      barKeysRev !== undefined
       && existing.cellRevisions !== undefined
       && existing.cellRefs !== undefined
     ) {
-      if (existing.cellKeysRevision !== bar.cellKeysRevision && existing.entries.size > bar.cells.size) {
+      if (existing.cellKeysRevision !== barKeysRev && existing.entries.size > bar.cells.size) {
         for (const key of existing.entries.keys()) {
           if (!bar.cells.has(key)) {
             existing.entries.delete(key);
@@ -136,7 +142,7 @@ export function getOrCreateBarCellTextCache(
         }
       }
       existing.cellRevision = bar.cellRevision;
-      existing.cellKeysRevision = bar.cellKeysRevision;
+      existing.cellKeysRevision = barKeysRev;
       return existing;
     }
   }
@@ -146,7 +152,7 @@ export function getOrCreateBarCellTextCache(
     entries: new Map<number, FormattedCellText>(),
     cellRevisions: new Map<number, number>(),
     cellRefs: new Map<number, FootprintCell>(),
-    cellKeysRevision: bar.cellKeysRevision,
+    cellKeysRevision: barKeysRev,
   };
   cache.set(bar, entry);
   return entry;
@@ -164,7 +170,7 @@ export function getOrFormatBarCellText(
     const cached = barCache.entries.get(cell.priceBin);
     if (cached !== undefined) {
       if (barCache.cellKeysRevision === undefined) return cached;
-      const rev = cell.revision ?? 0;
+      const rev = getFootprintCellRevision(cell);
       if (
         barCache.cellRevisions?.get(cell.priceBin) === rev
         && barCache.cellRefs?.get(cell.priceBin) === cell
@@ -176,7 +182,7 @@ export function getOrFormatBarCellText(
   const formatted = formatFootprintCellText(cell, mode, compact, step, showNotional);
   if (barCache !== null) {
     barCache.entries.set(cell.priceBin, formatted);
-    barCache.cellRevisions?.set(cell.priceBin, cell.revision ?? 0);
+    barCache.cellRevisions?.set(cell.priceBin, getFootprintCellRevision(cell));
     barCache.cellRefs?.set(cell.priceBin, cell);
   }
   return formatted;
