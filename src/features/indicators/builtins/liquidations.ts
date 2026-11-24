@@ -25,6 +25,7 @@ import {
 } from "../render/indicatorPaneUi.js";
 import { createIndicatorScale, indicatorDisplayRange, indicatorDisplayScaleMode } from "../scale/indicatorScale.js";
 import { uiColor, indicatorWarningMessageColor, positioningRatioColorDefault } from "../../../core/ui/seriesPalette.js";
+import { findLastPointWithData, findPointByIndex } from "./pointLookup.js";
 
 export interface LiquidationsIndicatorSettings extends IndicatorSettings {
   showLong: boolean;
@@ -342,18 +343,27 @@ function pointX(ctx: IndicatorDrawContext<LiquidationsIndicatorSettings>, point:
   return ctx.view.xOfIndex(point.index) + ctx.view.colWidth / 2;
 }
 
-function focusIndex(ctx: IndicatorDrawContext<LiquidationsIndicatorSettings>, data: LiquidationsPreparedData): number | null {
-  const crosshair = ctx.crosshair;
-  if (!crosshair?.visible) return null;
-  const hoverIndex = Math.floor(ctx.view.indexOfX(crosshair.x));
-  return data.points.some((point) => point.index === hoverIndex) ? hoverIndex : null;
-}
-
 function focusPoint(data: LiquidationsPreparedData, index: number | null): ChartLiquidationPoint | null {
   if (!data.points.length) return null;
-  if (index !== null) return data.points.find((point) => point.index === index) ?? null;
-  const lastWithData = [...data.points].reverse().find((point) => point.hasData);
-  return lastWithData ?? data.points[data.points.length - 1] ?? null;
+  if (index !== null) return findPointByIndex(data.points, index);
+  return findLastPointWithData(data.points);
+}
+
+function formatLiquidationsReadout(
+  ctx: IndicatorDrawContext<LiquidationsIndicatorSettings>,
+  point: ChartLiquidationPoint,
+  isLast: boolean,
+): IndicatorReadout {
+  const total = point.longLiquidationsUsd + point.shortLiquidationsUsd;
+  return {
+    title: isLast ? "Last" : "◆",
+    time: tzDateTimeHud(point.candleStart, ctx.chart?.intervalMs ?? ctx.series.config.intervalMs),
+    items: [
+      { label: "L", value: compactUsd(point.longLiquidationsUsd) },
+      { label: "S", value: compactUsd(point.shortLiquidationsUsd) },
+      { label: "T", value: compactUsd(total) },
+    ],
+  };
 }
 
 function liquidationsReadout(
@@ -364,16 +374,7 @@ function liquidationsReadout(
   const data = asLiquidationsData(prepared);
   const point = focusPoint(data, index);
   if (!point) return null;
-  const total = point.longLiquidationsUsd + point.shortLiquidationsUsd;
-  return {
-    title: index === null ? "Last" : "◆",
-    time: tzDateTimeHud(point.candleStart, ctx.chart?.intervalMs ?? ctx.series.config.intervalMs),
-    items: [
-      { label: "L", value: compactUsd(point.longLiquidationsUsd) },
-      { label: "S", value: compactUsd(point.shortLiquidationsUsd) },
-      { label: "T", value: compactUsd(total) },
-    ],
-  };
+  return formatLiquidationsReadout(ctx, point, index === null);
 }
 
 function drawStatus(ctx: IndicatorDrawContext<LiquidationsIndicatorSettings>, data: LiquidationsPreparedData): boolean {
@@ -490,12 +491,15 @@ function drawLiquidationsInteraction(
   if (data.status !== "ok") return;
 
   const { top, bottom } = panePlotBounds(rect, 32, 5);
-  const hoverIndex = focusIndex(ctx, data);
-  const focus = focusPoint(data, hoverIndex);
+  const hoveredPoint = ctx.crosshair?.visible
+    ? findPointByIndex(data.points, Math.floor(ctx.view.indexOfX(ctx.crosshair.x)))
+    : null;
+  const hoverIndex = hoveredPoint ? hoveredPoint.index : null;
+  const focus = hoveredPoint ?? findLastPointWithData(data.points);
 
-  if (showReadout(settings)) {
-    const readout = liquidationsReadout(ctx, data, hoverIndex);
-    if (readout) drawIndicatorReadout(ctx, indicatorReadoutToText(readout));
+  if (showReadout(settings) && focus) {
+    const readout = formatLiquidationsReadout(ctx, focus, hoverIndex === null);
+    drawIndicatorReadout(ctx, indicatorReadoutToText(readout));
   }
 
   if (data.meta.maxAbs <= 0) return;

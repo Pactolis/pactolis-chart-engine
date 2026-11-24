@@ -33,9 +33,19 @@ interface RangeProfileBarSnapshot {
   cellsSize: number;
 }
 
+type RangeProfileSourceMode = "none" | "estimated" | "exact";
+
 interface CachedRangeProfileCalculation {
   series: FootprintSeries;
-  key: string;
+  configKey: string;
+  sourceMode: RangeProfileSourceMode;
+  resetEpoch: number;
+  nonTailRevision: number;
+  structureRevision: number;
+  revision: number;
+  firstIndex: number;
+  afterLastIndex: number;
+  rangeEndTime: number;
   bars: RangeProfileBarSnapshot[];
   result: CachedRangeProfileResult;
 }
@@ -184,15 +194,6 @@ function lowerBoundBarTime(bars: readonly FootprintBar[], time: number): number 
   return lo;
 }
 
-function rangeProfileBars(series: FootprintSeries, from: number, to: number): readonly FootprintBar[] {
-  const bars = series.listReadonly();
-  const start = Math.min(from, to);
-  const end = Math.max(from, to);
-  const first = lowerBoundBarTime(bars, start);
-  const afterLast = lowerBoundBarTime(bars, end + 1);
-  return bars.slice(first, afterLast);
-}
-
 function snapshotRangeProfileBars(bars: readonly FootprintBar[]): RangeProfileBarSnapshot[] {
   return bars.map((bar) => ({
     bar,
@@ -203,10 +204,16 @@ function snapshotRangeProfileBars(bars: readonly FootprintBar[]): RangeProfileBa
   }));
 }
 
-function sameRangeProfileBars(cached: readonly RangeProfileBarSnapshot[], bars: readonly FootprintBar[]): boolean {
-  if (cached.length !== bars.length) return false;
-  for (let i = 0; i < bars.length; i++) {
-    const bar = bars[i];
+function sameRangeProfileBars(
+  cached: readonly RangeProfileBarSnapshot[],
+  bars: readonly FootprintBar[],
+  firstIndex: number,
+  afterLastIndex: number,
+): boolean {
+  const count = Math.max(0, afterLastIndex - firstIndex);
+  if (cached.length !== count) return false;
+  for (let i = 0; i < count; i++) {
+    const bar = bars[firstIndex + i];
     const previous = cached[i];
     if (previous.bar !== bar
       || previous.startTime !== bar.startTime
@@ -215,6 +222,14 @@ function sameRangeProfileBars(cached: readonly RangeProfileBarSnapshot[], bars: 
       || previous.cellsSize !== bar.cells.size) return false;
   }
   return true;
+}
+
+function rangeProfileSourceMode(bars: readonly FootprintBar[]): RangeProfileSourceMode {
+  if (bars.length === 0) return "none";
+  for (let i = 0; i < bars.length; i++) {
+    if (bars[i].cells.size > 0) return "exact";
+  }
+  return "estimated";
 }
 
 function cachedRangeProfile(
@@ -227,12 +242,7 @@ function cachedRangeProfile(
   const developing = profileSupportsValueArea(settings.profileMetric)
     && [settings.pocMode, settings.vahMode, settings.valMode].some(levelModeHasDeveloping);
   const valueAreaPercent = settings.valueAreaPercent ?? 0.7;
-  const selectedBars = rangeProfileBars(series, from, to);
-  const sourceMode = selectedBars.length === 0
-    ? "none"
-    : selectedBars.every((bar) => bar.cells.size === 0) ? "estimated" : "exact";
-  const key = [
-    sourceMode,
+  const configKey = [
     series.config.priceStep,
     from,
     to,
@@ -241,12 +251,68 @@ function cachedRangeProfile(
     settings.profileSide,
     developing ? 1 : 0,
   ].join(":");
+  const bars = series.listReadonly();
   const cached = rangeProfileCache.get(drawing);
-  if (cached && cached.series === series && cached.key === key && sameRangeProfileBars(cached.bars, selectedBars)) {
+
+  if (
+    cached
+    && cached.series === series
+    && cached.configKey === configKey
+    && cached.resetEpoch === series.resetEpoch
+    && cached.nonTailRevision === series.nonTailRevision
+    && cached.structureRevision === series.structureRevision
+  ) {
+    if (cached.revision === series.revision) {
+      incrementPerformanceCounter("analysis.drawings.frvp.cache.hit");
+      return cached.result;
+    }
+    const outOfRangeTailOnly =
+      (bars.length === 0 && cached.bars.length === 0)
+      || (
+        bars.length > 0
+        && cached.afterLastIndex <= bars.length - 1
+        && bars[bars.length - 1].startTime > cached.rangeEndTime
+        && (
+          cached.bars.length === 0
+          || (
+            cached.firstIndex < bars.length - 1
+            && cached.afterLastIndex > cached.firstIndex
+            && bars[cached.firstIndex] === cached.bars[0].bar
+            && bars[cached.afterLastIndex - 1] === cached.bars[cached.bars.length - 1].bar
+          )
+        )
+      );
+    if (outOfRangeTailOnly) {
+      cached.revision = series.revision;
+      incrementPerformanceCounter("analysis.drawings.frvp.cache.hit");
+      return cached.result;
+    }
+  }
+
+  const start = Math.min(from, to);
+  const end = Math.max(from, to);
+  const firstIndex = lowerBoundBarTime(bars, start);
+  const afterLastIndex = lowerBoundBarTime(bars, end + 1);
+  if (
+    cached
+    && cached.series === series
+    && cached.configKey === configKey
+    && sameRangeProfileBars(cached.bars, bars, firstIndex, afterLastIndex)
+  ) {
+    cached.resetEpoch = series.resetEpoch;
+    cached.nonTailRevision = series.nonTailRevision;
+    cached.structureRevision = series.structureRevision;
+    cached.revision = series.revision;
+    cached.firstIndex = firstIndex;
+    cached.afterLastIndex = afterLastIndex;
+    cached.rangeEndTime = end;
     incrementPerformanceCounter("analysis.drawings.frvp.cache.hit");
     return cached.result;
   }
+
   incrementPerformanceCounter("analysis.drawings.frvp.cache.miss");
+  const selectedBars = bars.slice(firstIndex, afterLastIndex);
+  const sourceMode = rangeProfileSourceMode(selectedBars);
   const profile = measurePerformance("analysis.drawings.frvp.calculate.ms", () =>
     calculateOrderFlowRangeProfile(selectedBars, from, to, {
       profileMetric: settings.profileMetric,
@@ -259,7 +325,20 @@ function cachedRangeProfile(
   let maxMagnitude = 0;
   for (const level of profile.levels) maxMagnitude = Math.max(maxMagnitude, level.magnitude ?? 0);
   const result = { profile, maxMagnitude };
-  rangeProfileCache.set(drawing, { series, key, bars: snapshotRangeProfileBars(selectedBars), result });
+  rangeProfileCache.set(drawing, {
+    series,
+    configKey,
+    sourceMode,
+    resetEpoch: series.resetEpoch,
+    nonTailRevision: series.nonTailRevision,
+    structureRevision: series.structureRevision,
+    revision: series.revision,
+    firstIndex,
+    afterLastIndex,
+    rangeEndTime: end,
+    bars: snapshotRangeProfileBars(selectedBars),
+    result,
+  });
   return result;
 }
 

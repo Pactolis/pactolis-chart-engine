@@ -27,6 +27,7 @@ import {
 } from "../render/indicatorPaneUi.js";
 import { createIndicatorScale, indicatorDisplayRange, indicatorDisplayScaleMode } from "../scale/indicatorScale.js";
 import { uiColor, indicatorWarningMessageColor, positioningRatioColorDefault } from "../../../core/ui/seriesPalette.js";
+import { findLastPointWithData, findPointByIndex } from "./pointLookup.js";
 
 export interface FuturesPositioningIndicatorSettings extends IndicatorSettings {
   mode: FuturesPositioningMode;
@@ -363,30 +364,20 @@ function pointX(ctx: IndicatorDrawContext<FuturesPositioningIndicatorSettings>, 
   return ctx.view.xOfIndex(point.index) + ctx.view.colWidth / 2;
 }
 
-function focusIndex(ctx: IndicatorDrawContext<FuturesPositioningIndicatorSettings>, data: FuturesPositioningPreparedData): number | null {
-  const crosshair = ctx.crosshair;
-  if (!crosshair?.visible) return null;
-  const hoverIndex = Math.floor(ctx.view.indexOfX(crosshair.x));
-  return data.points.some((point) => point.index === hoverIndex) ? hoverIndex : null;
-}
-
 function focusPoint(data: FuturesPositioningPreparedData, index: number | null): ChartPositioningPoint | null {
   if (!data.points.length) return null;
-  if (index !== null) return data.points.find((point) => point.index === index) ?? null;
-  const lastWithData = [...data.points].reverse().find((point) => point.hasData);
-  return lastWithData ?? data.points[data.points.length - 1] ?? null;
+  if (index !== null) return findPointByIndex(data.points, index);
+  return findLastPointWithData(data.points);
 }
 
-function futuresPositioningReadout(
+function formatFuturesPositioningReadout(
   ctx: IndicatorDrawContext<FuturesPositioningIndicatorSettings>,
-  prepared: IndicatorPreparedData,
-  index: number | null,
-): IndicatorReadout | null {
-  const data = asFuturesPositioningData(prepared);
-  const point = focusPoint(data, index);
-  if (!point) return null;
+  data: FuturesPositioningPreparedData,
+  point: ChartPositioningPoint,
+  isLast: boolean,
+): IndicatorReadout {
   return {
-    title: index === null ? "Last" : "*",
+    title: isLast ? "Last" : "*",
     time: tzDateTimeHud(point.candleStart, ctx.chart?.intervalMs ?? ctx.series.config.intervalMs),
     items: [
       { label: modeLabel(data.meta.mode), value: formatForMode(data.meta.mode, point.value) },
@@ -397,6 +388,17 @@ function futuresPositioningReadout(
       { label: "Taker", value: `${point.takerLongShortVolumeRatio.toFixed(2)}x` },
     ],
   };
+}
+
+function futuresPositioningReadout(
+  ctx: IndicatorDrawContext<FuturesPositioningIndicatorSettings>,
+  prepared: IndicatorPreparedData,
+  index: number | null,
+): IndicatorReadout | null {
+  const data = asFuturesPositioningData(prepared);
+  const point = focusPoint(data, index);
+  if (!point) return null;
+  return formatFuturesPositioningReadout(ctx, data, point, index === null);
 }
 
 function drawStatus(ctx: IndicatorDrawContext<FuturesPositioningIndicatorSettings>, data: FuturesPositioningPreparedData): boolean {
@@ -501,12 +503,15 @@ function drawFuturesPositioningInteraction(
   if (data.status !== "ok") return;
 
   const { top, bottom } = panePlotBounds(rect, 32, 5);
-  const hoverIndex = focusIndex(ctx, data);
-  const focus = focusPoint(data, hoverIndex);
+  const hoveredPoint = ctx.crosshair?.visible
+    ? findPointByIndex(data.points, Math.floor(ctx.view.indexOfX(ctx.crosshair.x)))
+    : null;
+  const hoverIndex = hoveredPoint ? hoveredPoint.index : null;
+  const focus = hoveredPoint ?? findLastPointWithData(data.points);
 
-  if (showReadout(settings)) {
-    const readout = futuresPositioningReadout(ctx, data, hoverIndex);
-    if (readout) drawIndicatorReadout(ctx, indicatorReadoutToText(readout));
+  if (showReadout(settings) && focus) {
+    const readout = formatFuturesPositioningReadout(ctx, data, focus, hoverIndex === null);
+    drawIndicatorReadout(ctx, indicatorReadoutToText(readout));
   }
 
   const mode = data.meta.mode;

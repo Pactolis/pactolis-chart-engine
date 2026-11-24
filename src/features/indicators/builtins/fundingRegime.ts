@@ -27,6 +27,7 @@ import {
 } from "../render/indicatorPaneUi.js";
 import { createIndicatorScale, indicatorDisplayRange, indicatorDisplayScaleMode } from "../scale/indicatorScale.js";
 import { uiColor, indicatorWarningMessageColor, fundingPredictedColorDefault } from "../../../core/ui/seriesPalette.js";
+import { findLastPointWithData, findPointByIndex } from "./pointLookup.js";
 
 export type FundingRegimeMode = "fundingRate" | "predictedFundingRate" | "spread";
 
@@ -410,18 +411,29 @@ function pointX(ctx: IndicatorDrawContext<FundingRegimeSettings>, point: ChartFu
   return ctx.view.xOfIndex(point.index) + ctx.view.colWidth / 2;
 }
 
-function focusIndex(ctx: IndicatorDrawContext<FundingRegimeSettings>, data: FundingRegimeData): number | null {
-  const crosshair = ctx.crosshair;
-  if (!crosshair?.visible) return null;
-  const hoverIndex = Math.floor(ctx.view.indexOfX(crosshair.x));
-  return data.points.some((point) => point.index === hoverIndex) ? hoverIndex : null;
-}
-
 function focusPoint(data: FundingRegimeData, index: number | null): ChartFundingPoint | null {
   if (!data.points.length) return null;
-  if (index !== null) return data.points.find((point) => point.index === index) ?? null;
-  const lastWithData = [...data.points].reverse().find((point) => point.hasData);
-  return lastWithData ?? data.points[data.points.length - 1] ?? null;
+  if (index !== null) return findPointByIndex(data.points, index);
+  return findLastPointWithData(data.points);
+}
+
+function formatFundingRegimeReadout(
+  ctx: IndicatorDrawContext<FundingRegimeSettings>,
+  data: FundingRegimeData,
+  point: ChartFundingPoint,
+  isLast: boolean,
+): IndicatorReadout {
+  return {
+    title: isLast ? "Last" : "*",
+    time: tzDateTimeHud(point.candleStart, ctx.chart?.intervalMs ?? ctx.series.config.intervalMs),
+    items: [
+      { label: modeLabel(data.meta.mode), value: formatFundingRate(point.value) },
+      { label: "F", value: formatFundingRate(point.fundingRate) },
+      { label: "Pred", value: formatFundingRate(point.predictedFundingRate) },
+      { label: "Spr", value: formatFundingRate(point.spread) },
+      { label: "sym", value: String(data.meta.symbolCount) },
+    ],
+  };
 }
 
 function fundingRegimeReadout(
@@ -432,17 +444,7 @@ function fundingRegimeReadout(
   const data = asFundingRegimeData(prepared);
   const point = focusPoint(data, index);
   if (!point) return null;
-  return {
-    title: index === null ? "Last" : "*",
-    time: tzDateTimeHud(point.candleStart, ctx.chart?.intervalMs ?? ctx.series.config.intervalMs),
-    items: [
-      { label: modeLabel(data.meta.mode), value: formatFundingRate(point.value) },
-      { label: "F", value: formatFundingRate(point.fundingRate) },
-      { label: "Pred", value: formatFundingRate(point.predictedFundingRate) },
-      { label: "Spr", value: formatFundingRate(point.spread) },
-      { label: "sym", value: String(data.meta.symbolCount) },
-    ],
-  };
+  return formatFundingRegimeReadout(ctx, data, point, index === null);
 }
 
 function drawStatus(ctx: IndicatorDrawContext<FundingRegimeSettings>, data: FundingRegimeData): boolean {
@@ -527,12 +529,15 @@ function drawFundingRegimeInteraction(
   if (data.status !== "ok") return;
 
   const { top, bottom } = panePlotBounds(rect, 32, 5);
-  const hoverIndex = focusIndex(ctx, data);
-  const focus = focusPoint(data, hoverIndex);
+  const hoveredPoint = ctx.crosshair?.visible
+    ? findPointByIndex(data.points, Math.floor(ctx.view.indexOfX(ctx.crosshair.x)))
+    : null;
+  const hoverIndex = hoveredPoint ? hoveredPoint.index : null;
+  const focus = hoveredPoint ?? findLastPointWithData(data.points);
 
-  if (showReadout(settings)) {
-    const readout = fundingRegimeReadout(ctx, data, hoverIndex);
-    if (readout) drawIndicatorReadout(ctx, indicatorReadoutToText(readout));
+  if (showReadout(settings) && focus) {
+    const readout = formatFundingRegimeReadout(ctx, data, focus, hoverIndex === null);
+    drawIndicatorReadout(ctx, indicatorReadoutToText(readout));
   }
 
   const displayRange = indicatorDisplayRange(settings, data.range.min, data.range.max);
