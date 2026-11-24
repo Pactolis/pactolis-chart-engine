@@ -125,11 +125,11 @@ export class AnnotationPassCache<T> {
     changes: ChartChange, draw: (target: CanvasRenderingContext2D) => T, replay: (effects: T) => void,
     dirtyRect?: AnnotationDirtyRect): "hit" | "miss" | false {
     const retained = this.entries.get(pass.id);
-    if (!isCachePreservingChange(changes) || (pass.interests & changes) !== 0) {
+    if (changes === ChartChange.None || (pass.interests & ChartChange.DataTail) !== 0) {
       if (retained) retained.valid = false;
       return false;
     }
-    if (this.sameGeometry && retained?.valid && retained.key === key) {
+    if (isCachePreservingChange(changes) && (pass.interests & changes) === 0 && this.sameGeometry && retained?.valid && retained.key === key) {
       replay(retained.effects);
       if (dirtyRect) this.blitRegion(ctx, retained.canvas, dirtyRect);
       else this.blit(ctx, retained.canvas);

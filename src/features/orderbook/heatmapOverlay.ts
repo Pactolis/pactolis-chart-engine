@@ -1200,7 +1200,8 @@ export class OrderbookHeatmapOverlay {
       this.visibleThreshold = frame.threshold;
       this.visibleOpacity = resolved.opacity;
       if (knownCellCount === 0) {
-        this.invalidateRasterCacheContents();
+        if (viewportMoving) this.invalidateRasterCacheContents();
+        else this.releaseRasterCache();
         if (canUseRasterCache) {
           this.lastRasterKey = rasterKey;
           this.rasterCacheHasCells = false;
@@ -1239,7 +1240,18 @@ export class OrderbookHeatmapOverlay {
           true,
           () => { budgetExceeded = true; },
         );
-        if (offCtx) {
+        const canMotionImageDataReanchor =
+          !viewportMoving
+          || (
+            offCtx !== null
+            && transform.b === 0
+            && transform.c === 0
+            && transform.a > 0
+            && transform.d > 0
+            && typeof offCtx.createImageData === "function"
+            && typeof offCtx.putImageData === "function"
+          );
+        if (offCtx && canMotionImageDataReanchor) {
           const paintBounds = {
             minX: Number.POSITIVE_INFINITY,
             minY: Number.POSITIVE_INFINITY,
@@ -1270,7 +1282,8 @@ export class OrderbookHeatmapOverlay {
           );
           offCtx.restore();
           if (paintedCells === 0) {
-            this.invalidateRasterCacheContents();
+            if (viewportMoving) this.invalidateRasterCacheContents();
+            else this.releaseRasterCache();
             if (canUseRasterCache) {
               this.lastRasterKey = rasterKey;
               this.rasterCacheHasCells = false;
@@ -1297,9 +1310,19 @@ export class OrderbookHeatmapOverlay {
           } else {
             this.rasterCacheBlitBounds = null;
           }
-          this.recordRasterCacheMeta(view, series, rasterKey, rasterDataSig, resolved, frame.threshold, transform);
+          this.recordRasterCacheMeta(
+            view,
+            series,
+            viewportMoving ? "" : rasterKey,
+            rasterDataSig,
+            resolved,
+            frame.threshold,
+            transform,
+          );
           this.blitRasterCache(ctx);
-          incrementPerformanceCounter("chart.cpu.heatmap.raster.miss");
+          incrementPerformanceCounter(
+            viewportMoving ? "chart.cpu.heatmap.raster.direct" : "chart.cpu.heatmap.raster.miss",
+          );
           return;
         }
         if (budgetExceeded && transform.b === 0 && transform.c === 0) {
@@ -2301,13 +2324,7 @@ export class OrderbookHeatmapOverlay {
       let cells: readonly OrderbookHeatmapCell[] = bar.cells;
       let sparseValues: readonly number[] | null = null;
       if (threshold > 0) {
-        const chunkState = !live && !this.liveBarTimes.has(bar.t)
-          ? this.chunks.get(heatmapChunkStart(bar.t, frame.tier))
-          : undefined;
-        const serverFiltered = chunkState?.status === "ready"
-          && chunkState.fullThreshold === threshold
-          && chunkState.fullUnit === unit;
-        const sparse = getHeatmapThresholdSparseBar(bar, unit, threshold, step, serverFiltered);
+        const sparse = getHeatmapThresholdSparseBar(bar, unit, threshold, step);
         if (sparse.maxValue < threshold || sparse.cells.length === 0) continue;
         cells = sparse.cells;
         sparseValues = sparse.values;
@@ -2421,13 +2438,7 @@ export class OrderbookHeatmapOverlay {
       if (!bar || bar.cells.length === 0) continue;
       let cells: readonly OrderbookHeatmapCell[] = bar.cells;
       if (preamble.threshold > 0) {
-        const chunkState = !live && !this.liveBarTimes.has(bar.t)
-          ? this.chunks.get(heatmapChunkStart(bar.t, preamble.tier))
-          : undefined;
-        const serverFiltered = chunkState?.status === "ready"
-          && chunkState.fullThreshold === preamble.threshold
-          && chunkState.fullUnit === preamble.settings.unit;
-        const sparse = getHeatmapThresholdSparseBar(bar, preamble.settings.unit, preamble.threshold, step, serverFiltered);
+        const sparse = getHeatmapThresholdSparseBar(bar, preamble.settings.unit, preamble.threshold, step);
         if (sparse.maxValue < preamble.threshold || sparse.cells.length === 0) continue;
         cells = sparse.cells;
       }
