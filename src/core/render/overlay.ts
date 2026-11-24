@@ -1,5 +1,12 @@
 import { ChartChange } from "./scene/chartScene.js";
-import { annotationPass, AnnotationPassCache } from "./overlay/annotationPassCache.js";
+import {
+  alignDirtyRectToDevicePixels,
+  annotationPass,
+  AnnotationPassCache,
+  shouldFallbackToFullRedraw,
+  unionDirtyRects,
+  type AnnotationDirtyRect,
+} from "./overlay/annotationPassCache.js";
 // Canvas2D layer: cell volume numbers, price/time axes, crosshair, HUD.
 import type { View } from "../engine/view.js";
 import type { FootprintBar } from "../types.js";
@@ -85,6 +92,7 @@ export class Overlay {
   private tpoProfileHitZones: TpoProfileHitZone[] = [];
   private interactionHudWasActive = false;
   private interactionHudSyncTime: number | null = null;
+  private partialTailRedrawEnabled = false;
   /** Per-chart görünüm config'i (runtime set eder); null ise global settings. */
   private chartConfig: ChartViewConfig | null = null;
   private readonly axisCache = new AxisLayerCache();
@@ -286,6 +294,16 @@ export class Overlay {
     return this.getDisplayOptions?.() ?? this.defaultDisplayOptions;
   }
 
+  /** Enable or disable opt-in dirty-region partial tail redraw on DataTail frames (default: false). */
+  setPartialTailRedrawEnabled(enabled: boolean): void {
+    this.partialTailRedrawEnabled = Boolean(enabled);
+  }
+
+  /** Whether opt-in dirty-region partial tail redraw is enabled. */
+  isPartialTailRedrawEnabled(): boolean {
+    return this.partialTailRedrawEnabled;
+  }
+
   /** Clear cached axis offscreen bitmaps so the next render rebuilds them from fresh state. */
   invalidateAxisCache(): void {
     this.axisCache.invalidate();
@@ -355,8 +373,39 @@ export class Overlay {
     this.annotationPassCache.begin(changes, JSON.stringify([ctx.canvas.width, ctx.canvas.height, transform?.a, transform?.d, view.area, view.offsetX, view.colWidth, view.priceTop, view.pricePerPx, range, series.length, series.at(series.length - 1)?.startTime, series.config.priceStep, series.nonTailRevision, orderedLayers, asOfTime, skipFootprintText]));
     const telemetryEnabled = isPerformanceTelemetryEnabled();
     const setupStartedAt = telemetryEnabled ? performance.now() : null;
-    ctx.clearRect(0, 0, ctx.canvas.width, ctx.canvas.height);
-    ctx.save();
+    const empty = series.length === 0;
+    const mainSuppressed = this.isMainChartSuppressed?.() === true;
+    const partialDirtyRect = this.resolvePartialTailDirtyRect(
+      ctx,
+      transform,
+      view,
+      series,
+      crosshair,
+      orderedLayers,
+      changes,
+      empty,
+      mainSuppressed,
+      skipFootprintText,
+    );
+    if (this.partialTailRedrawEnabled) {
+      incrementPerformanceCounter(
+        partialDirtyRect ? "chart.annotation.partial.hit" : "chart.annotation.partial.fallback",
+      );
+    }
+    if (partialDirtyRect) {
+      ctx.save();
+      ctx.setTransform?.(1, 0, 0, 1, 0, 0);
+      ctx.beginPath?.();
+      ctx.rect?.(partialDirtyRect.x, partialDirtyRect.y, partialDirtyRect.width, partialDirtyRect.height);
+      ctx.clip?.();
+      ctx.clearRect(partialDirtyRect.x, partialDirtyRect.y, partialDirtyRect.width, partialDirtyRect.height);
+      if (transform) {
+        ctx.setTransform?.(transform.a, transform.b, transform.c, transform.d, transform.e, transform.f);
+      }
+    } else {
+      ctx.clearRect(0, 0, ctx.canvas.width, ctx.canvas.height);
+      ctx.save();
+    }
     this.priceMarkers = [];
     this.timeMarkers = [];
     this.lineLabels = [];
@@ -364,8 +413,6 @@ export class Overlay {
     this.tpoProfileHitZones = [];
     if (setupStartedAt !== null) recordPerformanceDuration("chart.annotation.setup.ms", performance.now() - setupStartedAt);
 
-    const empty = series.length === 0;
-    const mainSuppressed = this.isMainChartSuppressed?.() === true;
     let indicatorBatchDrawn = false;
     let canRetainTpo = changes === ChartChange.DataTail;
 
@@ -413,7 +460,7 @@ export class Overlay {
               if ((this.chartConfig ?? settings).chartType !== "tpo") canRetainTpo = false;
               this.paintRetainedAnnotationPass("closed-footprint-text", "", changes, () => {
                 drawCells(this.annotationHost, view, series, [range[0], Math.min(range[1], series.length - 1)]);
-              });
+              }, false, partialDirtyRect ?? undefined);
               if (range[1] > series.length - 1) drawCells(this.annotationHost, view, series, [Math.max(range[0], series.length - 1), range[1]]);
               break;
             case "volume-profile":
@@ -425,7 +472,7 @@ export class Overlay {
               // With an underlay, paint directly to preserve blending order.
               const retain = canRetainTpo ? (key: string, draw: () => void) => {
                 const transformKey = transform ? [transform.b, transform.c, transform.e, transform.f].join("|") : "";
-                if (this.paintRetainedAnnotationPass("closed-tpo", transformKey + key, changes, draw)) {
+                if (this.paintRetainedAnnotationPass("closed-tpo", transformKey + key, changes, draw, false, partialDirtyRect ?? undefined)) {
                   incrementPerformanceCounter("chart.annotation.pass.closed-tpo.reuse");
                 }
               } : undefined;
@@ -462,7 +509,7 @@ export class Overlay {
         const main = ctx;
         ctx = this.ctx;
         try { paint(); } finally { ctx = main; }
-      }, livePass);
+      }, livePass, partialDirtyRect ?? undefined);
       if (retained) incrementPerformanceCounter(`chart.annotation.pass.${metricLayer}.reuse`);
       if (layerId === "axis" && !mainSuppressed && !empty) {
         drawPriceMarkers(ctx, view, this.priceMarkers, series.config.priceStep, series.config.pricePrecision, this.displayOptions);
@@ -497,12 +544,74 @@ export class Overlay {
     }
   }
 
+  private resolvePartialTailDirtyRect(
+    ctx: CanvasRenderingContext2D,
+    transform: DOMMatrix | undefined,
+    view: View,
+    series: FootprintSeries,
+    crosshair: Crosshair,
+    orderedLayers: readonly string[],
+    changes: ChartChange,
+    empty: boolean,
+    mainSuppressed: boolean,
+    skipFootprintText: boolean,
+  ): AnnotationDirtyRect | null {
+    if (!this.partialTailRedrawEnabled) return null;
+    if (changes !== ChartChange.DataTail || empty || mainSuppressed) return null;
+    if (!this.annotationPassCache.isSameGeometry()) return null;
+    if (ctx.canvas.width <= 0 || ctx.canvas.height <= 0) return null;
+    if (
+      transform &&
+      (transform.b !== 0 || transform.c !== 0 ||
+        !Number.isFinite(transform.a) || !Number.isFinite(transform.d) ||
+        transform.a <= 0 || transform.d <= 0)
+    ) {
+      return null;
+    }
+    const dpr = transform?.a ?? view.pixelRatio ?? 1;
+    if (!Number.isFinite(dpr) || dpr <= 0) return null;
+    const totalHeight = Math.max(0, view.area.height + (view.subPanesH ?? 0));
+    const lastBarX = view.xOfIndex(series.length - 1);
+    const lastBarRect = alignDirtyRectToDevicePixels(
+      { x: lastBarX, y: view.area.top, width: view.colWidth, height: totalHeight },
+      dpr,
+      ctx.canvas.width,
+      ctx.canvas.height,
+    );
+    const priceAxisRect = alignDirtyRectToDevicePixels(
+      { x: view.area.left + view.area.width, y: view.area.top, width: view.priceAxisW, height: totalHeight },
+      dpr,
+      ctx.canvas.width,
+      ctx.canvas.height,
+    );
+    const dirty = unionDirtyRects(lastBarRect, priceAxisRect);
+    if (dirty.width <= 0 || dirty.height <= 0) return null;
+    if (shouldFallbackToFullRedraw(dirty, ctx.canvas.width, ctx.canvas.height)) return null;
+    for (const layerId of orderedLayers) {
+      if (layerId === "footprint-text") {
+        if (!skipFootprintText && !this.annotationPassCache.canHit(annotationPass("closed-footprint-text"), "", changes)) {
+          return null;
+        }
+        continue;
+      }
+      const livePass = layerId === "drawings" && (this.hasLiveSeriesDrawings?.() ?? false);
+      const pass = annotationPass(layerId, livePass);
+      if ((pass.interests & ChartChange.DataTail) === 0) {
+        if (!this.annotationPassCache.canHit(pass, this.layerCacheKey(layerId, crosshair), changes)) {
+          return null;
+        }
+      }
+    }
+    return dirty;
+  }
+
   private paintRetainedAnnotationPass(
     id: string,
     key: string,
     changes: ChartChange,
     draw: () => void,
     live = false,
+    dirtyRect?: AnnotationDirtyRect,
   ): boolean {
     const main = this.ctx;
     const handled = this.annotationPassCache.render(main, annotationPass(id, live), key, changes, (target) => {
@@ -521,7 +630,7 @@ export class Overlay {
       this.timeMarkers.push(...effects.time);
       this.lineLabels.push(...effects.labels);
       this.tpoProfileHitZones.push(...effects.tpoHits);
-    });
+    }, dirtyRect);
     if (!handled) draw();
     return handled === "hit";
   }
