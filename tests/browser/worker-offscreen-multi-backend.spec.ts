@@ -70,7 +70,7 @@ for (const backendPreference of ["webgl2", "canvas2d", "auto"] as const) {
         { backendPreference: pref, offscreenCanvases },
       );
 
-      const now = 1_700_000_000_000;
+      const now = 1_700_000_040_000;
       const bars = Array.from({ length: 12 }, (_, i) => ({
         time: now + i * 60_000,
         open: 100 + i,

@@ -60,9 +60,10 @@ export interface ChartWorkerDiagnostics {
   readonly gpuDiagnostics: GpuDiagnosticsSnapshot;
 }
 
-function toFootprintBar(bar: WorkerHistoryBar): FootprintBar {
+function toFootprintBar(bar: WorkerHistoryBar, intervalMs: number): FootprintBar {
+  const safeInterval = intervalMs > 0 ? intervalMs : 60_000;
   return {
-    startTime: bar.time,
+    startTime: Math.floor(bar.time / safeInterval) * safeInterval,
     open: bar.open,
     high: bar.high,
     low: bar.low,
@@ -454,7 +455,7 @@ export class ChartWorkerPanelRuntime {
 
   private handleBar(payload: WorkerHistoryBar): void {
     if (this.disposed) return;
-    this.series.upsertBar(toFootprintBar(payload));
+    this.series.upsertBar(toFootprintBar(payload, this.series.config.intervalMs));
     if (!this.hasInitialFit) {
       this.fitViewToSeries();
     } else if (this.view.isPriceAutoScale()) {
@@ -475,7 +476,7 @@ export class ChartWorkerPanelRuntime {
       : payload.bars;
 
     for (const bar of bars) {
-      this.series.upsertBar(toFootprintBar(bar));
+      this.series.upsertBar(toFootprintBar(bar, this.series.config.intervalMs));
     }
 
     if (payload.bars instanceof ArrayBuffer) {

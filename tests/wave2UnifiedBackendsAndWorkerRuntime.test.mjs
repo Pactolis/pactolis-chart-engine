@@ -13,13 +13,19 @@ import {
 import { Canvas2dSurface } from "../dist/core/gpu/canvas2d/canvas2dSurface.js";
 import { WebGl2Surface } from "../dist/core/gpu/webgl2/webgl2Surface.js";
 import { createGpuSurface, createGpuSurfaceAsync } from "../dist/core/gpu/selectBackend.js";
+import { configureChartLocale } from "../dist/core/chartLocale.js";
 import { View } from "../dist/core/engine/view.js";
 import { FootprintSeries } from "../dist/core/model/footprint.js";
+import { DEFAULT_ORDERBOOK_HEATMAP_SETTINGS } from "../dist/core/orderbookHeatmap/settings.js";
 import { AxisLayerCache } from "../dist/core/render/axisLayerCache.js";
 import { AnnotationPassCache, annotationPass } from "../dist/core/render/overlay/annotationPassCache.js";
 import { ChartChange } from "../dist/core/render/scene/chartScene.js";
 import { resolveChartDisplayOptions } from "../dist/core/model/chartDisplayOptions.js";
 import { OrderbookHeatmapOverlay } from "../dist/features/orderbook/heatmapOverlay.js";
+import {
+  configureOrderbookHeatmapSettingsSource,
+  orderbookHeatmapSettingsSource,
+} from "../dist/features/orderbook/heatmapSettingsSource.js";
 import {
   ChartWorkerHostPool,
   ChartWorkerPanelRuntime,
@@ -28,6 +34,42 @@ import { WorkerChartHostBridge } from "../dist/features/chart/worker/workerRunti
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const repoRoot = resolve(__dirname, "..");
+const BASE_TIME = 1_700_000_040_000;
+
+configureChartLocale({
+  locale: () => "en-US",
+  timeZone: () => "UTC",
+  translate: (key) => key,
+  onLocaleChange: () => () => {},
+});
+
+function createMockPortPair() {
+  const listeners1 = new Set();
+  const listeners2 = new Set();
+  const makePort = (ownListeners, peerListeners) => ({
+    postMessage(data) {
+      queueMicrotask(() => {
+        for (const fn of [...peerListeners]) {
+          fn({ data });
+        }
+      });
+    },
+    addEventListener(type, fn) {
+      if (type === "message") ownListeners.add(fn);
+    },
+    removeEventListener(type, fn) {
+      if (type === "message") ownListeners.delete(fn);
+    },
+    start() {},
+    close() {
+      ownListeners.clear();
+    },
+  });
+  return {
+    port1: makePort(listeners1, listeners2),
+    port2: makePort(listeners2, listeners1),
+  };
+}
 
 function makeMock2dContext(canvas) {
   const tx = { a: 1, b: 0, c: 0, d: 1, e: 0, f: 0 };
@@ -68,6 +110,20 @@ function makeMock2dContext(canvas) {
       return { width: String(t).length * 7 };
     },
     drawImage() {},
+    setLineDash() {},
+    closePath() {},
+    arc() {},
+    roundRect() {},
+    translate() {},
+    scale() {},
+    createImageData(w, h) {
+      return {
+        width: w,
+        height: h,
+        data: new Uint8ClampedArray(Math.max(1, w) * Math.max(1, h) * 4),
+      };
+    },
+    putImageData() {},
     isContextLost() {
       return false;
     },
@@ -230,7 +286,7 @@ test("AxisLayerCache, AnnotationPassCache, and OrderbookHeatmapOverlay work with
     const series = new FootprintSeries({ intervalMs: 60_000, priceStep: 1, pricePrecision: 2 });
     series.loadBars([
       {
-        startTime: 1_700_000_000_000,
+        startTime: BASE_TIME,
         open: 100,
         high: 101,
         low: 99,
@@ -273,10 +329,41 @@ test("AxisLayerCache, AnnotationPassCache, and OrderbookHeatmapOverlay work with
     assert.equal(second, "hit");
     passCache.clear();
 
-    const heatmap = new OrderbookHeatmapOverlay("BTCUSDT");
-    heatmap.setVisible(true);
-    heatmap.draw(mainCtx, view, series, [0, 1]);
-    heatmap.dispose();
+    let prevHeatmapSettingsSource = null;
+    try {
+      prevHeatmapSettingsSource = orderbookHeatmapSettingsSource();
+    } catch {
+      prevHeatmapSettingsSource = null;
+    }
+    configureOrderbookHeatmapSettingsSource({
+      settingsFor: () => DEFAULT_ORDERBOOK_HEATMAP_SETTINGS,
+      onChange: () => () => {},
+    });
+    const heatmap = new OrderbookHeatmapOverlay({
+      fetch: async () => ({
+        schemaVersion: 1,
+        generatedAt: BASE_TIME,
+        base: "BTC",
+        source: "single",
+        resolution: "1m",
+        bucketStep: 25,
+        from: BASE_TIME,
+        to: BASE_TIME + 60_000,
+        bars: [],
+      }),
+      invalidate: () => {},
+      getMarket: () => "BINANCE_FUTURES:btcusdt",
+      now: () => BASE_TIME,
+    });
+    try {
+      heatmap.setVisible(true);
+      heatmap.draw(mainCtx, view, series, [0, 0]);
+    } finally {
+      heatmap.dispose();
+      if (prevHeatmapSettingsSource) {
+        configureOrderbookHeatmapSettingsSource(prevHeatmapSettingsSource);
+      }
+    }
   } finally {
     globalThis.OffscreenCanvas = prevOffscreen;
   }
@@ -287,7 +374,7 @@ test("ChartWorkerPanelRuntime + WorkerChartHostBridge end-to-end over MessageCha
   globalThis.OffscreenCanvas = MockOffscreenCanvas;
   try {
     for (const backendPreference of ["canvas2d", "webgl2", "auto"]) {
-      const mainChannel = new MessageChannel();
+      const mainChannel = createMockPortPair();
       const historyChannel = new MessageChannel();
       const ingressChannel = new MessageChannel();
 
@@ -339,15 +426,15 @@ test("ChartWorkerPanelRuntime + WorkerChartHostBridge end-to-end over MessageCha
         payload: {
           timeframe: "1m",
           bars: [
-            { time: 1_700_000_000_000, open: 100, high: 105, low: 98, close: 103, volume: 50 },
-            { time: 1_700_000_060_000, open: 103, high: 108, low: 101, close: 107, volume: 75 },
+            { time: BASE_TIME, open: 100, high: 105, low: 98, close: 103, volume: 50 },
+            { time: BASE_TIME + 60_000, open: 103, high: 108, low: 101, close: 107, volume: 75 },
           ],
           hasMore: true,
           chunkIndex: 0,
         },
       });
 
-      const packed = new Float64Array([1_700_000_120_000, 107, 110, 105, 109, 90]);
+      const packed = new Float64Array([BASE_TIME + 120_000, 107, 110, 105, 109, 90]);
       historyChannel.port1.postMessage(
         {
           channel: "history",
@@ -376,7 +463,7 @@ test("ChartWorkerPanelRuntime + WorkerChartHostBridge end-to-end over MessageCha
         generation: 0,
         seq: 1,
         revision: 1,
-        payload: { price: 109.5, size: 1.5, timestamp: 1_700_000_130_000, side: "buy", tradeId: "t-1" },
+        payload: { price: 109.5, size: 1.5, timestamp: BASE_TIME + 130_000, side: "buy", tradeId: "t-1" },
       });
 
       ingressChannel.port1.postMessage({
@@ -387,7 +474,7 @@ test("ChartWorkerPanelRuntime + WorkerChartHostBridge end-to-end over MessageCha
         generation: 0,
         seq: 2,
         revision: 2,
-        payload: { time: 1_700_000_180_000, open: 109, high: 112, low: 108, close: 111, volume: 40 },
+        payload: { time: BASE_TIME + 180_000, open: 109, high: 112, low: 108, close: 111, volume: 40 },
       });
 
       await new Promise((r) => setTimeout(r, 25));

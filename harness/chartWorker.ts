@@ -1,5 +1,13 @@
+import { configureChartLocale } from "../src/core/chartLocale.js";
 import type { GpuBackendPreference } from "../src/core/gpu/gpuSettings.js";
 import { ChartWorkerHostPool } from "../src/features/chart/worker/chartWorkerRuntime.js";
+
+configureChartLocale({
+  locale: () => "en-US",
+  timeZone: () => "UTC",
+  translate: (key) => key,
+  onLocaleChange: () => () => {},
+});
 
 interface WorkerControlMessage {
   type: "attach-panel" | "dispose-panel" | "diagnostics";
