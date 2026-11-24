@@ -31,6 +31,7 @@ import type { ReferenceLevel } from "../analysis/referenceLevels.js";
 import type { PreviousWeekStrategyLevel, PreviousWeekStrategySettings } from "../analysis/previousWeekStrategy.js";
 import type { MondayRangeLevel, MondayRangeSettings } from "../analysis/mondayRange.js";
 import { incrementPerformanceCounter, isPerformanceTelemetryEnabled, recordPerformanceDuration } from "../performanceTelemetry.js";
+import type { InteractionQualityController } from "./interactionQuality.js";
 import { resolveChartDisplayOptions, type ResolvedChartDisplayOptions } from "../model/chartDisplayOptions.js";
 import { drawHud, type HudRendererDeps } from "./overlay/hudRenderer.js";
 import {
@@ -93,6 +94,7 @@ export class Overlay {
   private interactionHudWasActive = false;
   private interactionHudSyncTime: number | null = null;
   private partialTailRedrawEnabled = false;
+  private interactionQualityController: InteractionQualityController | null = null;
   /** Per-chart görünüm config'i (runtime set eder); null ise global settings. */
   private chartConfig: ChartViewConfig | null = null;
   private readonly axisCache = new AxisLayerCache();
@@ -304,6 +306,17 @@ export class Overlay {
     return this.partialTailRedrawEnabled;
   }
 
+  /** Attach or detach the optional adaptive pan/zoom interaction quality controller. */
+  setInteractionQualityController(controller: InteractionQualityController | null): void {
+    this.interactionQualityController = controller;
+  }
+
+  /** Whether opt-in adaptive reduced quality is currently active for non-critical dense text. */
+  isAdaptiveReducedQualityActive(): boolean {
+    const snapshot = this.interactionQualityController?.getSnapshot();
+    return snapshot?.qualityLevel === "reduced" && snapshot.suppressDenseFootprintText;
+  }
+
   /** Clear cached axis offscreen bitmaps so the next render rebuilds them from fresh state. */
   invalidateAxisCache(): void {
     this.axisCache.invalidate();
@@ -369,7 +382,8 @@ export class Overlay {
       "axis",
     ];
     const transform = ctx.getTransform?.();
-    const skipFootprintText = this.shouldSkipFootprintText?.() === true;
+    const skipFootprintText =
+      this.shouldSkipFootprintText?.() === true || this.isAdaptiveReducedQualityActive();
     this.annotationPassCache.begin(changes, JSON.stringify([ctx.canvas.width, ctx.canvas.height, transform?.a, transform?.d, view.area, view.offsetX, view.colWidth, view.priceTop, view.pricePerPx, range, series.length, series.at(series.length - 1)?.startTime, series.config.priceStep, series.nonTailRevision, orderedLayers, asOfTime, skipFootprintText]));
     const telemetryEnabled = isPerformanceTelemetryEnabled();
     const setupStartedAt = telemetryEnabled ? performance.now() : null;
