@@ -12,20 +12,96 @@ import {
 } from "../../analysis/tpoProfile.js";
 import type { FootprintSeries } from "../../model/footprint.js";
 import { incrementPerformanceCounter, isPerformanceTelemetryEnabled, recordPerformanceDuration } from "../../performanceTelemetry.js";
+import { quantizeToStep } from "../../priceStep.js";
 import type { ChartViewConfig } from "../../settings.js";
 import { bucketEnd, bucketStart } from "../../time.js";
 import type { FootprintBar } from "../../types.js";
-import type { TpoCacheState } from "./tpoPaintHelpers.js";
+import type { TpoCacheGroup, TpoCacheState } from "./tpoPaintHelpers.js";
 
 type BarInput = Omit<FootprintBar, "cells">;
 
 interface CachedGroup {
   firstIdx: number;
   sourceBars: readonly FootprintBar[];
-  inputs: BarInput[];
-  brackets: TpoBracketBar[];
+  closedInputs: BarInput[];
+  tailInput: BarInput | null;
+  closedBrackets: TpoBracketBar[];
+  tailBrackets: TpoBracketBar[];
   partial: boolean;
   result: TpoProfileGroup["result"];
+}
+
+interface TpoBracketBacking {
+  readonly totalCount: number;
+  readonly segments: readonly (readonly TpoBracketBar[])[];
+  readonly offsets: readonly number[];
+  flat?: TpoBracketBar[];
+}
+
+const bracketBackings = new WeakMap<TpoCacheState, TpoBracketBacking>();
+
+export function getTpoCacheBracketCount(cache: TpoCacheState): number {
+  const backing = bracketBackings.get(cache);
+  return backing ? backing.totalCount : cache.brackets.length;
+}
+
+export function getTpoCacheBracket(cache: TpoCacheState, index: number): TpoBracketBar | undefined {
+  const backing = bracketBackings.get(cache);
+  if (!backing) return cache.brackets[index];
+  if (index < 0 || index >= backing.totalCount) return undefined;
+  const lastSeg = backing.segments.length - 1;
+  if (lastSeg < 0) return undefined;
+  if (index >= backing.offsets[lastSeg]) {
+    return backing.segments[lastSeg][index - backing.offsets[lastSeg]];
+  }
+  let lo = 0;
+  let hi = lastSeg;
+  while (lo < hi) {
+    const mid = lo + ((hi - lo + 1) >>> 1);
+    if (backing.offsets[mid] <= index) lo = mid;
+    else hi = mid - 1;
+  }
+  return backing.segments[lo][index - backing.offsets[lo]];
+}
+
+function buildBracketBacking(entries: readonly CachedGroup[]): TpoBracketBacking {
+  const segments: (readonly TpoBracketBar[])[] = [];
+  const offsets: number[] = [];
+  let totalCount = 0;
+  for (const entry of entries) {
+    if (entry.closedBrackets.length > 0) {
+      offsets.push(totalCount);
+      segments.push(entry.closedBrackets);
+      totalCount += entry.closedBrackets.length;
+    }
+    if (entry.tailBrackets.length > 0) {
+      offsets.push(totalCount);
+      segments.push(entry.tailBrackets);
+      totalCount += entry.tailBrackets.length;
+    }
+  }
+  return { totalCount, segments, offsets };
+}
+
+function createTpoCacheState(key: string, groups: TpoCacheGroup[], backing: TpoBracketBacking): TpoCacheState {
+  const state = { key, groups } as TpoCacheState;
+  Object.defineProperty(state, "brackets", {
+    enumerable: true,
+    configurable: true,
+    get() {
+      if (!backing.flat) {
+        const flat = new Array<TpoBracketBar>(backing.totalCount);
+        let offset = 0;
+        for (const segment of backing.segments) {
+          for (let i = 0; i < segment.length; i++) flat[offset++] = segment[i];
+        }
+        backing.flat = flat;
+      }
+      return backing.flat;
+    },
+  });
+  bracketBackings.set(state, backing);
+  return state;
 }
 
 // Store only the previous render's visible groups without changing the exposed cache shape.
@@ -94,12 +170,14 @@ function sameBracketMetadata(saved: BarInput, bar: FootprintBar, checkShape: boo
 function groupChanges(
   cached: CachedGroup | undefined, bars: readonly FootprintBar[], first: number, last: number, structureChanged: boolean,
 ): "profile" | "brackets" | "none" {
-  if (cached?.firstIdx !== first || cached.inputs.length !== last - first + 1) return "profile";
+  const expectedLen = last - first + 1;
+  const cachedLen = cached ? cached.closedInputs.length + (cached.tailInput ? 1 : 0) : 0;
+  if (!cached || cached.firstIdx !== first || cachedLen !== expectedLen) return "profile";
   let sameMetadata = true;
   for (let index = first; index <= last; index++) {
     const bar = bars[index];
     const localIndex = index - first;
-    const saved = cached.inputs[localIndex];
+    const saved = localIndex < cached.closedInputs.length ? cached.closedInputs[localIndex] : cached.tailInput!;
     if (saved.startTime !== bar.startTime || !Object.is(saved.high, bar.high) || !Object.is(saved.low, bar.low)) {
       return "profile";
     }
@@ -114,14 +192,26 @@ function groupChanges(
   return sameMetadata ? "none" : "brackets";
 }
 
+function snapshotSingleInput(bar: FootprintBar): BarInput {
+  const { cells: _cells, ...input } = bar;
+  if (input.sources) input.sources = [...input.sources];
+  return input;
+}
+
 function snapshotInputs(bars: readonly FootprintBar[], first: number, last: number): BarInput[] {
   const inputs: BarInput[] = [];
   for (let index = first; index <= last; index++) {
-    const { cells: _cells, ...input } = bars[index];
-    if (input.sources) input.sources = [...input.sources];
-    inputs.push(input);
+    inputs.push(snapshotSingleInput(bars[index]));
   }
   return inputs;
+}
+
+function collectBracketBars(closedBrackets: readonly TpoBracketBar[], tailBrackets: readonly TpoBracketBar[]): FootprintBar[] {
+  const result = new Array<FootprintBar>(closedBrackets.length + tailBrackets.length);
+  let idx = 0;
+  for (let i = 0; i < closedBrackets.length; i++) result[idx++] = closedBrackets[i].bar;
+  for (let i = 0; i < tailBrackets.length; i++) result[idx++] = tailBrackets[i].bar;
+  return result;
 }
 
 export function updateTpoProfileCache(
@@ -149,16 +239,28 @@ export function updateTpoProfileCache(
   const closedBarsUnchanged = !structureChanged && typeof nonTailRevision === "number"
     && prior?.nonTailRevision === nonTailRevision;
 
-  const sameSessionBounds = closedBarsUnchanged
+  const sameSeriesContext = closedBarsUnchanged
     && prior !== undefined
     && prior.series === series
     && prior.bars === bars
     && prior.barsLength === bars.length
     && prior.tailStartTime === tailStartTime
     && prior.settingsKey === settingsKey
-    && prior.mergeKey === mergeKey
-    && prior.floorFrom === floorFrom
-    && prior.ceilTo === ceilTo;
+    && prior.mergeKey === mergeKey;
+
+  const sameSessionBounds = sameSeriesContext && (
+    (prior.floorFrom === floorFrom && prior.ceilTo === ceilTo)
+    || (
+      period !== "visible"
+      && previous !== null
+      && previous.groups.length > 0
+      && floorFrom < ceilTo
+      && floorFrom >= prior.first
+      && ceilTo <= prior.end
+      && floorFrom <= previous.groups[0].lastIdx
+      && (ceilTo - 1) >= previous.groups[previous.groups.length - 1].firstIdx
+    )
+  );
   const cachedBounds = sameSessionBounds ? prior : undefined;
 
   const [first, end] = cachedBounds
@@ -206,21 +308,22 @@ export function updateTpoProfileCache(
     const lastPrevGroup = prevGroups[closedCount];
     const cachedTail = cachedBounds.groupEntries[closedCount];
     const tailLen = lastBarIdx - lastPrevGroup.firstIdx + 1;
-    const lastCachedBracket = cachedTail.brackets[cachedTail.brackets.length - 1];
+    const cachedTailInputLen = cachedTail.closedInputs.length + (cachedTail.tailInput ? 1 : 0);
+    const lastCachedBracket = cachedTail.tailBrackets[cachedTail.tailBrackets.length - 1];
     if (
       fastOk
       && (
         tailLen <= 0
         || cachedTail.firstIdx !== lastPrevGroup.firstIdx
         || cachedTail.sourceBars.length !== tailLen
-        || cachedTail.inputs.length !== tailLen
-        || cachedTail.brackets.length === 0
+        || cachedTailInputLen !== tailLen
+        || cachedTail.tailBrackets.length === 0
         || cachedTail.sourceBars[0] !== bars[lastPrevGroup.firstIdx]
         || cachedTail.sourceBars[tailLen - 1] !== bars[lastBarIdx]
         || !lastCachedBracket
         || lastCachedBracket.firstIdx < cachedTail.firstIdx
         || lastCachedBracket.lastIdx !== lastBarIdx
-        || lastPrevGroup.lastBracketIndex !== previous.brackets.length - 1
+        || lastPrevGroup.lastBracketIndex !== getTpoCacheBracketCount(previous) - 1
       )
     ) {
       fastOk = false;
@@ -228,22 +331,19 @@ export function updateTpoProfileCache(
 
     if (fastOk) {
       if (startedAt !== null) skippedGroups += closedCount;
-      const localIndex = tailLen - 1;
       const tailBar = bars[lastBarIdx];
-      const savedTail = cachedTail.inputs[localIndex];
-      let tailChanges: "profile" | "brackets" | "none" = "none";
-      if (savedTail.startTime !== tailBar.startTime || !Object.is(savedTail.high, tailBar.high) || !Object.is(savedTail.low, tailBar.low)) {
-        tailChanges = "profile";
-      } else if (
-        !Object.is(savedTail.open, tailBar.open)
+      const savedTail = cachedTail.tailInput;
+      const tailChanged = !savedTail
+        || savedTail.startTime !== tailBar.startTime
+        || !Object.is(savedTail.high, tailBar.high)
+        || !Object.is(savedTail.low, tailBar.low)
+        || !Object.is(savedTail.open, tailBar.open)
         || !Object.is(savedTail.close, tailBar.close)
-        || !sameBracketMetadata(savedTail, tailBar, false)
-      ) {
-        tailChanges = "brackets";
-      }
+        || !sameBracketMetadata(savedTail, tailBar, false);
 
-      if (tailChanges === "none") {
-        const state: TpoCacheState = { key, brackets: previous.brackets, groups: previous.groups };
+      if (!tailChanged) {
+        const prevBacking = bracketBackings.get(previous) ?? buildBracketBacking(cachedBounds.groupEntries);
+        const state = createTpoCacheState(key, previous.groups, prevBacking);
         groupCaches.set(state, {
           series,
           structureRevision,
@@ -270,50 +370,59 @@ export function updateTpoProfileCache(
       }
 
       const tailBrackets = aggregateTpoBrackets(bars, lastCachedBracket.firstIdx, lastBarIdx + 1, bracketMs);
-      const brackets = cachedTail.brackets.length === 1
+      const quantizeChanged = tailBrackets.length > 0 && (
+        priceStep > 0
+          ? (
+              quantizeToStep(tailBrackets[0].bar.high, priceStep) !== quantizeToStep(lastCachedBracket.bar.high, priceStep)
+              || quantizeToStep(tailBrackets[0].bar.low, priceStep) !== quantizeToStep(lastCachedBracket.bar.low, priceStep)
+            )
+          : (
+              !Object.is(tailBrackets[0].bar.high, lastCachedBracket.bar.high)
+              || !Object.is(tailBrackets[0].bar.low, lastCachedBracket.bar.low)
+            )
+      );
+      const recompute = !savedTail
+        || savedTail.startTime !== tailBar.startTime
+        || tailBrackets.length !== 1
+        || tailBrackets[0].bar.startTime !== lastCachedBracket.bar.startTime
+        || quantizeChanged;
+
+      const nextClosedBrackets = tailBrackets.length <= 1
+        ? cachedTail.closedBrackets
+        : cachedTail.closedBrackets.concat(tailBrackets.slice(0, -1));
+      const nextTailBrackets = tailBrackets.length <= 1
         ? tailBrackets
-        : [...cachedTail.brackets.slice(0, -1), ...tailBrackets];
-      const inputs = cachedTail.inputs.slice();
-      const { cells: _cells, ...tailInput } = tailBar;
-      if (tailInput.sources) tailInput.sources = [...tailInput.sources];
-      inputs[localIndex] = tailInput;
-      const recompute = tailChanges === "profile";
+        : [tailBrackets[tailBrackets.length - 1]];
+
       const result = recompute
-        ? calculateTpoProfile(brackets.map(({ bar }) => bar), priceStep, vaPercent)
+        ? calculateTpoProfile(collectBracketBars(nextClosedBrackets, nextTailBrackets), priceStep, vaPercent)
         : cachedTail.result;
       if (startedAt !== null && recompute) computedGroups++;
 
       const tailEntry: CachedGroup = {
         firstIdx: cachedTail.firstIdx,
-        brackets,
         sourceBars: cachedTail.sourceBars,
-        inputs,
+        closedInputs: cachedTail.closedInputs,
+        tailInput: snapshotSingleInput(tailBar),
+        closedBrackets: nextClosedBrackets,
+        tailBrackets: nextTailBrackets,
         partial: cachedTail.partial,
         result,
       };
-      const nextBrackets = tailBrackets.length === 1
-        ? (() => {
-            const copied = previous.brackets.slice();
-            copied[copied.length - 1] = tailBrackets[0];
-            return copied;
-          })()
-        : [
-            ...previous.brackets.slice(0, previous.brackets.length - 1),
-            ...tailBrackets,
-          ];
+      const nextEntries = cachedBounds.groupEntries.slice();
+      nextEntries[closedCount] = tailEntry;
+      const nextBacking = buildBracketBacking(nextEntries);
       const nextGroups = prevGroups.slice();
       nextGroups[closedCount] = {
         ...lastPrevGroup,
         firstBracketIndex: lastPrevGroup.firstBracketIndex,
-        lastBracketIndex: nextBrackets.length - 1,
+        lastBracketIndex: nextBacking.totalCount - 1,
         partial: tailEntry.partial,
         result: tailEntry.result,
       };
-      const nextEntries = cachedBounds.groupEntries.slice();
-      nextEntries[closedCount] = tailEntry;
       const nextMap = new Map(cachedBounds.groups);
       nextMap.set(cachedBounds.groupIds[closedCount], tailEntry);
-      const state: TpoCacheState = { key, brackets: nextBrackets, groups: nextGroups };
+      const state = createTpoCacheState(key, nextGroups, nextBacking);
       groupCaches.set(state, {
         series,
         structureRevision,
@@ -344,7 +453,8 @@ export function updateTpoProfileCache(
   const groups = new Map<string, CachedGroup>();
   const groupEntries: CachedGroup[] = [];
   const groupIds: string[] = [];
-  const state: TpoCacheState = { key, brackets: [], groups: [] };
+  const stateGroups: TpoCacheGroup[] = [];
+  let bracketCount = 0;
   for (const group of mergeTpoSessionSpans(spans, mergeLeft)) {
     const { firstIdx, lastIdx, sessionStarts } = group;
     const id = sessionStarts.join("|");
@@ -359,11 +469,15 @@ export function updateTpoProfileCache(
       const brackets = aggregateTpoBrackets(bars, firstIdx, lastIdx + 1, bracketMs);
       // Brackets copy trade metadata too. Volume-only updates refresh that copy without recalculating the profile.
       const recompute = !cached || changes === "profile";
+      const closedBrackets = brackets.length > 1 ? brackets.slice(0, -1) : [];
+      const tailBrackets = brackets.length > 0 ? [brackets[brackets.length - 1]] : [];
       entry = {
         firstIdx,
-        brackets,
         sourceBars: bars.slice(firstIdx, lastIdx + 1),
-        inputs: snapshotInputs(bars, firstIdx, lastIdx),
+        closedInputs: snapshotInputs(bars, firstIdx, lastIdx - 1),
+        tailInput: lastIdx >= firstIdx ? snapshotSingleInput(bars[lastIdx]) : null,
+        closedBrackets,
+        tailBrackets,
         partial: recompute ? tpoSessionPartial(bars, firstIdx, lastIdx, period, intervalMs) : cached.partial,
         result: recompute ? calculateTpoProfile(brackets.map(({ bar }) => bar), priceStep, vaPercent) : cached.result,
       };
@@ -375,16 +489,17 @@ export function updateTpoProfileCache(
     groups.set(id, entry);
     groupEntries.push(entry);
     groupIds.push(id);
-    const firstBracketIndex = state.brackets.length;
-    for (const bracket of entry.brackets) state.brackets.push(bracket);
-    state.groups.push({
+    const firstBracketIndex = bracketCount;
+    bracketCount += entry.closedBrackets.length + entry.tailBrackets.length;
+    stateGroups.push({
       ...group,
       firstBracketIndex,
-      lastBracketIndex: state.brackets.length - 1,
+      lastBracketIndex: bracketCount - 1,
       partial: entry.partial,
       result: entry.result,
     });
   }
+  const state = createTpoCacheState(key, stateGroups, buildBracketBacking(groupEntries));
   groupCaches.set(state, {
     series,
     structureRevision,
