@@ -218,6 +218,7 @@ test("Stage 2 SwiftShader WebGPU verifies pixel-bucket LOD, sub-pixel merged-cel
     const captureLodMode = async (nativeEnabled: boolean) => {
       const context = await browser.newContext({ baseURL: resolvedBaseURL, viewport: VIEWPORT });
       const page = await context.newPage();
+      await page.clock.setFixedTime(new Date(FROZEN_NOW));
       await installWebGpuOffscreenPresentInitScript(page);
       await installStage2Routes(page, bars, () => {});
       await openHarness(
@@ -253,6 +254,7 @@ test("Stage 2 SwiftShader WebGPU verifies pixel-bucket LOD, sub-pixel merged-cel
         await r.session.captureCompositePng();
 
         // 1. pixel-bucket LOD (colWidth = 0.5)
+        r.historyController?.cancelMaintenanceRefresh?.();
         r.updateState({ ...r.getState(), chartType: "candlestick", scaleMode: "linear" });
         r.invalidate();
         await r.session.captureCompositePng();
@@ -262,11 +264,20 @@ test("Stage 2 SwiftShader WebGPU verifies pixel-bucket LOD, sub-pixel merged-cel
         v.fitPriceRange(59_800, 61_500, 0.05);
         v.setPriceAutoScale(false);
         r.invalidate();
+        await r.session.captureCompositePng();
+        v.setPriceAutoScale(false);
+        v.colWidth = 0.5;
+        v.offsetX = 0;
+        v.fitPriceRange(59_800, 61_500, 0.05);
+        v.setPriceAutoScale(false);
+        r.invalidate();
         const pbFrame = await r.session.captureCompositePng();
+        const pbView = { colWidth: v.colWidth, offsetX: v.offsetX, priceTop: v.priceTop, pricePerPx: v.pricePerPx };
         const pbPath = getGpuDiagnostics().featurePaths?.scene ?? null;
         const pbPng = await blobToB64(pbFrame.blob);
 
         // 2. merged-cells LOD (footprint with rowHeight < CELL_PIXEL_MERGE_HEIGHT = 2)
+        r.historyController?.cancelMaintenanceRefresh?.();
         r.updateState({ ...r.getState(), chartType: "footprint", scaleMode: "linear" });
         r.invalidate();
         await r.session.captureCompositePng();
@@ -276,15 +287,25 @@ test("Stage 2 SwiftShader WebGPU verifies pixel-bucket LOD, sub-pixel merged-cel
         v.fitPriceRange(52_000, 72_000, 0.05); // ~20k range / ~750px -> pricePerPx ~26.7 -> rowHeight = 50/26.7 ~ 1.87 < 2
         v.setPriceAutoScale(false);
         r.invalidate();
+        await r.session.captureCompositePng();
+        v.setPriceAutoScale(false);
+        v.colWidth = 20;
+        v.offsetX = 0;
+        v.fitPriceRange(52_000, 72_000, 0.05);
+        v.setPriceAutoScale(false);
+        r.invalidate();
         const mcFrame = await r.session.captureCompositePng();
+        const mcView = { colWidth: v.colWidth, offsetX: v.offsetX, priceTop: v.priceTop, pricePerPx: v.pricePerPx };
         const mcPath = getGpuDiagnostics().featurePaths?.scene ?? null;
         const mcPng = await blobToB64(mcFrame.blob);
 
         return {
           backend: getGpuDiagnostics().active,
           pbPath,
+          pbView,
           pbPng,
           mcPath,
+          mcView,
           mcPng,
         };
       }, { id });
@@ -346,6 +367,8 @@ test("Stage 2 SwiftShader WebGPU verifies pixel-bucket LOD, sub-pixel merged-cel
     }, { imm, nat });
     await compareCtx.close();
 
+    expect(nat.pbView).toEqual(imm.pbView);
+    expect(nat.mcView).toEqual(imm.mcView);
     expect(lodParity.pb.nonBg).toBeGreaterThan(200);
     expect(lodParity.pb.matchRatio).toBeGreaterThanOrEqual(0.98);
     expect(lodParity.mc.nonBg).toBeGreaterThan(200);
@@ -355,6 +378,7 @@ test("Stage 2 SwiftShader WebGPU verifies pixel-bucket LOD, sub-pixel merged-cel
     let heatmapAckCount = 0;
     const hmCtx = await browser.newContext({ baseURL: resolvedBaseURL, viewport: VIEWPORT });
     const hmPage = await hmCtx.newPage();
+    await hmPage.clock.setFixedTime(new Date(FROZEN_NOW));
     await installWebGpuOffscreenPresentInitScript(hmPage);
     await installStage2Routes(hmPage, bars, () => { heatmapAckCount++; });
     await openHarness(

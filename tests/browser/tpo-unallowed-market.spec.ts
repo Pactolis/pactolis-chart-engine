@@ -64,6 +64,7 @@ function buildPairedBars(count: number): { ohlcvBars: WireBar[]; footprintBars: 
 
 test("unallowed OHLCV markets support TPO with zero extra requests, pair-type persistence, and identical POC/VAH/VAL", async ({ page }) => {
   test.setTimeout(90_000);
+  await page.clock.setFixedTime(new Date(FROZEN_NOW));
   const { ohlcvBars, footprintBars } = buildPairedBars(120);
   const historyRequests: Array<{ market: string; includeFootprint: string | null; purpose: string | null }> = [];
 
@@ -240,6 +241,22 @@ test("unallowed OHLCV markets support TPO with zero extra requests, pair-type pe
     await waitReady("allowed-ref", allowedMarket);
     const rtRef = harness.getChartRuntime("allowed-ref")!;
     const allowedTpo = readTpoSummary(rtRef);
+    handleRef.dispose();
+    rootRef.remove();
+
+    // Quiesce resource timing entries before measuring toggleResourceDelta.
+    const quiesceDeadline = performance.now() + 2_000;
+    let prevResCount = performance.getEntriesByType("resource").length;
+    while (performance.now() < quiesceDeadline) {
+      await new Promise((r) => setTimeout(r, 50));
+      await nextFrames(2);
+      const nextResCount1 = performance.getEntriesByType("resource").length;
+      await new Promise((r) => setTimeout(r, 50));
+      await nextFrames(2);
+      const nextResCount2 = performance.getEntriesByType("resource").length;
+      if (nextResCount1 === prevResCount && nextResCount2 === prevResCount) break;
+      prevResCount = nextResCount2;
+    }
 
     // Measure requests around candlestick -> tpo -> candlestick and forced footprint on unallowed market.
     const resCountBeforeToggles = performance.getEntriesByType("resource").length;
@@ -352,10 +369,8 @@ test("unallowed OHLCV markets support TPO with zero extra requests, pair-type pe
     };
 
     handleA.dispose();
-    handleRef.dispose();
     handleSwitch.dispose();
     rootA.remove();
-    rootRef.remove();
     rootSwitch.remove();
 
     return {
