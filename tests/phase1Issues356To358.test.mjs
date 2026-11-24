@@ -6,7 +6,7 @@ import { FootprintSeries } from "../dist/core/model/footprint.js";
 import { settings } from "../dist/core/settings.js";
 import { footprintAutoscaleSource, footprintVisiblePriceRange } from "../dist/core/model/footprintAutoscale.js";
 import { configurePerformanceTelemetry, incrementPerformanceCounter, isPerformanceTelemetryEnabled, measurePerformance, snapshotPerformanceTelemetry } from "../dist/core/performanceTelemetry.js";
-import { getGpuDiagnostics, resetGpuDiagnostics } from "../dist/core/gpu/gpuDiagnostics.js";
+import { getGpuDiagnostics, resetGpuDiagnosticsForTest } from "../dist/core/gpu/gpuDiagnostics.js";
 import { configureOrderbookHeatmapSettingsSource, orderbookHeatmapSettingsSource } from "../dist/features/orderbook/heatmapSettingsSource.js";
 import { ChartInputController } from "../dist/features/chart/ChartInputController.js";
 import { ChartHeatmapGpuCoordinator } from "../dist/features/chart/ChartHeatmapGpuCoordinator.js";
@@ -180,7 +180,7 @@ function makeHeatmapView(offsetX = 0) {
 }
 
 test("#356: WebGL2 GPU heatmap pan reuses prepared frame with 0 B geometry/texture upload and updates u_panOffsetX", async () => {
-  resetGpuDiagnostics();
+  resetGpuDiagnosticsForTest();
   const fake = makeFakeGl();
   let overlay;
   let coordinator;
@@ -280,7 +280,7 @@ test("#356: WebGL2 GPU heatmap pan reuses prepared frame with 0 B geometry/textu
   });
   coordinator?.dispose();
   overlay?.dispose();
-  resetGpuDiagnostics();
+  resetGpuDiagnosticsForTest();
 });
 
 test("#357: ChartInputController caches getBoundingClientRect when ResizeObserver exists and invalidates on resize/scroll/observer/zero-width", () => {
@@ -493,7 +493,7 @@ test("#358A: _autoFit skips redundant _fitToData on sub-bar horizontal pan and r
 });
 
 test("#358B & Diagnostics: tryMotionRasterReuse < 0.72 triggers ImageData re-anchor and heatmap sets cpu-raster/off path", async () => {
-  resetGpuDiagnostics();
+  resetGpuDiagnosticsForTest();
   const wasTelemetry = isPerformanceTelemetryEnabled();
   configurePerformanceTelemetry({ enabled: true });
   let overlay;
@@ -580,6 +580,6 @@ test("#358B & Diagnostics: tryMotionRasterReuse < 0.72 triggers ImageData re-anc
   } finally {
     overlay?.dispose();
     configurePerformanceTelemetry({ enabled: wasTelemetry });
-    resetGpuDiagnostics();
+    resetGpuDiagnosticsForTest();
   }
 });
