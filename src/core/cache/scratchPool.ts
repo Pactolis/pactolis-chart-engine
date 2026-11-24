@@ -38,6 +38,7 @@ function recordCounter(name: "memory.pool.hit" | "memory.pool.alloc" | "memory.p
 export class ScratchBufferLease<T extends ArrayBufferView> {
   private _state: ScratchLeaseState = "leased";
   private readonly _view: T;
+  private readonly _initialByteLength: number;
   private readonly onRelease: (lease: ScratchBufferLease<T>) => void;
   private readonly onDetach: (lease: ScratchBufferLease<T>) => void;
 
@@ -48,6 +49,7 @@ export class ScratchBufferLease<T extends ArrayBufferView> {
     onDetach: (lease: ScratchBufferLease<T>) => void,
   ) {
     this._view = view;
+    this._initialByteLength = view.byteLength;
     this.onRelease = onRelease;
     this.onDetach = onDetach;
   }
@@ -60,6 +62,13 @@ export class ScratchBufferLease<T extends ArrayBufferView> {
     return this._view.byteLength;
   }
 
+  private isUnderlyingBufferDetached(): boolean {
+    return (
+      (this._view.buffer as { detached?: boolean }).detached === true ||
+      (this._initialByteLength > 0 && this._view.buffer.byteLength === 0)
+    );
+  }
+
   /**
    * Returns the leased typed-array view while owned. Throws if the lease has
    * been returned, detached for worker transfer, or disposed, or if its
@@ -69,8 +78,9 @@ export class ScratchBufferLease<T extends ArrayBufferView> {
     if (this._state !== "leased") {
       throw new Error(`Cannot access scratch buffer lease in state "${this._state}"`);
     }
-    if (this._view.buffer.byteLength === 0 && this._view.byteLength > 0) {
+    if (this.isUnderlyingBufferDetached()) {
       this._state = "detached";
+      this.onDetach(this);
       throw new Error("Cannot access scratch buffer lease: underlying ArrayBuffer is detached");
     }
     return this._view;
@@ -80,6 +90,11 @@ export class ScratchBufferLease<T extends ArrayBufferView> {
   release(): void {
     if (this._state !== "leased") {
       throw new Error(`Cannot release scratch buffer lease: already ${this._state}`);
+    }
+    if (this.isUnderlyingBufferDetached()) {
+      this._state = "detached";
+      this.onDetach(this);
+      throw new Error("Cannot release scratch buffer lease: underlying ArrayBuffer is detached");
     }
     this.onRelease(this);
   }
@@ -97,8 +112,9 @@ export class ScratchBufferLease<T extends ArrayBufferView> {
     if (typeof SharedArrayBuffer !== "undefined" && buffer instanceof SharedArrayBuffer) {
       throw new Error("Cannot detach SharedArrayBuffer for transfer");
     }
-    if (buffer.byteLength === 0 && this._view.byteLength > 0) {
+    if (this.isUnderlyingBufferDetached()) {
       this._state = "detached";
+      this.onDetach(this);
       throw new Error("Cannot detach scratch buffer lease: underlying ArrayBuffer is already detached");
     }
     this._state = "detached";
@@ -109,6 +125,11 @@ export class ScratchBufferLease<T extends ArrayBufferView> {
   /** @internal */
   _rawView(): T {
     return this._view;
+  }
+
+  /** @internal */
+  _isUnderlyingBufferDetached(): boolean {
+    return this.isUnderlyingBufferDetached();
   }
 
   /** @internal */
@@ -218,9 +239,9 @@ export class TypedArrayPool<T extends ArrayBufferView> {
       lease._markState("returned");
       return;
     }
-    if (buffer.byteLength === 0 && rawView.byteLength > 0) {
+    if (lease._isUnderlyingBufferDetached()) {
       lease._markState("detached");
-      throw new Error("Cannot release scratch buffer lease: underlying ArrayBuffer was detached");
+      throw new Error("Cannot release scratch buffer lease: underlying ArrayBuffer is detached");
     }
 
     lease._markState("returned");
