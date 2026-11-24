@@ -19,7 +19,7 @@ function makeSpySurface() {
   };
   const surface = {
     backend: "canvas2d",
-    canvas: null,
+    canvas: { width: 240, height: 180 },
     beginFrame() {
       quads.length = 0;
       return {
