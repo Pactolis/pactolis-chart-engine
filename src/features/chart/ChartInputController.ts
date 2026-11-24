@@ -175,6 +175,44 @@ function attachChartInput(canvas: HTMLCanvasElement, crosshair: Crosshair, host:
   const interactionPolicy = DEFAULT_CHART_INTERACTION_POLICY;
   const gestures = new ChartGestureController(canvas);
   const touches = new TouchPointers();
+  const canCacheRect = typeof ResizeObserver === "function";
+  let cachedRect: DOMRect | null = null;
+  const hasActiveGesture = (): boolean =>
+    gestures.pan !== null
+    || gestures.indicatorScale !== null
+    || gestures.drawingActive
+    || gestures.pinch !== null
+    || gestures.inspect !== null
+    || gestures.menuPress !== null;
+  const invalidateRect = (): void => {
+    cachedRect = null;
+  };
+  const rectObserver = canCacheRect ? new ResizeObserver(invalidateRect) : null;
+  rectObserver?.observe(canvas);
+  if (canCacheRect) {
+    ownerWindow?.addEventListener("resize", invalidateRect, { passive: true });
+    ownerWindow?.addEventListener("scroll", invalidateRect, { passive: true, capture: true });
+  }
+  const getCanvasRect = (refresh = false): DOMRect => {
+    if (!canCacheRect) return canvas.getBoundingClientRect();
+    if (!refresh && hasActiveGesture() && cachedRect && cachedRect.width > 0) {
+      return cachedRect;
+    }
+    const rect = canvas.getBoundingClientRect();
+    if (refresh || hasActiveGesture()) {
+      cachedRect = rect.width > 0 ? rect : null;
+    } else {
+      cachedRect = null;
+    }
+    return rect;
+  };
+  let lastCursor = canvas.style.cursor;
+  const setCanvasCursor = (next: string): void => {
+    if (lastCursor !== next) {
+      lastCursor = next;
+      canvas.style.cursor = next;
+    }
+  };
   let longPress: { timer: ReturnType<typeof setTimeout>; pointerId: number } | null = null;
   let lastTouchDownAt = Number.NEGATIVE_INFINITY;
   /** True while the keyboard route dispatches its synthetic contextmenu, which must not be mistaken for a touch's. */
@@ -246,14 +284,14 @@ function attachChartInput(canvas: HTMLCanvasElement, crosshair: Crosshair, host:
 
   const updateAxisCursor = (cx: number, cy: number): void => {
     if (gestures.pan) {
-      canvas.style.cursor = cursorForTarget(gestures.pan.target);
+      setCanvasCursor(cursorForTarget(gestures.pan.target));
       return;
     }
     if (gestures.indicatorScale) {
-      canvas.style.cursor = "ns-resize";
+      setCanvasCursor("ns-resize");
       return;
     }
-    canvas.style.cursor = cursorForTarget(hitTestChartAxis(view, cx, cy));
+    setCanvasCursor(cursorForTarget(hitTestChartAxis(view, cx, cy)));
   };
 
   const rebaseActiveGestureAfterWheel = (e: WheelEvent, localX: number, localY: number): void => {
@@ -282,7 +320,7 @@ function attachChartInput(canvas: HTMLCanvasElement, crosshair: Crosshair, host:
 
   const onWheel = (e: WheelEvent) => {
     e.preventDefault();
-    const rect = canvas.getBoundingClientRect();
+    const rect = getCanvasRect();
     const localX = e.clientX - rect.left;
     const localY = e.clientY - rect.top;
     const indicatorPaneId = host.overlay.getIndicatorAxisPaneAt(localX, localY);
@@ -379,7 +417,7 @@ function attachChartInput(canvas: HTMLCanvasElement, crosshair: Crosshair, host:
     host.clearMagnetSnap?.();
     crosshair.visible = false;
     if (host.isReplaySelecting()) host.previewReplayStart(null);
-    if (!gestures.pan) canvas.style.cursor = "default";
+    if (!gestures.pan) setCanvasCursor("default");
     session.invalidate(ChartChange.Interaction);
     resetLastNotifiedCrosshair();
     if (!host.applyingExternal) {
@@ -399,14 +437,14 @@ function attachChartInput(canvas: HTMLCanvasElement, crosshair: Crosshair, host:
     gestures.pan = null;
     host.setPointerDragging?.(false);
     if (!keepCapture) gestures.releasePointer(pointerId ?? capturedPointerId);
-    canvas.style.cursor = "default";
+    setCanvasCursor("default");
   };
 
   /** Ends an active indicator pane axis drag, releasing pointer capture before committing once. */
   const finishIndicatorScaleGesture = (pointerId?: number): IndicatorScaleGesture | null => {
     const drag = gestures.clearIndicatorScale(pointerId);
     if (!drag) return null;
-    canvas.style.cursor = "default";
+    setCanvasCursor("default");
     if (drag.scaled && !controllerDisposed && !host.isDisposed?.()) {
       host.scaleIndicatorPane(drag.paneId, 1, true);
     }
@@ -511,7 +549,7 @@ function attachChartInput(canvas: HTMLCanvasElement, crosshair: Crosshair, host:
   const resumePan = (pointerId: number): void => {
     const finger = touches.get(pointerId);
     if (!finger || gestures.pan) return;
-    const rect = canvas.getBoundingClientRect();
+    const rect = getCanvasRect();
     const clientX = finger.x + rect.left;
     const clientY = finger.y + rect.top;
     if (interactionPolicy.scroll.plotPressedMouseMove) host.timeViewport.beginPlotPan();
@@ -543,7 +581,7 @@ function attachChartInput(canvas: HTMLCanvasElement, crosshair: Crosshair, host:
 
   /** Registers a finger that just landed; true when it was an extra finger the gestures in progress consume. */
   const trackTouchDown = (e: PointerEvent): boolean => {
-    const rect = canvas.getBoundingClientRect();
+    const rect = getCanvasRect(!hasActiveGesture());
     // With no gesture in progress, fingers still on record are stale (a lift the canvas never saw).
     if (!gestureInProgress()) touches.clear();
     touches.down(e.pointerId, e.clientX - rect.left, e.clientY - rect.top);
@@ -578,7 +616,7 @@ function attachChartInput(canvas: HTMLCanvasElement, crosshair: Crosshair, host:
   /** A tap on the corner "⋯" button opens the same menu a right click would, anchored under the button. */
   const openMenuFromButton = (release: PointerEvent, press: { startX: number; startY: number }): void => {
     if (movedBeyondSlop(release.clientX - press.startX, release.clientY - press.startY, TOUCH_CLICK_SLOP_PX)) return;
-    const rect = canvas.getBoundingClientRect();
+    const rect = getCanvasRect();
     if (!host.overlay.getMenuButtonAt(release.clientX - rect.left, release.clientY - rect.top)) return;
     const button = host.overlay.getMenuButtonRect();
     if (!button) return;
@@ -620,7 +658,7 @@ function attachChartInput(canvas: HTMLCanvasElement, crosshair: Crosshair, host:
     gestures.drawingActive = false;
     syncTransientMagnet(e);
     gestures.releasePointer(e.pointerId);
-    canvas.style.cursor = "default";
+    setCanvasCursor("default");
     session.invalidate();
   };
 
@@ -638,7 +676,7 @@ function attachChartInput(canvas: HTMLCanvasElement, crosshair: Crosshair, host:
   };
 
   const tapDrawing = (release: PointerEvent): void => {
-    const rect = canvas.getBoundingClientRect();
+    const rect = getCanvasRect();
     if (pressDrawing(release, release.clientX - rect.left, release.clientY - rect.top, false)) releaseDrawing(release);
   };
 
@@ -657,7 +695,7 @@ function attachChartInput(canvas: HTMLCanvasElement, crosshair: Crosshair, host:
       (canvas as HTMLElement & { focus(options?: FocusOptions & { focusVisible?: boolean }): void })
         .focus({ preventScroll: true, focusVisible: false });
     }
-    const rect = canvas.getBoundingClientRect();
+    const rect = getCanvasRect(true);
     const cx = e.clientX - rect.left;
     const cy = e.clientY - rect.top;
     if (touch && host.overlay.getMenuButtonAt(cx, cy)) {
@@ -668,14 +706,14 @@ function attachChartInput(canvas: HTMLCanvasElement, crosshair: Crosshair, host:
     const indicatorPaneId = host.overlay.getIndicatorAxisPaneAt(cx, cy);
     if (indicatorPaneId) {
       gestures.indicatorScale = { paneId: indicatorPaneId, pointerId: e.pointerId, startX: e.clientX, startY: e.clientY, lastY: e.clientY };
-      canvas.style.cursor = "ns-resize";
+      setCanvasCursor("ns-resize");
       canvas.setPointerCapture(e.pointerId);
       return;
     }
     const target = hitTestChartAxis(view, cx, cy, touch ? TOUCH_AXIS_HIT : undefined);
     if (target === "plot" && host.isReplaySelecting()) {
       host.selectReplayStart(host.screenToDrawingPoint(cx, cy).time);
-      canvas.style.cursor = "default";
+      setCanvasCursor("default");
       return;
     }
     let tap: ChartPanGesture["tap"];
@@ -683,7 +721,7 @@ function attachChartInput(canvas: HTMLCanvasElement, crosshair: Crosshair, host:
       if (touch && defersDrawingPress(cx, cy)) tap = tapDrawing;
       else if (pressDrawing(e, cx, cy, true)) return;
     }
-    canvas.style.cursor = cursorForTarget(target);
+    setCanvasCursor(cursorForTarget(target));
     if (target === "price-axis" && interactionPolicy.scale.axisPressedMouseMove.price) {
       view.startPriceAxisScale(cy);
     } else if (target === "time-axis" && interactionPolicy.scale.axisPressedMouseMove.time) {
@@ -756,62 +794,66 @@ function attachChartInput(canvas: HTMLCanvasElement, crosshair: Crosshair, host:
   };
 
   const onPointerUp = (e: PointerEvent) => {
-    if (isTouchPointer(e)) {
-      touches.up(e.pointerId);
-      cancelLongPress(e.pointerId);
-      if (endTouchGesture(e, false)) return;
-    }
-    if (gestures.acceptedDrawingPointerId === e.pointerId) {
-      releaseDrawing(e);
-      return;
-    }
-    if (gestures.indicatorScale) {
-      if (gestures.indicatorScale.pointerId !== e.pointerId) return;
-      const drag = finishIndicatorScaleGesture(e.pointerId);
-      const wasDragging = drag
-        ? movedBeyondSlop(e.clientX - drag.startX, e.clientY - drag.startY, clickSlopPx(e))
-        : false;
-      if (!wasDragging) {
-        const rect = canvas.getBoundingClientRect();
-        const control = host.overlay.getIndicatorScaleControlAt(e.clientX - rect.left, e.clientY - rect.top);
-        if (control?.id === "autoScale") host.resetIndicatorPaneScale(control.paneId);
-        if (control?.id === "logarithmic") host.toggleIndicatorScaleModeFromControl(control.paneId);
+    try {
+      if (isTouchPointer(e)) {
+        touches.up(e.pointerId);
+        cancelLongPress(e.pointerId);
+        if (endTouchGesture(e, false)) return;
       }
-      return;
-    }
-    if (!gestures.pan || gestures.pan.pointerId !== e.pointerId) return;
-    const wasDragging = gestures.pan.wheeled
-      || gestures.pan.dragging === true
-      || movedBeyondSlop(e.clientX - gestures.pan.startX, e.clientY - gestures.pan.startY, clickSlopPx(e));
-    const tap = gestures.pan.tap;
-    endActiveGesture(e.pointerId);
-
-    if (!wasDragging) {
-      if (tap) {
-        tap(e);
+      if (gestures.acceptedDrawingPointerId === e.pointerId) {
+        releaseDrawing(e);
         return;
       }
-      const rect = canvas.getBoundingClientRect();
-      const cx = e.clientX - rect.left;
-      const cy = e.clientY - rect.top;
-      const control = host.overlay.getPriceScaleControlAt(cx, cy);
-      const indicatorControl = host.overlay.getIndicatorScaleControlAt(cx, cy);
-      if (indicatorControl) {
-        if (indicatorControl.id === "autoScale") {
-          host.resetIndicatorPaneScale(indicatorControl.paneId);
-        } else {
-          host.toggleIndicatorScaleModeFromControl(indicatorControl.paneId);
+      if (gestures.indicatorScale) {
+        if (gestures.indicatorScale.pointerId !== e.pointerId) return;
+        const drag = finishIndicatorScaleGesture(e.pointerId);
+        const wasDragging = drag
+          ? movedBeyondSlop(e.clientX - drag.startX, e.clientY - drag.startY, clickSlopPx(e))
+          : false;
+        if (!wasDragging) {
+          const rect = getCanvasRect();
+          const control = host.overlay.getIndicatorScaleControlAt(e.clientX - rect.left, e.clientY - rect.top);
+          if (control?.id === "autoScale") host.resetIndicatorPaneScale(control.paneId);
+          if (control?.id === "logarithmic") host.toggleIndicatorScaleModeFromControl(control.paneId);
         }
         return;
       }
-      if (control === "autoScale") {
-        host.setPriceAutoScaleFromControl(!view.isPriceAutoScale());
-        return;
+      if (!gestures.pan || gestures.pan.pointerId !== e.pointerId) return;
+      const wasDragging = gestures.pan.wheeled
+        || gestures.pan.dragging === true
+        || movedBeyondSlop(e.clientX - gestures.pan.startX, e.clientY - gestures.pan.startY, clickSlopPx(e));
+      const tap = gestures.pan.tap;
+      endActiveGesture(e.pointerId);
+
+      if (!wasDragging) {
+        if (tap) {
+          tap(e);
+          return;
+        }
+        const rect = getCanvasRect();
+        const cx = e.clientX - rect.left;
+        const cy = e.clientY - rect.top;
+        const control = host.overlay.getPriceScaleControlAt(cx, cy);
+        const indicatorControl = host.overlay.getIndicatorScaleControlAt(cx, cy);
+        if (indicatorControl) {
+          if (indicatorControl.id === "autoScale") {
+            host.resetIndicatorPaneScale(indicatorControl.paneId);
+          } else {
+            host.toggleIndicatorScaleModeFromControl(indicatorControl.paneId);
+          }
+          return;
+        }
+        if (control === "autoScale") {
+          host.setPriceAutoScaleFromControl(!view.isPriceAutoScale());
+          return;
+        }
+        if (control === "logarithmic") {
+          host.togglePriceScaleModeFromControl();
+          return;
+        }
       }
-      if (control === "logarithmic") {
-        host.togglePriceScaleModeFromControl();
-        return;
-      }
+    } finally {
+      if (!hasActiveGesture()) invalidateRect();
     }
   };
 
@@ -837,6 +879,7 @@ function attachChartInput(canvas: HTMLCanvasElement, crosshair: Crosshair, host:
     finishIndicatorScaleGesture(e.pointerId);
     cancelDrawingPointer(e.pointerId);
     endActiveGesture(e.pointerId);
+    if (!hasActiveGesture()) invalidateRect();
     crosshair.visible = false;
     session.invalidate();
   };
@@ -847,6 +890,7 @@ function attachChartInput(canvas: HTMLCanvasElement, crosshair: Crosshair, host:
     finishIndicatorScaleGesture(e.pointerId);
     cancelDrawingPointer(e.pointerId);
     endActiveGesture(e.pointerId);
+    if (!hasActiveGesture()) invalidateRect();
   };
 
   const onContextMenu = (e: MouseEvent) => {
@@ -863,7 +907,7 @@ function attachChartInput(canvas: HTMLCanvasElement, crosshair: Crosshair, host:
     if (activeDrawings.hasDraft()) activeDrawings.cancelDraft();
     gestures.drawingActive = false;
     endActiveGesture();
-    const rect = canvas.getBoundingClientRect();
+    const rect = getCanvasRect();
     openContextMenu(e.clientX - rect.left, e.clientY - rect.top, e.clientX, e.clientY);
   };
 
@@ -914,7 +958,7 @@ function attachChartInput(canvas: HTMLCanvasElement, crosshair: Crosshair, host:
     if (e.defaultPrevented || e.target !== canvas) return;
     if (!matchesChartCanvasShortcut("context-menu", e)) return;
     e.preventDefault();
-    const rect = canvas.getBoundingClientRect();
+    const rect = getCanvasRect();
     const MouseEventCtor = canvas.ownerDocument.defaultView?.MouseEvent ?? MouseEvent;
     keyboardContextMenu = true;
     try {
@@ -955,9 +999,13 @@ function attachChartInput(canvas: HTMLCanvasElement, crosshair: Crosshair, host:
     if (e.key === "Control" || e.key === "Meta") syncTransientMagnet(e);
   };
 
-  const onWindowBlur = (): void => clearTransientMagnet();
+  const onWindowBlur = (): void => {
+    clearTransientMagnet();
+    if (!hasActiveGesture()) invalidateRect();
+  };
   const onVisibilityChange = (): void => {
     if (ownerWindow?.document.visibilityState === "hidden") clearTransientMagnet();
+    if (!hasActiveGesture()) invalidateRect();
   };
 
   /**
@@ -1037,7 +1085,7 @@ function attachChartInput(canvas: HTMLCanvasElement, crosshair: Crosshair, host:
   };
 
   const onDblClick = (e: MouseEvent) => {
-    const rect = canvas.getBoundingClientRect();
+    const rect = getCanvasRect();
     const cx = e.clientX - rect.left;
     const cy = e.clientY - rect.top;
     const indicatorPaneId = host.overlay.getIndicatorAxisPaneAt(cx, cy);
@@ -1112,7 +1160,7 @@ function attachChartInput(canvas: HTMLCanvasElement, crosshair: Crosshair, host:
   };
 
   const onPointerMoveMain = (e: PointerEvent) => {
-    const rect = canvas.getBoundingClientRect();
+    const rect = getCanvasRect();
     const cx = e.clientX - rect.left;
     const cy = e.clientY - rect.top;
     if (isTouchPointer(e)) {
@@ -1124,7 +1172,7 @@ function attachChartInput(canvas: HTMLCanvasElement, crosshair: Crosshair, host:
     if (host.isReplaySelecting()) {
       const target = hitTestChartAxis(view, cx, cy);
       host.previewReplayStart(target === "plot" ? host.screenToDrawingPoint(cx, cy).time : null);
-      canvas.style.cursor = target === "plot" ? "crosshair" : cursorForTarget(target);
+      setCanvasCursor(target === "plot" ? "crosshair" : cursorForTarget(target));
       return;
     }
     if (gestures.drawingActive) return;
@@ -1184,6 +1232,12 @@ function attachChartInput(canvas: HTMLCanvasElement, crosshair: Crosshair, host:
     ownerWindow?.removeEventListener("keyup", onDrawingKeyUp);
     ownerWindow?.removeEventListener("blur", onWindowBlur);
     ownerWindow?.document.removeEventListener("visibilitychange", onVisibilityChange);
+    rectObserver?.disconnect();
+    if (canCacheRect) {
+      ownerWindow?.removeEventListener("resize", invalidateRect);
+      ownerWindow?.removeEventListener("scroll", invalidateRect, { capture: true });
+    }
+    cachedRect = null;
     gestures.reset();
   };
 }

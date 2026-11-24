@@ -59,6 +59,7 @@ import {
 } from "./heatmapModel.js";
 import type { HeatmapGpuCellFrame } from "../chart/heatmap/gpu/heatmapGpuRenderer.js";
 import type { GpuNativeHeatmapResidentCell, GpuNativeHeatmapResidentFrame } from "../../core/gpu/gpuBackend.js";
+import { setGpuFeaturePath } from "../../core/gpu/gpuDiagnostics.js";
 
 export type { LiveHeatmapTailEvent, LiveHeatmapTailRequest, OrderbookHeatmapRuntimeStatus } from "./heatmapContracts.js";
 
@@ -1108,7 +1109,11 @@ export class OrderbookHeatmapOverlay {
     }
     this.needsRedrawOnVisible = false;
     const frame = this.beginFrame(series, range);
-    if (!frame) return;
+    if (!frame) {
+      setGpuFeaturePath("heatmap", this.active() ? "cpu-raster" : "off");
+      return;
+    }
+    setGpuFeaturePath("heatmap", "cpu-raster");
     const startedAt = isPerformanceTelemetryEnabled() ? performance.now() : null;
     try {
       const canvasWidth = ctx.canvas?.width ?? 0;
@@ -1660,6 +1665,19 @@ export class OrderbookHeatmapOverlay {
     const canScrollInPlace = Boolean(
       offCtx && typeof offCtx.drawImage === "function" && typeof offCtx.clearRect === "function",
     );
+    if (!canScrollInPlace && view.colWidth >= 1) {
+      const cacheCtx = offCtx ?? (this.rasterCacheCanvas.getContext?.("2d") ?? null);
+      if (
+        cacheCtx &&
+        typeof cacheCtx.createImageData === "function" &&
+        typeof cacheCtx.putImageData === "function"
+      ) {
+        const retainedAreaRatio = (destWidth * destHeight) / Math.max(1, areaWidth * areaHeight);
+        if (retainedAreaRatio < 0.72) {
+          return false;
+        }
+      }
+    }
 
     const drawWidth = Math.max(1, view.colWidth);
     const colPad = view.colWidth < 1 ? 1 : 0;
@@ -2463,6 +2481,8 @@ export class OrderbookHeatmapOverlay {
         palette,
         dataKey: this.dataKey,
         contentRevision: ++this.gpuFrameContentRevision,
+        anchorOffsetX: view.offsetX,
+        panOffsetX: 0,
       };
     }
     if (mainCount >= GPU_MAX_PREPARED_CELLS) return null;
@@ -2680,6 +2700,8 @@ export class OrderbookHeatmapOverlay {
       palette: resolveOrderbookHeatmapPalette(this.settings.palette),
       dataKey: this.dataKey,
       contentRevision: ++this.gpuFrameContentRevision,
+      anchorOffsetX: view.offsetX,
+      panOffsetX: 0,
     };
   }
 
@@ -2702,10 +2724,10 @@ export class OrderbookHeatmapOverlay {
    * Returns a deterministic cache key for GPU prepare inputs (while running
    * `beginFrame` chunk TTL and error retry scheduling), or `null` when nothing can be drawn.
    */
-  getPrepareCacheKey(view: View, series: FootprintSeries, range: [number, number]): string | null {
+  getPrepareCacheKey(view: View, series: FootprintSeries, range: [number, number], includeOffsetX = false): string | null {
     const frame = this.beginFrame(series, range);
     if (!frame) return null;
-    return this.frameCacheKey(view, series, frame, false, false);
+    return this.frameCacheKey(view, series, frame, false, false, includeOffsetX);
   }
 
   private scheduleScaleSettleTimer(): void {
@@ -3078,14 +3100,16 @@ export class OrderbookHeatmapOverlay {
     frame: HeatmapFramePreamble,
     includePalette = true,
     includeOpacity = true,
+    includeOffsetX = true,
   ): string {
     const opacityPart = includeOpacity ? resolveOrderbookHeatmapOpacity(frame.settings.opacity) : "";
     const scaleMode = frame.settings.scaleMode ?? "auto";
     const fixedCeiling = scaleMode === "fixed" ? (frame.settings.fixedCeiling?.[frame.settings.unit] ?? 0) : 0;
     const contrast = frame.settings.contrast ?? "medium";
     const palettePart = includePalette ? resolveOrderbookHeatmapPalette(frame.settings.palette) : "";
+    const offsetXPart = includeOffsetX ? view.offsetX : "";
     const seriesStructRev = (series as { structureRevision?: number }).structureRevision ?? 0;
-    return `${this.dataKey}|${frame.settings.unit}|${frame.threshold}|${opacityPart}|${scaleMode}|${fixedCeiling}|${contrast}|${palettePart}|${this.barsRevision}|${seriesIdentityId(series)}|${seriesStructRev}|${series.length}|${frame.first}|${frame.last}|${this.isReplayActive()}|${view.colWidth}|${view.offsetX}|${view.area.left}|${view.area.top}|${view.area.width}|${view.area.height}|${view.priceTop}|${view.pricePerPx}|${view.priceScaleMode}`;
+    return `${this.dataKey}|${frame.settings.unit}|${frame.threshold}|${opacityPart}|${scaleMode}|${fixedCeiling}|${contrast}|${palettePart}|${this.barsRevision}|${seriesIdentityId(series)}|${seriesStructRev}|${series.length}|${frame.first}|${frame.last}|${this.isReplayActive()}|${view.colWidth}|${offsetXPart}|${view.area.left}|${view.area.top}|${view.area.width}|${view.area.height}|${view.priceTop}|${view.pricePerPx}|${view.priceScaleMode}`;
   }
 
   /** Collects the visible density cells and refreshes chunk requests/ceiling. */

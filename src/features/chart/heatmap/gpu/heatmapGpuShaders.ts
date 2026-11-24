@@ -11,10 +11,11 @@ in vec4 a_rect;        // instance: x, y, w, h in CSS pixels (top-left origin)
 in vec2 a_texel;       // instance: density/validity grid coordinate [0..1]
 in float a_alphaScale; // instance: 1.0 main column, 0.45 live-bar extension
 uniform vec2 u_resolution; // canvas size in CSS pixels
+uniform float u_panOffsetX;
 out vec2 v_texel;
 out float v_alphaScale;
 void main() {
-  vec2 pos = a_rect.xy + a_unit * a_rect.zw;
+  vec2 pos = a_rect.xy + vec2(u_panOffsetX, 0.0) + a_unit * a_rect.zw;
   vec2 clip = (pos / u_resolution) * 2.0 - 1.0;
   gl_Position = vec4(clip.x, -clip.y, 0.0, 1.0); // flip Y -> top-left origin
   v_texel = a_texel;
