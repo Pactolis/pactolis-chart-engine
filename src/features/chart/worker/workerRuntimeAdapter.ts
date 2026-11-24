@@ -328,7 +328,7 @@ export class WorkerChartHostBridge {
    */
   handleWorkerCrash(reason: string, newPorts?: HostBridgePorts): boolean {
     if (this.disposed) return false;
-    this.detachMainPort();
+    this.detachMainPort(true);
     this.rejectAllPending(`Worker crashed: ${reason}`);
 
     if (this.restartCount >= this.maxRestarts) {
@@ -374,13 +374,11 @@ export class WorkerChartHostBridge {
     this.disposed = true;
     this.rejectAllPending("Host bridge disposed");
     this.outboundQueue.clear();
-    this.detachMainPort();
+    this.detachMainPort(true);
     if (this.closePortsOnDispose) {
-      this.mainPort?.close?.();
       this.ingressPort?.close?.();
       this.historyPort?.close?.();
     }
-    this.mainPort = null;
     this.ingressPort = null;
     this.historyPort = null;
     this.setStatus("disposed");
@@ -433,9 +431,13 @@ export class WorkerChartHostBridge {
     }
   }
 
-  private detachMainPort(): void {
+  private detachMainPort(closeIfConfigured = false): void {
     if (this.mainPort) {
       this.mainPort.removeEventListener("message", this.handleMainMessage);
+      if (closeIfConfigured && this.closePortsOnDispose) {
+        this.mainPort.close?.();
+      }
+      this.mainPort = null;
     }
   }
 
