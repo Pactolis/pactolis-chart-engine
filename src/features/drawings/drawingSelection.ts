@@ -29,8 +29,7 @@ export class DrawingSelection extends DrawingState {
   }
 
   selectMany(ids: string[]): void {
-    const valid = ids.filter((id) => this.drawings.some((drawing) => drawing.id === id));
-    this.setSelection(valid, lastOf(valid) ?? null);
+    this.setSelection(ids);
   }
 
   clearSelection(): void {
@@ -104,6 +103,7 @@ export class DrawingSelection extends DrawingState {
     time: DrawingContext,
     market?: string
   ): void {
+    if (this.selectedIds.size === 0) return;
     const renderMarket = market ?? this.currentMarket;
     ctx.save();
     for (const drawing of this.drawings) {
@@ -117,7 +117,8 @@ export class DrawingSelection extends DrawingState {
   }
 
   protected setSelection(ids: string[], primary: string | null | undefined = undefined, emit = false): void {
-    const valid = ids.filter((id) => this.drawings.some((drawing) => drawing.id === id));
+    const validIds = new Set(this.drawings.map((drawing) => drawing.id));
+    const valid = ids.filter((id) => validIds.has(id));
     this.selectedIds = new Set(valid);
     this.selectedId = primary && this.selectedIds.has(primary) ? primary : (lastOf(valid) ?? null);
     this.summaryRevision++;

@@ -23,7 +23,8 @@ export abstract class DrawingState extends DrawingNotifications {
   protected selectedId: string | null = null;
   protected selectedIds = new Set<string>();
   protected editingPoint: number | null = null;
-  protected draggingSelection: { start: DrawingPoint; before: Array<{ id: string; points: DrawingPoint[] }> } | null = null;
+  protected editingDrawing: Drawing | null = null;
+  protected draggingSelection: { start: DrawingPoint; before: Array<{ drawing: Drawing; id: string; points: DrawingPoint[] }> } | null = null;
   protected gestureBefore: Drawing[] | null = null; // drawings before a pointer drag/point edit, see commitGesture
   protected clipboard: Drawing[] = [];
   protected positionRiskSettings: PositionRiskSettings = structuredClone(DEFAULT_POSITION_RISK_SETTINGS);
@@ -183,10 +184,17 @@ export abstract class DrawingState extends DrawingNotifications {
     this.displayNameCache = null;
     this.drawings = structuredClone(drawings).map(normalizeDrawing);
     this.pruneSelection();
+    this.draggingSelection = null;
+    this.editingPoint = null;
+    this.editingDrawing = null;
     this.gestureBefore = null;
     this.undoStack = [];
     this.redoStack = [];
     this.summaryRevision++;
+  }
+
+  getRevision(): number {
+    return this.summaryRevision;
   }
 
   list(): Drawing[] {
