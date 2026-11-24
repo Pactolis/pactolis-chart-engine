@@ -79,6 +79,8 @@ import { orderbookHeatmapSettingsSource } from "../orderbook/heatmapSettingsSour
 import { isOrderbookHeatmapMarket } from "../../core/orderbookHeatmap/settings.js";
 import type { HeatmapGpuCellFrame } from "./heatmap/gpu/heatmapGpuRenderer.js";
 import type { FootprintSeries } from "../../core/model/footprint.js";
+import type { FootprintBar } from "../../core/types.js";
+import type { Drawing } from "../../core/drawingTypes.js";
 import { abortableDelay } from "./abortableDelay.js";
 import type { ChartSurfaceModel } from "./chartSurfaceModel.js";
 
@@ -261,6 +263,17 @@ class ChartRuntimeImpl implements ChartRuntime, ChartInputHost {
   private lastSeriesTailSig: string | null = null;
   private lastSeriesTailJson: string = "[]";
   private pendingFirstCandleMark = false;
+  private magnetPocCache = new WeakMap<
+    FootprintBar,
+    { cellRevision: number; priceStep: number; cellsSize: number; pocPrice: number | null }
+  >();
+  private magnetAnchorCache: {
+    listRef: readonly Drawing[] | null;
+    revision: number | null;
+    market: string;
+    asOfTime: number | undefined;
+    anchors: Array<{ time: number; price: number; drawingId: string }>;
+  } | null = null;
 
   activeMagnetSnap: MagnetSnapTarget | null = null;
 
@@ -1323,26 +1336,111 @@ class ChartRuntimeImpl implements ChartRuntime, ChartInputHost {
       label: string;
       distancePx: number;
     }
-    const candidates: SnapCandidate[] = [];
+    let best: SnapCandidate | null = null;
+    const considerCandidate = (
+      x: number,
+      y: number,
+      price: number,
+      time: number,
+      label: string,
+      distancePx: number,
+    ) => {
+      if (best === null || distancePx < best.distancePx) {
+        best = { x, y, price, time, label, distancePx };
+      }
+    };
 
     // 1. Drawing anchors
     const drawings = this.analysisContextForChart().drawings;
     if (drawings) {
-      const currentList = drawings.listCurrentReadonly ? drawings.listCurrentReadonly() : (drawings.listCurrent?.() ?? []);
+      const panelMarket = this.state?.market ?? "";
+      const replaySnap = this.replayCoordinator?.getSnapshot?.();
+      const asOfTime = this.replayCoordinator?.isActive
+        ? (this.replayCoordinator.isActive() ? replaySnap?.virtualTime : undefined)
+        : replaySnap?.virtualTime;
+      const currentList = drawings.listCurrentReadonly
+        ? drawings.listCurrentReadonly()
+        : (drawings.listCurrent?.() ?? []);
+      const revision = (drawings as { getRevision?: () => number }).getRevision?.() ?? null;
       const isDragActive = drawings.isPointerDragActive?.() === true;
-      const selectedSet = new Set(drawings.getSelectedIds?.() ?? []);
-      for (const d of currentList) {
-        if (!d.visible) continue;
-        if (isDragActive && selectedSet.has(d.id)) continue;
-        for (const pt of d.points) {
-          if (typeof pt.price !== "number" || typeof pt.time !== "number") continue;
-          const ptIdx = this.pipeline.series.indexOfTime(pt.time);
-          const ax = this.view.xOfIndex(ptIdx);
-          const ay = this.view.yOfPrice(pt.price);
-          if (!Number.isFinite(ax) || !Number.isFinite(ay)) continue;
-          const dist = Math.hypot(ax - cx, ay - cy);
-          if (forceNearest || dist <= 14) {
-            candidates.push({ x: ax, y: ay, price: pt.price, time: pt.time, label: "ANCHOR", distancePx: dist });
+      const selectedSet = isDragActive ? new Set(drawings.getSelectedIds?.() ?? []) : null;
+
+      let anchorCache = this.magnetAnchorCache;
+      if (
+        !anchorCache
+        || anchorCache.listRef !== currentList
+        || anchorCache.revision !== revision
+        || anchorCache.market !== panelMarket
+        || anchorCache.asOfTime !== asOfTime
+      ) {
+        const anchors: Array<{ time: number; price: number; drawingId: string }> = [];
+        for (const d of currentList) {
+          if (!d.visible) continue;
+          if (d.market !== panelMarket) continue;
+          if (asOfTime !== undefined && !d.points.every((pt) => pt.time <= asOfTime)) continue;
+          for (const pt of d.points) {
+            if (typeof pt.price !== "number" || typeof pt.time !== "number") continue;
+            anchors.push({ time: pt.time, price: pt.price, drawingId: d.id });
+          }
+        }
+        anchors.sort((a, b) => a.time - b.time);
+        anchorCache = {
+          listRef: currentList,
+          revision,
+          market: panelMarket,
+          asOfTime,
+          anchors,
+        };
+        this.magnetAnchorCache = anchorCache;
+      }
+
+      const anchors = anchorCache.anchors;
+      if (anchors.length > 0) {
+        if (!forceNearest) {
+          const WEAK_ANCHOR_THRESHOLD_PX = 14;
+          const tLeft = this._indexToTime(this.view.indexOfX(cx - WEAK_ANCHOR_THRESHOLD_PX));
+          const tRight = this._indexToTime(this.view.indexOfX(cx + WEAK_ANCHOR_THRESHOLD_PX));
+          if (tLeft !== null && tRight !== null) {
+            const minTime = Math.min(tLeft, tRight) - 1;
+            const maxTime = Math.max(tLeft, tRight) + 1;
+            const pA = this.view.priceOfY(cy - WEAK_ANCHOR_THRESHOLD_PX);
+            const pB = this.view.priceOfY(cy + WEAK_ANCHOR_THRESHOLD_PX);
+            const minPrice = Math.min(pA, pB);
+            const maxPrice = Math.max(pA, pB);
+
+            let lo = 0;
+            let hi = anchors.length;
+            while (lo < hi) {
+              const mid = (lo + hi) >>> 1;
+              if (anchors[mid].time < minTime) lo = mid + 1;
+              else hi = mid;
+            }
+
+            for (let i = lo; i < anchors.length; i++) {
+              const anchor = anchors[i];
+              if (anchor.time > maxTime) break;
+              if (anchor.price < minPrice || anchor.price > maxPrice) continue;
+              if (selectedSet !== null && selectedSet.has(anchor.drawingId)) continue;
+              const ptIdx = this.pipeline.series.indexOfTime(anchor.time);
+              const ax = this.view.xOfIndex(ptIdx);
+              const ay = this.view.yOfPrice(anchor.price);
+              if (!Number.isFinite(ax) || !Number.isFinite(ay)) continue;
+              const dist = Math.hypot(ax - cx, ay - cy);
+              if (dist <= WEAK_ANCHOR_THRESHOLD_PX) {
+                considerCandidate(ax, ay, anchor.price, anchor.time, "ANCHOR", dist);
+              }
+            }
+          }
+        } else {
+          for (let i = 0; i < anchors.length; i++) {
+            const anchor = anchors[i];
+            if (selectedSet !== null && selectedSet.has(anchor.drawingId)) continue;
+            const ptIdx = this.pipeline.series.indexOfTime(anchor.time);
+            const ax = this.view.xOfIndex(ptIdx);
+            const ay = this.view.yOfPrice(anchor.price);
+            if (!Number.isFinite(ax) || !Number.isFinite(ay)) continue;
+            const dist = Math.hypot(ax - cx, ay - cy);
+            considerCandidate(ax, ay, anchor.price, anchor.time, "ANCHOR", dist);
           }
         }
       }
@@ -1354,35 +1452,47 @@ class ChartRuntimeImpl implements ChartRuntime, ChartInputHost {
     if (bar) {
       const barX = this.view.xOfIndex(barIdx);
       const barTime = this._indexToTime(barIdx) ?? bar.startTime;
-      const ohlcLevels: Array<{ price: number; label: string }> = [
-        { price: bar.open, label: "O" },
-        { price: bar.high, label: "H" },
-        { price: bar.low, label: "L" },
-        { price: bar.close, label: "C" },
-      ];
 
-      // Bar POC if footprint cells exist
-      if (bar.cells && bar.cells.size > 0) {
-        let maxVol = 0;
-        let pocPrice: number | null = null;
-        const step = this.pipeline.series.config?.priceStep ?? 0;
-        for (const cell of bar.cells.values()) {
-          const v = cell.buyVol + cell.sellVol;
-          if (v > maxVol) {
-            maxVol = v;
-            pocPrice = cell.priceBin + step / 2;
-          }
-        }
-        if (pocPrice !== null) {
-          ohlcLevels.push({ price: pocPrice, label: "POC" });
-        }
-      }
-
-      for (const { price: lvlPrice, label: lvlLabel } of ohlcLevels) {
+      const considerBarLevel = (lvlPrice: number, lvlLabel: string) => {
         const lvlY = this.view.yOfPrice(lvlPrice);
         const distY = Math.abs(lvlY - cy);
         if (forceNearest || distY <= WEAK_MAGNET_THRESHOLD_PX) {
-          candidates.push({ x: barX, y: lvlY, price: lvlPrice, time: barTime, label: lvlLabel, distancePx: distY });
+          considerCandidate(barX, lvlY, lvlPrice, barTime, lvlLabel, distY);
+        }
+      };
+
+      considerBarLevel(bar.open, "O");
+      considerBarLevel(bar.high, "H");
+      considerBarLevel(bar.low, "L");
+      considerBarLevel(bar.close, "C");
+
+      // Bar POC if footprint cells exist
+      if (bar.cells && bar.cells.size > 0) {
+        const step = this.pipeline.series.config?.priceStep ?? 0;
+        const cellRevision = bar.cellRevision ?? 0;
+        const cellsSize = bar.cells.size;
+        const pocCache = (this.magnetPocCache ??= new WeakMap());
+        let cachedPoc = pocCache.get(bar);
+        if (
+          !cachedPoc
+          || cachedPoc.cellRevision !== cellRevision
+          || cachedPoc.priceStep !== step
+          || cachedPoc.cellsSize !== cellsSize
+        ) {
+          let maxVol = 0;
+          let pocPrice: number | null = null;
+          for (const cell of bar.cells.values()) {
+            const v = cell.buyVol + cell.sellVol;
+            if (v > maxVol) {
+              maxVol = v;
+              pocPrice = cell.priceBin + step / 2;
+            }
+          }
+          cachedPoc = { cellRevision, priceStep: step, cellsSize, pocPrice };
+          pocCache.set(bar, cachedPoc);
+        }
+        if (cachedPoc.pocPrice !== null) {
+          considerBarLevel(cachedPoc.pocPrice, "POC");
         }
       }
     }
@@ -1398,7 +1508,7 @@ class ChartRuntimeImpl implements ChartRuntime, ChartInputHost {
         const nY = this.view.yOfPrice(nPrice);
         const dist = Math.hypot(nX - cx, nY - cy);
         if (forceNearest || dist <= WEAK_MAGNET_THRESHOLD_PX) {
-          candidates.push({ x: nX, y: nY, price: nPrice, time: nTime, label: nLabel, distancePx: dist });
+          considerCandidate(nX, nY, nPrice, nTime, nLabel, dist);
         }
       }
     }
@@ -1416,18 +1526,23 @@ class ChartRuntimeImpl implements ChartRuntime, ChartInputHost {
         const vpY = this.view.yOfPrice(vpPrice);
         const vpDistY = Math.abs(vpY - cy);
         if (forceNearest || vpDistY <= WEAK_MAGNET_THRESHOLD_PX) {
-          candidates.push({ x: cx, y: vpY, price: vpPrice, time: defaultTime, label: vpLabel, distancePx: vpDistY });
+          considerCandidate(cx, vpY, vpPrice, defaultTime, vpLabel, vpDistY);
         }
       }
     }
 
-    if (candidates.length > 0) {
-      candidates.sort((a, b) => a.distancePx - b.distancePx);
-      const best = candidates[0];
-      this.activeMagnetSnap = { x: best.x, y: best.y, price: best.price, time: best.time, label: best.label };
-      this.setHookAttr?.("data-magnet-snap", best.label);
+    const resolvedBest = best as SnapCandidate | null;
+    if (resolvedBest !== null) {
+      this.activeMagnetSnap = {
+        x: resolvedBest.x,
+        y: resolvedBest.y,
+        price: resolvedBest.price,
+        time: resolvedBest.time,
+        label: resolvedBest.label,
+      };
+      this.setHookAttr?.("data-magnet-snap", resolvedBest.label);
       this.session?.invalidate(typeof ChartChange !== "undefined" ? ChartChange.Interaction : (1 << 4));
-      return { time: best.time, price: best.price };
+      return { time: resolvedBest.time, price: resolvedBest.price };
     }
 
     this.clearMagnetSnap?.();

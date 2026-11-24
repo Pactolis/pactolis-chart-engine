@@ -44,6 +44,7 @@ export class DrawingGestures extends DrawingSelection {
     this.placementCommitted = false;
     this.draggingSelection = null;
     this.editingPoint = null;
+    this.editingDrawing = null;
     this.selectedIds.delete(draftId);
     if (this.selectedId === draftId) this.selectedId = lastOf([...this.selectedIds]) ?? null;
     this.onToolChange?.(this.tool);
@@ -110,7 +111,7 @@ export class DrawingGestures extends DrawingSelection {
           start: { ...point },
           before: this.selectedInDrawOrder()
             .filter((drawing) => !drawing.locked)
-            .map((drawing) => ({ id: drawing.id, points: drawing.points.map((item) => ({ ...item })) })),
+            .map((drawing) => ({ drawing, id: drawing.id, points: drawing.points.map((item) => ({ ...item })) })),
         };
         return true;
       }
@@ -118,11 +119,12 @@ export class DrawingGestures extends DrawingSelection {
         const levelIndex = positionLevelHitIndex(selectable, point, screen, this.hitContext(this.touchTargets));
         if (levelIndex !== null) {
           this.editingPoint = levelIndex;
+          this.editingDrawing = selectable;
           return true;
         }
         this.draggingSelection = {
           start: { ...point },
-          before: [{ id: selectable.id, points: selectable.points.map((item) => ({ ...item })) }],
+          before: [{ drawing: selectable, id: selectable.id, points: selectable.points.map((item) => ({ ...item })) }],
         };
         return true;
       }
@@ -132,6 +134,7 @@ export class DrawingGestures extends DrawingSelection {
             ? index : best,
         0
       );
+      this.editingDrawing = selectable;
       return true;
     }
     const tool = getDrawingTool(this.tool);
@@ -180,15 +183,15 @@ export class DrawingGestures extends DrawingSelection {
       const deltaTime = point.time - this.draggingSelection.start.time;
       const deltaPrice = point.price - this.draggingSelection.start.price;
       for (const item of this.draggingSelection.before) {
-        const drawing = this.drawings.find((candidate) => candidate.id === item.id);
+        const drawing = item.drawing;
         if (!drawing || drawing.locked) continue;
         drawing.points = item.points.map((original) => ({ time: original.time + deltaTime, price: original.price + deltaPrice }));
       }
       return true;
     }
     if (this.editingPoint !== null && this.selectedId) {
-      const drawing = this.drawings.find((item) => item.id === this.selectedId);
-      if (!drawing) return false;
+      const drawing = this.editingDrawing;
+      if (!drawing || drawing.locked) return false;
       const nextPoint = constrainPointEdit(drawing, this.editingPoint, point);
       drawing.points[this.editingPoint] = nextPoint;
       normalizeDrawingPointsInPlace(drawing, this.editingPoint);
@@ -224,6 +227,7 @@ export class DrawingGestures extends DrawingSelection {
     if (this.draggingSelection || this.editingPoint !== null) {
       this.draggingSelection = null;
       this.editingPoint = null;
+      this.editingDrawing = null;
       this.commitGesture();
       this.changed();
       return true;
