@@ -235,6 +235,11 @@ function paintTpoGroups(
   const plotBottom = plotTop + view.area.height;
   const plotLeft = view.area.left;
   const plotRight = plotLeft + view.area.width;
+  const canvasCssWidth = ctx.canvas && view.pixelRatio && view.pixelRatio > 0
+    ? ctx.canvas.width / view.pixelRatio
+    : plotRight;
+  const cullLeft = Math.min(plotLeft, 0);
+  const cullRight = Math.max(plotRight, canvasCssWidth);
   const topPrice = view.priceOfY(plotTop);
   const bottomPrice = view.priceOfY(plotBottom);
   const hasFiniteVisPrice = Number.isFinite(topPrice) && Number.isFinite(bottomPrice) && step > 0;
@@ -279,7 +284,7 @@ function paintTpoGroups(
       const maxLabelW = typeof ctx.measureText === "function" ? ctx.measureText(maxLabel).width : maxLabel.length * cellH;
       const margin = Math.max(maxLabelW / 2, cellH) + 2;
       const [iStart, iEnd] = findVisibleBracketBounds(
-        cache, view, g.firstBracketIndex, g.lastBracketIndex, plotLeft - margin, plotRight + margin,
+        cache, view, g.firstBracketIndex, g.lastBracketIndex, cullLeft - margin, cullRight + margin,
       );
       for (let i = iStart; i <= iEnd; i++) {
         const bracket = getTpoCacheBracket(cache, i);
@@ -320,8 +325,8 @@ function paintTpoGroups(
         const sqH = Math.max(cellH - 1, 1);
         const sqW = Math.max(rawSquare - 1, 1);
         const latestLocalBracketIndex = g.lastBracketIndex - g.firstBracketIndex;
-        const kStart = Math.max(0, Math.ceil((plotLeft - left - sqW) / rawSquare));
-        const kEndMax = Math.min(Math.floor(maxWidth / rawSquare), Math.floor((plotRight - left) / rawSquare));
+        const kStart = Math.max(0, Math.ceil((cullLeft - left - sqW) / rawSquare));
+        const kEndMax = Math.min(Math.floor(maxWidth / rawSquare + 1e-9), Math.floor((cullRight - left) / rawSquare));
         let previousColor: string | undefined;
 
         if (kStart <= kEndMax) {
@@ -343,6 +348,7 @@ function paintTpoGroups(
               for (let k = kStart; k <= kEnd; k++) {
                 const bracketIndex = occurrenceIndices[k] ?? k;
                 const x = left + k * rawSquare;
+                if (x - left > maxWidth) break;
                 const color = latestPriceBin && bracketIndex === latestLocalBracketIndex ? tpoPalette.latest
                   : isPoc ? tpoPalette.poc
                   : tones[Math.abs(bracketIndex) % tones.length];
@@ -370,6 +376,7 @@ function paintTpoGroups(
                   for (let k = kStart; k <= kEnd; k++) {
                     const bracketIndex = rowIndices[k] ?? k;
                     const x = left + k * rawSquare;
+                    if (x - left > maxWidth) break;
                     const color = latestPriceBin && bracketIndex === latestLocalBracketIndex ? tpoPalette.latest
                       : isPoc ? tpoPalette.poc
                       : tones[Math.abs(bracketIndex) % tones.length];
@@ -396,7 +403,7 @@ function paintTpoGroups(
             const yBottom = view.yOfPrice(level.priceBin);
             if (yBottom < plotTop || yTop > plotBottom) continue;
             const barW = maxWidth * (level.count / maxCount);
-            if (left + barW < plotLeft || left > plotRight) continue;
+            if (left + barW < cullLeft || left > cullRight) continue;
             const inVA = vaLo !== null && vaHi !== null && level.priceBin >= vaLo && level.priceBin <= vaHi;
             const latestPriceBin = level.priceBin === lastCloseBin;
             const color = latestPriceBin ? tpoPalette.latest
@@ -413,7 +420,7 @@ function paintTpoGroups(
             const drawLo = Math.max(run.startPrice, visLoBin);
             const drawHi = Math.min(run.endPrice, visHiBin);
             const barW = maxWidth * (run.count / maxCount);
-            if (left + barW < plotLeft || left > plotRight) continue;
+            if (left + barW < cullLeft || left > cullRight) continue;
             if (cellH < 1) {
               const paintCoalescedBand = (bandLo: number, bandHi: number, color: string): void => {
                 if (bandHi < bandLo) return;
