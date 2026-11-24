@@ -1051,15 +1051,6 @@ export class OrderbookHeatmapOverlay {
       }
       this.rasterCacheCanvas = null;
     }
-    if (this.stripScratchCanvas) {
-      try {
-        this.stripScratchCanvas.width = 0;
-        this.stripScratchCanvas.height = 0;
-      } catch {
-        // Ignore mock canvases with readonly dimensions on teardown.
-      }
-      this.stripScratchCanvas = null;
-    }
     if (this.rasterReservedBytes > 0) {
       moduleCpuRasterReservedBytes = Math.max(0, moduleCpuRasterReservedBytes - this.rasterReservedBytes);
       this.rasterReservedBytes = 0;
@@ -1479,17 +1470,7 @@ export class OrderbookHeatmapOverlay {
       }
 
       incrementPerformanceCounter("chart.cpu.heatmap.raster.direct");
-      const directTransform = this.resolveCtxTransform(ctx, view);
-      const paintedCells = this.paintStripToTarget(
-        ctx,
-        view,
-        series,
-        frame,
-        frame.first,
-        frame.last,
-        undefined,
-        directTransform,
-      );
+      const paintedCells = this.paintCellsToContext(ctx, view, series, frame);
       if (paintedCells === 0) {
         this.releaseRasterCache();
       }
@@ -1869,36 +1850,36 @@ export class OrderbookHeatmapOverlay {
     ctx.restore();
 
     if (destLeft > areaLeft) {
-      this.paintStripToTarget(ctx, view, series, frame, leftFirst, leftLast, {
+      this.paintCellsToContext(ctx, view, series, frame, leftFirst, leftLast, {
         left: areaLeft,
         top: areaTop,
         width: destLeft - areaLeft,
         height: areaHeight,
-      }, transform);
+      });
     }
     if (destRight < areaRight) {
-      this.paintStripToTarget(ctx, view, series, frame, rightFirst, rightLast, {
+      this.paintCellsToContext(ctx, view, series, frame, rightFirst, rightLast, {
         left: destRight,
         top: areaTop,
         width: areaRight - destRight,
         height: areaHeight,
-      }, transform);
+      });
     }
     if (destTop > areaTop) {
-      this.paintStripToTarget(ctx, view, series, frame, topFirst, topLast, {
+      this.paintCellsToContext(ctx, view, series, frame, topFirst, topLast, {
         left: destLeft,
         top: areaTop,
         width: destRight - destLeft,
         height: destTop - areaTop,
-      }, transform);
+      });
     }
     if (destBottom < areaBottom) {
-      this.paintStripToTarget(ctx, view, series, frame, topFirst, topLast, {
+      this.paintCellsToContext(ctx, view, series, frame, topFirst, topLast, {
         left: destLeft,
         top: destBottom,
         width: destRight - destLeft,
         height: areaBottom - destBottom,
-      }, transform);
+      });
     }
 
     this.rasterStats.motionReuses++;
@@ -2135,106 +2116,6 @@ export class OrderbookHeatmapOverlay {
       ceiling,
       opacity: resolveOrderbookHeatmapOpacity(settings.opacity),
     };
-  }
-
-  /**
-   * Paints a heatmap strip using a reusable scratch canvas + Uint32Array/putImageData
-   * fast path and alpha-composites it onto `targetCtx` via `drawImage`.
-   * Falls back to `paintCellsToContext(targetCtx, ...)` on mock or sub-pixel contexts.
-   */
-  private paintStripToTarget(
-    targetCtx: CanvasRenderingContext2D,
-    view: View,
-    series: FootprintSeries,
-    frame: HeatmapFramePreamble,
-    barFirst: number,
-    barLast: number,
-    clipRect: { left: number; top: number; width: number; height: number } | undefined,
-    transform: { a: number; b: number; c: number; d: number; e: number; f: number },
-  ): number {
-    const canvasW = targetCtx.canvas?.width ?? 0;
-    const canvasH = targetCtx.canvas?.height ?? 0;
-    if (
-      view.colWidth >= 1 &&
-      transform.b === 0 &&
-      transform.c === 0 &&
-      transform.a > 0 &&
-      transform.d > 0 &&
-      canvasW > 0 &&
-      canvasH > 0 &&
-      typeof targetCtx.drawImage === "function"
-    ) {
-      const ownerDoc = getCanvasOwnerDocument(targetCtx.canvas);
-      let scratch = this.stripScratchCanvas;
-      if (!scratch) {
-        try {
-          scratch = createScratchCanvas(canvasW, canvasH, ownerDoc);
-        } catch {
-          scratch = null;
-        }
-        if (scratch) {
-          this.stripScratchCanvas = scratch;
-        }
-      }
-      if (scratch) {
-        try {
-          if (scratch.width !== canvasW) scratch.width = canvasW;
-          if (scratch.height !== canvasH) scratch.height = canvasH;
-        } catch {
-          scratch = null;
-        }
-      }
-      const scratchCtx = scratch ? getScratch2dContext(scratch) : null;
-      if (
-        scratch &&
-        scratchCtx &&
-        typeof scratchCtx.createImageData === "function" &&
-        typeof scratchCtx.putImageData === "function"
-      ) {
-        const clipLeft = clipRect ? clipRect.left : view.area.left;
-        const clipTop = clipRect ? clipRect.top : view.area.top;
-        const clipWidth = clipRect ? clipRect.width : view.area.width;
-        const clipHeight = clipRect ? clipRect.height : view.area.height;
-        const clipPxLeft = Math.max(0, Math.floor(clipLeft * transform.a + transform.e));
-        const clipPxTop = Math.max(0, Math.floor(clipTop * transform.d + transform.f));
-        const clipPxRight = Math.min(canvasW, Math.ceil((clipLeft + clipWidth) * transform.a + transform.e));
-        const clipPxBottom = Math.min(canvasH, Math.ceil((clipTop + clipHeight) * transform.d + transform.f));
-        const dirtyW = clipPxRight - clipPxLeft;
-        const dirtyH = clipPxBottom - clipPxTop;
-        if (dirtyW <= 0 || dirtyH <= 0) return 0;
-
-        const painted = this.paintCellsToContext(
-          scratchCtx,
-          view,
-          series,
-          frame,
-          barFirst,
-          barLast,
-          clipRect,
-          undefined,
-          transform,
-        );
-        if (painted > 0) {
-          targetCtx.save();
-          targetCtx.setTransform?.(1, 0, 0, 1, 0, 0);
-          targetCtx.drawImage(
-            scratch as unknown as CanvasImageSource,
-            clipPxLeft,
-            clipPxTop,
-            dirtyW,
-            dirtyH,
-            clipPxLeft,
-            clipPxTop,
-            dirtyW,
-            dirtyH,
-          );
-          targetCtx.restore();
-        }
-        return painted;
-      }
-    }
-
-    return this.paintCellsToContext(targetCtx, view, series, frame, barFirst, barLast, clipRect);
   }
 
   private paintCellsToContext(
@@ -3280,7 +3161,6 @@ export class OrderbookHeatmapOverlay {
   private lastCollectedRange: { floor: number; ceiling: number; threshold: number; opacity: number } | null = null;
   private lastRasterKey = "";
   private rasterCacheCanvas: CanvasTarget | null = null;
-  private stripScratchCanvas: CanvasTarget | null = null;
   private rasterStats = {
     imageDataPaints: 0,
     fillRectPaints: 0,

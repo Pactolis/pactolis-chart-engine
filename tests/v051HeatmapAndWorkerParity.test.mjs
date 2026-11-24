@@ -50,10 +50,29 @@ function makeMockCanvasAndCtx(width, height, counters) {
     fillRect() {
       counters.fillRect++;
     },
+    strokeRect() {},
+    fillText() {},
+    strokeText() {},
+    measureText() {
+      return { width: 8 };
+    },
+    moveTo() {},
+    lineTo() {},
+    stroke() {},
+    fill() {},
+    closePath() {},
+    setLineDash() {},
     drawImage() {
       counters.drawImage++;
     },
     createImageData(w, h) {
+      return {
+        width: w,
+        height: h,
+        data: new Uint8ClampedArray(w * h * 4),
+      };
+    },
+    getImageData(_x, _y, w, h) {
       return {
         width: w,
         height: h,
@@ -132,6 +151,9 @@ test("OrderbookHeatmapOverlay uses dirty-strip ImageData + putImageData with zer
     () => ({
       ...DEFAULT_ORDERBOOK_HEATMAP_SETTINGS,
       mode: "aggregated",
+      bucketStep: 1,
+      thresholdUsd: 0,
+      thresholdBtc: 0,
       scaleMode: "fixed",
       fixedCeiling: { usd: 1000, btc: 10 },
     }),
