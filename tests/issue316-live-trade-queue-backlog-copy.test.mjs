@@ -204,8 +204,9 @@ test("10,000 live trades drain in 1,000-trade turns with zero Array.prototype.sl
 test("10,000 live trades drain in 100-trade sub-batch turns with zero Array.prototype.slice backlog copies", () => {
   const f = createCoordinatorFixture();
   for (let i = 1; i <= 10_000; i++) {
-    assert.equal(f.coordinator._enqueuePendingTrade(makeTrade(i)), false);
+    assert.equal(f.coordinator._enqueuePendingTrade(makeTrade(i)), i === PENDING_TRADE_BUFFER_CAP);
   }
+  assert.equal(f.coordinator.pendingTradeDataLoss, false);
 
   const sliceCalls = withSliceSpy((getCalls) => {
     for (let turn = 0; turn < 100; turn++) {
