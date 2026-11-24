@@ -430,7 +430,7 @@ test("10x burst presentation requests coalesce into 1 callback without losing se
 
     // 10 rapid invalidations across different surface/change kinds before vsync.
     for (let i = 0; i < 4; i++) session.invalidate(ChartChange.Interaction);
-    for (let i = 0; i < 3; i++) session.invalidate(ChartChange.Annotation);
+    for (let i = 0; i < 3; i++) session.invalidate(ChartChange.Style);
     for (let i = 0; i < 3; i++) session.invalidate(ChartChange.Data);
 
     assert.equal(win.queuedRafs(), 1);
@@ -439,7 +439,7 @@ test("10x burst presentation requests coalesce into 1 callback without losing se
     assert.equal(counts.gpu, initialGpuDraws + 1);
     assert.equal(renderedEvents.length, 1);
     assert.ok((renderedEvents[0].changes & ChartChange.Interaction) !== 0);
-    assert.ok((renderedEvents[0].changes & ChartChange.Annotation) !== 0);
+    assert.ok((renderedEvents[0].changes & ChartChange.Style) !== 0);
     assert.ok((renderedEvents[0].changes & ChartChange.Data) !== 0);
     assert.equal(renderedEvents[0].surfaces, ChartSurfaceDirty.All);
 
