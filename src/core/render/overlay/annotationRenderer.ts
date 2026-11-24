@@ -1,6 +1,9 @@
 import type { View } from "../../engine/view.js";
 import type { FootprintBar } from "../../types.js";
-import type { FootprintSeries } from "../../model/footprint.js";
+import {
+  getVisibleFootprintCellSlice,
+  type FootprintSeries,
+} from "../../model/footprint.js";
 import { settings, type ChartViewConfig } from "../../settings.js";
 import { cellTextModeFor } from "../chartLod.js";
 import type { IndicatorPaneRender } from "../../indicatorTypes.js";
@@ -30,11 +33,14 @@ import type { Crosshair } from "./interactionOverlayRenderer.js";
 import {
   cellTextCacheKey,
   formatFootprintCellText,
+  getOrCreateBarCellTextCache,
   getOrCreateBarCellTextEntries,
+  getOrFormatBarCellText,
+  type BarCellTextCacheEntry,
   type FormattedCellText,
 } from "./footprintCellText.js";
 
-export type { FormattedCellText };
+export type { BarCellTextCacheEntry, FormattedCellText };
 
 export interface VolumeProfileCacheState {
   key: string;
@@ -63,7 +69,7 @@ export interface AnnotationRendererHost {
   readonly showNotional: boolean;
   readonly chartConfig: ChartViewConfig | null;
   profileCache: VolumeProfileCacheState | null;
-  readonly cellTextCache: WeakMap<FootprintBar, { key: string; cellRevision: number; entries: Map<number, FormattedCellText> }>;
+  readonly cellTextCache: WeakMap<FootprintBar, BarCellTextCacheEntry>;
   readonly lineLabels: readonly LineLabelEntry[];
   readonly getProfileSettings?: () => VolumeProfileSettings;
   readonly getPreviousWeekStrategySettings?: () => PreviousWeekStrategySettings;
@@ -276,20 +282,15 @@ export function drawCells(host: AnnotationRendererHost, view: View, series: Foot
     const fpLeft = view.xOfIndex(i) + candleW;
     const half = fpW / 2;
 
-    const barEntries = getOrCreateBarCellTextEntries(host.cellTextCache, bar, cacheKey);
-
-    for (const cell of bar.cells.values()) {
-      if (cell.priceBin + step < minVisPrice || cell.priceBin > maxVisPrice) continue;
+    const barCache = getOrCreateBarCellTextCache(host.cellTextCache, bar, cacheKey);
+    const slice = getVisibleFootprintCellSlice(bar, minVisPrice, maxVisPrice, step);
+    const iterCells = slice !== null ? slice.cells : null;
+    const drawCell = (cell: FootprintBar["cells"] extends Map<number, infer C> ? C : never) => {
+      if (cell.priceBin + step < minVisPrice || cell.priceBin > maxVisPrice) return;
       const yMid = view.yOfPrice(cell.priceBin + step / 2);
-      if (yMid < view.area.top || yMid > view.area.top + view.area.height) continue;
+      if (yMid < view.area.top || yMid > view.area.top + view.area.height) return;
 
-      let entry: FormattedCellText | undefined = barEntries?.get(cell.priceBin);
-      if (!entry) {
-        entry = formatFootprintCellText(cell, mode, compact, step, showNotional);
-        if (barEntries) {
-          barEntries.set(cell.priceBin, entry);
-        }
-      }
+      const entry = getOrFormatBarCellText(barCache, cell, mode, compact, step, showNotional);
 
       if (entry.centerText !== undefined) {
         ctx.fillStyle = entry.centerColor!;
@@ -303,6 +304,15 @@ export function drawCells(host: AnnotationRendererHost, view: View, series: Foot
         ctx.fillStyle = entry.rightColor!;
         ctx.textAlign = "left";
         ctx.fillText(entry.rightText!, fpLeft + half + 4, yMid);
+      }
+    };
+    if (iterCells !== null && slice !== null) {
+      for (let c = slice.start; c < slice.end; c++) {
+        drawCell(iterCells[c]);
+      }
+    } else {
+      for (const cell of bar.cells.values()) {
+        drawCell(cell);
       }
     }
   }

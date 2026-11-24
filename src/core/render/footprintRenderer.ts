@@ -2,7 +2,11 @@
 import type { GpuFrame, GpuSurface, QuadSink } from "../gpu/gpuBackend.js";
 import type { RGBA } from "../engine/gl.js";
 import type { View } from "../engine/view.js";
-import type { FootprintSeries } from "../model/footprint.js";
+import {
+  getSortedFootprintBarCells,
+  getVisibleFootprintCellSlice,
+  type FootprintSeries,
+} from "../model/footprint.js";
 import { neighbourBin } from "../priceStep.js";
 import { TimeScaleModel } from "../model/timeScale.js";
 import { drawTimeGrid } from "./gridRenderer.js";
@@ -24,8 +28,8 @@ import { readGpuSettings } from "../gpu/gpuSettings.js";
 import { recordGpuFeatureFallback, setGpuFeaturePath } from "../gpu/gpuDiagnostics.js";
 import {
   cellTextCacheKey,
-  formatFootprintCellText,
-  getOrCreateBarCellTextEntries,
+  getOrCreateBarCellTextCache,
+  getOrFormatBarCellText,
   parseCssColorToPackedRgba,
   type BarCellTextCacheEntry,
 } from "./overlay/footprintCellText.js";
@@ -547,20 +551,15 @@ export class FootprintRenderer {
         const bar = series.at(i);
         if (!bar) continue;
         const fpLeft = view.xOfIndex(i) + candleW;
-        const barEntries = getOrCreateBarCellTextEntries(this.cellTextCache, bar, cacheKey);
+        const barCache = getOrCreateBarCellTextCache(this.cellTextCache, bar, cacheKey);
+        const slice = getVisibleFootprintCellSlice(bar, minVisPrice, maxVisPrice, step);
 
-        for (const cell of bar.cells.values()) {
-          if (cell.priceBin + step < minVisPrice || cell.priceBin > maxVisPrice) continue;
+        const emitCell = (cell: FootprintCell): boolean => {
+          if (cell.priceBin + step < minVisPrice || cell.priceBin > maxVisPrice) return true;
           const yMid = view.yOfPrice(cell.priceBin + step / 2);
-          if (yMid < view.area.top || yMid > view.area.top + view.area.height) continue;
+          if (yMid < view.area.top || yMid > view.area.top + view.area.height) return true;
 
-          let entry = barEntries?.get(cell.priceBin);
-          if (!entry) {
-            entry = formatFootprintCellText(cell, mode, compact, step, showNotional);
-            if (barEntries) {
-              barEntries.set(cell.priceBin, entry);
-            }
-          }
+          const entry = getOrFormatBarCellText(barCache, cell, mode, compact, step, showNotional);
 
           if (entry.centerText !== undefined) {
             if (!sink.addText(
@@ -597,6 +596,17 @@ export class FootprintRenderer {
             )) {
               return false;
             }
+          }
+          return true;
+        };
+
+        if (slice !== null) {
+          for (let c = slice.start; c < slice.end; c++) {
+            if (!emitCell(slice.cells[c])) return false;
+          }
+        } else {
+          for (const cell of bar.cells.values()) {
+            if (!emitCell(cell)) return false;
           }
         }
       }
@@ -637,12 +647,12 @@ export class FootprintRenderer {
     const minVisPrice = Math.min(pTop, pBot) - step;
     const maxVisPrice = Math.max(pTop, pBot) + step;
 
-    for (const cell of bar.cells.values()) {
-      if (cell.priceBin + step < minVisPrice || cell.priceBin > maxVisPrice) continue;
+    const emitHeatCell = (cell: FootprintCell): void => {
+      if (cell.priceBin + step < minVisPrice || cell.priceBin > maxVisPrice) return;
       const rect = this.clippedCellRect(view, bar, cell.priceBin, step);
-      if (!rect) continue;
+      if (!rect) return;
       const { yTop, height: h } = rect;
-      if (yTop > view.area.top + view.area.height || yTop + h < view.area.top) continue;
+      if (yTop > view.area.top + view.area.height || yTop + h < view.area.top) return;
 
       if (cfg.poc && cell.priceBin === pocBin) this.batch.rect(fpLeft, yTop, fpW, h, POC);
       if (cfg.heat) {
@@ -653,6 +663,16 @@ export class FootprintRenderer {
         this.batch.rect(fpLeft, yTop, halfW, rowH, scratchColor);
         scratchColor.r = BUY.r; scratchColor.g = BUY.g; scratchColor.b = BUY.b; scratchColor.a = buyA;
         this.batch.rect(fpLeft + halfW, yTop, halfW, rowH, scratchColor);
+      }
+    };
+    const slice = getVisibleFootprintCellSlice(bar, minVisPrice, maxVisPrice, step);
+    if (slice !== null) {
+      for (let c = slice.start; c < slice.end; c++) {
+        emitHeatCell(slice.cells[c]);
+      }
+    } else {
+      for (const cell of bar.cells.values()) {
+        emitHeatCell(cell);
       }
     }
 
@@ -817,7 +837,7 @@ export class FootprintRenderer {
     if (cached && cached.cellRevision === (bar.cellRevision ?? 0) && cached.step === step) {
       return cached.cells.length < IMB_STACK ? null : cached;
     }
-    const cells = [...bar.cells.values()].sort((a, b) => a.priceBin - b.priceBin);
+    const cells = getSortedFootprintBarCells(bar) as FootprintCell[];
     const entry: BarImbalanceCache = {
       cellRevision: bar.cellRevision ?? 0,
       step,
@@ -923,13 +943,13 @@ export class FootprintRenderer {
       const minVisPrice = Math.min(pTop, pBot) - step;
       const maxVisPrice = Math.max(pTop, pBot) + step;
 
-      for (const cell of bar.cells.values()) {
-        if (cell.priceBin + step < minVisPrice || cell.priceBin > maxVisPrice) continue;
+      const emitProfileCell = (cell: FootprintCell): void => {
+        if (cell.priceBin + step < minVisPrice || cell.priceBin > maxVisPrice) return;
         const rect = this.clippedCellRect(view, bar, cell.priceBin, step);
-        if (!rect) continue;
+        if (!rect) return;
         const { yTop, height: h } = rect;
         if (yTop > view.area.top + view.area.height || yTop + h < view.area.top) {
-          continue; // off-screen vertically
+          return; // off-screen vertically
         }
 
         // POC row highlight remains volume-based: it marks the busiest price row.
@@ -938,6 +958,16 @@ export class FootprintRenderer {
         }
 
         this.drawProfileCell(cell, yTop, h, fpLeft, fpW, mode, maxMetric);
+      };
+      const slice = getVisibleFootprintCellSlice(bar, minVisPrice, maxVisPrice, step);
+      if (slice !== null) {
+        for (let c = slice.start; c < slice.end; c++) {
+          emitProfileCell(slice.cells[c]);
+        }
+      } else {
+        for (const cell of bar.cells.values()) {
+          emitProfileCell(cell);
+        }
       }
     }
 

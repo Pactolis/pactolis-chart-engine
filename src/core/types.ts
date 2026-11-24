@@ -50,6 +50,8 @@ export interface FootprintCell {
   liquidationBuyVol?: number;
   /** Forced sell liquidation volume at this price. */
   liquidationSellVol?: number;
+  /** Non-serialized per-cell mutation counter for selective text cache invalidation (#293). */
+  revision?: number;
 }
 
 /** One time bucket (candle) holding OHLC and its footprint cells. */
@@ -87,4 +89,6 @@ export interface FootprintBar {
    * bar against its own previous value. Never serialized.
    */
   cellRevision?: number;
+  /** Bumped only when a new price bin is inserted into `cells`. Never serialized (#293). */
+  cellKeysRevision?: number;
 }

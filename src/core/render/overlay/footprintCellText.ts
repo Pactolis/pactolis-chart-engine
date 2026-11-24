@@ -18,6 +18,9 @@ export interface BarCellTextCacheEntry {
   key: string;
   cellRevision: number;
   entries: Map<number, FormattedCellText>;
+  cellRevisions?: Map<number, number>;
+  cellRefs?: Map<number, FootprintCell>;
+  cellKeysRevision?: number;
 }
 
 const MAX_COLOR_CACHE_ENTRIES = 256;
@@ -105,6 +108,78 @@ export function getOrCreateBarCellTextEntries(
   const entries = new Map<number, FormattedCellText>();
   cache.set(bar, { key: cacheKey, cellRevision: bar.cellRevision, entries });
   return entries;
+}
+
+export function getOrCreateBarCellTextCache(
+  cache: WeakMap<FootprintBar, BarCellTextCacheEntry>,
+  bar: FootprintBar,
+  cacheKey: string,
+): BarCellTextCacheEntry | null {
+  if (bar.cellRevision === undefined) return null;
+  const existing = cache.get(bar);
+  if (existing && existing.key === cacheKey) {
+    if (existing.cellRevision === bar.cellRevision) {
+      return existing;
+    }
+    if (
+      bar.cellKeysRevision !== undefined
+      && existing.cellRevisions !== undefined
+      && existing.cellRefs !== undefined
+    ) {
+      if (existing.cellKeysRevision !== bar.cellKeysRevision && existing.entries.size > bar.cells.size) {
+        for (const key of existing.entries.keys()) {
+          if (!bar.cells.has(key)) {
+            existing.entries.delete(key);
+            existing.cellRevisions.delete(key);
+            existing.cellRefs.delete(key);
+          }
+        }
+      }
+      existing.cellRevision = bar.cellRevision;
+      existing.cellKeysRevision = bar.cellKeysRevision;
+      return existing;
+    }
+  }
+  const entry: BarCellTextCacheEntry = {
+    key: cacheKey,
+    cellRevision: bar.cellRevision,
+    entries: new Map<number, FormattedCellText>(),
+    cellRevisions: new Map<number, number>(),
+    cellRefs: new Map<number, FootprintCell>(),
+    cellKeysRevision: bar.cellKeysRevision,
+  };
+  cache.set(bar, entry);
+  return entry;
+}
+
+export function getOrFormatBarCellText(
+  barCache: BarCellTextCacheEntry | null,
+  cell: FootprintCell,
+  mode: FootprintCellData,
+  compact: boolean,
+  step: number,
+  showNotional: boolean,
+): FormattedCellText {
+  if (barCache !== null) {
+    const cached = barCache.entries.get(cell.priceBin);
+    if (cached !== undefined) {
+      if (barCache.cellKeysRevision === undefined) return cached;
+      const rev = cell.revision ?? 0;
+      if (
+        barCache.cellRevisions?.get(cell.priceBin) === rev
+        && barCache.cellRefs?.get(cell.priceBin) === cell
+      ) {
+        return cached;
+      }
+    }
+  }
+  const formatted = formatFootprintCellText(cell, mode, compact, step, showNotional);
+  if (barCache !== null) {
+    barCache.entries.set(cell.priceBin, formatted);
+    barCache.cellRevisions?.set(cell.priceBin, cell.revision ?? 0);
+    barCache.cellRefs?.set(cell.priceBin, cell);
+  }
+  return formatted;
 }
 
 export function formatFootprintCellText(
