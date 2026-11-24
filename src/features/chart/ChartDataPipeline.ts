@@ -157,10 +157,10 @@ export class ChartDataPipeline {
       finishExplicitHistory: (token) => this.repair.finishExplicitHistory(token),
       cancelRecentFootprintCoverageRepair: () => this.cancelRecentFootprintCoverageRepair(),
       reportServerPriceStep: (meta) => this.priceStepCoordinator.reportServerPriceStep(meta),
-      getPendingTrades: () => this.tradeQueueCoordinator.pendingTrades,
-      getPendingTradesCount: () => this.tradeQueueCoordinator.pendingTrades.length,
+      getPendingTrades: () => this.tradeQueueCoordinator.getPendingTrades(),
+      getPendingTradesCount: () => this.tradeQueueCoordinator.getPendingCount(),
       filterPendingTrades: (predicate) => {
-        this.tradeQueueCoordinator.pendingTrades = this.tradeQueueCoordinator.pendingTrades.filter(predicate);
+        this.tradeQueueCoordinator.filterPendingTrades(predicate);
       },
       enqueuePendingTrades: (trades) => this.tradeQueueCoordinator._enqueuePendingTrades(trades),
       scheduleFlush: () => this._scheduleFlush(),
@@ -184,9 +184,9 @@ export class ChartDataPipeline {
       isBlockingMaintenance: () => this.repair.isBlockingMaintenance(),
       hasPatchDayInFlight: () => this.historyCoordinator.patchDayController !== null,
       hasFillCellsInFlight: () => this.historyCoordinator.fillCellsInFlightKey !== null,
-      getPendingTradesCount: () => this.tradeQueueCoordinator.pendingTrades.length,
+      getPendingTradesCount: () => this.tradeQueueCoordinator.getPendingCount(),
       filterPendingTrades: (predicate) => {
-        this.tradeQueueCoordinator.pendingTrades = this.tradeQueueCoordinator.pendingTrades.filter(predicate);
+        this.tradeQueueCoordinator.filterPendingTrades(predicate);
       },
       scheduleFlush: () => this._scheduleFlush(),
       cancelFlush: () => this._cancelFlush(),
