@@ -2301,8 +2301,8 @@ export class OrderbookHeatmapOverlay {
       let cells: readonly OrderbookHeatmapCell[] = bar.cells;
       let sparseValues: readonly number[] | null = null;
       if (threshold > 0) {
-        const chunkState = !live && !this.liveBarTimes.has(bar.time)
-          ? this.chunks.get(heatmapChunkStart(bar.time, frame.tier))
+        const chunkState = !live && !this.liveBarTimes.has(bar.t)
+          ? this.chunks.get(heatmapChunkStart(bar.t, frame.tier))
           : undefined;
         const serverFiltered = chunkState?.status === "ready"
           && chunkState.fullThreshold === threshold
@@ -2421,8 +2421,8 @@ export class OrderbookHeatmapOverlay {
       if (!bar || bar.cells.length === 0) continue;
       let cells: readonly OrderbookHeatmapCell[] = bar.cells;
       if (preamble.threshold > 0) {
-        const chunkState = !live && !this.liveBarTimes.has(bar.time)
-          ? this.chunks.get(heatmapChunkStart(bar.time, preamble.tier))
+        const chunkState = !live && !this.liveBarTimes.has(bar.t)
+          ? this.chunks.get(heatmapChunkStart(bar.t, preamble.tier))
           : undefined;
         const serverFiltered = chunkState?.status === "ready"
           && chunkState.fullThreshold === preamble.threshold

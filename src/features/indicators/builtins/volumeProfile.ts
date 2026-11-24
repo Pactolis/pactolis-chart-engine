@@ -127,9 +127,11 @@ function subtractOrderFlowProfileBar(acc: OrderFlowProfileAccumulator, bar: Foot
       level.buyVol -= cell.buyVol;
       level.sellVol -= cell.sellVol;
     }
-    const total = typeof cell.totalCount === "number" && Number.isFinite(cell.totalCount) && cell.totalCount >= 0 ? cell.totalCount : null;
     const buy = typeof cell.buyCount === "number" && Number.isFinite(cell.buyCount) && cell.buyCount >= 0 ? cell.buyCount : null;
     const sell = typeof cell.sellCount === "number" && Number.isFinite(cell.sellCount) && cell.sellCount >= 0 ? cell.sellCount : null;
+    const total = typeof cell.count === "number" && Number.isFinite(cell.count) && cell.count >= 0
+      ? cell.count
+      : (buy !== null && sell !== null ? buy + sell : null);
     if (total !== null) level.totalCount = Math.max(0, level.totalCount - total);
     if (buy !== null) level.buyCount = Math.max(0, level.buyCount - buy);
     if (sell !== null) level.sellCount = Math.max(0, level.sellCount - sell);
