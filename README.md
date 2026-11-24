@@ -39,6 +39,73 @@ configureChartLocale({
 });
 ```
 
+## Rendering Backends
+
+The engine unifies `HTMLCanvasElement` and `OffscreenCanvas` under `CanvasTarget` (`@pactolis/chart-engine/core/gpu/canvasTarget`) and supports four backend preferences: `auto | webgpu | webgl2 | canvas2d`.
+
+- **Deterministic fallback chain:** `WebGPU → WebGL2 → Canvas2D` via `createGpuSurfaceAsync` (`@pactolis/chart-engine/core/gpu/selectBackend`).
+- **First-class Canvas2D:** `Canvas2dSurface` (`@pactolis/chart-engine/core/gpu/canvas2d/canvas2dSurface`) is a first-class, fully supported backend (not a degraded stub), alongside `WebGl2Surface` (`@pactolis/chart-engine/core/gpu/webgl2/webgl2Surface`) and `WebGpuSurface` (`@pactolis/chart-engine/core/gpu/webgpu/webgpuSurface`).
+- **DOM-free scratch caches:** Axis, annotation, and heatmap raster caches operate on `CanvasTarget` without requiring `document` when running inside a DedicatedWorker.
+
+## Worker-First Integration
+
+For zero-jank multi-panel layouts, run chart rendering and data aggregation inside a DedicatedWorker using `OffscreenCanvasOwnershipManager`, `WorkerChartHostBridge`, `ChartWorkerPanelRuntime`, and `ChartWorkerHostPool`.
+
+- **Zero-relay rule:** The main thread only wires `MessageChannel` ports (`mainPort`, `historyPort`, `ingressPort`). Market ticks and history chunks flow directly worker ↔ worker with zero main-thread relay.
+- **Single-transfer recovery:** `transferControlToOffscreen()` can only be called once per `<canvas>`. On context loss or re-homing, `OffscreenCanvasOwnershipManager.recreateAndTransfer` replaces the DOM `<canvas>` node and transfers a fresh `OffscreenCanvas` to the worker.
+
+### Main-thread example
+
+```ts
+import { OffscreenCanvasOwnershipManager } from "@pactolis/chart-engine/features/chart/worker/offscreenSurfaceAdapter";
+import { WorkerChartHostBridge } from "@pactolis/chart-engine/features/chart/worker/workerRuntimeAdapter";
+
+const ownership = new OffscreenCanvasOwnershipManager();
+const offscreenCanvases = {
+  "gpu-scene": ownership.transferSurface("gpu-scene", gpuCanvas, { width: 800, height: 500, dpr: 2 }),
+  annotation: ownership.transferSurface("annotation", annotationCanvas, { width: 800, height: 500, dpr: 2 }),
+  interaction: ownership.transferSurface("interaction", interactionCanvas, { width: 800, height: 500, dpr: 2 }),
+};
+
+const mainChannel = new MessageChannel();
+const historyChannel = new MessageChannel();
+const ingressChannel = new MessageChannel();
+
+worker.postMessage(
+  { type: "attach-panel", panelId: "panel-1", marketId: "BINANCE_FUTURES:btcusdt" },
+  [mainChannel.port2, historyChannel.port2, ingressChannel.port2],
+);
+
+const bridge = new WorkerChartHostBridge({ panelId: "panel-1", marketId: "BINANCE_FUTURES:btcusdt" });
+bridge.attachPorts({ mainPort: mainChannel.port1 });
+bridge.sendInit(ownership.getSurfaceSnapshot(), { width: 800, height: 500, dpr: 2 }, {
+  backendPreference: "auto",
+  offscreenCanvases,
+});
+```
+
+### Worker entry point
+
+```ts
+import { ChartWorkerHostPool } from "@pactolis/chart-engine/features/chart/worker/chartWorkerRuntime";
+
+const pool = new ChartWorkerHostPool();
+
+self.addEventListener("message", (event) => {
+  const { panelId, marketId } = event.data;
+  const [mainPort, historyPort, ingressPort] = event.ports;
+  const panel = pool.createPanel({ panelId, marketId });
+  panel.attachPorts({ mainPort, historyPort, ingressPort });
+});
+```
+
+### Main-Thread → Worker-First Migration
+
+1. Replace direct `ChartRuntime` mounting with `OffscreenCanvasOwnershipManager` for the 3-layer stack (`gpu-scene`, `annotation`, `interaction`).
+2. Forward pointer/wheel/keyboard/resize events from the host container to `WorkerChartHostBridge` (`sendInput`, `sendResize`).
+3. Connect your history and live-trade workers directly to `historyPort` and `ingressPort` using the `WorkerProtocolMessage` envelopes (`@pactolis/chart-engine/features/chart/worker/workerProtocol`).
+4. Use `bridge.requestHitTest`, `bridge.requestTooltip`, and `bridge.requestCapture` for correlated async UI queries.
+
 ## Entry points
 
 Each public module is its own entry point, listed under `exports` in

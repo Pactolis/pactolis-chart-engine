@@ -1,4 +1,4 @@
-import type { GpuFrame, GpuLossReason, GpuSurface, QuadSink, RGBA, RgbaFrame } from "../gpuBackend.js";
+import type { Canvas2dContext, CanvasTarget, GpuFrame, GpuLossReason, GpuSurface, QuadSink, RGBA, RgbaFrame } from "../gpuBackend.js";
 
 function clamp01(v: number): number {
   return v < 0 ? 0 : v > 1 ? 1 : v;
@@ -31,9 +31,9 @@ function formatCssRgba(c: RGBA): string {
 export class Canvas2dQuadSink implements QuadSink {
   private lastKey = -1;
 
-  constructor(private ctx: CanvasRenderingContext2D) {}
+  constructor(private ctx: Canvas2dContext) {}
 
-  updateContext(nextCtx: CanvasRenderingContext2D): void {
+  updateContext(nextCtx: Canvas2dContext): void {
     this.ctx = nextCtx;
     this.reset();
   }
@@ -79,8 +79,8 @@ export class Canvas2dSurface implements GpuSurface {
   };
 
   constructor(
-    public readonly canvas: HTMLCanvasElement,
-    private ctx: CanvasRenderingContext2D = canvas.getContext("2d") as CanvasRenderingContext2D,
+    public readonly canvas: CanvasTarget,
+    private ctx: Canvas2dContext = canvas.getContext("2d") as Canvas2dContext,
   ) {
     if (!this.ctx) {
       throw new Error("Canvas2dSurface: failed to acquire 2D rendering context");
@@ -92,9 +92,9 @@ export class Canvas2dSurface implements GpuSurface {
     this.contextLost = true;
   }
 
-  restoreCanvas2dContext(nextCtx?: CanvasRenderingContext2D | null): boolean {
+  restoreCanvas2dContext(nextCtx?: Canvas2dContext | null): boolean {
     if (this.disposed) return false;
-    const resolved = nextCtx !== undefined ? nextCtx : (this.canvas.getContext?.("2d") as CanvasRenderingContext2D | null);
+    const resolved = nextCtx !== undefined ? nextCtx : (this.canvas.getContext?.("2d") as Canvas2dContext | null);
     if (!resolved || resolved.isContextLost?.() === true) {
       return false;
     }

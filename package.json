@@ -110,6 +110,14 @@
       "types": "./dist/core/footprintPolicy.d.ts",
       "default": "./dist/core/footprintPolicy.js"
     },
+    "./core/gpu/canvas2d/canvas2dSurface": {
+      "types": "./dist/core/gpu/canvas2d/canvas2dSurface.d.ts",
+      "default": "./dist/core/gpu/canvas2d/canvas2dSurface.js"
+    },
+    "./core/gpu/canvasTarget": {
+      "types": "./dist/core/gpu/canvasTarget.d.ts",
+      "default": "./dist/core/gpu/canvasTarget.js"
+    },
     "./core/gpu/gpuBackend": {
       "types": "./dist/core/gpu/gpuBackend.d.ts",
       "default": "./dist/core/gpu/gpuBackend.js"
@@ -125,6 +133,10 @@
     "./core/gpu/selectBackend": {
       "types": "./dist/core/gpu/selectBackend.d.ts",
       "default": "./dist/core/gpu/selectBackend.js"
+    },
+    "./core/gpu/webgl2/webgl2Surface": {
+      "types": "./dist/core/gpu/webgl2/webgl2Surface.d.ts",
+      "default": "./dist/core/gpu/webgl2/webgl2Surface.js"
     },
     "./core/gpu/webgpu/webgpuDevice": {
       "types": "./dist/core/gpu/webgpu/webgpuDevice.d.ts",
@@ -273,6 +285,22 @@
     "./features/chart/parseTimeframeInput": {
       "types": "./dist/features/chart/parseTimeframeInput.d.ts",
       "default": "./dist/features/chart/parseTimeframeInput.js"
+    },
+    "./features/chart/worker/chartWorkerRuntime": {
+      "types": "./dist/features/chart/worker/chartWorkerRuntime.d.ts",
+      "default": "./dist/features/chart/worker/chartWorkerRuntime.js"
+    },
+    "./features/chart/worker/offscreenSurfaceAdapter": {
+      "types": "./dist/features/chart/worker/offscreenSurfaceAdapter.d.ts",
+      "default": "./dist/features/chart/worker/offscreenSurfaceAdapter.js"
+    },
+    "./features/chart/worker/workerProtocol": {
+      "types": "./dist/features/chart/worker/workerProtocol.d.ts",
+      "default": "./dist/features/chart/worker/workerProtocol.js"
+    },
+    "./features/chart/worker/workerRuntimeAdapter": {
+      "types": "./dist/features/chart/worker/workerRuntimeAdapter.d.ts",
+      "default": "./dist/features/chart/worker/workerRuntimeAdapter.js"
     },
     "./features/drawings/drawingManager": {
       "types": "./dist/features/drawings/drawingManager.d.ts",

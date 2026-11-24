@@ -1,6 +1,14 @@
 // Chart overlay that draws stored orderbook walls as a heatmap under the candles
 // and a 5x5 hover table of bucket amounts around the cursor. BTCUSDT perp only.
 import type { View } from "../../core/engine/view.js";
+import {
+  createScratchCanvas,
+  getCanvasOwnerDocument,
+  getScratch2dContext,
+  isOffscreenCanvas,
+  type Canvas2dContext,
+  type CanvasTarget,
+} from "../../core/gpu/canvasTarget.js";
 import type { FootprintSeries } from "../../core/model/footprint.js";
 import type { Crosshair } from "../../core/render/overlay.js";
 import { parseMarket } from "../../core/domain/market.js";
@@ -273,7 +281,7 @@ export class OrderbookHeatmapOverlay {
   private lastRasterViewportKey = "";
   private rasterViewportChangedAt = Number.NEGATIVE_INFINITY;
   private visibilityObservedDoc: Document | null = null;
-  private visibilityObservedCanvas: HTMLCanvasElement | null = null;
+  private visibilityObservedCanvas: CanvasTarget | null = null;
   private visibilityObserver: IntersectionObserver | null = null;
   private visibilityObservedIntersecting: boolean | null = null;
   private readonly handleDocumentVisibilityChange = (): void => {
@@ -1011,9 +1019,9 @@ export class OrderbookHeatmapOverlay {
     }
   }
 
-  private syncVisibilityTracking(canvas: HTMLCanvasElement | undefined): void {
+  private syncVisibilityTracking(canvas: CanvasTarget | undefined): void {
     if (this.disposed) return;
-    const nextDoc = canvas?.ownerDocument ?? null;
+    const nextDoc = getCanvasOwnerDocument(canvas);
     if (nextDoc !== this.visibilityObservedDoc) {
       if (this.visibilityObservedDoc && typeof this.visibilityObservedDoc.removeEventListener === "function") {
         this.visibilityObservedDoc.removeEventListener("visibilitychange", this.handleDocumentVisibilityChange);
@@ -1036,7 +1044,7 @@ export class OrderbookHeatmapOverlay {
       }
       this.visibilityObservedCanvas = nextCanvas;
       this.visibilityObservedIntersecting = null;
-      if (nextCanvas) {
+      if (nextCanvas && nextDoc && !isOffscreenCanvas(nextCanvas)) {
         const ObserverCtor =
           (nextDoc as { defaultView?: { IntersectionObserver?: typeof IntersectionObserver } | null } | null)
             ?.defaultView?.IntersectionObserver
@@ -1069,9 +1077,9 @@ export class OrderbookHeatmapOverlay {
     }
   }
 
-  private isVisibilityHidden(canvas: HTMLCanvasElement | undefined): boolean {
+  private isVisibilityHidden(canvas: CanvasTarget | undefined): boolean {
     if (!this.explicitVisible) return true;
-    const doc = canvas?.ownerDocument ?? this.visibilityObservedDoc;
+    const doc = getCanvasOwnerDocument(canvas) ?? this.visibilityObservedDoc;
     if (doc?.visibilityState === "hidden") return true;
     if ((canvas as { isConnected?: boolean } | undefined)?.isConnected === false) return true;
     if (canvas && canvas === this.visibilityObservedCanvas && this.visibilityObservedIntersecting === false) {
@@ -1127,12 +1135,13 @@ export class OrderbookHeatmapOverlay {
       }
       this.lastRasterViewportKey = viewportKey;
       const viewportMoving = now - this.rasterViewportChangedAt < HEATMAP_CPU_RASTER_QUIET_MS;
+      const ownerDoc = getCanvasOwnerDocument(ctx.canvas);
       const rasterEligible =
         !this.rasterCacheDisabledForTest &&
         !hidden &&
         canvasWidth > 0 &&
         canvasHeight > 0 &&
-        typeof ctx.canvas?.ownerDocument?.createElement === "function" &&
+        (typeof ownerDoc?.createElement === "function" || typeof OffscreenCanvas === "function") &&
         typeof ctx.drawImage === "function";
 
       const canUseRasterCache = rasterEligible && !viewportMoving;
@@ -1226,7 +1235,7 @@ export class OrderbookHeatmapOverlay {
         }
         let budgetExceeded = false;
         const offCtx = this.ensureRasterCacheCanvas(
-          ctx.canvas.ownerDocument,
+          ownerDoc,
           canvasWidth,
           canvasHeight,
           true,
@@ -1342,7 +1351,7 @@ export class OrderbookHeatmapOverlay {
             const rw = rr - rx;
             const rh = rb - ry;
             if (rw > 0 && rh > 0 && (rw < canvasWidth || rh < canvasHeight)) {
-              const croppedCtx = this.ensureRasterCacheCanvas(ctx.canvas.ownerDocument, rw, rh, true);
+              const croppedCtx = this.ensureRasterCacheCanvas(ownerDoc, rw, rh, true);
               if (croppedCtx) {
                 croppedCtx.save();
                 croppedCtx.setTransform?.(1, 0, 0, 1, 0, 0);
@@ -1863,7 +1872,7 @@ export class OrderbookHeatmapOverlay {
     this.visibleCeiling = this.rasterCacheCeiling;
 
     if (liveX < right) {
-      const offCtx = this.ensureRasterCacheCanvas(ctx.canvas.ownerDocument, canvasWidth, canvasHeight);
+      const offCtx = this.ensureRasterCacheCanvas(getCanvasOwnerDocument(ctx.canvas), canvasWidth, canvasHeight);
       if (!offCtx) return false;
       const { a, d, e, f } = transform;
       const pxClearLeft = Math.max(Math.floor(left * a + e), Math.floor(liveX * a + e));
@@ -1896,7 +1905,7 @@ export class OrderbookHeatmapOverlay {
   }
 
   private ensureRasterCacheCanvas(
-    doc: Document,
+    doc: Document | null,
     width: number,
     height: number,
     suppressBudgetCounter = false,
@@ -1929,7 +1938,7 @@ export class OrderbookHeatmapOverlay {
       existing.height === height &&
       this.rasterReservedBytes === requiredBytes
     ) {
-      const existingCtx = existing.getContext?.("2d") ?? null;
+      const existingCtx = (getScratch2dContext(existing) as CanvasRenderingContext2D | null) ?? null;
       if (existingCtx) return existingCtx;
       this.releaseRasterCache();
       return null;
@@ -1953,7 +1962,7 @@ export class OrderbookHeatmapOverlay {
     let canvas = this.rasterCacheCanvas;
     if (!canvas) {
       try {
-        canvas = doc.createElement("canvas");
+        canvas = createScratchCanvas(width, height, doc);
       } catch {
         return null;
       }
@@ -1965,7 +1974,7 @@ export class OrderbookHeatmapOverlay {
     try {
       if (canvas.width !== width) canvas.width = width;
       if (canvas.height !== height) canvas.height = height;
-      offCtx = canvas.getContext?.("2d") ?? null;
+      offCtx = (getScratch2dContext(canvas) as CanvasRenderingContext2D | null) ?? null;
     } catch {
       offCtx = null;
     }
@@ -2050,7 +2059,7 @@ export class OrderbookHeatmapOverlay {
   }
 
   private paintCellsToContext(
-    targetCtx: CanvasRenderingContext2D,
+    targetCtx: Canvas2dContext,
     view: View,
     series: FootprintSeries,
     frame: HeatmapFramePreamble,
@@ -3065,7 +3074,7 @@ export class OrderbookHeatmapOverlay {
   private lastCollected: Array<{ x: number; yTop: number; cellHeight: number; value: number; live: boolean }> | null = null;
   private lastCollectedRange: { floor: number; ceiling: number; threshold: number; opacity: number } | null = null;
   private lastRasterKey = "";
-  private rasterCacheCanvas: HTMLCanvasElement | null = null;
+  private rasterCacheCanvas: CanvasTarget | null = null;
   private rasterReservedBytes = 0;
   private rasterCacheHasCells = false;
   private rasterCacheFloor = 0;

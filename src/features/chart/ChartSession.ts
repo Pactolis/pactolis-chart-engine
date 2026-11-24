@@ -359,7 +359,7 @@ export class ChartSession {
     }
 
     const prevCanvas = this.gpuCanvas;
-    const nextCanvas = nextSurface.canvas;
+    const nextCanvas = nextSurface.canvas as HTMLCanvasElement;
 
     nextCanvas.dataset.chartSurface = "gpu-scene";
     nextCanvas.setAttribute?.("aria-hidden", "true");
