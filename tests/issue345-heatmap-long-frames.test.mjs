@@ -293,65 +293,72 @@ test("#345 sparse positive-threshold index shrinks scanned cells while preservin
     const harness = makeOffscreenHarness({ width: 1200, height: 600, dpr: 1, supportImageData: true });
     let hoverFetchCount = 0;
 
-    const overlay = new OrderbookHeatmapOverlay({
-      fetch: async (req) => {
-        if (req.threshold === 0) hoverFetchCount++;
-        return {
-          schemaVersion: 1,
-          generatedAt: now,
-          base: "BTC",
-          source: req.source,
-          resolution: req.resolution,
-          bucketStep: req.bucketStep,
-          from: req.from,
-          to: req.to,
-          bars,
-        };
-      },
-      invalidate: () => {},
-      getMarket: () => MARKET,
-      now: () => now,
-    });
+    let overlay = null;
+    try {
+      overlay = new OrderbookHeatmapOverlay({
+        fetch: async (req) => {
+          if (req.threshold === 0) hoverFetchCount++;
+          return {
+            schemaVersion: 1,
+            generatedAt: now,
+            base: "BTC",
+            source: req.source,
+            resolution: req.resolution,
+            bucketStep: req.bucketStep,
+            from: req.from,
+            to: req.to,
+            bars,
+          };
+        },
+        invalidate: () => {},
+        getMarket: () => MARKET,
+        now: () => now,
+      });
 
-    overlay.draw(harness.ctx, view, series, [0, 959]);
-    await new Promise((resolve) => setTimeout(resolve, 20));
-    overlay.draw(harness.ctx, view, series, [0, 959]);
+      overlay.draw(harness.ctx, view, series, [0, 959]);
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      overlay.draw(harness.ctx, view, series, [0, 959]);
 
-    const stats = harness.stats();
-    assert.equal(stats.putImageDataCalls, 1, "expected single putImageData call for offscreen raster");
-    assert.equal(stats.offFillRects.length, 0, "expected zero offscreen fillRect calls with ImageData fast path");
+      const stats = harness.stats();
+      assert.equal(stats.putImageDataCalls, 1, "expected single putImageData call for offscreen raster");
+      assert.equal(stats.offFillRects.length, 0, "expected zero offscreen fillRect calls with ImageData fast path");
 
-    // Verify < 100 BTC cells remain intact for hover lookup
-    const hoverCtx = {
-      save() {},
-      restore() {},
-      beginPath() {},
-      rect() {},
-      roundRect() {},
-      clip() {},
-      fill() {},
-      stroke() {},
-      fillRect() {},
-      fillText() {},
-      measureText(t) {
-        return { width: String(t).length * 6 };
-      },
-      set font(_) {},
-      set fillStyle(_) {},
-      set strokeStyle(_) {},
-      set lineWidth(_) {},
-      set textAlign(_) {},
-      set textBaseline(_) {},
-    };
-    overlay.drawHover(hoverCtx, view, series, { visible: true, x: 100, y: 300 });
-    await new Promise((resolve) => setTimeout(resolve, 140));
-    overlay.drawHover(hoverCtx, view, series, { visible: true, x: 100, y: 300 });
-    assert.ok(hoverFetchCount >= 1, "hover lookup should request unthresholded bars");
-    for (const bar of bars) {
-      assert.ok(bar.cells.some((c) => c[1] + c[2] < 100 * (c[0] + 12.5)), "<100 BTC cells stay in bar.cells");
+      // Verify < 100 BTC cells remain intact for hover lookup
+      const hoverCtx = {
+        save() {},
+        restore() {},
+        beginPath() {},
+        closePath() {},
+        moveTo() {},
+        lineTo() {},
+        rect() {},
+        roundRect() {},
+        clip() {},
+        fill() {},
+        stroke() {},
+        strokeRect() {},
+        fillRect() {},
+        fillText() {},
+        measureText(t) {
+          return { width: String(t).length * 6 };
+        },
+        set font(_) {},
+        set fillStyle(_) {},
+        set strokeStyle(_) {},
+        set lineWidth(_) {},
+        set textAlign(_) {},
+        set textBaseline(_) {},
+      };
+      overlay.drawHover(hoverCtx, view, series, { visible: true, x: 100, y: 300 });
+      await new Promise((resolve) => setTimeout(resolve, 140));
+      overlay.drawHover(hoverCtx, view, series, { visible: true, x: 100, y: 300 });
+      assert.ok(hoverFetchCount >= 1, "hover lookup should request unthresholded bars");
+      for (const bar of bars) {
+        assert.ok(bar.cells.some((c) => c[1] + c[2] < 100 * (c[0] + 12.5)), "<100 BTC cells stay in bar.cells");
+      }
+    } finally {
+      overlay?.dispose();
     }
-
-    overlay.dispose();
   });
 });
 
@@ -400,28 +407,32 @@ for (const cfg of [
           now: () => now,
         });
 
-      const fastOverlay = makeOverlay();
-      const refOverlay = makeOverlay();
+      let fastOverlay = null;
+      let refOverlay = null;
+      try {
+        fastOverlay = makeOverlay();
+        refOverlay = makeOverlay();
 
-      fastOverlay.draw(fastHarness.ctx, view, series, [0, 127]);
-      refOverlay.draw(refHarness.ctx, view, series, [0, 127]);
-      await new Promise((resolve) => setTimeout(resolve, 20));
-      fastOverlay.draw(fastHarness.ctx, view, series, [0, 127]);
-      refOverlay.draw(refHarness.ctx, view, series, [0, 127]);
+        fastOverlay.draw(fastHarness.ctx, view, series, [0, 127]);
+        refOverlay.draw(refHarness.ctx, view, series, [0, 127]);
+        await new Promise((resolve) => setTimeout(resolve, 20));
+        fastOverlay.draw(fastHarness.ctx, view, series, [0, 127]);
+        refOverlay.draw(refHarness.ctx, view, series, [0, 127]);
 
-      const fastStats = fastHarness.stats();
-      const refStats = refHarness.stats();
-      assert.equal(fastStats.putImageDataCalls, 1);
-      assert.equal(fastStats.offFillRects.length, 0);
-      assert.ok(refStats.offFillRects.length > 0);
+        const fastStats = fastHarness.stats();
+        const refStats = refHarness.stats();
+        assert.equal(fastStats.putImageDataCalls, 1);
+        assert.equal(fastStats.offFillRects.length, 0);
+        assert.ok(refStats.offFillRects.length > 0);
 
-      const img = fastStats.lastImageData;
-      const fastU32 = new Uint32Array(img.data.buffer, img.data.byteOffset, img.data.byteLength >>> 2);
-      const refU32 = rasterizeReferenceFillRects(refStats.offFillRects, img.width, img.height);
-      assert.deepEqual(Array.from(fastU32), Array.from(refU32));
-
-      fastOverlay.dispose();
-      refOverlay.dispose();
+        const img = fastStats.lastImageData;
+        const fastU32 = new Uint32Array(img.data.buffer, img.data.byteOffset, img.data.byteLength >>> 2);
+        const refU32 = rasterizeReferenceFillRects(refStats.offFillRects, img.width, img.height);
+        assert.deepEqual(Array.from(fastU32), Array.from(refU32));
+      } finally {
+        fastOverlay?.dispose();
+        refOverlay?.dispose();
+      }
     });
   });
 }
@@ -435,43 +446,46 @@ test("#345 WebGL2 prepareGpuCells uses sparse threshold index and preserves pari
     const view = makeView({ dpr: 1, width: 1200, height: 600, colWidth: 1.25 });
     let released = false;
 
-    const overlay = new OrderbookHeatmapOverlay({
-      fetch: async (req) => ({
-        schemaVersion: 1,
-        generatedAt: now,
-        base: "BTC",
-        source: req.source,
-        resolution: req.resolution,
-        bucketStep: req.bucketStep,
-        from: req.from,
-        to: req.to,
-        bars,
-      }),
-      invalidate: () => {},
-      getMarket: () => MARKET,
-      now: () => now,
-    });
+    let overlay = null;
+    try {
+      overlay = new OrderbookHeatmapOverlay({
+        fetch: async (req) => ({
+          schemaVersion: 1,
+          generatedAt: now,
+          base: "BTC",
+          source: req.source,
+          resolution: req.resolution,
+          bucketStep: req.bucketStep,
+          from: req.from,
+          to: req.to,
+          bars,
+        }),
+        invalidate: () => {},
+        getMarket: () => MARKET,
+        now: () => now,
+      });
 
-    overlay.prepareGpuCells(view, series, [0, 959], () => ({ release() { released = true; } }));
-    await new Promise((resolve) => setTimeout(resolve, 20));
-    const gpuFrame = overlay.prepareGpuCells(view, series, [0, 959], () => ({
-      release() {
-        released = true;
-      },
-    }));
+      overlay.prepareGpuCells(view, series, [0, 959], () => ({ release() { released = true; } }));
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      const gpuFrame = overlay.prepareGpuCells(view, series, [0, 959], () => ({
+        release() {
+          released = true;
+        },
+      }));
 
-    assert.ok(gpuFrame, "expected prepared GPU frame");
-    assert.equal(gpuFrame.main.length, 120, "expected only >= 100 BTC sparse cells");
-    assert.equal(gpuFrame.floor, 100);
-    assert.equal(gpuFrame.ceiling, 1_000);
-    assert.equal(gpuFrame.threshold, 100);
-    assert.equal(gpuFrame.palette, "viridis");
-    assert.equal(gpuFrame.opacity, 0.85);
-    assert.equal(released, false);
-    gpuFrame.preparedLease?.release();
-    assert.equal(released, true);
-
-    overlay.dispose();
+      assert.ok(gpuFrame, "expected prepared GPU frame");
+      assert.equal(gpuFrame.main.length, 120, "expected only >= 100 BTC sparse cells");
+      assert.equal(gpuFrame.floor, 100);
+      assert.equal(gpuFrame.ceiling, 1_000);
+      assert.equal(gpuFrame.threshold, 100);
+      assert.equal(gpuFrame.palette, "viridis");
+      assert.equal(gpuFrame.opacity, 0.85);
+      assert.equal(released, false);
+      gpuFrame.preparedLease?.release();
+      assert.equal(released, true);
+    } finally {
+      overlay?.dispose();
+    }
   });
 });
 
@@ -484,46 +498,49 @@ test("#345 tryMotionRasterReuse stays stable when bar 0 is visible at left histo
     const view = makeView({ dpr: 1, width: 1200, height: 600, colWidth: 1.25, offsetX: 120 });
     const harness = makeOffscreenHarness({ width: 1200, height: 600, dpr: 1, supportImageData: true });
 
-    const overlay = new OrderbookHeatmapOverlay({
-      fetch: async (req) => ({
-        schemaVersion: 1,
-        generatedAt: now,
-        base: "BTC",
-        source: req.source,
-        resolution: req.resolution,
-        bucketStep: req.bucketStep,
-        from: req.from,
-        to: req.to,
-        bars,
-      }),
-      invalidate: () => {},
-      getMarket: () => MARKET,
-      now: () => now,
-    });
+    let overlay = null;
+    try {
+      overlay = new OrderbookHeatmapOverlay({
+        fetch: async (req) => ({
+          schemaVersion: 1,
+          generatedAt: now,
+          base: "BTC",
+          source: req.source,
+          resolution: req.resolution,
+          bucketStep: req.bucketStep,
+          from: req.from,
+          to: req.to,
+          bars,
+        }),
+        invalidate: () => {},
+        getMarket: () => MARKET,
+        now: () => now,
+      });
 
-    overlay.draw(harness.ctx, view, series, [0, 959]);
-    await new Promise((resolve) => setTimeout(resolve, 20));
-    overlay.draw(harness.ctx, view, series, [0, 959]);
-
-    const before = snapshotPerformanceTelemetry().counters;
-    for (let step = 0; step < 4; step++) {
-      now += 16;
-      view.offsetX += 10;
       overlay.draw(harness.ctx, view, series, [0, 959]);
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      overlay.draw(harness.ctx, view, series, [0, 959]);
+
+      const before = snapshotPerformanceTelemetry().counters;
+      for (let step = 0; step < 4; step++) {
+        now += 16;
+        view.offsetX += 10;
+        overlay.draw(harness.ctx, view, series, [0, 959]);
+      }
+      const after = snapshotPerformanceTelemetry().counters;
+
+      assert.equal(
+        (after["chart.cpu.heatmap.raster.motionReuse"] ?? 0) - (before["chart.cpu.heatmap.raster.motionReuse"] ?? 0),
+        4,
+        "left-boundary pan with bar 0 visible should reuse raster cache on every frame",
+      );
+      assert.equal(
+        (after["chart.cpu.heatmap.raster.miss"] ?? 0) - (before["chart.cpu.heatmap.raster.miss"] ?? 0),
+        0,
+        "left-boundary pan with bar 0 visible should not trigger unnecessary cache misses",
+      );
+    } finally {
+      overlay?.dispose();
     }
-    const after = snapshotPerformanceTelemetry().counters;
-
-    assert.equal(
-      (after["chart.cpu.heatmap.raster.motionReuse"] ?? 0) - (before["chart.cpu.heatmap.raster.motionReuse"] ?? 0),
-      4,
-      "left-boundary pan with bar 0 visible should reuse raster cache on every frame",
-    );
-    assert.equal(
-      (after["chart.cpu.heatmap.raster.miss"] ?? 0) - (before["chart.cpu.heatmap.raster.miss"] ?? 0),
-      0,
-      "left-boundary pan with bar 0 visible should not trigger unnecessary cache misses",
-    );
-
-    overlay.dispose();
   });
 });

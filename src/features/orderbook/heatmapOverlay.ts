@@ -2250,6 +2250,7 @@ export class OrderbookHeatmapOverlay {
     const sortedTimes = this.subBarTimesFor(series, frame.tier);
     const isLinearFast =
       !(typeof view.isLogScale === "function" && view.isLogScale()) &&
+      !Object.hasOwn(view, "yOfPrice") &&
       Number.isFinite(view.priceTop) &&
       view.pricePerPx > 0;
     const areaTop = view.area.top;
@@ -2367,6 +2368,7 @@ export class OrderbookHeatmapOverlay {
     const liveIndex = replayActive ? -1 : series.length - 1;
     const isLinearFast =
       !(typeof view.isLogScale === "function" && view.isLogScale()) &&
+      !Object.hasOwn(view, "yOfPrice") &&
       Number.isFinite(view.priceTop) &&
       view.pricePerPx > 0;
     const priceTop = view.priceTop;
