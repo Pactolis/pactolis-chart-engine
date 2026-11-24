@@ -130,18 +130,21 @@ test("Issue #313: group drag and single-point edit perform 0 drawing.id lookups 
   assert.equal(after[2].points[0].price, 50202);
 
   // Single-step undo/redo
-  assert.equal(manager.undo(), true);
+  assert.equal(manager.canUndo, true);
+  manager.undo();
   assert.equal(manager.listCurrent()[0].points[0].price, 50000);
-  assert.equal(manager.redo(), true);
+  assert.equal(manager.canRedo, true);
+  manager.redo();
   assert.equal(manager.listCurrent()[0].points[0].price, 50200);
 
   // Single-point edit on d-0 must also avoid id scans during pointerMove
+  const probe2 = instrumentDrawingIdReads(manager.listCurrentReadonly());
   manager.select("d-0");
   assert.equal(manager.pointerDown(after[0].points[0], { x: view.xOfIndex(20) + view.colWidth / 2, y: view.yOfPrice(50200) }), true);
-  probe.reset();
+  probe2.reset();
   for (let step = 1; step <= 10; step++) {
     manager.pointerMove({ time: after[0].points[0].time, price: 50200 + step });
   }
-  assert.equal(probe.getReads(), 0, "pointerMove single-point edit must perform 0 id scans");
+  assert.equal(probe2.getReads(), 0, "pointerMove single-point edit must perform 0 id scans");
   manager.pointerUp();
 });
