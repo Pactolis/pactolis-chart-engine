@@ -7,17 +7,32 @@
  */
 
 import { ChartChange } from "../../../core/render/scene/chartScene.js";
+import { resolveBuiltInLayerPreset, type BuiltInChartType } from "../../../core/render/scene/chartLayerPreset.js";
 import { View } from "../../../core/engine/view.js";
 import type { Canvas2dContext, CanvasTarget } from "../../../core/gpu/canvasTarget.js";
 import type { GpuBackendKind, GpuSurface } from "../../../core/gpu/gpuBackend.js";
 import { getGpuDiagnostics, type GpuDiagnosticsSnapshot } from "../../../core/gpu/gpuDiagnostics.js";
-import type { GpuBackendPreference } from "../../../core/gpu/gpuSettings.js";
+import { readGpuSettings, type GpuBackendPreference } from "../../../core/gpu/gpuSettings.js";
 import { createGpuSurfaceAsync } from "../../../core/gpu/selectBackend.js";
 import { FootprintSeries } from "../../../core/model/footprint.js";
+import {
+  DEFAULT_ORDERBOOK_HEATMAP_SETTINGS,
+  isOrderbookHeatmapMarket,
+  type OrderbookHeatmapMode,
+} from "../../../core/orderbookHeatmap/settings.js";
 import { FootprintRenderer } from "../../../core/render/footprintRenderer.js";
 import { Overlay, type Crosshair } from "../../../core/render/overlay.js";
-import type { FootprintBar } from "../../../core/types.js";
+import { settings, type ChartViewConfig } from "../../../core/settings.js";
+import type { FootprintBar, FootprintCell } from "../../../core/types.js";
+import { ChartHeatmapGpuCoordinator } from "../ChartHeatmapGpuCoordinator.js";
+import type { HeatmapGpuCellFrame } from "../heatmap/gpu/heatmapGpuRenderer.js";
+import { OrderbookHeatmapOverlay } from "../../orderbook/heatmapOverlay.js";
 import {
+  configureOrderbookHeatmapSettingsSource,
+  orderbookHeatmapSettingsSource,
+} from "../../orderbook/heatmapSettingsSource.js";
+import {
+  type WorkerChartStatePatch,
   type WorkerHistoryBar,
   type WorkerInputEvent,
   type WorkerSurfaceDescriptor,
@@ -32,6 +47,35 @@ import {
 const PACKED_BAR_STRIDE = 6; // [time, open, high, low, close, volume]
 const DEFAULT_TIME_AXIS_HEIGHT = 24;
 
+const workerHeatmapPanelModes = new Map<string, OrderbookHeatmapMode>();
+const workerHeatmapListeners = new Set<() => void>();
+let workerHeatmapSourceInstalled = false;
+
+function ensureWorkerHeatmapSettingsSource(): void {
+  try {
+    orderbookHeatmapSettingsSource();
+    return;
+  } catch {
+    if (workerHeatmapSourceInstalled) return;
+    workerHeatmapSourceInstalled = true;
+    configureOrderbookHeatmapSettingsSource({
+      settingsFor: (market, panelId) => {
+        const mode = workerHeatmapPanelModes.get(`${panelId ?? ""}:${market}`) ?? "off";
+        return {
+          ...DEFAULT_ORDERBOOK_HEATMAP_SETTINGS,
+          mode,
+        };
+      },
+      onChange: (listener) => {
+        workerHeatmapListeners.add(listener);
+        return () => {
+          workerHeatmapListeners.delete(listener);
+        };
+      },
+    });
+  }
+}
+
 export interface ChartWorkerPanelOptions {
   panelId: string;
   marketId: string;
@@ -45,23 +89,37 @@ export interface ChartWorkerPanelOptions {
 }
 
 export interface ChartWorkerDiagnostics {
+  readonly renderMode: "worker";
   readonly panelId: string;
   readonly marketId: string;
   readonly requestedBackend: GpuBackendPreference;
   readonly activeBackend: GpuBackendKind | null;
+  readonly chartType: BuiltInChartType;
+  readonly scaleMode: "linear" | "log";
   readonly width: number;
   readonly height: number;
   readonly dpr: number;
   readonly barCount: number;
+  readonly cellCount: number;
   readonly frameCount: number;
   readonly paused: boolean;
   readonly disposed: boolean;
   readonly endpointStats: WorkerEndpointStats;
   readonly gpuDiagnostics: GpuDiagnosticsSnapshot;
+  readonly heatmap: ReturnType<ChartHeatmapGpuCoordinator["getDiagnostics"]> | null;
+  readonly heatmapRaster: ReturnType<OrderbookHeatmapOverlay["getRasterDiagnostics"]> | null;
 }
 
 function toFootprintBar(bar: WorkerHistoryBar, intervalMs: number): FootprintBar {
   const safeInterval = intervalMs > 0 ? intervalMs : 60_000;
+  const cells = new Map<number, FootprintCell>();
+  let computedDelta = 0;
+  if (bar.cells) {
+    for (const [priceBin, buyVol, sellVol] of bar.cells) {
+      cells.set(priceBin, { priceBin, buyVol, sellVol });
+      computedDelta += buyVol - sellVol;
+    }
+  }
   return {
     startTime: Math.floor(bar.time / safeInterval) * safeInterval,
     open: bar.open,
@@ -69,9 +127,9 @@ function toFootprintBar(bar: WorkerHistoryBar, intervalMs: number): FootprintBar
     low: bar.low,
     close: bar.close,
     volume: bar.volume,
-    delta: 0,
-    count: 1,
-    cells: new Map(),
+    delta: bar.delta ?? computedDelta,
+    count: bar.count ?? (cells.size > 0 ? cells.size : 1),
+    cells,
     hasRef: true,
     completeness: "complete",
     sources: ["history"],
@@ -131,6 +189,21 @@ export class ChartWorkerPanelRuntime {
   private gpuSurface: GpuSurface | null = null;
   private renderer: FootprintRenderer | null = null;
   private overlay: Overlay | null = null;
+  private orderbookHeatmap: OrderbookHeatmapOverlay | null = null;
+  private heatmapGpuCoordinator: ChartHeatmapGpuCoordinator | null = null;
+  private offscreenCanvases?: Partial<Record<WorkerSurfaceRole, OffscreenCanvas>>;
+
+  private chartType: BuiltInChartType = "footprint";
+  private cellData: ChartViewConfig["clusterCellData"] = settings.clusterCellData;
+  private tpoMode: ChartViewConfig["tpoMode"] = settings.tpoMode;
+  private scaleMode: "linear" | "log" = "linear";
+  private orderbookHeatmapMode: OrderbookHeatmapMode = "off";
+  private residentHeatmapEnabled: boolean = readGpuSettings().residentHeatmap;
+  private candlesVisible: boolean = settings.candles;
+  private heatVisible: boolean = settings.heat;
+  private cellNumbersVisible: boolean = settings.cellNumbers;
+  private pocVisible: boolean = settings.poc;
+  private stackedImbalanceVisible: boolean = settings.stackedImbalance;
 
   private width = 640;
   private height = 360;
@@ -153,6 +226,8 @@ export class ChartWorkerPanelRuntime {
     this.createScratchCanvas = options.createScratchCanvas;
     this.getWebGl2Context = options.getWebGl2Context;
 
+    ensureWorkerHeatmapSettingsSource();
+
     this.view = new View();
     this.series = new FootprintSeries({
       intervalMs: options.intervalMs ?? 60_000,
@@ -160,6 +235,42 @@ export class ChartWorkerPanelRuntime {
       pricePrecision: options.pricePrecision ?? 2,
       referenceMarket: options.marketId,
     });
+
+    this.orderbookHeatmap = new OrderbookHeatmapOverlay({
+      fetch: async (req) => ({
+        schemaVersion: 1,
+        generatedAt: Date.now(),
+        base: "BTC",
+        source: req.source,
+        resolution: req.resolution,
+        bucketStep: req.bucketStep,
+        from: req.from,
+        to: req.to,
+        bars: [],
+      }),
+      invalidate: () => {
+        if (!this.disposed) this.invalidate(ChartChange.Data);
+      },
+      getMarket: () => this.marketId,
+      getPanelId: () => this.panelId,
+      isReplayActive: () => false,
+    });
+
+    const self = this;
+    this.heatmapGpuCoordinator = new ChartHeatmapGpuCoordinator({
+      get backendKind() { return self.gpuSurface?.kind ?? "canvas2d"; },
+      get orderbookHeatmap() { return self.orderbookHeatmap; },
+      get renderCoordinator() {
+        return {
+          getAnnotationLayerOrder: () => resolveBuiltInLayerPreset(self.chartType).annotation,
+        };
+      },
+      get renderer() { return self.renderer!; },
+      invalidateSession: () => {
+        if (!this.disposed) this.invalidate(ChartChange.All);
+      },
+    });
+    this.heatmapGpuCoordinator.setResidentHeatmapEnabled(this.residentHeatmapEnabled);
 
     this.endpoint = new WorkerChartEndpoint({
       panelId: options.panelId,
@@ -175,14 +286,23 @@ export class ChartWorkerPanelRuntime {
         onInput: (event) => {
           this.handleInputEvent(event);
         },
+        onStateUpdate: (payload) => {
+          void this.handleStateUpdate(payload);
+        },
         onTick: (payload) => {
           this.handleTick(payload);
         },
         onBar: (payload) => {
           this.handleBar(payload);
         },
+        onHeatmapTail: (payload) => {
+          this.handleHeatmapTail(payload);
+        },
         onHistoryChunk: (payload) => {
           this.handleHistoryChunk(payload);
+        },
+        onHeatmapChunk: (payload) => {
+          this.handleHeatmapChunk(payload);
         },
         onHitTest: (payload) => this.handleHitTest(payload.x, payload.y),
         onTooltip: (payload) => this.handleTooltip(payload.x, payload.y),
@@ -216,19 +336,42 @@ export class ChartWorkerPanelRuntime {
     const changes = this.pendingChanges === ChartChange.None ? ChartChange.All : this.pendingChanges;
     this.pendingChanges = ChartChange.None;
 
-    this.renderer.render(this.view, this.series);
+    this.heatmapGpuCoordinator?.beginFrameAttempt();
+    let heatmapFrame: HeatmapGpuCellFrame | null = null;
+    try {
+      heatmapFrame = this.heatmapGpuCoordinator?.prepareHeatmapGpuCells(this.view, this.series) ?? null;
+      const isOrderbookHeatmapActive =
+        this.orderbookHeatmap !== null
+        && isOrderbookHeatmapMarket(this.marketId)
+        && orderbookHeatmapSettingsSource().settingsFor(this.marketId, this.panelId).mode !== "off";
+      this.renderer.setAllowNativeFootprintText(!isOrderbookHeatmapActive);
+      const gpuLayers = new Set(resolveBuiltInLayerPreset(this.chartType).gpu);
+      this.renderer.renderLayers(this.view, this.series, gpuLayers);
+      this.heatmapGpuCoordinator?.renderHeatmapGpuCells(heatmapFrame, this.view, this.series);
+    } catch (error) {
+      heatmapFrame?.preparedLease?.release();
+      heatmapFrame = null;
+      throw error;
+    }
 
     if (this.overlay) {
       const range = this.renderer.visibleRange(this.view, this.series.length);
+      const preset = resolveBuiltInLayerPreset(this.chartType);
       this.overlay.renderAnnotations(
         this.view,
         this.series,
         this.crosshair,
         range,
-        undefined,
+        preset.annotation,
         changes as ChartChange,
       );
-      this.overlay.renderInteraction(this.view, this.series, this.crosshair, range);
+      this.overlay.renderInteraction(
+        this.view,
+        this.series,
+        this.crosshair,
+        range,
+        preset.interaction,
+      );
     }
 
     this.frameCount++;
@@ -236,20 +379,30 @@ export class ChartWorkerPanelRuntime {
   }
 
   getDiagnostics(): ChartWorkerDiagnostics {
+    let cellCount = 0;
+    for (let i = 0; i < this.series.length; i++) {
+      cellCount += this.series.at(i)?.cells.size ?? 0;
+    }
     return {
+      renderMode: "worker",
       panelId: this.panelId,
       marketId: this.marketId,
       requestedBackend: this.requestedBackend,
       activeBackend: this.gpuSurface?.kind ?? null,
+      chartType: this.chartType,
+      scaleMode: this.scaleMode,
       width: this.width,
       height: this.height,
       dpr: this.dpr,
       barCount: this.series.length,
+      cellCount,
       frameCount: this.frameCount,
       paused: this.paused,
       disposed: this.disposed,
       endpointStats: this.endpoint.getStats(),
       gpuDiagnostics: getGpuDiagnostics(),
+      heatmap: this.heatmapGpuCoordinator?.getDiagnostics() ?? null,
+      heatmapRaster: this.orderbookHeatmap?.getRasterDiagnostics() ?? null,
     };
   }
 
@@ -258,6 +411,10 @@ export class ChartWorkerPanelRuntime {
     this.disposed = true;
     this.scheduledFrame?.cancel();
     this.scheduledFrame = null;
+    this.heatmapGpuCoordinator?.dispose();
+    this.heatmapGpuCoordinator = null;
+    this.orderbookHeatmap?.dispose();
+    this.orderbookHeatmap = null;
     this.overlay?.dispose();
     this.overlay = null;
     this.renderer?.dispose();
@@ -266,7 +423,30 @@ export class ChartWorkerPanelRuntime {
     this.gpuSurface = null;
     this.annotationCanvas = null;
     this.interactionCanvas = null;
+    this.offscreenCanvases = undefined;
     this.endpoint.dispose();
+  }
+
+  private chartViewConfig(): ChartViewConfig {
+    return {
+      chartType: this.chartType,
+      tpoMode: this.tpoMode,
+      tpoProfilePeriod: settings.tpoProfilePeriod,
+      tpoBracketSize: settings.tpoBracketSize,
+      clusterCellData: this.cellData,
+      profileCellData: this.cellData,
+      candles: this.candlesVisible,
+      heat: this.heatVisible,
+      cellNumbers: this.cellNumbersVisible,
+      poc: this.pocVisible,
+      stackedImbalance: this.stackedImbalanceVisible,
+    };
+  }
+
+  private applyChartConfig(): void {
+    const cfg = this.chartViewConfig();
+    this.renderer?.setChartConfig(cfg);
+    this.overlay?.setChartConfig(cfg);
   }
 
   private async handleInit(payload: {
@@ -279,6 +459,7 @@ export class ChartWorkerPanelRuntime {
     if (payload.backendPreference) {
       this.requestedBackend = payload.backendPreference;
     }
+    this.offscreenCanvases = payload.offscreenCanvases;
 
     await this.setupSurfaces(
       payload.viewport.width,
@@ -359,6 +540,12 @@ export class ChartWorkerPanelRuntime {
       this.renderer.setSurface(nextSurface);
     }
 
+    const resolvedGl = nextSurface.kind === "webgl2" && this.getWebGl2Context
+      ? this.getWebGl2Context(nextGpuCanvas)
+      : null;
+    this.heatmapGpuCoordinator?.setGl(resolvedGl);
+    this.heatmapGpuCoordinator?.setSurface(nextSurface);
+
     const annotationCtx = nextAnnotationCanvas.getContext?.("2d") as Canvas2dContext | null;
     const interactionCtx = nextInteractionCanvas.getContext?.("2d") as Canvas2dContext | null;
 
@@ -383,6 +570,22 @@ export class ChartWorkerPanelRuntime {
           undefined,
           undefined,
           interactionCtx ?? undefined,
+          undefined,
+          (ctx, activeView, activeSeries, range) => {
+            if (this.heatmapGpuCoordinator?.heatmapGpuSuppressedAnnotation(activeView, activeSeries, range)) {
+              this.orderbookHeatmap?.releaseRasterCache();
+              return false;
+            }
+            if (!this.orderbookHeatmap) return false;
+            this.orderbookHeatmap.draw(ctx, activeView, activeSeries, range);
+            return this.chartType !== "tpo" || (
+              isOrderbookHeatmapMarket(this.marketId)
+              && this.orderbookHeatmapMode !== "off"
+            );
+          },
+          (ctx, activeView, activeSeries, activeCrosshair) => {
+            this.orderbookHeatmap?.drawHover(ctx, activeView, activeSeries, activeCrosshair);
+          },
         );
       } else {
         this.overlay.updateContext(annotationCtx);
@@ -391,6 +594,98 @@ export class ChartWorkerPanelRuntime {
         }
       }
     }
+
+    this.applyChartConfig();
+  }
+
+  private async handleStateUpdate(patch: WorkerChartStatePatch): Promise<void> {
+    if (this.disposed) return;
+    if (patch.chartType !== undefined) {
+      this.chartType = patch.chartType;
+    }
+    if (patch.cellData !== undefined) {
+      this.cellData = patch.cellData;
+    }
+    if (patch.tpoMode !== undefined) {
+      this.tpoMode = patch.tpoMode;
+    }
+    if (patch.scaleMode !== undefined) {
+      this.scaleMode = patch.scaleMode;
+      this.view.setScaleMode(patch.scaleMode);
+    }
+    if (patch.candles !== undefined) {
+      this.candlesVisible = patch.candles;
+    }
+    if (patch.heat !== undefined) {
+      this.heatVisible = patch.heat;
+    }
+    if (patch.cellNumbers !== undefined) {
+      this.cellNumbersVisible = patch.cellNumbers;
+    }
+    if (patch.poc !== undefined) {
+      this.pocVisible = patch.poc;
+    }
+    if (patch.stackedImbalance !== undefined) {
+      this.stackedImbalanceVisible = patch.stackedImbalance;
+    }
+    if (patch.orderbookHeatmapMode !== undefined) {
+      this.orderbookHeatmapMode = patch.orderbookHeatmapMode;
+      workerHeatmapPanelModes.set(`${this.panelId}:${this.marketId}`, patch.orderbookHeatmapMode);
+      for (const listener of workerHeatmapListeners) {
+        listener();
+      }
+    }
+    if (patch.residentHeatmap !== undefined) {
+      this.residentHeatmapEnabled = patch.residentHeatmap;
+      this.heatmapGpuCoordinator?.setResidentHeatmapEnabled(patch.residentHeatmap);
+    }
+
+    this.applyChartConfig();
+
+    if (patch.backendPreference !== undefined && patch.backendPreference !== this.requestedBackend) {
+      this.requestedBackend = patch.backendPreference;
+      await this.setupSurfaces(this.width, this.height, this.dpr, this.offscreenCanvases);
+    }
+
+    if (!this.disposed) {
+      this.invalidate(ChartChange.Style | ChartChange.All);
+    }
+  }
+
+  private handleHeatmapChunk(payload: {
+    resolution?: "1m" | "5m" | "15m" | "1h";
+    bucketStep?: number;
+    from?: number;
+    to?: number;
+    bars: ReadonlyArray<{ t: number; cells: ReadonlyArray<readonly [number, number, number]> }>;
+  }): void {
+    if (this.disposed || !this.orderbookHeatmap) return;
+    this.orderbookHeatmap.ingestWorkerHeatmapChunk({
+      resolution: payload.resolution,
+      bucketStep: payload.bucketStep,
+      from: payload.from,
+      to: payload.to,
+      bars: payload.bars.map((bar) => ({
+        t: bar.t,
+        cells: bar.cells.map(([p, b, a]) => [p, b, a]),
+      })),
+    });
+  }
+
+  private handleHeatmapTail(payload: {
+    market?: string;
+    timestamp?: number;
+    bars?: ReadonlyArray<{ t: number; cells: ReadonlyArray<readonly [number, number, number]> }>;
+  }): void {
+    if (this.disposed || !this.orderbookHeatmap) return;
+    this.orderbookHeatmap.ingestWorkerHeatmapTail({
+      market: payload.market,
+      timestamp: payload.timestamp,
+      bars: payload.bars?.map((bar) => ({
+        t: bar.t,
+        cells: bar.cells.map(([p, b, a]) => [p, b, a]),
+      })),
+    });
   }
 
   private handleResize(width: number, height: number, dpr: number): void {
@@ -715,6 +1010,7 @@ export class ChartWorkerPanelRuntime {
         break;
       case "rehome":
         if (payload.offscreenCanvases) {
+          this.offscreenCanvases = payload.offscreenCanvases;
           const primary = payload.surfaces?.[0];
           const nextW = primary?.width ?? this.width;
           const nextH = primary?.height ?? this.height;

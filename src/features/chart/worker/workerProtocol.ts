@@ -57,6 +57,32 @@ export interface WorkerHistoryBar {
   low: number;
   close: number;
   volume: number;
+  delta?: number;
+  count?: number;
+  cells?: ReadonlyArray<readonly [number, number, number]>;
+}
+
+export interface WorkerChartStatePatch {
+  chartType?: "footprint" | "footprintProfile" | "candlestick" | "tpo";
+  cellData?:
+    | "bidask"
+    | "volume"
+    | "delta"
+    | "deltaPct"
+    | "count"
+    | "countBidask"
+    | "avgTradeSize"
+    | "avgTradeSizeBidask";
+  tpoMode?: "blocks" | "letters";
+  scaleMode?: "linear" | "log";
+  orderbookHeatmapMode?: "off" | "single" | "aggregated" | "custom";
+  residentHeatmap?: boolean;
+  backendPreference?: "auto" | "webgpu" | "webgl2" | "canvas2d";
+  candles?: boolean;
+  heat?: boolean;
+  cellNumbers?: boolean;
+  poc?: boolean;
+  stackedImbalance?: boolean;
 }
 
 export interface WorkerSurfaceDescriptor {
@@ -116,6 +142,15 @@ export type IngressWorkerMessage =
         timestamp: number;
       }
     >
+  | WorkerEnvelopeBase<
+      "ingress",
+      "ingress:heatmap-tail",
+      {
+        market?: string;
+        timestamp?: number;
+        bars?: ReadonlyArray<{ t: number; cells: ReadonlyArray<readonly [number, number, number]> }>;
+      }
+    >
   | WorkerEnvelopeBase<"ingress", "ingress:credit", { granted: number }>
   | WorkerEnvelopeBase<"ingress", "ingress:ack", { ackedSeq: number }>;
 
@@ -157,6 +192,17 @@ export type HistoryWorkerMessage =
         recoverable: boolean;
       }
     >
+  | WorkerEnvelopeBase<
+      "history",
+      "history:heatmap-chunk",
+      {
+        resolution?: "1m" | "5m" | "15m" | "1h";
+        bucketStep?: number;
+        from?: number;
+        to?: number;
+        bars: ReadonlyArray<{ t: number; cells: ReadonlyArray<readonly [number, number, number]> }>;
+      }
+    >
   | WorkerEnvelopeBase<"history", "history:credit", { granted: number }>
   | WorkerEnvelopeBase<"history", "history:ack", { ackedSeq: number }>;
 
@@ -189,6 +235,7 @@ export type MainWorkerMessage =
       }
     >
   | WorkerEnvelopeBase<"main", "main:input", WorkerInputEvent>
+  | WorkerEnvelopeBase<"main", "main:state-update", WorkerChartStatePatch>
   | WorkerEnvelopeBase<
       "main",
       "main:capture-request",

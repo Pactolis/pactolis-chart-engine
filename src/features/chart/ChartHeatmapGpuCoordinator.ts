@@ -121,6 +121,8 @@ export class ChartHeatmapGpuCoordinator {
     if (backend !== "webgl2") {
       setGpuFeaturePath(HEATMAP_GPU_FEATURE, "cpu");
       setGpuFeaturePath("heatmap", "cpu");
+      this.lastHeatmapPath = "cpu";
+      this.lastFallbackReason = "backend_unsupported";
       if (!this.heatmapGpuUnsupportedEpisode) {
         recordGpuFeatureFallback(HEATMAP_GPU_FEATURE, "backend_unsupported");
         this.heatmapGpuUnsupportedEpisode = true;
@@ -173,12 +175,14 @@ export class ChartHeatmapGpuCoordinator {
   }
 
   getDiagnostics(): {
+    enabled: boolean;
     backend: string;
     heatmapPath: string;
     failureLatched: boolean;
     fallbackReason: string | null;
   } {
     return {
+      enabled: this._heatmapTexturePrototypeEnabled,
       backend: this.host.backendKind ?? "webgl2",
       heatmapPath: this.lastHeatmapPath,
       failureLatched: this.heatmapGpuFailureLatched,

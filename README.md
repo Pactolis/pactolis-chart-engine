@@ -82,6 +82,13 @@ bridge.sendInit(ownership.getSurfaceSnapshot(), { width: 800, height: 500, dpr: 
   backendPreference: "auto",
   offscreenCanvases,
 });
+bridge.sendStateUpdate({
+  chartType: "footprint",
+  cellData: "bidask",
+  scaleMode: "linear",
+  orderbookHeatmapMode: "aggregated",
+  residentHeatmap: true,
+});
 ```
 
 ### Worker entry point
@@ -96,15 +103,20 @@ self.addEventListener("message", (event) => {
   const [mainPort, historyPort, ingressPort] = event.ports;
   const panel = pool.createPanel({ panelId, marketId });
   panel.attachPorts({ mainPort, historyPort, ingressPort });
+
+  // History chunks may carry full footprint `cells: [[priceBin, buyVol, sellVol], ...]`
+  // and heatmap chunks (`history:heatmap-chunk` / `ingress:heatmap-tail`).
+  // Per-pass diagnostics are available via `panel.getDiagnostics()`
+  // (`renderMode`, `chartType`, `scaleMode`, `cellCount`, `heatmap`, `heatmapRaster`).
 });
 ```
 
 ### Main-Thread → Worker-First Migration
 
 1. Replace direct `ChartRuntime` mounting with `OffscreenCanvasOwnershipManager` for the 3-layer stack (`gpu-scene`, `annotation`, `interaction`).
-2. Forward pointer/wheel/keyboard/resize events from the host container to `WorkerChartHostBridge` (`sendInput`, `sendResize`).
-3. Connect your history and live-trade workers directly to `historyPort` and `ingressPort` using the `WorkerProtocolMessage` envelopes (`@pactolis/chart-engine/features/chart/worker/workerProtocol`).
-4. Use `bridge.requestHitTest`, `bridge.requestTooltip`, and `bridge.requestCapture` for correlated async UI queries.
+2. Forward pointer/wheel/keyboard/resize events and chart view state patches from the host container to `WorkerChartHostBridge` (`sendInput`, `sendResize`, `sendStateUpdate`).
+3. Connect your history and live-trade workers directly to `historyPort` and `ingressPort` using the `WorkerProtocolMessage` envelopes (`history:chunk` with optional `cells`, `history:heatmap-chunk`, `ingress:heatmap-tail`) from `@pactolis/chart-engine/features/chart/worker/workerProtocol`.
+4. Use `bridge.requestHitTest`, `bridge.requestTooltip`, and `bridge.requestCapture` for correlated async UI queries, and `panel.getDiagnostics()` / `runtime.getDiagnostics()` for per-pass GPU and CPU raster telemetry.
 
 ## Entry points
 

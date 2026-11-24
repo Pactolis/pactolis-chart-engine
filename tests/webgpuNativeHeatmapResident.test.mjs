@@ -151,10 +151,10 @@ test("Resident heatmap constants and WGSL match 16 B/cell + 64 B uniform + 4-sto
   assert.match(NATIVE_RESIDENT_HEATMAP_WGSL, /vec3<f32>\(254\.0,\s*240\.0,\s*178\.0\)/);
 });
 
-test("readGpuSettings supports ?residentHeatmap=0|1 and ?heatmapGpu=0|1 while keeping default false", () => {
+test("readGpuSettings supports ?residentHeatmap=0|1 and ?heatmapGpu=0|1 while keeping default true", () => {
   resetGpuSettingsForTest();
-  assert.equal(DEFAULT_GPU_SETTINGS.residentHeatmap, false);
-  assert.equal(readGpuSettings({ location: { search: "" } }).residentHeatmap, false);
+  assert.equal(DEFAULT_GPU_SETTINGS.residentHeatmap, true);
+  assert.equal(readGpuSettings({ location: { search: "" } }).residentHeatmap, true);
   assert.equal(readGpuSettings({ location: { search: "?residentHeatmap=1" } }).residentHeatmap, true);
   assert.equal(readGpuSettings({ location: { search: "?heatmapGpu=1" } }).residentHeatmap, true);
   assert.equal(readGpuSettings({ location: { search: "?residentHeatmap=0" } }).residentHeatmap, false);

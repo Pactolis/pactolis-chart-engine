@@ -647,6 +647,44 @@ export class OrderbookHeatmapOverlay {
     this.handleLiveTailEvent({ market, bars });
   }
 
+  /** Public DOM-free seam: ingests a pre-fetched heatmap history chunk in worker/headless mode. */
+  ingestWorkerHeatmapChunk(
+    response: Pick<OrderbookHeatmapResponse, "bars"> & Partial<OrderbookHeatmapResponse>,
+  ): number {
+    if (this.disposed || !this.active()) return 0;
+    const settings = this.settings;
+    if (!this.currentTier) {
+      const intervalMs =
+        response.resolution === "1h" ? 3_600_000 :
+        response.resolution === "15m" ? 900_000 :
+        response.resolution === "5m" ? 300_000 :
+        60_000;
+      this.currentTier = heatmapTierFor(intervalMs);
+    }
+    if (this.dataKey === "") {
+      this.dataKey = this.dataKeyFor(settings, this.currentTier);
+    }
+    if (response.bars.length === 0) return 0;
+    const changed = this.mergeIntoBars(response.bars);
+    this.bumpBarsRevision(changed, true);
+    if (changed.length > 0) {
+      this.invalidate();
+    }
+    return changed.length;
+  }
+
+  /** Public DOM-free seam: ingests a live heatmap tail push in worker/headless mode. */
+  ingestWorkerHeatmapTail(event: LiveHeatmapTailEvent): void {
+    if (this.disposed || !this.active()) return;
+    if (!this.currentTier) {
+      this.currentTier = heatmapTierFor(60_000);
+    }
+    if (this.dataKey === "") {
+      this.dataKey = this.dataKeyFor(this.settings, this.currentTier);
+    }
+    this.handleLiveTailEvent(event);
+  }
+
   private scheduleLiveTailRefresh(): void {
     if (this.liveDebounceTimer) return;
     this.liveDebounceTimer = setTimeout(() => {
@@ -1013,10 +1051,33 @@ export class OrderbookHeatmapOverlay {
       }
       this.rasterCacheCanvas = null;
     }
+    if (this.stripScratchCanvas) {
+      try {
+        this.stripScratchCanvas.width = 0;
+        this.stripScratchCanvas.height = 0;
+      } catch {
+        // Ignore mock canvases with readonly dimensions on teardown.
+      }
+      this.stripScratchCanvas = null;
+    }
     if (this.rasterReservedBytes > 0) {
       moduleCpuRasterReservedBytes = Math.max(0, moduleCpuRasterReservedBytes - this.rasterReservedBytes);
       this.rasterReservedBytes = 0;
     }
+  }
+
+  /** Returns lightweight CPU raster paint and cache diagnostics for telemetry/tests. */
+  getRasterDiagnostics(): {
+    imageDataPaints: number;
+    fillRectPaints: number;
+    lastPaintedCells: number;
+    lastFillRectCalls: number;
+    cacheHits: number;
+    cacheMisses: number;
+    motionReuses: number;
+    tailPatches: number;
+  } {
+    return { ...this.rasterStats };
   }
 
   private syncVisibilityTracking(canvas: CanvasTarget | undefined): void {
@@ -1168,6 +1229,7 @@ export class OrderbookHeatmapOverlay {
         if (this.rasterCacheHasCells) {
           this.blitRasterCache(ctx);
         }
+        this.rasterStats.cacheHits++;
         incrementPerformanceCounter("chart.cpu.heatmap.raster.hit");
         return;
       }
@@ -1321,6 +1383,9 @@ export class OrderbookHeatmapOverlay {
             transform,
           );
           this.blitRasterCache(ctx);
+          if (!viewportMoving) {
+            this.rasterStats.cacheMisses++;
+          }
           incrementPerformanceCounter(
             viewportMoving ? "chart.cpu.heatmap.raster.direct" : "chart.cpu.heatmap.raster.miss",
           );
@@ -1401,6 +1466,7 @@ export class OrderbookHeatmapOverlay {
                 this.rasterCacheBlitBounds = null;
                 this.recordRasterCacheMeta(view, series, rasterKey, rasterDataSig, resolved, frame.threshold, transform);
                 this.blitRasterCache(ctx);
+                this.rasterStats.cacheMisses++;
                 incrementPerformanceCounter("chart.cpu.heatmap.raster.miss");
                 return;
               }
@@ -1413,7 +1479,17 @@ export class OrderbookHeatmapOverlay {
       }
 
       incrementPerformanceCounter("chart.cpu.heatmap.raster.direct");
-      const paintedCells = this.paintCellsToContext(ctx, view, series, frame);
+      const directTransform = this.resolveCtxTransform(ctx, view);
+      const paintedCells = this.paintStripToTarget(
+        ctx,
+        view,
+        series,
+        frame,
+        frame.first,
+        frame.last,
+        undefined,
+        directTransform,
+      );
       if (paintedCells === 0) {
         this.releaseRasterCache();
       }
@@ -1732,7 +1808,7 @@ export class OrderbookHeatmapOverlay {
           top: areaTop,
           width: destLeft - areaLeft,
           height: areaHeight,
-        });
+        }, undefined, transform);
       }
       if (destRight < areaRight) {
         clearDeviceStrip(destRight, areaTop, areaRight - destRight, areaHeight);
@@ -1741,7 +1817,7 @@ export class OrderbookHeatmapOverlay {
           top: areaTop,
           width: areaRight - destRight,
           height: areaHeight,
-        });
+        }, undefined, transform);
       }
       if (destTop > areaTop) {
         clearDeviceStrip(destLeft, areaTop, destRight - destLeft, destTop - areaTop);
@@ -1750,7 +1826,7 @@ export class OrderbookHeatmapOverlay {
           top: areaTop,
           width: destRight - destLeft,
           height: destTop - areaTop,
-        });
+        }, undefined, transform);
       }
       if (destBottom < areaBottom) {
         clearDeviceStrip(destLeft, destBottom, destRight - destLeft, areaBottom - destBottom);
@@ -1759,7 +1835,7 @@ export class OrderbookHeatmapOverlay {
           top: destBottom,
           width: destRight - destLeft,
           height: areaBottom - destBottom,
-        });
+        }, undefined, transform);
       }
       offCtx.restore();
 
@@ -1777,6 +1853,7 @@ export class OrderbookHeatmapOverlay {
         : null;
       this.blitRasterCache(ctx);
 
+      this.rasterStats.motionReuses++;
       incrementPerformanceCounter("chart.cpu.heatmap.raster.direct");
       incrementPerformanceCounter("chart.cpu.heatmap.raster.motionReuse");
       return true;
@@ -1792,38 +1869,39 @@ export class OrderbookHeatmapOverlay {
     ctx.restore();
 
     if (destLeft > areaLeft) {
-      this.paintCellsToContext(ctx, view, series, frame, leftFirst, leftLast, {
+      this.paintStripToTarget(ctx, view, series, frame, leftFirst, leftLast, {
         left: areaLeft,
         top: areaTop,
         width: destLeft - areaLeft,
         height: areaHeight,
-      });
+      }, transform);
     }
     if (destRight < areaRight) {
-      this.paintCellsToContext(ctx, view, series, frame, rightFirst, rightLast, {
+      this.paintStripToTarget(ctx, view, series, frame, rightFirst, rightLast, {
         left: destRight,
         top: areaTop,
         width: areaRight - destRight,
         height: areaHeight,
-      });
+      }, transform);
     }
     if (destTop > areaTop) {
-      this.paintCellsToContext(ctx, view, series, frame, topFirst, topLast, {
+      this.paintStripToTarget(ctx, view, series, frame, topFirst, topLast, {
         left: destLeft,
         top: areaTop,
         width: destRight - destLeft,
         height: destTop - areaTop,
-      });
+      }, transform);
     }
     if (destBottom < areaBottom) {
-      this.paintCellsToContext(ctx, view, series, frame, topFirst, topLast, {
+      this.paintStripToTarget(ctx, view, series, frame, topFirst, topLast, {
         left: destLeft,
         top: destBottom,
         width: destRight - destLeft,
         height: areaBottom - destBottom,
-      });
+      }, transform);
     }
 
+    this.rasterStats.motionReuses++;
     incrementPerformanceCounter("chart.cpu.heatmap.raster.direct");
     incrementPerformanceCounter("chart.cpu.heatmap.raster.motionReuse");
     return true;
@@ -1893,13 +1971,14 @@ export class OrderbookHeatmapOverlay {
           top,
           width: clearWidthCss,
           height,
-        });
+        }, undefined, transform);
         offCtx.restore();
       }
     }
 
     this.lastRasterKey = rasterKey;
     this.blitRasterCache(ctx);
+    this.rasterStats.tailPatches++;
     incrementPerformanceCounter("chart.cpu.heatmap.raster.tailPatch");
     return true;
   }
@@ -2058,6 +2137,106 @@ export class OrderbookHeatmapOverlay {
     };
   }
 
+  /**
+   * Paints a heatmap strip using a reusable scratch canvas + Uint32Array/putImageData
+   * fast path and alpha-composites it onto `targetCtx` via `drawImage`.
+   * Falls back to `paintCellsToContext(targetCtx, ...)` on mock or sub-pixel contexts.
+   */
+  private paintStripToTarget(
+    targetCtx: CanvasRenderingContext2D,
+    view: View,
+    series: FootprintSeries,
+    frame: HeatmapFramePreamble,
+    barFirst: number,
+    barLast: number,
+    clipRect: { left: number; top: number; width: number; height: number } | undefined,
+    transform: { a: number; b: number; c: number; d: number; e: number; f: number },
+  ): number {
+    const canvasW = targetCtx.canvas?.width ?? 0;
+    const canvasH = targetCtx.canvas?.height ?? 0;
+    if (
+      view.colWidth >= 1 &&
+      transform.b === 0 &&
+      transform.c === 0 &&
+      transform.a > 0 &&
+      transform.d > 0 &&
+      canvasW > 0 &&
+      canvasH > 0 &&
+      typeof targetCtx.drawImage === "function"
+    ) {
+      const ownerDoc = getCanvasOwnerDocument(targetCtx.canvas);
+      let scratch = this.stripScratchCanvas;
+      if (!scratch) {
+        try {
+          scratch = createScratchCanvas(canvasW, canvasH, ownerDoc);
+        } catch {
+          scratch = null;
+        }
+        if (scratch) {
+          this.stripScratchCanvas = scratch;
+        }
+      }
+      if (scratch) {
+        try {
+          if (scratch.width !== canvasW) scratch.width = canvasW;
+          if (scratch.height !== canvasH) scratch.height = canvasH;
+        } catch {
+          scratch = null;
+        }
+      }
+      const scratchCtx = scratch ? getScratch2dContext(scratch) : null;
+      if (
+        scratch &&
+        scratchCtx &&
+        typeof scratchCtx.createImageData === "function" &&
+        typeof scratchCtx.putImageData === "function"
+      ) {
+        const clipLeft = clipRect ? clipRect.left : view.area.left;
+        const clipTop = clipRect ? clipRect.top : view.area.top;
+        const clipWidth = clipRect ? clipRect.width : view.area.width;
+        const clipHeight = clipRect ? clipRect.height : view.area.height;
+        const clipPxLeft = Math.max(0, Math.floor(clipLeft * transform.a + transform.e));
+        const clipPxTop = Math.max(0, Math.floor(clipTop * transform.d + transform.f));
+        const clipPxRight = Math.min(canvasW, Math.ceil((clipLeft + clipWidth) * transform.a + transform.e));
+        const clipPxBottom = Math.min(canvasH, Math.ceil((clipTop + clipHeight) * transform.d + transform.f));
+        const dirtyW = clipPxRight - clipPxLeft;
+        const dirtyH = clipPxBottom - clipPxTop;
+        if (dirtyW <= 0 || dirtyH <= 0) return 0;
+
+        const painted = this.paintCellsToContext(
+          scratchCtx,
+          view,
+          series,
+          frame,
+          barFirst,
+          barLast,
+          clipRect,
+          undefined,
+          transform,
+        );
+        if (painted > 0) {
+          targetCtx.save();
+          targetCtx.setTransform?.(1, 0, 0, 1, 0, 0);
+          targetCtx.drawImage(
+            scratch as unknown as CanvasImageSource,
+            clipPxLeft,
+            clipPxTop,
+            dirtyW,
+            dirtyH,
+            clipPxLeft,
+            clipPxTop,
+            dirtyW,
+            dirtyH,
+          );
+          targetCtx.restore();
+        }
+        return painted;
+      }
+    }
+
+    return this.paintCellsToContext(targetCtx, view, series, frame, barFirst, barLast, clipRect);
+  }
+
   private paintCellsToContext(
     targetCtx: Canvas2dContext,
     view: View,
@@ -2087,6 +2266,7 @@ export class OrderbookHeatmapOverlay {
     const log10_101 = Math.log10(101);
     let lastFillStyle = "";
     let paintedCount = 0;
+    let fillRectCalls = 0;
 
     const canvasW = targetCtx.canvas?.width ?? 0;
     const canvasH = targetCtx.canvas?.height ?? 0;
@@ -2100,6 +2280,8 @@ export class OrderbookHeatmapOverlay {
     let clipPxTop = 0;
     let clipPxRight = 0;
     let clipPxBottom = 0;
+    let dirtyW = 0;
+    let dirtyH = 0;
     // Narrow overlapping columns (colWidth < 1, where drawWidth = 1 > colWidth) fall back
     // to fillRect to preserve exact Skia 8-bit premultiplied multi-layer coverage parity.
     if (
@@ -2133,9 +2315,6 @@ export class OrderbookHeatmapOverlay {
         }
       }
       if (cached && this.rasterImageDataU32) {
-        imgData = cached;
-        u32 = this.rasterImageDataU32;
-        u32.fill(0);
         ta = imageDataTransform.a;
         td = imageDataTransform.d;
         te = imageDataTransform.e;
@@ -2144,6 +2323,21 @@ export class OrderbookHeatmapOverlay {
         clipPxTop = Math.max(0, Math.floor(clipTop * td + tf));
         clipPxRight = Math.min(canvasW, Math.ceil((clipLeft + clipWidth) * ta + te));
         clipPxBottom = Math.min(canvasH, Math.ceil((clipTop + clipHeight) * td + tf));
+        dirtyW = clipPxRight - clipPxLeft;
+        dirtyH = clipPxBottom - clipPxTop;
+        if (dirtyW <= 0 || dirtyH <= 0) {
+          return 0;
+        }
+        imgData = cached;
+        u32 = this.rasterImageDataU32;
+        if (clipRect) {
+          for (let py = clipPxTop; py < clipPxBottom; py++) {
+            const rowOffset = py * canvasW;
+            u32.fill(0, rowOffset + clipPxLeft, rowOffset + clipPxRight);
+          }
+        } else {
+          u32.fill(0);
+        }
       }
     }
 
@@ -2211,6 +2405,7 @@ export class OrderbookHeatmapOverlay {
             lastFillStyle = mainColor;
           }
           targetCtx.fillRect(x, yTop, drawWidth, cellHeight);
+          fillRectCalls++;
         }
         if (outBounds) {
           const cx0 = Math.max(clipLeft, x);
@@ -2231,12 +2426,22 @@ export class OrderbookHeatmapOverlay {
       clipTop,
       clipHeight,
     );
+    this.rasterStats.lastPaintedCells = paintedCount;
+    this.rasterStats.lastFillRectCalls = fillRectCalls;
     if (u32 && imgData) {
       if (paintedCount > 0) {
-        targetCtx.putImageData(imgData, 0, 0);
+        if (clipRect) {
+          targetCtx.putImageData(imgData, 0, 0, clipPxLeft, clipPxTop, dirtyW, dirtyH);
+        } else {
+          targetCtx.putImageData(imgData, 0, 0);
+        }
+        this.rasterStats.imageDataPaints++;
       }
     } else {
       targetCtx.restore();
+      if (fillRectCalls > 0) {
+        this.rasterStats.fillRectPaints++;
+      }
     }
     return paintedCount;
   }
@@ -3075,6 +3280,17 @@ export class OrderbookHeatmapOverlay {
   private lastCollectedRange: { floor: number; ceiling: number; threshold: number; opacity: number } | null = null;
   private lastRasterKey = "";
   private rasterCacheCanvas: CanvasTarget | null = null;
+  private stripScratchCanvas: CanvasTarget | null = null;
+  private rasterStats = {
+    imageDataPaints: 0,
+    fillRectPaints: 0,
+    lastPaintedCells: 0,
+    lastFillRectCalls: 0,
+    cacheHits: 0,
+    cacheMisses: 0,
+    motionReuses: 0,
+    tailPatches: 0,
+  };
   private rasterReservedBytes = 0;
   private rasterCacheHasCells = false;
   private rasterCacheFloor = 0;

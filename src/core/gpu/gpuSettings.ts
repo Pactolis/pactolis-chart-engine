@@ -22,7 +22,7 @@ export interface GpuSettingsSource {
 
 export const DEFAULT_GPU_SETTINGS: GpuSettings = Object.freeze({
   backend: "webgl2",
-  residentHeatmap: false,
+  residentHeatmap: true,
   asyncCapture: false,
   nativeWebGpu: true,
   nativeWebGpuText: true,

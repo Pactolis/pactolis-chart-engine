@@ -17,6 +17,7 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     strategy:
+      fail-fast: true
       matrix:
         node: [22, 24, 26]
     steps:
@@ -37,6 +38,7 @@ jobs:
     # Change-based browser test selection (scripts/select-ci-tests.mjs).
     # Engine source, harness, config and shared test support run every browser
     # test; a spec-only change runs that spec; docs and Node tests run none.
+    needs: test
     if: github.event_name == 'pull_request'
     runs-on: ubuntu-24.04
     timeout-minutes: 5
@@ -81,8 +83,8 @@ jobs:
           retention-days: 3
 
   census:
-    needs: changes
-    if: github.event_name == 'pull_request' && needs.changes.outputs.census == 'true'
+    needs: [changes, browser]
+    if: ${{ !cancelled() && github.event_name == 'pull_request' && needs.changes.result == 'success' && (needs.browser.result == 'success' || needs.browser.result == 'skipped') && needs.changes.outputs.census == 'true' }}
     runs-on: ubuntu-24.04
     timeout-minutes: 60
     steps:

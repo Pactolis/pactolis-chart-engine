@@ -35,13 +35,18 @@ function listedTests(project) {
 
 test('PR CI runs one census job without the Tam/L2-L9 load profiles', () => {
   assert.doesNotMatch(workflow, /census-shards/, 'shard matrix and aggregator are removed');
+  assert.match(jobBlock('test'), /fail-fast:\s*true/);
+  assert.match(jobBlock('changes'), /needs:\s*test$/m);
   const censusBlock = jobBlock('census');
-  assert.match(censusBlock, /if:\s*github\.event_name\s*==\s*'pull_request' && needs\.changes\.outputs\.census == 'true'/);
+  assert.match(
+    censusBlock,
+    /if:\s*\$\{\{\s*!cancelled\(\)\s*&&\s*github\.event_name\s*==\s*'pull_request'\s*&&\s*needs\.changes\.result\s*==\s*'success'\s*&&\s*\(needs\.browser\.result\s*==\s*'success'\s*\|\|\s*needs\.browser\.result\s*==\s*'skipped'\)\s*&&\s*needs\.changes\.outputs\.census\s*==\s*'true'\s*\}\}/,
+  );
   assert.match(censusBlock, /--project=census\b/);
   assert.match(censusBlock, /--workers=1/);
   assert.match(censusBlock, /npm ci --no-audit --no-fund/);
   assert.match(censusBlock, /if: failure\(\)/);
-  assert.match(censusBlock, /needs: changes$/m, 'census waits only for the short selection job, not for the test matrix');
+  assert.match(censusBlock, /needs:\s*\[changes,\s*browser\]$/m, 'census waits for changes and browser before running');
   assert.match(jobBlock('browser'), /if:\s*github\.event_name\s*==\s*'pull_request' && needs\.changes\.outputs\.browser != 'none'/);
   assert.match(jobBlock('browser'), /--project=default \$SPECS/);
   assert.match(jobBlock('changes'), /fetch-depth: 2/, 'selection diffs the merge commit against its base parent');
