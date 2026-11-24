@@ -81,8 +81,8 @@ async function withCustomSettings(run) {
       bucketStep: 25,
       scaleMode: "fixed",
       fixedCeiling: { usd: 2_000_000, btc: 40 },
-      single: { usd: 1_000_000, btc: 10 },
-      aggregated: { usd: 5_000_000, btc: 50 },
+      single: { usd: 100_000, btc: 1 },
+      aggregated: { usd: 100_000, btc: 1 },
     }),
     onChange(listener) {
       listeners.add(listener);
@@ -133,7 +133,7 @@ test("#317: custom 1m live canonical push before delayed REST history invalidate
         canonicalBars: [{
           t: liveBarTime,
           sources: ["binance:usd_perp"],
-          cells: [[50_025, 0, 600_000, 0]],
+          cells: [[50_025, [[0, 600_000, 0]]]],
         }],
       });
 
@@ -204,7 +204,7 @@ test("#317: custom 1m live canonical push before delayed REST history invalidate
         canonicalBars: [{
           t: liveBarTime,
           sources: ["binance:usd_perp"],
-          cells: [[50_025, 0, 600_000, 0]],
+          cells: [[50_025, [[0, 600_000, 0]]]],
         }],
       });
       const keyAfterIdenticalLive = overlay.getPrepareCacheKey(view, series, [0, 2]);
@@ -257,7 +257,7 @@ test("#317: REST before live canonical arrival produces identical warm output", 
         canonicalBars: [{
           t: liveBarTime,
           sources: ["binance:usd_perp"],
-          cells: [[50_025, 0, 600_000, 0]],
+          cells: [[50_025, [[0, 600_000, 0]]]],
         }],
       });
 

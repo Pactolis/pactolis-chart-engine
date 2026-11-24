@@ -144,14 +144,18 @@ test("#319: pinned historical viewport evicts old live-pushed bars, supports re-
 
       // Returning to live tail uses cached live bars without needing a REST fetch.
       const fetchesBeforeLiveReturn = fetchedRanges.length;
-      const liveGpu = overlay.prepareGpuCells(view, series, [totalMinutes - 2, totalMinutes]);
+      const liveView = makeView();
+      liveView.offsetX = -(totalMinutes - 2) * liveView.colWidth;
+      const liveGpu = overlay.prepareGpuCells(liveView, series, [totalMinutes - 2, totalMinutes]);
       await flushMicrotasks();
       assert.ok(liveGpu !== null && liveGpu.main.length === 60, "live tail bars should still be cached");
       assert.equal(fetchedRanges.length, fetchesBeforeLiveReturn);
 
       // Panning to an evicted chunk time (e.g. minute 1500 in chunk 1000..1999) triggers a REST re-fetch.
       const fetchesBeforePan = fetchedRanges.length;
-      overlay.getPrepareCacheKey(view, series, [1_500, 1_502]);
+      const panView = makeView();
+      panView.offsetX = -1_500 * panView.colWidth;
+      overlay.getPrepareCacheKey(panView, series, [1_500, 1_502]);
       await flushMicrotasks();
       assert.ok(
         fetchedRanges.length > fetchesBeforePan,

@@ -92,9 +92,9 @@ test("#320: monthly hover shares overlapping ranges, aborts unshared old request
   let overlay;
   try {
     await withSettings(async () => {
-      const series = makeSeries(MONTH_MS, 12, 0);
+      const series = makeSeries(MONTH_MS, 40, 0);
       const view = makeView(40);
-      const currentTime = 12 * MONTH_MS + DAY_MS;
+      const currentTime = 40 * MONTH_MS + DAY_MS;
 
       const hoverRequests = [];
       const historyRequests = [];
@@ -133,7 +133,7 @@ test("#320: monthly hover shares overlapping ranges, aborts unshared old request
       assert.equal(abortedHoverRequests.length, 3, "unshared older hover month requests must be aborted");
 
       // While hover requests are still pending, main history must immediately start using its own 2-request quota.
-      overlay.getPrepareCacheKey(view, series, [0, 11]);
+      overlay.getPrepareCacheKey(view, series, [0, 39]);
       await flushMicrotasks();
       assert.equal(
         historyRequests.length,
