@@ -18,17 +18,19 @@ function makeSpySurface() {
     },
   };
   const surface = {
-    backend: "canvas2d",
+    kind: "canvas2d",
     canvas: { width: 240, height: 180 },
     beginFrame() {
       quads.length = 0;
       return {
         quads: sink,
-        flush() {},
+        flushQuads() {},
+        end() {},
       };
     },
-    endFrame() {},
     resize() {},
+    requestCapture: async () => ({ data: new Uint8ClampedArray(0), width: 0, height: 0 }),
+    onLost: () => () => {},
     dispose() {},
   };
   return { surface, quads };
@@ -108,7 +110,7 @@ test("#318: empty footprint output visits 0 cells and emits 0 quads while keepin
     }));
 
     const view = makeView({ top: 0, height: 300, priceTop: 200, pricePerPx: 0.5 });
-    renderer.render(view, series, { chartType: "footprint" });
+    renderer.render(view, series);
 
     assert.equal(cellVisits, 0, "empty output must visit 0 cells");
     assert.equal(quads.length, 0, "empty output must emit 0 quads");
@@ -138,7 +140,7 @@ test("#318: stackedImbalance-only skips heat/POC cell loop and clips strips to p
     // bin 120 ([120, 130]): y = 80 .. 100 (inside)
     // bin 110 ([110, 120]): y = 100 .. 120 (inside)
     const view = makeView({ top: 50, height: 100, priceTop: 145, pricePerPx: 0.5 });
-    renderer.render(view, series, { chartType: "footprint" });
+    renderer.render(view, series);
 
     // Only stacked imbalance strips should be emitted (4 visible/partial bins out of 5-bin stack)
     assert.equal(quads.length, 4, "off-screen stack cell must be skipped while preserving stack membership");
@@ -169,7 +171,7 @@ test("#318: stacked imbalance clipping holds under fractional DPR, vertical pan,
 
     // Fractional DPR + vertical pan clipping bottom edge
     const panView = makeView({ top: 40, height: 80, priceTop: 180, pricePerPx: 0.5, dpr: 1.25 });
-    renderer.render(panView, series, { chartType: "footprint" });
+    renderer.render(panView, series);
     assert.ok(quads.length > 0);
     for (const q of quads) {
       assert.ok(q.y >= panView.area.top);
@@ -179,7 +181,7 @@ test("#318: stacked imbalance clipping holds under fractional DPR, vertical pan,
     // Log scale clipping
     const logView = makeView({ top: 50, height: 70, priceTop: 145, pricePerPx: 0.5, dpr: 1.5 });
     logView.setScaleMode("log");
-    renderer.render(logView, series, { chartType: "footprint" });
+    renderer.render(logView, series);
     assert.ok(quads.length > 0);
     for (const q of quads) {
       assert.ok(q.y >= logView.area.top);
