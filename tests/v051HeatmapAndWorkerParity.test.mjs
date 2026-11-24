@@ -150,10 +150,11 @@ test("OrderbookHeatmapOverlay uses dirty-strip ImageData + putImageData with zer
   await withSettingsSource(
     () => ({
       ...DEFAULT_ORDERBOOK_HEATMAP_SETTINGS,
-      mode: "aggregated",
+      mode: "single",
+      unit: "usd",
       bucketStep: 1,
-      thresholdUsd: 0,
-      thresholdBtc: 0,
+      single: { usd: 1, btc: 1 },
+      aggregated: { usd: 1, btc: 1 },
       scaleMode: "fixed",
       fixedCeiling: { usd: 1000, btc: 10 },
     }),
@@ -171,45 +172,52 @@ test("OrderbookHeatmapOverlay uses dirty-strip ImageData + putImageData with zer
       mainCanvas.ownerDocument = doc;
 
       const series = new FootprintSeries({ intervalMs: 60_000, priceStep: 1 });
-      series.loadBars([
-        { startTime: 0, open: 100, high: 110, low: 90, close: 105, volume: 10, delta: 0, count: 1, cells: new Map(), hasRef: true },
-        { startTime: 60_000, open: 105, high: 115, low: 95, close: 110, volume: 10, delta: 0, count: 1, cells: new Map(), hasRef: true },
-        { startTime: 120_000, open: 110, high: 120, low: 100, close: 115, volume: 10, delta: 0, count: 1, cells: new Map(), hasRef: true },
-      ]);
+      const bars = Array.from({ length: 20 }, (_, i) => ({
+        startTime: (1_000 + i) * 60_000,
+        open: 100,
+        high: 115,
+        low: 95,
+        close: 105,
+        volume: 10,
+        delta: 0,
+        count: 1,
+        cells: new Map(),
+        hasRef: true,
+      }));
+      series.loadBars(bars);
 
       const view = new View();
       view.area = { left: 0, top: 0, width: 400, height: 200 };
       view.colWidth = 20;
-      view.offsetX = 100;
+      view.offsetX = -20;
       view.fitPriceRange(85, 125);
 
       const overlay = new OrderbookHeatmapOverlay({
-        fetch: async () => ({
+        fetch: async (req) => ({
           schemaVersion: 1,
           generatedAt: nowMs,
           base: "BTC",
-          source: "aggregated",
-          resolution: "1m",
-          bucketStep: 1,
-          from: 0,
-          to: 180_000,
-          bars: [
-            { t: 0, cells: [[100, 500, 300]] },
-            { t: 60_000, cells: [[105, 600, 400]] },
-            { t: 120_000, cells: [[110, 700, 500]] },
-          ],
+          source: req.source,
+          resolution: req.resolution,
+          bucketStep: req.bucketStep,
+          from: req.from,
+          to: req.to,
+          bars: bars.map((b) => ({
+            t: b.startTime,
+            cells: [[102, 500, 300]],
+          })),
         }),
         invalidate: () => {},
         getMarket: () => "BINANCE_FUTURES:btcusdt",
         now: () => nowMs,
       });
 
-      // 1) Initial frame schedules chunk fetch; flush microtasks then draw full cached frame.
-      overlay.draw(mainCtx, view, series, [0, 2]);
-      await new Promise((r) => setTimeout(r, 0));
+      // 1) Initial frame schedules chunk fetch; wait for fetch to settle then draw full cached frame.
+      overlay.draw(mainCtx, view, series, [0, 19]);
+      await new Promise((r) => setTimeout(r, 20));
 
       nowMs += HEATMAP_CPU_RASTER_QUIET_MS + 100;
-      overlay.draw(mainCtx, view, series, [0, 2]);
+      overlay.draw(mainCtx, view, series, [0, 19]);
       const afterMiss = overlay.getRasterDiagnostics();
       assert.equal(counters.fillRect, 0, "initial raster build must not call fillRect");
       assert.ok(counters.putImageData > 0, "initial raster build must use putImageData");
@@ -218,21 +226,21 @@ test("OrderbookHeatmapOverlay uses dirty-strip ImageData + putImageData with zer
       // 2) Live tail patch on quiet viewport uses dirty-strip putImageData with zero fillRect.
       overlay.ingestWorkerHeatmapTail({
         market: "BINANCE_FUTURES:btcusdt",
-        bars: [{ t: 120_000, cells: [[112, 900, 700]] }],
+        bars: [{ t: (1_000 + 19) * 60_000, cells: [[104, 900, 700]] }],
       });
       const prevPutCount = counters.putImageData;
-      overlay.draw(mainCtx, view, series, [0, 2]);
+      overlay.draw(mainCtx, view, series, [0, 19]);
       const afterTail = overlay.getRasterDiagnostics();
       assert.equal(counters.fillRect, 0, "tryStaticLiveTailPatch must not call fillRect");
       assert.ok(counters.putImageData > prevPutCount, "tryStaticLiveTailPatch must call putImageData");
       assert.ok(counters.dirtyPutImageData > 0, "tryStaticLiveTailPatch must pass dirty rect to putImageData");
       assert.equal(afterTail.tailPatches, 1);
 
-      // 3) Integer pan triggers tryMotionRasterReuse with zero fillRect and dirty-strip putImageData.
+      // 3) Integer pan brings bar 0 into [0, 20] and triggers tryMotionRasterReuse with dirty-strip putImageData.
       view.offsetX += 20;
       nowMs += 16;
       const prevDirtyPutCount = counters.dirtyPutImageData;
-      overlay.draw(mainCtx, view, series, [0, 2]);
+      overlay.draw(mainCtx, view, series, [0, 19]);
       const afterMotion = overlay.getRasterDiagnostics();
       assert.equal(counters.fillRect, 0, "tryMotionRasterReuse must not call fillRect");
       assert.ok(counters.dirtyPutImageData > prevDirtyPutCount, "tryMotionRasterReuse must use dirty-strip putImageData");
