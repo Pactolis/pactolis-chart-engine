@@ -60,10 +60,8 @@ test("Issue #313: selectMany validates in O(N + M), renderSelection short-circui
     view.pricePerPx = 1;
     const dummyCtx = { save() {}, restore() {} };
     const timeCtx = {
-      timeToX: () => 0,
-      xToTime: () => 1_800_000_000_000,
-      indexOfTime: () => 0,
-      timeOfIndex: () => 1_800_000_000_000,
+      indexForTime: () => 0,
+      timeForIndex: () => 1_800_000_000_000,
     };
 
     probe.reset();
@@ -99,10 +97,8 @@ test("Issue #313: group drag and single-point edit perform 0 drawing.id lookups 
   view.priceTop = 52000;
   view.pricePerPx = 1;
   const timeCtx = {
-    timeToX: (t) => (t - 1_800_000_000_000) / 3000,
-    xToTime: (x) => 1_800_000_000_000 + x * 3000,
-    indexOfTime: (t) => (t - 1_800_000_000_000) / 60_000,
-    timeOfIndex: (idx) => 1_800_000_000_000 + idx * 60_000,
+    indexForTime: (t) => (t - 1_800_000_000_000) / 60_000,
+    timeForIndex: (idx) => 1_800_000_000_000 + idx * 60_000,
   };
   manager.setHitTestContext(view, timeCtx);
 
