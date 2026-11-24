@@ -414,22 +414,56 @@ function paintTpoGroups(
             const drawHi = Math.min(run.endPrice, visHiBin);
             const barW = maxWidth * (run.count / maxCount);
             if (left + barW < plotLeft || left > plotRight) continue;
-            const ticks = Math.max(0, Math.round((drawHi - drawLo) / step));
-            let bin = drawLo;
-            for (let tick = 0; tick <= ticks; tick++) {
-              const yTop = view.yOfPrice(bin + step);
-              const yBottom = view.yOfPrice(bin);
-              if (yBottom >= plotTop && yTop <= plotBottom) {
-                const inVA = vaLo !== null && vaHi !== null && bin >= vaLo && bin <= vaHi;
-                const latestPriceBin = bin === lastCloseBin;
-                const color = latestPriceBin ? tpoPalette.latest
-                  : bin === result.poc ? tpoPalette.poc
-                  : inVA ? tpoPalette.valueArea
-                  : tpoPalette.outside;
+            if (cellH < 1) {
+              const paintCoalescedBand = (bandLo: number, bandHi: number, color: string): void => {
+                if (bandHi < bandLo) return;
+                const yTop = view.yOfPrice(bandHi + step);
+                const yBottom = view.yOfPrice(bandLo);
+                if (yBottom < plotTop || yTop > plotBottom) return;
                 if (color !== previousColor) ctx.fillStyle = previousColor = color;
-                ctx.fillRect(left, yTop, barW, Math.max(1, yBottom - yTop - 1));
+                ctx.fillRect(left, yTop, barW, Math.max(1, yBottom - yTop));
+              };
+              if (vaLo !== null && vaHi !== null) {
+                paintCoalescedBand(drawLo, Math.min(drawHi, neighbourBin(vaLo, step, -1)), tpoPalette.outside);
+                paintCoalescedBand(Math.max(drawLo, vaLo), Math.min(drawHi, vaHi), tpoPalette.valueArea);
+                paintCoalescedBand(Math.max(drawLo, neighbourBin(vaHi, step, 1)), drawHi, tpoPalette.outside);
+              } else {
+                paintCoalescedBand(drawLo, drawHi, tpoPalette.outside);
               }
-              bin = neighbourBin(bin, step, 1);
+              if (result.poc !== null && result.poc >= drawLo && result.poc <= drawHi && result.poc !== lastCloseBin) {
+                const yTop = view.yOfPrice(result.poc + step);
+                const yBottom = view.yOfPrice(result.poc);
+                if (yBottom >= plotTop && yTop <= plotBottom) {
+                  if (tpoPalette.poc !== previousColor) ctx.fillStyle = previousColor = tpoPalette.poc;
+                  ctx.fillRect(left, yTop, barW, 1);
+                }
+              }
+              if (Number.isFinite(lastCloseBin) && lastCloseBin >= drawLo && lastCloseBin <= drawHi) {
+                const yTop = view.yOfPrice(lastCloseBin + step);
+                const yBottom = view.yOfPrice(lastCloseBin);
+                if (yBottom >= plotTop && yTop <= plotBottom) {
+                  if (tpoPalette.latest !== previousColor) ctx.fillStyle = previousColor = tpoPalette.latest;
+                  ctx.fillRect(left, yTop, barW, 1);
+                }
+              }
+            } else {
+              const ticks = Math.max(0, Math.round((drawHi - drawLo) / step));
+              let bin = drawLo;
+              for (let tick = 0; tick <= ticks; tick++) {
+                const yTop = view.yOfPrice(bin + step);
+                const yBottom = view.yOfPrice(bin);
+                if (yBottom >= plotTop && yTop <= plotBottom) {
+                  const inVA = vaLo !== null && vaHi !== null && bin >= vaLo && bin <= vaHi;
+                  const latestPriceBin = bin === lastCloseBin;
+                  const color = latestPriceBin ? tpoPalette.latest
+                    : bin === result.poc ? tpoPalette.poc
+                    : inVA ? tpoPalette.valueArea
+                    : tpoPalette.outside;
+                  if (color !== previousColor) ctx.fillStyle = previousColor = color;
+                  ctx.fillRect(left, yTop, barW, Math.max(1, yBottom - yTop - 1));
+                }
+                bin = neighbourBin(bin, step, 1);
+              }
             }
           }
         }
