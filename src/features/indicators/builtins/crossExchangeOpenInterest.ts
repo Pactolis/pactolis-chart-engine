@@ -24,6 +24,7 @@ import {
 } from "../render/indicatorPaneUi.js";
 import { createIndicatorScale, indicatorDisplayRange, indicatorDisplayScaleMode } from "../scale/indicatorScale.js";
 import { uiColor, indicatorWarningMessageColor, openInterestLineColorDefault } from "../../../core/ui/seriesPalette.js";
+import { findLastPointWithData, findPointByIndex } from "./pointLookup.js";
 
 export type CrossExchangeOpenInterestMode = "openInterestUsd" | "openInterestDeltaUsd";
 
@@ -322,18 +323,28 @@ function pointX(ctx: IndicatorDrawContext<CrossExchangeOpenInterestSettings>, po
   return ctx.view.xOfIndex(point.index) + ctx.view.colWidth / 2;
 }
 
-function focusIndex(ctx: IndicatorDrawContext<CrossExchangeOpenInterestSettings>, data: CrossExchangeOpenInterestData): number | null {
-  const crosshair = ctx.crosshair;
-  if (!crosshair?.visible) return null;
-  const hoverIndex = Math.floor(ctx.view.indexOfX(crosshair.x));
-  return data.points.some((point) => point.index === hoverIndex) ? hoverIndex : null;
-}
-
 function focusPoint(data: CrossExchangeOpenInterestData, index: number | null): ChartOpenInterestPoint | null {
   if (!data.points.length) return null;
-  if (index !== null) return data.points.find((point) => point.index === index) ?? null;
-  const lastWithData = [...data.points].reverse().find((point) => point.hasData);
-  return lastWithData ?? data.points[data.points.length - 1] ?? null;
+  if (index !== null) return findPointByIndex(data.points, index);
+  return findLastPointWithData(data.points);
+}
+
+function formatCrossExchangeOpenInterestReadout(
+  ctx: IndicatorDrawContext<CrossExchangeOpenInterestSettings>,
+  data: CrossExchangeOpenInterestData,
+  point: ChartOpenInterestPoint,
+  isLast: boolean,
+): IndicatorReadout {
+  return {
+    title: isLast ? "Last" : "*",
+    time: tzDateTimeHud(point.candleStart, ctx.chart?.intervalMs ?? ctx.series.config.intervalMs),
+    items: [
+      { label: modeLabel(data.meta.mode), value: compactUsd(point.value) },
+      { label: "OI", value: compactUsd(point.openInterestUsd) },
+      { label: "dOI", value: compactUsd(point.openInterestDeltaUsd) },
+      { label: "sym", value: String(data.meta.symbolCount) },
+    ],
+  };
 }
 
 function crossExchangeOpenInterestReadout(
@@ -344,16 +355,7 @@ function crossExchangeOpenInterestReadout(
   const data = asCrossExchangeOpenInterestData(prepared);
   const point = focusPoint(data, index);
   if (!point) return null;
-  return {
-    title: index === null ? "Last" : "*",
-    time: tzDateTimeHud(point.candleStart, ctx.chart?.intervalMs ?? ctx.series.config.intervalMs),
-    items: [
-      { label: modeLabel(data.meta.mode), value: compactUsd(point.value) },
-      { label: "OI", value: compactUsd(point.openInterestUsd) },
-      { label: "dOI", value: compactUsd(point.openInterestDeltaUsd) },
-      { label: "sym", value: String(data.meta.symbolCount) },
-    ],
-  };
+  return formatCrossExchangeOpenInterestReadout(ctx, data, point, index === null);
 }
 
 function drawStatus(ctx: IndicatorDrawContext<CrossExchangeOpenInterestSettings>, data: CrossExchangeOpenInterestData): boolean {
@@ -458,12 +460,15 @@ function drawCrossExchangeOpenInterestInteraction(
   if (data.status !== "ok") return;
 
   const { top, bottom } = panePlotBounds(rect, 32, 5);
-  const hoverIndex = focusIndex(ctx, data);
-  const focus = focusPoint(data, hoverIndex);
+  const hoveredPoint = ctx.crosshair?.visible
+    ? findPointByIndex(data.points, Math.floor(ctx.view.indexOfX(ctx.crosshair.x)))
+    : null;
+  const hoverIndex = hoveredPoint ? hoveredPoint.index : null;
+  const focus = hoveredPoint ?? findLastPointWithData(data.points);
 
-  if (showReadout(settings)) {
-    const readout = crossExchangeOpenInterestReadout(ctx, data, hoverIndex);
-    if (readout) drawIndicatorReadout(ctx, indicatorReadoutToText(readout));
+  if (showReadout(settings) && focus) {
+    const readout = formatCrossExchangeOpenInterestReadout(ctx, data, focus, hoverIndex === null);
+    drawIndicatorReadout(ctx, indicatorReadoutToText(readout));
   }
 
   const mode = data.meta.mode;
