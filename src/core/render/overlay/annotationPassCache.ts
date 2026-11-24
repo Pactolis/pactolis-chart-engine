@@ -129,7 +129,7 @@ export class AnnotationPassCache<T> {
       if (retained) retained.valid = false;
       return false;
     }
-    if (isCachePreservingChange(changes) && (pass.interests & changes) === 0 && this.sameGeometry && retained?.valid && retained.key === key) {
+    if (isCachePreservingChange(changes) && (pass.interests & changes) === 0 && retained?.valid && retained.key === key) {
       replay(retained.effects);
       if (dirtyRect) this.blitRegion(ctx, retained.canvas, dirtyRect);
       else this.blit(ctx, retained.canvas);

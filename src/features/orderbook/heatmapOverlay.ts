@@ -1200,8 +1200,7 @@ export class OrderbookHeatmapOverlay {
       this.visibleThreshold = frame.threshold;
       this.visibleOpacity = resolved.opacity;
       if (knownCellCount === 0) {
-        if (viewportMoving) this.invalidateRasterCacheContents();
-        else this.releaseRasterCache();
+        this.releaseRasterCache();
         if (canUseRasterCache) {
           this.lastRasterKey = rasterKey;
           this.rasterCacheHasCells = false;
@@ -1282,8 +1281,7 @@ export class OrderbookHeatmapOverlay {
           );
           offCtx.restore();
           if (paintedCells === 0) {
-            if (viewportMoving) this.invalidateRasterCacheContents();
-            else this.releaseRasterCache();
+            this.releaseRasterCache();
             if (canUseRasterCache) {
               this.lastRasterKey = rasterKey;
               this.rasterCacheHasCells = false;
@@ -1384,7 +1382,7 @@ export class OrderbookHeatmapOverlay {
                 );
                 croppedCtx.restore();
                 if (paintedCells === 0) {
-                  this.invalidateRasterCacheContents();
+                  this.releaseRasterCache();
                   if (canUseRasterCache) {
                     this.lastRasterKey = rasterKey;
                     this.rasterCacheHasCells = false;
@@ -1414,7 +1412,7 @@ export class OrderbookHeatmapOverlay {
       incrementPerformanceCounter("chart.cpu.heatmap.raster.direct");
       const paintedCells = this.paintCellsToContext(ctx, view, series, frame);
       if (paintedCells === 0) {
-        this.invalidateRasterCacheContents();
+        this.releaseRasterCache();
       }
     } finally {
       if (startedAt !== null) recordPerformanceDuration("chart.cpu.heatmap.draw.ms", performance.now() - startedAt);

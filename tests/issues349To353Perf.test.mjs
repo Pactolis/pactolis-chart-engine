@@ -5,10 +5,11 @@ globalThis.$state ??= (value) => value;
 
 const { getHeatmapThresholdSparseBar } = await import("../dist/features/orderbook/heatmapModel.js");
 const { OrderbookHeatmapOverlay } = await import("../dist/features/orderbook/heatmapOverlay.js");
-const { setOrderbookHeatmapSettingsSourceForTest, resetOrderbookHeatmapSettingsSourceForTest } = await import("../dist/features/orderbook/heatmapSettingsSource.js");
+const { configureOrderbookHeatmapSettingsSource, orderbookHeatmapSettingsSource } = await import("../dist/features/orderbook/heatmapSettingsSource.js");
 const { vwapIndicatorDefinition } = await import("../dist/features/indicators/builtins/vwapIndicator.js");
 const vpMod = await import("../dist/features/indicators/builtins/volumeProfile.js");
 const vpDef = Object.values(vpMod).find((v) => v && typeof v.prepareData === "function");
+const { calculateOrderFlowProfile } = await import("../dist/core/analysis/orderFlowProfile.js");
 const { FootprintSeries } = await import("../dist/core/model/footprint.js");
 const { configurePerformanceTelemetry, isPerformanceTelemetryEnabled, snapshotPerformanceTelemetry } = await import("../dist/core/performanceTelemetry.js");
 const { AnnotationPassCache, annotationPass, isCachePreservingChange } = await import("../dist/core/render/overlay/annotationPassCache.js");
@@ -17,6 +18,7 @@ const { drawHud } = await import("../dist/core/render/overlay/hudRenderer.js");
 const { resolveChartDisplayOptions } = await import("../dist/core/model/chartDisplayOptions.js");
 const { AxisLayerCache } = await import("../dist/core/render/axisLayerCache.js");
 const { drawPriceAxisGridLines } = await import("../dist/core/render/priceAxisRenderer.js");
+const { axisGridLineColor } = await import("../dist/core/ui/seriesPalette.js");
 const { View } = await import("../dist/core/engine/view.js");
 const { Canvas2dQuadSink } = await import("../dist/core/gpu/canvas2d/canvas2dSurface.js");
 const { calculateUntouchedLevels } = await import("../dist/core/analysis/referenceLevels.js");
@@ -86,7 +88,8 @@ test("#349: getHeatmapThresholdSparseBar zero-copy fast path reuses bar.cells wh
 test("#349: OrderbookHeatmapOverlay negative-caches empty historical chunks and suppresses hover during pointer drag", async () => {
   let fetchCount = 0;
   const nowMs = T0 + 100 * 60 * MIN;
-  setOrderbookHeatmapSettingsSourceForTest({
+  const prevSource = orderbookHeatmapSettingsSource();
+  configureOrderbookHeatmapSettingsSource({
     settingsFor: () => ({
       mode: "single",
       unit: "usd",
@@ -136,7 +139,7 @@ test("#349: OrderbookHeatmapOverlay negative-caches empty historical chunks and 
     assert.equal(overlay.pointerDragging, false);
   } finally {
     overlay.dispose();
-    resetOrderbookHeatmapSettingsSourceForTest();
+    configureOrderbookHeatmapSettingsSource(prevSource);
   }
 });
 
@@ -175,12 +178,12 @@ test("#350: VWAP incremental reuse survives visible range changes without full f
   }
 });
 
-test("#350: Volume Profile visible-mode pan uses delta accumulator instead of full rebuild", () => {
+test("#350: Volume Profile visible-mode right-extension and back-and-forth pan reuse preserve bit-exact parity", () => {
   const wasEnabled = isPerformanceTelemetryEnabled();
   configurePerformanceTelemetry({ enabled: true });
   try {
     const series = new FootprintSeries({ intervalMs: MIN, priceStep: 1 });
-    series.loadBars(mkFootprintBars(60));
+    series.loadBars(mkFootprintBars(80));
     const settingsObj = { ...vpDef.defaultSettings(), mode: "visible", pocMode: "static", vahMode: "static", valMode: "static" };
     const instance = { id: "vp-pan", type: vpDef.type, title: vpDef.type, visible: true, paneId: "p", order: 0, settings: settingsObj };
     const makeCtx = (range) => ({
@@ -193,17 +196,35 @@ test("#350: Volume Profile visible-mode pan uses delta accumulator instead of fu
       settings: settingsObj,
       requestRefresh() {},
     });
+    const fullFor = (range) => calculateOrderFlowProfile(series.listReadonly().slice(range[0], range[1]), {
+      profileMetric: settingsObj.profileMetric ?? "volume",
+      profileSide: settingsObj.profileSide ?? "total",
+      valueAreaPercent: (settingsObj.valueAreaPercent ?? 70) / 100,
+      developing: false,
+      priceStep: series.config.priceStep,
+      allowOhlcvEstimate: true,
+    });
 
-    vpDef.prepareData(makeCtx([10, 40]));
+    const initial = vpDef.prepareData(makeCtx([10, 40]));
+    assert.equal(initial.status, "ok");
+    assert.deepStrictEqual(initial.meta.result, fullFor([10, 40]));
     const before = snapshotPerformanceTelemetry().counters;
 
-    // Small pan shift (< half window) should use delta accumulator.
-    const deltaRes = vpDef.prepareData(makeCtx([12, 42]));
-    const after = snapshotPerformanceTelemetry().counters;
+    // Exact right-extension ([10, 40] -> [10, 50]) accumulates only bars 40..49.
+    const extended = vpDef.prepareData(makeCtx([10, 50]));
+    assert.equal(extended.status, "ok");
+    assert.deepStrictEqual(extended.meta.result, fullFor([10, 50]));
+    const afterExtend = snapshotPerformanceTelemetry().counters;
+    assert.equal((afterExtend["indicator.incremental.full.volumeProfile"] ?? 0) - (before["indicator.incremental.full.volumeProfile"] ?? 0), 0);
+    assert.equal((afterExtend["indicator.incremental.delta.volumeProfile"] ?? 0) - (before["indicator.incremental.delta.volumeProfile"] ?? 0), 1);
 
-    assert.equal(deltaRes.status, "ok");
-    assert.equal((after["indicator.incremental.full.volumeProfile"] ?? 0) - (before["indicator.incremental.full.volumeProfile"] ?? 0), 0);
-    assert.equal((after["indicator.incremental.delta.volumeProfile"] ?? 0) - (before["indicator.incremental.delta.volumeProfile"] ?? 0), 1);
+    // Back-and-forth pan to [10, 40] hits 4-entry LRU without full rebuild.
+    const back = vpDef.prepareData(makeCtx([10, 40]));
+    assert.equal(back.status, "ok");
+    assert.deepStrictEqual(back.meta.result, fullFor([10, 40]));
+    const afterBack = snapshotPerformanceTelemetry().counters;
+    assert.equal((afterBack["indicator.incremental.full.volumeProfile"] ?? 0) - (afterExtend["indicator.incremental.full.volumeProfile"] ?? 0), 0);
+    assert.equal((afterBack["indicator.incremental.delta.volumeProfile"] ?? 0) - (afterExtend["indicator.incremental.delta.volumeProfile"] ?? 0), 1);
   } finally {
     configurePerformanceTelemetry({ enabled: wasEnabled });
   }
@@ -358,8 +379,9 @@ test("#352: AxisLayerCache bypasses offscreen bitmap after 3 consecutive price-a
       stroke() { strokes++; },
     };
     drawPriceAxisGridLines(gridCtx, view, [100, 150, 200, 250]);
-    assert.equal(beginPaths, 1);
-    assert.equal(strokes, 1);
+    assert.equal(gridCtx.strokeStyle, axisGridLineColor);
+    assert.equal(beginPaths, 4);
+    assert.equal(strokes, 4);
   } finally {
     settings.grid = prevGrid;
     configurePerformanceTelemetry({ enabled: wasEnabled });
