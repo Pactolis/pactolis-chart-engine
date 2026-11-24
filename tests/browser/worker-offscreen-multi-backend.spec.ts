@@ -31,10 +31,6 @@ for (const backendPreference of ["webgl2", "canvas2d", "auto"] as const) {
       document.body.appendChild(container);
 
       const worker = new Worker("/harness/chartWorker.ts", { type: "module" });
-      const workerEvents: Array<{ type: string; diagnostics?: any }> = [];
-      worker.addEventListener("message", (ev) => {
-        workerEvents.push(ev.data);
-      });
 
       const ownership = new OffscreenCanvasOwnershipManager();
       const offscreenCanvases = {
@@ -53,6 +49,11 @@ for (const backendPreference of ["webgl2", "canvas2d", "auto"] as const) {
           panelId: "worker-panel-1",
           marketId: "BINANCE_FUTURES:btcusdt",
           backendPreference: pref,
+          ports: {
+            mainPort: mainChannel.port2,
+            historyPort: historyChannel.port2,
+            ingressPort: ingressChannel.port2,
+          },
         },
         [mainChannel.port2, historyChannel.port2, ingressChannel.port2],
       );
@@ -64,7 +65,7 @@ for (const backendPreference of ["webgl2", "canvas2d", "auto"] as const) {
       bridge.attachPorts({ mainPort: mainChannel.port1 });
 
       bridge.sendInit(
-        ownership.getDescriptors(),
+        ownership.getSurfaceSnapshot(),
         { width: 640, height: 360, dpr: 1 },
         { backendPreference: pref, offscreenCanvases },
       );
@@ -138,30 +139,42 @@ for (const backendPreference of ["webgl2", "canvas2d", "auto"] as const) {
           "gpu-scene",
           () => replacementGpu,
           { width: 640, height: 360, dpr: 1 },
-        ),
+        ).offscreen,
         annotation: ownership.recreateAndTransfer(
           "annotation",
           () => replacementAnnotation,
           { width: 640, height: 360, dpr: 1 },
-        ),
+        ).offscreen,
         interaction: ownership.recreateAndTransfer(
           "interaction",
           () => replacementInteraction,
           { width: 640, height: 360, dpr: 1 },
-        ),
+        ).offscreen,
       };
 
       bridge.sendLifecycle("rehome", "context-recovery", {
-        surfaces: ownership.getDescriptors(),
+        surfaces: ownership.getSurfaceSnapshot(),
         offscreenCanvases: recovered,
       });
 
       await new Promise((r) => setTimeout(r, 120));
       const recoveredCap = await bridge.requestCapture({ format: "bitmap" });
 
-      worker.postMessage({ type: "diagnostics", panelId: "worker-panel-1" });
-      await new Promise((r) => setTimeout(r, 40));
-      const diagEvent = workerEvents.find((e) => e.type === "diagnostics");
+      const diagEvent = await new Promise<{ diagnostics?: any }>((resolve, reject) => {
+        const timer = setTimeout(() => {
+          worker.removeEventListener("message", onMessage);
+          reject(new Error("Timed out waiting for worker diagnostics response"));
+        }, 2000);
+        const onMessage = (ev: MessageEvent) => {
+          if (ev.data?.type === "diagnostics" && ev.data?.panelId === "worker-panel-1") {
+            clearTimeout(timer);
+            worker.removeEventListener("message", onMessage);
+            resolve(ev.data);
+          }
+        };
+        worker.addEventListener("message", onMessage);
+        worker.postMessage({ type: "diagnostics", panelId: "worker-panel-1" });
+      });
 
       bridge.dispose();
       worker.terminate();

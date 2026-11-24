@@ -78,7 +78,7 @@ worker.postMessage(
 
 const bridge = new WorkerChartHostBridge({ panelId: "panel-1", marketId: "BINANCE_FUTURES:btcusdt" });
 bridge.attachPorts({ mainPort: mainChannel.port1 });
-bridge.sendInit(ownership.getDescriptors(), { width: 800, height: 500, dpr: 2 }, {
+bridge.sendInit(ownership.getSurfaceSnapshot(), { width: 800, height: 500, dpr: 2 }, {
   backendPreference: "auto",
   offscreenCanvases,
 });

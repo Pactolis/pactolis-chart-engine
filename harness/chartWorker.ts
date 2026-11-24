@@ -7,6 +7,11 @@ interface WorkerControlMessage {
   marketId?: string;
   backendPreference?: GpuBackendPreference;
   requestId?: string;
+  ports?: {
+    mainPort?: MessagePort;
+    historyPort?: MessagePort;
+    ingressPort?: MessagePort;
+  };
 }
 
 const pool = new ChartWorkerHostPool();
@@ -21,7 +26,9 @@ workerScope.addEventListener("message", (event) => {
   if (!data || typeof data !== "object") return;
 
   if (data.type === "attach-panel") {
-    const [mainPort, historyPort, ingressPort] = event.ports;
+    const mainPort = data.ports?.mainPort ?? event.ports[0];
+    const historyPort = data.ports?.historyPort ?? event.ports[1];
+    const ingressPort = data.ports?.ingressPort ?? event.ports[2];
     if (!mainPort) return;
     const panel = pool.createPanel({
       panelId: data.panelId,

@@ -10,7 +10,7 @@ import { ChartChange } from "../../../core/render/scene/chartScene.js";
 import { View } from "../../../core/engine/view.js";
 import type { Canvas2dContext, CanvasTarget } from "../../../core/gpu/canvasTarget.js";
 import type { GpuBackendKind, GpuSurface } from "../../../core/gpu/gpuBackend.js";
-import { getGpuDiagnosticsSnapshot, type GpuDiagnosticsSnapshot } from "../../../core/gpu/gpuDiagnostics.js";
+import { getGpuDiagnostics, type GpuDiagnosticsSnapshot } from "../../../core/gpu/gpuDiagnostics.js";
 import type { GpuBackendPreference } from "../../../core/gpu/gpuSettings.js";
 import { createGpuSurfaceAsync } from "../../../core/gpu/selectBackend.js";
 import { FootprintSeries } from "../../../core/model/footprint.js";
@@ -125,7 +125,6 @@ export class ChartWorkerPanelRuntime {
   private readonly createScratchCanvas?: () => CanvasTarget;
   private readonly getWebGl2Context?: (canvas: CanvasTarget) => WebGL2RenderingContext | null;
 
-  private gpuCanvas: CanvasTarget | null = null;
   private annotationCanvas: CanvasTarget | null = null;
   private interactionCanvas: CanvasTarget | null = null;
   private gpuSurface: GpuSurface | null = null;
@@ -230,7 +229,7 @@ export class ChartWorkerPanelRuntime {
         undefined,
         changes as ChartChange,
       );
-      this.overlay.renderInteraction(this.view, this.series, this.crosshair);
+      this.overlay.renderInteraction(this.view, this.series, this.crosshair, range);
     }
 
     this.frameCount++;
@@ -251,7 +250,7 @@ export class ChartWorkerPanelRuntime {
       paused: this.paused,
       disposed: this.disposed,
       endpointStats: this.endpoint.getStats(),
-      gpuDiagnostics: getGpuDiagnosticsSnapshot(),
+      gpuDiagnostics: getGpuDiagnostics(),
     };
   }
 
@@ -266,7 +265,6 @@ export class ChartWorkerPanelRuntime {
     this.renderer = null;
     this.gpuSurface?.dispose();
     this.gpuSurface = null;
-    this.gpuCanvas = null;
     this.annotationCanvas = null;
     this.interactionCanvas = null;
     this.endpoint.dispose();
@@ -352,7 +350,6 @@ export class ChartWorkerPanelRuntime {
     nextSurface.resize(bitmapW, bitmapH, safeDpr);
 
     this.gpuSurface?.dispose();
-    this.gpuCanvas = nextSurface.canvas;
     this.annotationCanvas = nextAnnotationCanvas;
     this.interactionCanvas = nextInteractionCanvas;
     this.gpuSurface = nextSurface;
@@ -465,7 +462,7 @@ export class ChartWorkerPanelRuntime {
     } else if (this.view.isPriceAutoScale()) {
       this.autoFitVisiblePrices();
     }
-    this.invalidate(ChartChange.DataStructure | ChartChange.DataTail);
+    this.invalidate(ChartChange.Data | ChartChange.DataTail);
   }
 
   private handleHistoryChunk(payload: {
@@ -494,7 +491,7 @@ export class ChartWorkerPanelRuntime {
         this.autoFitVisiblePrices();
       }
     }
-    this.invalidate(ChartChange.DataStructure);
+    this.invalidate(ChartChange.Data);
   }
 
   private fitViewToSeries(): void {
@@ -651,7 +648,7 @@ export class ChartWorkerPanelRuntime {
       return { ok: false, error: "ChartWorkerPanelRuntime is not initialized or disposed" };
     }
 
-    if (this.dirty || this.frameCount === 0) {
+    if (!this.paused) {
       this.renderNow();
     }
 

@@ -5,6 +5,8 @@ import {
   createScratchCanvas,
   getCanvasOwnerDocument,
   getScratch2dContext,
+  isOffscreenCanvas,
+  type Canvas2dContext,
   type CanvasTarget,
 } from "../../core/gpu/canvasTarget.js";
 import type { FootprintSeries } from "../../core/model/footprint.js";
@@ -1042,7 +1044,7 @@ export class OrderbookHeatmapOverlay {
       }
       this.visibilityObservedCanvas = nextCanvas;
       this.visibilityObservedIntersecting = null;
-      if (nextCanvas && nextDoc) {
+      if (nextCanvas && nextDoc && !isOffscreenCanvas(nextCanvas)) {
         const ObserverCtor =
           (nextDoc as { defaultView?: { IntersectionObserver?: typeof IntersectionObserver } | null } | null)
             ?.defaultView?.IntersectionObserver
@@ -2057,7 +2059,7 @@ export class OrderbookHeatmapOverlay {
   }
 
   private paintCellsToContext(
-    targetCtx: CanvasRenderingContext2D,
+    targetCtx: Canvas2dContext,
     view: View,
     series: FootprintSeries,
     frame: HeatmapFramePreamble,
