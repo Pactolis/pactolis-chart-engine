@@ -885,6 +885,9 @@ export class FootprintSeries {
       if (!cell) {
         cell = { priceBin: bin, buyVol: 0, sellVol: 0, count: 0, buyCount: 0, sellCount: 0, liquidationBuyVol: 0, liquidationSellVol: 0 };
         bar.cells.set(bin, cell);
+        bumpFootprintBarKeysRevision(bar);
+      } else {
+        ensureFootprintBarKeysRevision(bar);
       }
       if (isLiq) {
         if (trade.isBuy) {
@@ -899,6 +902,7 @@ export class FootprintSeries {
         if (trade.isBuy) { cell.buyCount = (cell.buyCount ?? 0) + tradeCount; cell.buyVol += trade.qty; }
         else { cell.sellCount = (cell.sellCount ?? 0) + tradeCount; cell.sellVol += trade.qty; }
       }
+      bumpFootprintCellRevision(cell);
     }
     if (includeCandle && !isLiq) { bar.volume += trade.qty; bar.count += tradeCount; }
     const source = trade.source ?? "live";
@@ -1080,6 +1084,86 @@ export function cellImbalance(cell: FootprintCell): number {
   const total = cell.buyVol + cell.sellVol;
   if (total === 0) return 0;
   return (cell.buyVol - cell.sellVol) / total;
+}
+
+const cellRevisions = new WeakMap<FootprintCell, number>();
+const barCellKeysRevisions = new WeakMap<FootprintBar, number>();
+
+function bumpFootprintCellRevision(cell: FootprintCell): void {
+  cellRevisions.set(cell, (cellRevisions.get(cell) ?? 0) + 1);
+}
+
+function ensureFootprintBarKeysRevision(bar: FootprintBar): void {
+  if (!barCellKeysRevisions.has(bar)) {
+    barCellKeysRevisions.set(bar, 0);
+  }
+}
+
+function bumpFootprintBarKeysRevision(bar: FootprintBar): void {
+  barCellKeysRevisions.set(bar, (barCellKeysRevisions.get(bar) ?? 0) + 1);
+}
+
+export function getFootprintCellRevision(cell: FootprintCell): number {
+  return cellRevisions.get(cell) ?? 0;
+}
+
+export function getFootprintBarKeysRevision(bar: FootprintBar): number | undefined {
+  return barCellKeysRevisions.get(bar);
+}
+
+const sortedBarCellsCache = new WeakMap<
+  FootprintBar,
+  { keyRev: number; size: number; cells: FootprintCell[] }
+>();
+
+/**
+ * Returns `bar.cells` sorted ascending by `priceBin`, cached per `bar` until a
+ * new price bin is inserted (`cellKeysRevision`) or `bar.cells.size` changes (#293).
+ */
+export function getSortedFootprintBarCells(bar: FootprintBar): readonly FootprintCell[] {
+  const keyRev = barCellKeysRevisions.get(bar) ?? (bar.cellRevision ?? 0);
+  const size = bar.cells.size;
+  const cached = sortedBarCellsCache.get(bar);
+  if (cached && cached.keyRev === keyRev && cached.size === size) {
+    return cached.cells;
+  }
+  const cells = [...bar.cells.values()].sort((a, b) => a.priceBin - b.priceBin);
+  sortedBarCellsCache.set(bar, { keyRev, size, cells });
+  return cells;
+}
+
+/**
+ * Returns the `[start, end)` slice of `bar`'s price-sorted cells overlapping
+ * `[minVisPrice - step, maxVisPrice]` for bars with `>= 32` cells (#293).
+ */
+export function getVisibleFootprintCellSlice(
+  bar: FootprintBar,
+  minVisPrice: number,
+  maxVisPrice: number,
+  step: number,
+): { cells: readonly FootprintCell[]; start: number; end: number } | null {
+  if (bar.cells.size < 32 || !Number.isFinite(minVisPrice) || !Number.isFinite(maxVisPrice)) {
+    return null;
+  }
+  const cells = getSortedFootprintBarCells(bar);
+  const len = cells.length;
+  const minBin = minVisPrice - step;
+  let lo = 0;
+  let hi = len;
+  while (lo < hi) {
+    const mid = (lo + hi) >> 1;
+    if (cells[mid].priceBin < minBin) lo = mid + 1;
+    else hi = mid;
+  }
+  const start = lo;
+  lo = start;
+  hi = len;
+  while (lo < hi) {
+    const mid = (lo + hi) >> 1;
+    if (cells[mid].priceBin <= maxVisPrice) lo = mid + 1;
+    else hi = mid;
+  }
+  return { cells, start, end: lo };
 }
 
 /** True when a bar was constructed solely from live/recovery prints without any history or repair snapshot. */

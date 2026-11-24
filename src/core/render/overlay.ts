@@ -52,7 +52,7 @@ import {
   lineLabelPriority,
   priceAxisKeepOut,
   type AnnotationRendererHost,
-  type FormattedCellText,
+  type BarCellTextCacheEntry,
   type IndicatorAxisRect,
   type LineLabelEntry,
   type VolumeProfileCacheState,
@@ -91,7 +91,7 @@ export class Overlay {
   private readonly annotationPassCache = new AnnotationPassCache<{
     price: PriceMarker[]; time: TimeMarker[]; labels: LineLabelEntry[]; tpoHits: TpoProfileHitZone[];
   }>();
-  private readonly cellTextCache = new WeakMap<FootprintBar, { key: string; cellRevision: number; entries: Map<number, FormattedCellText> }>();
+  private readonly cellTextCache = new WeakMap<FootprintBar, BarCellTextCacheEntry>();
   private readonly hudDeps: HudRendererDeps;
   private readonly tpoHost: TpoRenderHost;
   private readonly interactionHost: InteractionOverlayHost;

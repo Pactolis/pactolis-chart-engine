@@ -119,6 +119,7 @@ export class HeatmapGpuRenderer {
   private uploadedInstancesReservedBytes = 0;
   private instanceData: Float32Array | null = null;
   private uploadedInstances: Float32Array | null = null;
+  private uploadedInstancesFloats = 0;
   private instanceReservedFloats = 0;
   private gpuInstanceCapacityBytes = 0;
   /** Init-only capability read (MAX_TEXTURE_SIZE); never queried per frame. */
@@ -349,6 +350,8 @@ export class HeatmapGpuRenderer {
     this.uploadedExtensionCount = -1;
     this.instanceData = null;
     this.uploadedInstances = null;
+    this.uploadedInstancesFloats = 0;
+    this.uploadedInstancesReservedBytes = 0;
     this.instanceReservedFloats = 0;
     this.gpuInstanceCapacityBytes = 0;
     this.gridWidth = 0;
@@ -379,6 +382,32 @@ export class HeatmapGpuRenderer {
 
   private releaseReservation(): void {
     this.releaseBytes(this.reservedBytes);
+  }
+
+  private targetInstanceCapacityFloats(
+    neededFloats: number,
+    currentCapFloats: number,
+    bytesPerFloat: number,
+  ): number {
+    const neededCells = Math.ceil(neededFloats / FLOATS_PER_INSTANCE);
+    const currentCells = Math.floor(currentCapFloats / FLOATS_PER_INSTANCE);
+    if (currentCapFloats >= neededFloats) {
+      if (currentCells > 4096 && neededCells * 4 < currentCells) {
+        const shrinkCells = Math.max(1024, Math.ceil((neededCells * 1.5) / 256) * 256);
+        return Math.max(neededFloats, shrinkCells * FLOATS_PER_INSTANCE);
+      }
+      return currentCapFloats;
+    }
+    const idealCells = Math.min(Math.ceil((neededCells * 1.25) / 256) * 256, neededCells + 2048);
+    const idealFloats = Math.max(neededFloats, idealCells * FLOATS_PER_INSTANCE);
+    const availBytes = Math.min(
+      HEATMAP_GPU_CHART_BUDGET_BYTES - (this.reservedBytes + this.preparedLeaseBytes),
+      HEATMAP_GPU_MODULE_BUDGET_BYTES - moduleReservedBytes,
+    );
+    if (idealFloats * bytesPerFloat > availBytes || idealFloats * 4 > MAX_INSTANCE_BYTES) {
+      return neededFloats;
+    }
+    return idealFloats;
   }
 
   private ensureResources(gl: WebGL2RenderingContext, cellCount: number, instanceCount: number): void {
@@ -557,19 +586,18 @@ export class HeatmapGpuRenderer {
     }
     if (!this.stagingValidity) throw new Error("Heatmap GPU staging missing");
 
-    const instanceBytes = instanceCount * FLOATS_PER_INSTANCE * 4;
+    const neededFloats = instanceCount * FLOATS_PER_INSTANCE;
+    const instanceBytes = neededFloats * 4;
     if (instanceBytes > MAX_INSTANCE_BYTES) throw new Error("Heatmap GPU prototype instance buffer out of budget");
-    if (!this.instanceData || this.instanceData.length < instanceCount * FLOATS_PER_INSTANCE) {
-      const capacity = Math.max(instanceCount * FLOATS_PER_INSTANCE, 4096);
-      // CPU staging plus the retained upload copy, at replacement peak.
-      const oldBytes = this.instanceReservedFloats * 8;
-      const newBytes = capacity * 8;
+    const currentInstanceCells = Math.floor(this.instanceReservedFloats / FLOATS_PER_INSTANCE);
+    const shouldShrinkInstance = currentInstanceCells > 4096 && instanceCount * 4 < currentInstanceCells;
+    if (!this.instanceData || this.instanceData.length < neededFloats || shouldShrinkInstance) {
+      const capacity = this.targetInstanceCapacityFloats(neededFloats, this.instanceReservedFloats, 4);
+      const oldBytes = this.instanceReservedFloats * 4;
+      const newBytes = capacity * 4;
       this.reserve(newBytes);
       this.instanceReservedFloats = capacity;
       this.instanceData = new Float32Array(capacity);
-      this.releaseBytes(this.uploadedInstancesReservedBytes);
-      this.uploadedInstancesReservedBytes = 0;
-      this.uploadedInstances = null;
       this.releaseBytes(oldBytes);
     }
   }
@@ -722,7 +750,7 @@ export class HeatmapGpuRenderer {
 
     const view = data.subarray(0, offset);
     const uploaded = this.uploadedInstances;
-    if (uploaded && uploaded.length === view.length) {
+    if (uploaded && this.uploadedInstancesFloats === view.length) {
       let same = true;
       for (let i = 0; i < view.length; i++) {
         if (uploaded[i] !== view[i]) { same = false; break; }
@@ -736,28 +764,61 @@ export class HeatmapGpuRenderer {
       }
     }
     gl.bindBuffer(gl.ARRAY_BUFFER, this.instanceBuffer);
-    if (view.byteLength > this.gpuInstanceCapacityBytes) {
+    const currentGpuFloats = Math.floor(this.gpuInstanceCapacityBytes / 4);
+    const currentGpuCells = Math.floor(currentGpuFloats / FLOATS_PER_INSTANCE);
+    const needVboResize =
+      view.byteLength > this.gpuInstanceCapacityBytes
+      || (currentGpuCells > 4096 && total * 4 < currentGpuCells);
+    let reallocatedVbo = false;
+    if (needVboResize) {
+      const targetGpuFloats = this.targetInstanceCapacityFloats(view.length, currentGpuFloats, 4);
+      const targetGpuBytes = Math.max(view.byteLength, targetGpuFloats * 4);
       const oldBytes = this.gpuInstanceCapacityBytes;
-      this.reserve(view.byteLength); // replacement peak: old + new GPU storage
-      this.gpuInstanceCapacityBytes = view.byteLength;
-      gl.bufferData(gl.ARRAY_BUFFER, view.byteLength, gl.DYNAMIC_DRAW);
+      this.reserve(targetGpuBytes); // replacement peak: old + new GPU storage
+      this.gpuInstanceCapacityBytes = targetGpuBytes;
+      gl.bufferData(gl.ARRAY_BUFFER, targetGpuBytes, gl.DYNAMIC_DRAW);
       this.releaseBytes(oldBytes);
+      reallocatedVbo = true;
     }
-    gl.bufferSubData(gl.ARRAY_BUFFER, 0, view);
+    if (!reallocatedVbo && uploaded && this.uploadedInstancesFloats > 0) {
+      let firstDirty = -1;
+      let lastDirty = -1;
+      const prevLen = this.uploadedInstancesFloats;
+      for (let i = 0; i < view.length; i++) {
+        if (i >= prevLen || uploaded[i] !== view[i]) {
+          if (firstDirty === -1) firstDirty = i;
+          lastDirty = i;
+        }
+      }
+      if (firstDirty !== -1) {
+        gl.bufferSubData(gl.ARRAY_BUFFER, firstDirty * 4, view.subarray(firstDirty, lastDirty + 1));
+      }
+    } else {
+      gl.bufferSubData(gl.ARRAY_BUFFER, 0, view);
+    }
     gl.bindBuffer(gl.ARRAY_BUFFER, null);
     if (view.byteLength > this.gpuInstanceCapacityBytes) {
       throw new Error("Heatmap GPU instance buffer smaller than the draw contract");
     }
-    if (!this.uploadedInstances || this.uploadedInstances.length !== view.length) {
+    const currentRetainedFloats = this.uploadedInstances ? this.uploadedInstances.length : 0;
+    const currentRetainedCells = Math.floor(currentRetainedFloats / FLOATS_PER_INSTANCE);
+    const needRetainedResize =
+      !this.uploadedInstances
+      || this.uploadedInstances.length < view.length
+      || (currentRetainedCells > 4096 && total * 4 < currentRetainedCells);
+    if (needRetainedResize) {
       // Replacement peak: charge the new retained copy while the old copy is
       // still referenced, then release the old charge after the swap.
+      const targetRetainedFloats = this.targetInstanceCapacityFloats(view.length, currentRetainedFloats, 4);
+      const targetRetainedBytes = targetRetainedFloats * 4;
       const oldRetainedBytes = this.uploadedInstancesReservedBytes;
-      this.reserve(view.byteLength);
-      this.uploadedInstancesReservedBytes = view.byteLength;
-      this.uploadedInstances = new Float32Array(view.length);
+      this.reserve(targetRetainedBytes);
+      this.uploadedInstancesReservedBytes = targetRetainedBytes;
+      this.uploadedInstances = new Float32Array(targetRetainedFloats);
       this.releaseBytes(oldRetainedBytes);
     }
-    this.uploadedInstances.set(view);
+    this.uploadedInstances!.set(view, 0);
+    this.uploadedInstancesFloats = view.length;
   }
 
   private draw(gl: WebGL2RenderingContext, frame: HeatmapGpuCellFrame, plot: HeatmapGpuPlot): void {
