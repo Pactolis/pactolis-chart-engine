@@ -639,7 +639,7 @@ test("hidden panel/tab visibility transitions release rasterCache without double
       assert.equal(overlay.reservedRasterBytes(), expectedBytes);
       assert.equal(getHeatmapCpuRasterModuleReservedBytes(), anchorBytes + expectedBytes);
 
-      // 1. document visibilitychange -> hidden releases immediately; drawing while hidden paints directly without caching; restore rebuilds cleanly
+      // 1. document visibilitychange -> hidden releases immediately; drawing while hidden skips cell scan/paint; restore rebuilds cleanly
       h.dispatchVisibility("hidden");
       assert.equal(overlay.reservedRasterBytes(), 0);
       assert.equal(getHeatmapCpuRasterModuleReservedBytes(), anchorBytes);
@@ -650,7 +650,7 @@ test("hidden panel/tab visibility transitions release rasterCache without double
       overlay.draw(h.ctx, view, series, [0, 0]);
       assert.equal(overlay.reservedRasterBytes(), 0);
       assert.equal(h.stats().drawImageCount, 0);
-      assert.equal(h.stats().mainFillRectCalls, 2);
+      assert.equal(h.stats().mainFillRectCalls, 0);
       assert.equal(getHeatmapCpuRasterModuleReservedBytes(), anchorBytes);
 
       h.dispatchVisibility("visible");
@@ -669,7 +669,7 @@ test("hidden panel/tab visibility transitions release rasterCache without double
       h.resetPaintCounters();
       overlay.draw(h.ctx, view, series, [0, 0]);
       assert.equal(overlay.reservedRasterBytes(), 0);
-      assert.equal(h.stats().mainFillRectCalls, 2);
+      assert.equal(h.stats().mainFillRectCalls, 0);
 
       h.triggerIntersection(true);
       h.resetPaintCounters();
@@ -684,7 +684,7 @@ test("hidden panel/tab visibility transitions release rasterCache without double
       overlay.draw(h.ctx, view, series, [0, 0]);
       assert.equal(overlay.reservedRasterBytes(), 0);
       assert.equal(getHeatmapCpuRasterModuleReservedBytes(), anchorBytes);
-      assert.equal(h.stats().mainFillRectCalls, 2);
+      assert.equal(h.stats().mainFillRectCalls, 0);
 
       h.setConnected(true);
       h.resetPaintCounters();

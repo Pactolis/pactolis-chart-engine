@@ -284,6 +284,11 @@ export class WebGpuNativeHeatmapPipeline {
   private uploadedDataReservedBytes = 0;
   private uploadedCellCount = -1;
   private uploadedDataKey = "";
+  private uploadedContentRevision = -1;
+  private uploadedMainRef: readonly GpuNativeHeatmapRect[] | null = null;
+  private uploadedExtensionRef: readonly GpuNativeHeatmapRect[] | null = null;
+  private uploadedMainCount = -1;
+  private uploadedExtensionCount = -1;
 
   private readonly uniformRaw = new ArrayBuffer(HEATMAP_UNIFORM_BYTES);
   private readonly uniformF32 = new Float32Array(this.uniformRaw);
@@ -318,6 +323,11 @@ export class WebGpuNativeHeatmapPipeline {
   private residentTotalCells = 0;
   private residentBarOffsets = new Int32Array(0);
   private residentBarCounts = new Int32Array(0);
+  private residentBarSorted = new Uint8Array(0);
+  private residentCellPriceRel: Float32Array | null = null;
+  private residentCellPriceRelReservedBytes = 0;
+  private residentCullSegStarts = new Int32Array(64);
+  private residentCullSegCounts = new Int32Array(64);
   private readonly residentUniformRaw = new ArrayBuffer(RESIDENT_HEATMAP_UNIFORM_BYTES);
   private readonly residentUniformF32 = new Float32Array(this.residentUniformRaw);
   private readonly residentUniformU32 = new Uint32Array(this.residentUniformRaw);
@@ -485,22 +495,37 @@ export class WebGpuNativeHeatmapPipeline {
     const pos = (n: number): boolean => f32(n) && n > 0 && Math.fround(n) > 0;
     const val = (n: number): boolean => f32(n) && n >= 0 && !(n > 0 && Math.fround(n) === 0);
 
-    for (const rect of frame.main) {
-      if (!f32(rect.x) || !f32(rect.yTop) || !pos(rect.width) || !pos(rect.height) || !val(rect.value)) {
-        return false;
+    const canFastReuseUploaded =
+      this.cellBuffer !== null
+      && frame.contentRevision !== undefined
+      && Number.isSafeInteger(frame.contentRevision)
+      && frame.contentRevision >= 0
+      && frame.contentRevision === this.uploadedContentRevision
+      && frame.dataKey === this.uploadedDataKey
+      && frame.main === this.uploadedMainRef
+      && frame.extension === this.uploadedExtensionRef
+      && frame.main.length === this.uploadedMainCount
+      && frame.extension.length === this.uploadedExtensionCount
+      && this.uploadedCellCount === cells;
+
+    if (!canFastReuseUploaded) {
+      for (const rect of frame.main) {
+        if (!f32(rect.x) || !f32(rect.yTop) || !pos(rect.width) || !pos(rect.height) || !val(rect.value)) {
+          return false;
+        }
       }
-    }
-    for (const rect of frame.extension) {
-      if (!f32(rect.x) || !f32(rect.yTop) || !pos(rect.width) || !pos(rect.height) || !val(rect.value)) {
-        return false;
-      }
-      if (
-        rect.sourceMainIndex === undefined
-        || rect.sourceMainIndex < 0
-        || rect.sourceMainIndex >= frame.main.length
-        || !Number.isInteger(rect.sourceMainIndex)
-      ) {
-        return false;
+      for (const rect of frame.extension) {
+        if (!f32(rect.x) || !f32(rect.yTop) || !pos(rect.width) || !pos(rect.height) || !val(rect.value)) {
+          return false;
+        }
+        if (
+          rect.sourceMainIndex === undefined
+          || rect.sourceMainIndex < 0
+          || rect.sourceMainIndex >= frame.main.length
+          || !Number.isInteger(rect.sourceMainIndex)
+        ) {
+          return false;
+        }
       }
     }
 
@@ -546,68 +571,83 @@ export class WebGpuNativeHeatmapPipeline {
     }
 
     try {
-      const neededBytes = cells * HEATMAP_CELL_RECORD_BYTES;
-      if (neededBytes > this.maxBufferSize) return false;
+      if (!canFastReuseUploaded) {
+        const neededBytes = cells * HEATMAP_CELL_RECORD_BYTES;
+        if (neededBytes > this.maxBufferSize) return false;
 
-      this.ensureStagingAndStorage(neededBytes);
-      const data = this.stagingData!;
+        this.ensureStagingAndStorage(neededBytes);
+        const data = this.stagingData!;
 
-      let offset = 0;
-      const writeCell = (rect: GpuNativeHeatmapRect, value: number, alphaScale: number): void => {
-        data[offset] = rect.x;
-        data[offset + 1] = rect.yTop;
-        data[offset + 2] = rect.width;
-        data[offset + 3] = rect.height;
-        data[offset + 4] = value;
-        data[offset + 5] = alphaScale;
-        data[offset + 6] = 0;
-        data[offset + 7] = 0;
-        offset += HEATMAP_CELL_RECORD_WORDS;
-      };
+        let offset = 0;
+        const writeCell = (rect: GpuNativeHeatmapRect, value: number, alphaScale: number): void => {
+          data[offset] = rect.x;
+          data[offset + 1] = rect.yTop;
+          data[offset + 2] = rect.width;
+          data[offset + 3] = rect.height;
+          data[offset + 4] = value;
+          data[offset + 5] = alphaScale;
+          data[offset + 6] = 0;
+          data[offset + 7] = 0;
+          offset += HEATMAP_CELL_RECORD_WORDS;
+        };
 
-      let nextExt = 0;
-      for (let i = 0; i < frame.main.length; i++) {
-        const mainRect = frame.main[i];
-        writeCell(mainRect, mainRect.value, 1);
-        while (nextExt < frame.extension.length && frame.extension[nextExt].sourceMainIndex === i) {
-          writeCell(frame.extension[nextExt], mainRect.value, 0.45);
-          nextExt++;
-        }
-      }
-      if (nextExt !== frame.extension.length) return false;
-
-      const activeView = data.subarray(0, cells * HEATMAP_CELL_RECORD_WORDS);
-      const uploaded = this.uploadedData;
-      let needsDataUpload =
-        !uploaded
-        || this.uploadedDataKey !== frame.dataKey
-        || this.uploadedCellCount !== cells
-        || uploaded.length !== activeView.length;
-      if (!needsDataUpload && uploaded) {
-        for (let i = 0; i < activeView.length; i++) {
-          if (uploaded[i] !== activeView[i]) {
-            needsDataUpload = true;
-            break;
+        let nextExt = 0;
+        for (let i = 0; i < frame.main.length; i++) {
+          const mainRect = frame.main[i];
+          writeCell(mainRect, mainRect.value, 1);
+          while (nextExt < frame.extension.length && frame.extension[nextExt].sourceMainIndex === i) {
+            writeCell(frame.extension[nextExt], mainRect.value, 0.45);
+            nextExt++;
           }
         }
-      }
+        if (nextExt !== frame.extension.length) return false;
 
-      if (needsDataUpload) {
-        const uploadBytes = cells * HEATMAP_CELL_RECORD_BYTES;
-        this.device.queue.writeBuffer(this.cellBuffer, 0, data.buffer, 0, uploadBytes);
-        incrementPerformanceCounter("gpu.upload.bytes", uploadBytes);
-        incrementPerformanceCounter("gpu.native.heatmap.upload.bytes", uploadBytes);
+        const activeView = data.subarray(0, cells * HEATMAP_CELL_RECORD_WORDS);
+        const uploaded = this.uploadedData;
+        const sameLayout =
+          uploaded !== null
+          && this.uploadedDataKey === frame.dataKey
+          && this.uploadedCellCount === cells
+          && uploaded.length === activeView.length;
 
-        if (!this.uploadedData || this.uploadedData.length !== activeView.length) {
-          const oldRetained = this.uploadedDataReservedBytes;
-          this.reserve(uploadBytes);
-          this.uploadedDataReservedBytes = uploadBytes;
-          this.uploadedData = new Float32Array(activeView.length);
-          this.releaseBytes(oldRetained);
+        if (sameLayout) {
+          let firstDirtyWord = -1;
+          let lastDirtyWord = -1;
+          for (let i = 0; i < activeView.length; i++) {
+            if (uploaded[i] !== activeView[i]) {
+              if (firstDirtyWord === -1) firstDirtyWord = i;
+              lastDirtyWord = i;
+            }
+          }
+          if (firstDirtyWord !== -1) {
+            const firstCell = Math.floor(firstDirtyWord / HEATMAP_CELL_RECORD_WORDS);
+            const lastCell = Math.floor(lastDirtyWord / HEATMAP_CELL_RECORD_WORDS);
+            const firstWord = firstCell * HEATMAP_CELL_RECORD_WORDS;
+            const endWord = (lastCell + 1) * HEATMAP_CELL_RECORD_WORDS;
+            const byteOffset = firstCell * HEATMAP_CELL_RECORD_BYTES;
+            const dirtyBytes = (lastCell - firstCell + 1) * HEATMAP_CELL_RECORD_BYTES;
+            this.device.queue.writeBuffer(this.cellBuffer, byteOffset, data.buffer, byteOffset, dirtyBytes);
+            incrementPerformanceCounter("gpu.upload.bytes", dirtyBytes);
+            incrementPerformanceCounter("gpu.native.heatmap.upload.bytes", dirtyBytes);
+            uploaded.set(activeView.subarray(firstWord, endWord), firstWord);
+          }
+        } else {
+          const uploadBytes = cells * HEATMAP_CELL_RECORD_BYTES;
+          this.device.queue.writeBuffer(this.cellBuffer, 0, data.buffer, 0, uploadBytes);
+          incrementPerformanceCounter("gpu.upload.bytes", uploadBytes);
+          incrementPerformanceCounter("gpu.native.heatmap.upload.bytes", uploadBytes);
+
+          if (!this.uploadedData || this.uploadedData.length !== activeView.length) {
+            const oldRetained = this.uploadedDataReservedBytes;
+            this.reserve(uploadBytes);
+            this.uploadedDataReservedBytes = uploadBytes;
+            this.uploadedData = new Float32Array(activeView.length);
+            this.releaseBytes(oldRetained);
+          }
+          this.uploadedData.set(activeView);
+          this.uploadedCellCount = cells;
+          this.uploadedDataKey = frame.dataKey;
         }
-        this.uploadedData.set(activeView);
-        this.uploadedCellCount = cells;
-        this.uploadedDataKey = frame.dataKey;
       }
 
       this.uniformF32[0] = bitmapWidth / effectiveDpr;
@@ -663,6 +703,25 @@ export class WebGpuNativeHeatmapPipeline {
       passEncoder.draw(6, cells, 0, 0);
       passEncoder.end();
       this.device.queue.submit([commandEncoder.finish()]);
+      if (!canFastReuseUploaded) {
+        if (
+          frame.contentRevision !== undefined
+          && Number.isSafeInteger(frame.contentRevision)
+          && frame.contentRevision >= 0
+        ) {
+          this.uploadedContentRevision = frame.contentRevision;
+          this.uploadedMainRef = frame.main;
+          this.uploadedExtensionRef = frame.extension;
+          this.uploadedMainCount = frame.main.length;
+          this.uploadedExtensionCount = frame.extension.length;
+        } else {
+          this.uploadedContentRevision = -1;
+          this.uploadedMainRef = null;
+          this.uploadedExtensionRef = null;
+          this.uploadedMainCount = -1;
+          this.uploadedExtensionCount = -1;
+        }
+      }
       return true;
     } catch (error) {
       if (error instanceof Error && error.message === "Heatmap GPU prototype budget exceeded") {
@@ -773,12 +832,57 @@ export class WebGpuNativeHeatmapPipeline {
     while (nextCap < barCount) nextCap *= 2;
     const nextOffsets = new Int32Array(nextCap);
     const nextCounts = new Int32Array(nextCap);
+    const nextSorted = new Uint8Array(nextCap);
     if (preservePrefixCount > 0) {
       nextOffsets.set(this.residentBarOffsets.subarray(0, preservePrefixCount));
       nextCounts.set(this.residentBarCounts.subarray(0, preservePrefixCount));
+      nextSorted.set(this.residentBarSorted.subarray(0, preservePrefixCount));
     }
     this.residentBarOffsets = nextOffsets;
     this.residentBarCounts = nextCounts;
+    this.residentBarSorted = nextSorted;
+  }
+
+  private ensureResidentPriceIndexCells(minCells: number): void {
+    const neededCells = Math.max(RESIDENT_HEATMAP_TAIL_HEADROOM, minCells);
+    if (this.residentCellPriceRel && this.residentCellPriceRel.length >= neededCells) {
+      return;
+    }
+    let nextCells = Math.max(RESIDENT_HEATMAP_TAIL_HEADROOM, this.residentCellPriceRel?.length || RESIDENT_HEATMAP_TAIL_HEADROOM);
+    while (nextCells < neededCells) nextCells *= 2;
+    const nextBytes = nextCells * 4;
+    const oldBytes = this.residentCellPriceRelReservedBytes;
+    const netChartBytes = this.reservedBytes - oldBytes + this.preparedLeaseBytes + nextBytes;
+    const netModuleBytes = moduleReservedBytes - oldBytes + nextBytes;
+    if (netChartBytes > HEATMAP_WEBGPU_CHART_BUDGET_BYTES || netModuleBytes > HEATMAP_WEBGPU_MODULE_BUDGET_BYTES) {
+      throw new Error("Heatmap GPU prototype budget exceeded");
+    }
+    const prev = this.residentCellPriceRel;
+    const next = new Float32Array(nextCells);
+    if (prev) next.set(prev);
+    this.releaseBytes(oldBytes);
+    this.reserve(nextBytes);
+    this.residentCellPriceRel = next;
+    this.residentCellPriceRelReservedBytes = nextBytes;
+  }
+
+  private recordResidentBarPrices(
+    dstCellOffset: number,
+    barIndex: number,
+    priceOrigin: number,
+    cells: ReturnType<GpuNativeHeatmapResidentFrame["readBarCells"]>,
+  ): void {
+    this.ensureResidentPriceIndexCells(dstCellOffset + cells.length);
+    const prices = this.residentCellPriceRel!;
+    let sorted = 1;
+    let prevPrice = Number.NEGATIVE_INFINITY;
+    for (let i = 0; i < cells.length; i++) {
+      const rel = Math.fround(cells[i].priceStart - priceOrigin);
+      prices[dstCellOffset + i] = rel;
+      if (rel < prevPrice) sorted = 0;
+      prevPrice = rel;
+    }
+    this.residentBarSorted[barIndex] = sorted;
   }
 
   private ensureResidentStagingCells(minCells: number): void {
@@ -962,6 +1066,7 @@ export class WebGpuNativeHeatmapPipeline {
           const tailCells = frame.readBarCells(frame.liveBarIndex);
           if (tailOffset >= 0 && tailOffset + tailCells.length <= this.residentCellCapacityCells) {
             this.packResidentCellsIntoStaging(0, frame.liveBarIndex, frame.priceOrigin, tailCells);
+            this.recordResidentBarPrices(tailOffset, frame.liveBarIndex, frame.priceOrigin, tailCells);
             this.uploadResidentDataSlice(tailOffset, tailCells.length);
             this.residentBarCounts[frame.liveBarIndex] = tailCells.length;
             this.residentTotalCells = tailOffset + tailCells.length;
@@ -983,6 +1088,7 @@ export class WebGpuNativeHeatmapPipeline {
             this.residentBarOffsets[b] = startOffset + sliceCells;
             this.residentBarCounts[b] = barCells.length;
             this.packResidentCellsIntoStaging(sliceCells, b, frame.priceOrigin, barCells);
+            this.recordResidentBarPrices(startOffset + sliceCells, b, frame.priceOrigin, barCells);
             sliceCells += barCells.length;
           }
           if (startOffset + sliceCells <= this.residentCellCapacityCells) {
@@ -1011,6 +1117,7 @@ export class WebGpuNativeHeatmapPipeline {
               this.residentBarOffsets[b] = prevOffset + sliceCells;
               this.residentBarCounts[b] = barCells.length;
               this.packResidentCellsIntoStaging(sliceCells, b, frame.priceOrigin, barCells);
+              this.recordResidentBarPrices(prevOffset + sliceCells, b, frame.priceOrigin, barCells);
               sliceCells += barCells.length;
             }
             if (prevOffset + sliceCells <= this.residentCellCapacityCells) {
@@ -1036,6 +1143,7 @@ export class WebGpuNativeHeatmapPipeline {
             this.residentBarOffsets[b] = totalCells;
             this.residentBarCounts[b] = barCells.length;
             this.packResidentCellsIntoStaging(totalCells, b, frame.priceOrigin, barCells);
+            this.recordResidentBarPrices(totalCells, b, frame.priceOrigin, barCells);
             totalCells += barCells.length;
           }
           if (totalCells > MAX_CELLS) return false;
@@ -1101,6 +1209,66 @@ export class WebGpuNativeHeatmapPipeline {
         this.hasUploadedResidentUniform = true;
       }
 
+      let segCount = 0;
+      let culledTotalCells = visibleCellCount;
+      let useVerticalSegments = false;
+      const priceRelArr = this.residentCellPriceRel;
+      if (visibleCellCount >= 256 && visEndBar - visStartBar + 1 <= 256 && priceRelArr !== null) {
+        const priceTopRel = frame.view.priceTop - frame.priceOrigin;
+        const eps = 1e-4 * Math.max(1, Math.abs(priceTopRel), frame.bucketStep);
+        const minPriceRel = priceTopRel - plot.height * frame.view.pricePerPx - frame.bucketStep - eps;
+        const maxPriceRel = priceTopRel - frame.bucketStep + Math.max(frame.view.pricePerPx, frame.bucketStep) + eps;
+        let sumCulled = 0;
+        for (let b = visStartBar; b <= visEndBar; b++) {
+          const barCount = this.residentBarCounts[b];
+          if (barCount <= 0) continue;
+          const barOff = this.residentBarOffsets[b];
+          let segStart = barOff;
+          let segEnd = barOff + barCount;
+          if (this.residentBarSorted[b] === 1) {
+            let l = barOff;
+            let r = barOff + barCount;
+            while (l < r) {
+              const mid = (l + r) >> 1;
+              if (priceRelArr[mid] < minPriceRel) l = mid + 1;
+              else r = mid;
+            }
+            segStart = l;
+            l = segStart;
+            r = barOff + barCount;
+            while (l < r) {
+              const mid = (l + r) >> 1;
+              if (priceRelArr[mid] <= maxPriceRel) l = mid + 1;
+              else r = mid;
+            }
+            segEnd = l;
+          }
+          const len = segEnd - segStart;
+          if (len <= 0) continue;
+          sumCulled += len;
+          if (segCount > 0 && this.residentCullSegStarts[segCount - 1] + this.residentCullSegCounts[segCount - 1] === segStart) {
+            this.residentCullSegCounts[segCount - 1] += len;
+          } else {
+            if (segCount === this.residentCullSegStarts.length) {
+              const nextStarts = new Int32Array(this.residentCullSegStarts.length * 2);
+              const nextCounts = new Int32Array(this.residentCullSegCounts.length * 2);
+              nextStarts.set(this.residentCullSegStarts);
+              nextCounts.set(this.residentCullSegCounts);
+              this.residentCullSegStarts = nextStarts;
+              this.residentCullSegCounts = nextCounts;
+            }
+            this.residentCullSegStarts[segCount] = segStart;
+            this.residentCullSegCounts[segCount] = len;
+            segCount++;
+          }
+        }
+        if (sumCulled === 0) return true;
+        if (sumCulled < visibleCellCount * 0.5) {
+          useVerticalSegments = true;
+          culledTotalCells = sumCulled;
+        }
+      }
+
       const commandEncoder = this.device.createCommandEncoder({
         label: "WebGpuNativeResidentHeatmapCommandEncoder",
       });
@@ -1117,7 +1285,13 @@ export class WebGpuNativeHeatmapPipeline {
       passEncoder.setScissorRect?.(scissorX, scissorY, scissorW, scissorH);
       passEncoder.setPipeline(this.residentRenderPipeline);
       passEncoder.setBindGroup(0, this.residentBindGroup);
-      passEncoder.draw(6, visibleCellCount, 0, 0);
+      if (useVerticalSegments && culledTotalCells > 0) {
+        for (let s = 0; s < segCount; s++) {
+          passEncoder.draw(6, this.residentCullSegCounts[s], 0, this.residentCullSegStarts[s] - visibleCellOffset);
+        }
+      } else {
+        passEncoder.draw(6, visibleCellCount, 0, 0);
+      }
       passEncoder.end();
       this.device.queue.submit([commandEncoder.finish()]);
       return true;
@@ -1177,6 +1351,11 @@ export class WebGpuNativeHeatmapPipeline {
     this.uploadedDataReservedBytes = 0;
     this.uploadedCellCount = -1;
     this.uploadedDataKey = "";
+    this.uploadedContentRevision = -1;
+    this.uploadedMainRef = null;
+    this.uploadedExtensionRef = null;
+    this.uploadedMainCount = -1;
+    this.uploadedExtensionCount = -1;
     this.hasUploadedUniform = false;
     this.cellCapacityBytes = 0;
 
@@ -1198,6 +1377,9 @@ export class WebGpuNativeHeatmapPipeline {
     this.residentTotalCells = 0;
     this.residentBarOffsets = new Int32Array(0);
     this.residentBarCounts = new Int32Array(0);
+    this.residentBarSorted = new Uint8Array(0);
+    this.residentCellPriceRel = null;
+    this.residentCellPriceRelReservedBytes = 0;
     this.hasUploadedResidentUniform = false;
 
     this.releaseBytes(this.reservedBytes);

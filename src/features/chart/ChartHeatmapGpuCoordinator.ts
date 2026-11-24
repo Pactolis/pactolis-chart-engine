@@ -23,6 +23,8 @@ export interface HeatmapGpuRenderFrame {
   priceTop: number;
   pricePerPx: number;
   priceScaleMode: string;
+  seriesRef: FootprintSeries;
+  seriesStructureRevision: number;
   seriesLength: number;
   rangeFrom: number;
   rangeTo: number;
@@ -284,6 +286,9 @@ export class ChartHeatmapGpuCoordinator {
         ...(typeof (overlay as { getActivePalette?: () => unknown }).getActivePalette === "function"
           ? { palette: (overlay as { getActivePalette: () => HeatmapGpuCellFrame["palette"] }).getActivePalette() }
           : {}),
+        ...(typeof (overlay as { getActiveOpacity?: () => unknown }).getActiveOpacity === "function"
+          ? { opacity: (overlay as { getActiveOpacity: () => number }).getActiveOpacity() }
+          : {}),
         preparedLease: this.cachedPrepareHandle,
       };
     }
@@ -525,6 +530,8 @@ export class ChartHeatmapGpuCoordinator {
       priceTop: v.priceTop,
       pricePerPx: v.pricePerPx,
       priceScaleMode: v.priceScaleMode,
+      seriesRef: s,
+      seriesStructureRevision: (s as { structureRevision?: number }).structureRevision ?? 0,
       seriesLength: s.length,
       rangeFrom: range[0],
       rangeTo: range[1],
@@ -536,6 +543,8 @@ export class ChartHeatmapGpuCoordinator {
     const claim = this.heatmapGpuFrame;
     if (!claim) return false;
     return claim.dataKey === this.host.orderbookHeatmap?.currentDataKey()
+      && claim.seriesRef === s
+      && claim.seriesStructureRevision === ((s as { structureRevision?: number }).structureRevision ?? 0)
       && claim.colWidth === v.colWidth
       && claim.offsetX === v.offsetX
       && claim.areaLeft === v.area.left

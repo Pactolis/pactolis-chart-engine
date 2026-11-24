@@ -47,6 +47,7 @@ export interface HeatmapGpuCellFrame {
   opacity?: number;
   palette?: OrderbookHeatmapPalette;
   dataKey: string;
+  contentRevision?: number;
   /**
    * Production prepare only: lease covering the prepared lists' known
    * logical payload, held by the caller while it retains the frame. When
@@ -108,6 +109,11 @@ export class HeatmapGpuRenderer {
   private uploadedValues: Float32Array | null = null;
   private uploadedValidity: Uint8Array | null = null;
   private uploadedDataKey = "";
+  private uploadedContentRevision = -1;
+  private uploadedMainRef: readonly HeatmapGpuRect[] | null = null;
+  private uploadedExtensionRef: readonly HeatmapGpuRect[] | null = null;
+  private uploadedMainCount = -1;
+  private uploadedExtensionCount = -1;
   private retainedReservedBytes = 0;
   /** Reserved bytes for the retained uploadedInstances CPU copy. */
   private uploadedInstancesReservedBytes = 0;
@@ -167,15 +173,34 @@ export class HeatmapGpuRenderer {
     // upload, and a positive scalar must not underflow to a present zero.
     const pos = (n: number): boolean => f32(n) && n > 0 && Math.fround(n) > 0;
     const val = (n: number): boolean => f32(n) && n >= 0 && !(n > 0 && Math.fround(n) === 0);
-    for (const rect of frame.main) {
-      if (!f32(rect.x) || !f32(rect.yTop) || !pos(rect.width) || !pos(rect.height)
-        || !val(rect.value)) return false;
-    }
-    for (const rect of frame.extension) {
-      if (!f32(rect.x) || !f32(rect.yTop) || !pos(rect.width) || !pos(rect.height)
-        || !val(rect.value)) return false;
-      if (rect.sourceMainIndex === undefined || rect.sourceMainIndex < 0
-        || rect.sourceMainIndex >= frame.main.length || !Number.isInteger(rect.sourceMainIndex)) return false;
+    const canFastReuseUploaded =
+      this.gl === gl
+      && this.program !== null
+      && frame.contentRevision !== undefined
+      && Number.isSafeInteger(frame.contentRevision)
+      && frame.contentRevision >= 0
+      && frame.contentRevision === this.uploadedContentRevision
+      && frame.dataKey === this.uploadedDataKey
+      && frame.main === this.uploadedMainRef
+      && frame.extension === this.uploadedExtensionRef
+      && frame.main.length === this.uploadedMainCount
+      && frame.extension.length === this.uploadedExtensionCount
+      && cells * FLOATS_PER_INSTANCE * 4 <= this.gpuInstanceCapacityBytes
+      && this.gridWidth > 0
+      && this.gridHeight > 0
+      && this.gridWidth * this.gridHeight >= cells;
+
+    if (!canFastReuseUploaded) {
+      for (const rect of frame.main) {
+        if (!f32(rect.x) || !f32(rect.yTop) || !pos(rect.width) || !pos(rect.height)
+          || !val(rect.value)) return false;
+      }
+      for (const rect of frame.extension) {
+        if (!f32(rect.x) || !f32(rect.yTop) || !pos(rect.width) || !pos(rect.height)
+          || !val(rect.value)) return false;
+        if (rect.sourceMainIndex === undefined || rect.sourceMainIndex < 0
+          || rect.sourceMainIndex >= frame.main.length || !Number.isInteger(rect.sourceMainIndex)) return false;
+      }
     }
     // A positive floor/threshold/ceiling must survive the Float32 uniform upload:
     // 1e-50 would round to a present zero and silently widen the drawn span.
@@ -213,12 +238,33 @@ export class HeatmapGpuRenderer {
       moduleReservedBytes += framePayloadBytes;
     }
     try {
-      // The texture grid must cover MAIN + EXT texels: extensions own their
-      // own texels past the main count, capped by the grid bounds checks.
-      this.ensureResources(gl, cells, cells);
-      this.uploadData(gl, frame);
-      this.uploadInstances(gl, frame);
+      if (!canFastReuseUploaded) {
+        // The texture grid must cover MAIN + EXT texels: extensions own their
+        // own texels past the main count, capped by the grid bounds checks.
+        this.ensureResources(gl, cells, cells);
+        this.uploadData(gl, frame);
+        this.uploadInstances(gl, frame);
+      }
       this.draw(gl, frame, plot);
+      if (!canFastReuseUploaded) {
+        if (
+          frame.contentRevision !== undefined
+          && Number.isSafeInteger(frame.contentRevision)
+          && frame.contentRevision >= 0
+        ) {
+          this.uploadedContentRevision = frame.contentRevision;
+          this.uploadedMainRef = frame.main;
+          this.uploadedExtensionRef = frame.extension;
+          this.uploadedMainCount = frame.main.length;
+          this.uploadedExtensionCount = frame.extension.length;
+        } else {
+          this.uploadedContentRevision = -1;
+          this.uploadedMainRef = null;
+          this.uploadedExtensionRef = null;
+          this.uploadedMainCount = -1;
+          this.uploadedExtensionCount = -1;
+        }
+      }
       return true;
     } catch (error) {
       if (error instanceof Error && error.message === "Heatmap GPU prototype budget exceeded") {
@@ -296,6 +342,11 @@ export class HeatmapGpuRenderer {
     this.uploadedValues = null;
     this.uploadedValidity = null;
     this.uploadedDataKey = "";
+    this.uploadedContentRevision = -1;
+    this.uploadedMainRef = null;
+    this.uploadedExtensionRef = null;
+    this.uploadedMainCount = -1;
+    this.uploadedExtensionCount = -1;
     this.instanceData = null;
     this.uploadedInstances = null;
     this.instanceReservedFloats = 0;
@@ -450,6 +501,11 @@ export class HeatmapGpuRenderer {
       this.uploadedValues = null;
       this.uploadedValidity = null;
       this.uploadedDataKey = "";
+      this.uploadedContentRevision = -1;
+      this.uploadedMainRef = null;
+      this.uploadedExtensionRef = null;
+      this.uploadedMainCount = -1;
+      this.uploadedExtensionCount = -1;
       const texels = gridWidth * gridHeight;
       // Replacement peak: the driver may transiently hold the old and the new
       // storage together, so reserve the full new size while the old one is
@@ -539,17 +595,73 @@ export class HeatmapGpuRenderer {
     }
 
     // Re-upload only when the data epoch changed: key, layout size or any
-    // value/validity texel (elementwise compare, no hashing, no per-frame upload).
+    // value/validity texel. When the grid dimensions and dataKey match,
+    // upload only the dirty sub-row or row span via texSubImage2D.
     const uploaded = this.uploadedValues;
     const uploadedMask = this.uploadedValidity;
-    let needsUpload = !uploaded || !uploadedMask || uploaded.length !== staging.length
-      || uploadedMask.length !== validity.length || frame.dataKey !== this.uploadedDataKey;
-    if (!needsUpload && uploaded && uploadedMask) {
-      for (let i = 0; i < staging.length; i++) {
-        if (uploaded[i] !== staging[i] || uploadedMask[i] !== validity[i]) { needsUpload = true; break; }
+    const canPartial =
+      uploaded !== null
+      && uploadedMask !== null
+      && uploaded.length === staging.length
+      && uploadedMask.length === validity.length
+      && frame.dataKey === this.uploadedDataKey;
+
+    if (canPartial) {
+      const width = this.gridWidth;
+      const activeTexels = width * this.gridHeight;
+      let firstVal = -1;
+      let lastVal = -1;
+      let firstMask = -1;
+      let lastMask = -1;
+      for (let i = 0; i < activeTexels; i++) {
+        if (uploaded[i] !== staging[i]) {
+          if (firstVal === -1) firstVal = i;
+          lastVal = i;
+        }
+        if (uploadedMask[i] !== validity[i]) {
+          if (firstMask === -1) firstMask = i;
+          lastMask = i;
+        }
       }
+      if (firstVal === -1 && firstMask === -1) return;
+
+      if (firstVal !== -1) {
+        const startRow = Math.floor(firstVal / width);
+        const endRow = Math.floor(lastVal / width);
+        gl.bindTexture(gl.TEXTURE_2D, this.densityTexture);
+        if (startRow === endRow) {
+          const x = firstVal - startRow * width;
+          const w = lastVal - firstVal + 1;
+          gl.texSubImage2D(gl.TEXTURE_2D, 0, x, startRow, w, 1, gl.RED, gl.FLOAT, staging.subarray(firstVal, lastVal + 1));
+        } else {
+          const sliceStart = startRow * width;
+          const sliceEnd = (endRow + 1) * width;
+          gl.texSubImage2D(gl.TEXTURE_2D, 0, 0, startRow, width, endRow - startRow + 1, gl.RED, gl.FLOAT, staging.subarray(sliceStart, sliceEnd));
+        }
+        uploaded.set(staging.subarray(firstVal, lastVal + 1), firstVal);
+      }
+
+      if (firstMask !== -1) {
+        const startRow = Math.floor(firstMask / width);
+        const endRow = Math.floor(lastMask / width);
+        gl.pixelStorei(gl.UNPACK_ALIGNMENT, 1);
+        gl.bindTexture(gl.TEXTURE_2D, this.validityTexture);
+        if (startRow === endRow) {
+          const x = firstMask - startRow * width;
+          const w = lastMask - firstMask + 1;
+          gl.texSubImage2D(gl.TEXTURE_2D, 0, x, startRow, w, 1, gl.RED, gl.UNSIGNED_BYTE, validity.subarray(firstMask, lastMask + 1));
+        } else {
+          const sliceStart = startRow * width;
+          const sliceEnd = (endRow + 1) * width;
+          gl.texSubImage2D(gl.TEXTURE_2D, 0, 0, startRow, width, endRow - startRow + 1, gl.RED, gl.UNSIGNED_BYTE, validity.subarray(sliceStart, sliceEnd));
+        }
+        gl.pixelStorei(gl.UNPACK_ALIGNMENT, 4);
+        uploadedMask.set(validity.subarray(firstMask, lastMask + 1), firstMask);
+      }
+      gl.bindTexture(gl.TEXTURE_2D, null);
+      return;
     }
-    if (!needsUpload) return;
+
     gl.bindTexture(gl.TEXTURE_2D, this.densityTexture);
     gl.texSubImage2D(gl.TEXTURE_2D, 0, 0, 0, this.gridWidth, this.gridHeight, gl.RED, gl.FLOAT, staging);
     gl.pixelStorei(gl.UNPACK_ALIGNMENT, 1);
