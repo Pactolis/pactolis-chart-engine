@@ -39,7 +39,7 @@ function makeSpySurface() {
 function makeImbalanceSeries() {
   const series = new FootprintSeries({ intervalMs: 60_000, priceStep: 10 });
   const cells = new Map([
-    [100, { priceBin: 100, buyVol: 10, sellVol: 10, count: 2, buyCount: 1, sellCount: 1 }],
+    [100, { priceBin: 100, buyVol: 0, sellVol: 10, count: 1, buyCount: 0, sellCount: 1 }],
     [110, { priceBin: 110, buyVol: 100, sellVol: 1, count: 2, buyCount: 1, sellCount: 1 }],
     [120, { priceBin: 120, buyVol: 100, sellVol: 1, count: 2, buyCount: 1, sellCount: 1 }],
     [130, { priceBin: 130, buyVol: 100, sellVol: 1, count: 2, buyCount: 1, sellCount: 1 }],
