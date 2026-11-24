@@ -184,7 +184,7 @@ test("#356: WebGL2 GPU heatmap pan reuses prepared frame with 0 B geometry/textu
   const fake = makeFakeGl();
   let overlay;
   let coordinator;
-  let now = 1_020 * MINUTE;
+  let now = 1_060 * MINUTE;
 
   await withHeatmapSettings(() => ({
     mode: "single",
@@ -196,8 +196,8 @@ test("#356: WebGL2 GPU heatmap pan reuses prepared frame with 0 B geometry/textu
     single: { usd: 1, btc: 10 },
     aggregated: { usd: 1, btc: 10 },
   }), async () => {
-    const series = makeHeatmapSeries(20);
-    const view = makeHeatmapView(0);
+    const series = makeHeatmapSeries(60);
+    const view = makeHeatmapView(-205);
     overlay = new OrderbookHeatmapOverlay({
       fetch: async (req) => ({
         schemaVersion: 1,
@@ -208,7 +208,7 @@ test("#356: WebGL2 GPU heatmap pan reuses prepared frame with 0 B geometry/textu
         bucketStep: req.bucketStep,
         from: req.from,
         to: req.to,
-        bars: Array.from({ length: 20 }, (_, i) => ({
+        bars: Array.from({ length: 60 }, (_, i) => ({
           t: (1_000 + i) * MINUTE,
           cells: [[50_000, 600_000, 600_000]],
         })),
@@ -219,7 +219,7 @@ test("#356: WebGL2 GPU heatmap pan reuses prepared frame with 0 B geometry/textu
     });
 
     // Warm up chunks
-    overlay.getPrepareCacheKey(view, series, [0, 19]);
+    overlay.getPrepareCacheKey(view, series, [0, 59]);
     await new Promise((r) => setTimeout(r, 20));
 
     coordinator = new ChartHeatmapGpuCoordinator({
@@ -238,11 +238,11 @@ test("#356: WebGL2 GPU heatmap pan reuses prepared frame with 0 B geometry/textu
     await coordinator.whenHeatmapGpuRendererReady();
     coordinator.setGl(fake.gl);
 
-    // Frame 1: initial anchor at offsetX = 0
+    // Frame 1: initial anchor at offsetX = -205
     coordinator.beginFrameAttempt();
     const f1 = coordinator.prepareHeatmapGpuCells(view, series);
     assert.ok(f1, "initial GPU frame prepared");
-    assert.equal(f1.anchorOffsetX, 0);
+    assert.equal(f1.anchorOffsetX, -205);
     assert.equal(f1.panOffsetX, 0);
     coordinator.renderHeatmapGpuCells(f1, view, series);
     const up1 = fake.getUploads();
@@ -253,7 +253,7 @@ test("#356: WebGL2 GPU heatmap pan reuses prepared frame with 0 B geometry/textu
 
     // Frame 2: sub-bar 0.25 px pan within same visible [from, to) range
     fake.resetUploads();
-    view.offsetX = 0.25;
+    view.offsetX = -204.75;
     coordinator.beginFrameAttempt();
     const f2 = coordinator.prepareHeatmapGpuCells(view, series);
     assert.ok(f2, "pan frame reuses cached prepared frame");
@@ -267,12 +267,12 @@ test("#356: WebGL2 GPU heatmap pan reuses prepared frame with 0 B geometry/textu
 
     // Frame 3: pan across bar boundary -> visible range changes -> re-prepares & re-uploads
     fake.resetUploads();
-    view.offsetX = 25;
+    view.offsetX = -230;
     coordinator.beginFrameAttempt();
     const f3 = coordinator.prepareHeatmapGpuCells(view, series);
     assert.ok(f3, "boundary-crossing pan prepares fresh frame");
     assert.notEqual(f3.main, f1.main, "fresh main array on boundary crossing");
-    assert.equal(f3.anchorOffsetX, 25);
+    assert.equal(f3.anchorOffsetX, -230);
     assert.equal(f3.panOffsetX, 0);
     coordinator.renderHeatmapGpuCells(f3, view, series);
     const up3 = fake.getUploads();
@@ -364,7 +364,7 @@ test("#357: ChartInputController caches getBoundingClientRect when ResizeObserve
       session: { invalidate() {}, invalidateSurface() {} },
       pipeline: { series: { length: 100 } },
       overlay: { getIndicatorAxisPaneAt: () => null, getIndicatorScaleControlAt: () => null, getPriceScaleControlAt: () => null, getMenuButtonAt: () => null, getMenuButtonRect: () => null, getTpoProfileAt: () => null },
-      timeViewport: { beginPlotPan() {}, dragPlotPanTo() {}, endPlotPan() {}, beginTimeAxisScale() {}, dragTimeAxisScaleTo() {}, endTimeAxisScale() {}, zoomPlot() {}, panPlot() {} },
+      timeViewport: { beginPlotPan() {}, dragPlotPanTo() {}, endPlotPan() {}, beginTimeAxisScale() {}, dragTimeAxisScaleTo() {}, endTimeAxisScale() {}, zoomPlot() {}, panPlot() {}, applyWheelZoom() {}, applyWheelPan() {} },
       state: { market: MARKET, timeframe: "15m" },
       panelId: "rect-cache-unit",
       applyingExternal: false,
@@ -519,6 +519,7 @@ test("#358B & Diagnostics: tryMotionRasterReuse < 0.72 triggers ImageData re-anc
         putImageData: () => { putImageDataCalls++; },
       };
       const offCanvas = { width: 0, height: 0, getContext: (k) => (k === "2d" ? offCtx : null) };
+      offCtx.canvas = offCanvas;
       const mainCtx = {
         fillStyle: "",
         canvas: { width: 800, height: 400, ownerDocument: { createElement: () => offCanvas } },
