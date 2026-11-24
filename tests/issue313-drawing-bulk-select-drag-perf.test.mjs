@@ -94,7 +94,7 @@ test("Issue #313: group drag and single-point edit perform 0 drawing.id lookups 
   view.area = { left: 0, top: 0, width: 800, height: 600 };
   view.colWidth = 20;
   view.offsetX = 0;
-  view.priceTop = 52000;
+  view.priceTop = 50500;
   view.pricePerPx = 1;
   const timeCtx = {
     indexForTime: (t) => (t - 1_800_000_000_000) / 60_000,
@@ -107,7 +107,7 @@ test("Issue #313: group drag and single-point edit perform 0 drawing.id lookups 
   assert.equal(manager.selected?.id, "d-2");
 
   const startPt = { time: 1_800_000_000_000, price: 50000 };
-  const started = manager.pointerDown(startPt, { x: view.xOfIndex(0), y: view.yOfPrice(50000) });
+  const started = manager.pointerDown(startPt, { x: view.xOfIndex(0) + view.colWidth / 2, y: view.yOfPrice(50000) });
   assert.equal(started, true);
 
   const probe = instrumentDrawingIdReads(manager.listCurrentReadonly());
@@ -137,7 +137,7 @@ test("Issue #313: group drag and single-point edit perform 0 drawing.id lookups 
 
   // Single-point edit on d-0 must also avoid id scans during pointerMove
   manager.select("d-0");
-  assert.equal(manager.pointerDown(after[0].points[0], { x: view.xOfIndex(20), y: view.yOfPrice(50200) }), true);
+  assert.equal(manager.pointerDown(after[0].points[0], { x: view.xOfIndex(20) + view.colWidth / 2, y: view.yOfPrice(50200) }), true);
   probe.reset();
   for (let step = 1; step <= 10; step++) {
     manager.pointerMove({ time: after[0].points[0].time, price: 50200 + step });
