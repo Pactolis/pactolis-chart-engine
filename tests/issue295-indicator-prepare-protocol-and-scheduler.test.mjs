@@ -144,19 +144,14 @@ test("#295: IndicatorPrepareCache supports peek/store and classifies hit, tail, 
   assert.equal(cache.peek("rsi-1", baseKey), stored);
   assert.equal(cache.classifyInvalidation("rsi-1", baseKey), "hit");
 
-  const tailKey = {
-    ...baseKey,
-    series: { revision: 11, nonTailRevision: 2, resetEpoch: 0 },
-  };
-  assert.equal(cache.classifyInvalidation("rsi-1", tailKey), "tail");
+  series.revision = 11;
+  assert.equal(cache.classifyInvalidation("rsi-1", { ...baseKey }), "tail");
 
-  const nonTailKey = {
-    ...baseKey,
-    series: { revision: 12, nonTailRevision: 3, resetEpoch: 0 },
-    nonTailRevision: 3,
-  };
-  assert.equal(cache.classifyInvalidation("rsi-1", nonTailKey), "non-tail");
+  series.revision = 12;
+  series.nonTailRevision = 3;
+  assert.equal(cache.classifyInvalidation("rsi-1", { ...baseKey, nonTailRevision: 3 }), "non-tail");
 
+  assert.equal(cache.classifyInvalidation("rsi-1", { ...baseKey, series: { revision: 13, nonTailRevision: 3, resetEpoch: 0 } }), "cold");
   assert.equal(cache.classifyInvalidation("rsi-1", { ...baseKey, resetEpoch: 1 }), "cold");
   assert.equal(cache.classifyInvalidation("rsi-1", { ...baseKey, generation: 2 }), "cold");
   assert.equal(cache.classifyInvalidation("rsi-1", { ...baseKey, settingsRevision: 2 }), "cold");
@@ -177,7 +172,7 @@ test("#295: prewarmPreparedData achieves 0 cache misses on draw and matches sync
   const managerPrewarm = new IndicatorManager({
     ownerDocument: { dispatchEvent: () => true },
     root: {},
-    initial: makeInstances(["rsi", "atr", "moving-average"]),
+    initial: makeInstances(["rsi", "atr", "keltner-channels"]),
     onChange() {},
     onLayoutChange() {},
     onInvalidate() {},
@@ -199,10 +194,10 @@ test("#295: prewarmPreparedData achieves 0 cache misses on draw and matches sync
   const snap = snapshotPerformanceTelemetry();
   assert.equal(snap.counters["indicator.prepare.cache.miss.rsi"] ?? 0, 0);
   assert.equal(snap.counters["indicator.prepare.cache.miss.atr"] ?? 0, 0);
-  assert.equal(snap.counters["indicator.prepare.cache.miss.moving-average"] ?? 0, 0);
+  assert.equal(snap.counters["indicator.prepare.cache.miss.keltner-channels"] ?? 0, 0);
   assert.equal(snap.counters["indicator.prepare.cache.hit.rsi"], 1);
   assert.equal(snap.counters["indicator.prepare.cache.hit.atr"], 1);
-  assert.equal(snap.counters["indicator.prepare.cache.hit.moving-average"], 1);
+  assert.equal(snap.counters["indicator.prepare.cache.hit.keltner-channels"], 1);
 
   for (const instance of managerPrewarm.peekInstances()) {
     const def = getIndicatorDefinition(instance.type);
@@ -230,6 +225,7 @@ test("#295: prewarmPreparedData achieves 0 cache misses on draw and matches sync
       nonTailRevision: series.nonTailRevision,
       resetEpoch: series.resetEpoch,
       settingsRevision: 0,
+      timeBucket: typeof def.prepareCache === "string" ? 0 : Math.floor(Date.now() / Math.max(1, def.prepareCache.maxAgeMs)),
     });
     assert.deepEqual(cachedPrepared, syncPrepared);
   }
@@ -283,8 +279,8 @@ test("#295: prewarmPreparedData defers overflow beyond budget and triggers Chart
   }
   const snap = snapshotPerformanceTelemetry();
   assert.equal(snap.counters["indicator.prepare.cache.miss.rsi"] ?? 0, 0);
-  assert.equal(snap.counters["indicator.prepare.cache.miss.atr"] ?? 0);
-  assert.equal(snap.counters["indicator.prepare.cache.miss.macd"] ?? 0);
+  assert.equal(snap.counters["indicator.prepare.cache.miss.atr"] ?? 0, 0);
+  assert.equal(snap.counters["indicator.prepare.cache.miss.macd"] ?? 0, 0);
 
   manager.dispose();
 });
