@@ -229,6 +229,53 @@ export function heatmapValueInUnit(usd: number, priceStart: number, bucketStep: 
   return middle > 0 ? usd / middle : 0;
 }
 
+export interface HeatmapThresholdSparseBar {
+  readonly key: string;
+  readonly maxValue: number;
+  readonly cells: readonly OrderbookHeatmapCell[];
+  readonly values: readonly number[];
+}
+
+const heatmapThresholdSparseCache = new WeakMap<OrderbookHeatmapBar, HeatmapThresholdSparseBar>();
+
+/**
+ * Lazily caches the subset of cells in `bar` whose converted value meets `threshold` (`> 0`),
+ * along with the bar's `maxValue` in `unit`. Never mutates `bar.cells` so hover and
+ * unthresholded lookups continue to see sub-threshold liquidity.
+ */
+export function getHeatmapThresholdSparseBar(
+  bar: OrderbookHeatmapBar,
+  unit: "usd" | "btc",
+  threshold: number,
+  step: number,
+): HeatmapThresholdSparseBar {
+  const key = `${unit}|${threshold}|${step}|${bar.cells.length}`;
+  const cached = heatmapThresholdSparseCache.get(bar);
+  if (cached && cached.key === key) {
+    return cached;
+  }
+  const sparseCells: OrderbookHeatmapCell[] = [];
+  const sparseValues: number[] = [];
+  let maxValue = 0;
+  for (let i = 0; i < bar.cells.length; i++) {
+    const cell = bar.cells[i];
+    const value = heatmapValueInUnit(heatmapCellUsd(cell), cell[0], step, unit);
+    if (value > maxValue) maxValue = value;
+    if (value >= threshold) {
+      sparseCells.push(cell);
+      sparseValues.push(value);
+    }
+  }
+  const entry: HeatmapThresholdSparseBar = {
+    key,
+    maxValue,
+    cells: sparseCells,
+    values: sparseValues,
+  };
+  heatmapThresholdSparseCache.set(bar, entry);
+  return entry;
+}
+
 /** The intensity ceiling never drops below this multiple of the floor, so a screen of near-floor walls stays faint. */
 export const HEATMAP_MIN_CEILING_RATIO = 2;
 
@@ -769,6 +816,88 @@ export function getHeatmapColorLut(
     formatHeatmapRgba(heatmapCellRgba(q / 1000, safeAlphaScale, clampedOpacity, resolvedPalette)),
   );
   heatmapColorLutCache.set(key, lut);
+  return lut;
+}
+
+const IS_LITTLE_ENDIAN_RGBA = new Uint8Array(new Uint32Array([0x01020304]).buffer)[0] === 0x04;
+const heatmapPackedRgbaLutCache = new Map<string, Uint32Array>();
+
+export function packRgbaToUint32(r: number, g: number, b: number, aByte: number): number {
+  if (IS_LITTLE_ENDIAN_RGBA) {
+    return (((aByte & 0xff) << 24) | ((b & 0xff) << 16) | ((g & 0xff) << 8) | (r & 0xff)) >>> 0;
+  }
+  return (((r & 0xff) << 24) | ((g & 0xff) << 16) | ((b & 0xff) << 8) | (aByte & 0xff)) >>> 0;
+}
+
+/**
+ * Exact Canvas2D `source-over` straight-alpha blend of `(srcR, srcG, srcB, srcA)` over `dstPacked`.
+ */
+export function blendPackedRgbaSourceOver(
+  dstPacked: number,
+  srcR: number,
+  srcG: number,
+  srcB: number,
+  srcA: number,
+): number {
+  if (dstPacked === 0) return packRgbaToUint32(srcR, srcG, srcB, srcA);
+  const dstA = IS_LITTLE_ENDIAN_RGBA ? ((dstPacked >>> 24) & 0xff) : (dstPacked & 0xff);
+  if (dstA === 0) return packRgbaToUint32(srcR, srcG, srcB, srcA);
+  if (srcA >= 255) return packRgbaToUint32(srcR, srcG, srcB, 255);
+  const sa = srcA / 255;
+  const da = dstA / 255;
+  const invSa = 1 - sa;
+  const outA = sa + da * invSa;
+  if (!(outA > 0)) return 0;
+  const dstR = IS_LITTLE_ENDIAN_RGBA ? (dstPacked & 0xff) : ((dstPacked >>> 24) & 0xff);
+  const dstG = IS_LITTLE_ENDIAN_RGBA ? ((dstPacked >>> 8) & 0xff) : ((dstPacked >>> 16) & 0xff);
+  const dstB = IS_LITTLE_ENDIAN_RGBA ? ((dstPacked >>> 16) & 0xff) : ((dstPacked >>> 8) & 0xff);
+  const outR = Math.round((srcR * sa + dstR * da * invSa) / outA);
+  const outG = Math.round((srcG * sa + dstG * da * invSa) / outA);
+  const outB = Math.round((srcB * sa + dstB * da * invSa) / outA);
+  const outAByte = Math.round(outA * 255);
+  return packRgbaToUint32(outR, outG, outB, outAByte);
+}
+
+/**
+ * Exact Canvas2D `source-over` straight-alpha blend of packed `srcPacked` over packed `dstPacked`.
+ */
+export function blendPackedRgbaOver(dstPacked: number, srcPacked: number): number {
+  if (dstPacked === 0) return srcPacked;
+  const srcA = IS_LITTLE_ENDIAN_RGBA ? ((srcPacked >>> 24) & 0xff) : (srcPacked & 0xff);
+  if (srcA === 0) return dstPacked;
+  if (srcA >= 255) return srcPacked;
+  const srcR = IS_LITTLE_ENDIAN_RGBA ? (srcPacked & 0xff) : ((srcPacked >>> 24) & 0xff);
+  const srcG = IS_LITTLE_ENDIAN_RGBA ? ((srcPacked >>> 8) & 0xff) : ((srcPacked >>> 16) & 0xff);
+  const srcB = IS_LITTLE_ENDIAN_RGBA ? ((srcPacked >>> 16) & 0xff) : ((srcPacked >>> 8) & 0xff);
+  return blendPackedRgbaSourceOver(dstPacked, srcR, srcG, srcB, srcA);
+}
+
+/**
+ * Returns a 1001-entry packed RGBA `Uint32Array` lookup table matching `getHeatmapColorLut`
+ * for direct `ImageData` rasterization without CSS color string parsing.
+ */
+export function getHeatmapPackedRgbaLut(
+  alphaScale = 1,
+  opacity = 1,
+  palette: OrderbookHeatmapPalette = DEFAULT_HEATMAP_PALETTE,
+): Uint32Array {
+  const safeAlphaScale = Number.isFinite(alphaScale) ? (alphaScale <= 0 ? 0 : alphaScale) : 1;
+  const rawClampedOpacity = Math.min(1, Math.max(0, Number.isFinite(opacity) ? opacity : 1));
+  const clampedOpacity = rawClampedOpacity === 0 ? 0 : rawClampedOpacity;
+  const resolvedPalette = resolveOrderbookHeatmapPalette(palette);
+  const key = `${resolvedPalette}|${safeAlphaScale}|${clampedOpacity}`;
+  const cached = heatmapPackedRgbaLutCache.get(key);
+  if (cached) return cached;
+  if (heatmapPackedRgbaLutCache.size >= HEATMAP_COLOR_LUT_CACHE_MAX_ENTRIES) {
+    const oldestKey = heatmapPackedRgbaLutCache.keys().next().value;
+    if (oldestKey !== undefined) heatmapPackedRgbaLutCache.delete(oldestKey);
+  }
+  const lut = new Uint32Array(1001);
+  for (let q = 0; q <= 1000; q++) {
+    const rgba = heatmapCellRgba(q / 1000, safeAlphaScale, clampedOpacity, resolvedPalette);
+    lut[q] = packRgbaToUint32(rgba.r, rgba.g, rgba.b, Math.round(rgba.a * 255));
+  }
+  heatmapPackedRgbaLutCache.set(key, lut);
   return lut;
 }
 
