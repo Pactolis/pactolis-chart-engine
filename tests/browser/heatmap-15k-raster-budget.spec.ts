@@ -442,8 +442,9 @@ test("15,000-cell SwiftShader benchmark and CPU raster cache budget / GPU takeov
     const gpuColdFrameMs: number[] = [];
     const gpuColdPrepareMs: number[] = [];
     const gpuColdRenderMs: number[] = [];
+    const calibratedPriceTop = v.priceTop;
     for (let i = 0; i < 6; i++) {
-      v.offsetX = i % 2 === 0 ? calibratedOffsetX + 0.25 : calibratedOffsetX;
+      v.priceTop = i % 2 === 0 ? calibratedPriceTop + 0.05 : calibratedPriceTop;
       const b = telemetry.snapshotPerformanceTelemetry();
       r.invalidate();
       await r.session.captureCompositePng();
@@ -455,7 +456,7 @@ test("15,000-cell SwiftShader benchmark and CPU raster cache budget / GPU takeov
       if (prep.count > 0) gpuColdPrepareMs.push(prep.totalMs / prep.count);
       if (rend.count > 0) gpuColdRenderMs.push(rend.totalMs / rend.count);
     }
-    v.offsetX = calibratedOffsetX;
+    v.priceTop = calibratedPriceTop;
     r.invalidate();
     await r.session.captureCompositePng();
 

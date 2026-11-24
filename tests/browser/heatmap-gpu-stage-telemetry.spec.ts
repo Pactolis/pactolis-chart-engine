@@ -19,7 +19,7 @@ test.use({
 type RuntimeProbe = {
   heatmapTexturePrototypeEnabled: boolean;
   heatmapGpuFrame: unknown;
-  view: { offsetX: number };
+  view: { offsetX: number; colWidth: number };
   invalidate(): void;
   orderbookHeatmap: {
     bars: Map<number, { t: number; cells: number[][] }>;
@@ -103,7 +103,7 @@ test("GPU heatmap stage times reach performance telemetry only while it is on", 
     // Each capture renders one frame of all three surfaces.
     const frames = async (n: number, pan = false) => {
       for (let i = 0; i < n; i++) {
-        if (pan) r.view.offsetX -= 1;
+        if (pan) r.view.offsetX += Math.max(1, Math.ceil(r.view.colWidth) + 2);
         r.invalidate();
         await r.session.captureCompositePng();
       }

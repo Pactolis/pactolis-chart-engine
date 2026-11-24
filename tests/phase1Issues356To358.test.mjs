@@ -387,31 +387,41 @@ test("#357: ChartInputController caches getBoundingClientRect when ResizeObserve
     const controller = new ChartInputController(canvas, { x: 0, y: 0, visible: false, touch: false }, host);
     assert.equal(observerInstances.length, 1);
 
-    emitCanvas("pointermove", { clientX: 50, clientY: 60 });
-    emitCanvas("pointermove", { clientX: 55, clientY: 65 });
+    // Active drag gesture: pointerdown -> consecutive pointermove + wheel reuse cached rect (1 call)
     emitCanvas("pointerdown", { clientX: 55, clientY: 65 });
-    emitCanvas("wheel", { clientX: 55, clientY: 65, deltaY: 10 });
-    assert.equal(rectCalls, 1, "pointermove/pointerdown/wheel reuse cached rect");
-
-    observerInstances[0].cb();
     emitCanvas("pointermove", { clientX: 60, clientY: 70 });
-    assert.equal(rectCalls, 2, "ResizeObserver invalidates cached rect");
+    emitCanvas("pointermove", { clientX: 65, clientY: 75 });
+    emitCanvas("wheel", { clientX: 65, clientY: 75, deltaY: 10 });
+    assert.equal(rectCalls, 1, "active gesture reuses cached rect across pointermove and wheel");
+
+    // Invalidation mid-drag via ResizeObserver, resize, and scroll
+    observerInstances[0].cb();
+    emitCanvas("pointermove", { clientX: 66, clientY: 76 });
+    assert.equal(rectCalls, 2, "ResizeObserver invalidates cached rect mid-drag");
 
     emitWin("resize");
-    emitCanvas("pointermove", { clientX: 61, clientY: 71 });
-    assert.equal(rectCalls, 3, "window resize invalidates cached rect");
+    emitCanvas("pointermove", { clientX: 67, clientY: 77 });
+    assert.equal(rectCalls, 3, "window resize invalidates cached rect mid-drag");
 
     emitWin("scroll");
-    emitCanvas("pointermove", { clientX: 62, clientY: 72 });
-    assert.equal(rectCalls, 4, "window scroll invalidates cached rect");
+    emitCanvas("pointermove", { clientX: 68, clientY: 78 });
+    assert.equal(rectCalls, 4, "window scroll invalidates cached rect mid-drag");
 
+    // Zero-width rect is never retained
     rect = { left: 0, top: 0, width: 0, height: 0 };
     emitWin("resize");
-    emitCanvas("pointermove", { clientX: 63, clientY: 73 });
+    emitCanvas("pointermove", { clientX: 69, clientY: 79 });
     assert.equal(rectCalls, 5);
-    rect = { left: 0, top: 0, width: 400, height: 300 };
-    emitCanvas("pointermove", { clientX: 64, clientY: 74 });
+    rect = { left: 10, top: 20, width: 400, height: 300 };
+    emitCanvas("pointermove", { clientX: 70, clientY: 80 });
     assert.equal(rectCalls, 6, "zero-width rect is not retained");
+
+    // End drag -> idle pointermove always reads fresh rect even without observer/resize/scroll
+    emitCanvas("pointerup", { clientX: 70, clientY: 80 });
+    rect = { left: 150, top: 100, width: 400, height: 300 };
+    const beforeIdleMove = rectCalls;
+    emitCanvas("pointermove", { clientX: 200, clientY: 150 });
+    assert.ok(rectCalls > beforeIdleMove, "idle pointermove reads fresh rect after pointerup");
 
     controller.dispose();
     assert.equal(observerInstances[0].disconnected, true, "dispose disconnects ResizeObserver");
