@@ -977,18 +977,6 @@ export class OrderbookHeatmapOverlay {
     return this.now() - this.rasterViewportChangedAt < HEATMAP_CPU_RASTER_QUIET_MS;
   }
 
-  /** Invalidates raster cache metadata while keeping the offscreen canvas and ImageData buffer pooled. */
-  private invalidateRasterCacheContents(): void {
-    this.lastRasterKey = "";
-    this.rasterCacheHasCells = false;
-    this.rasterCacheDataSig = "";
-    this.rasterCacheView = null;
-    this.rasterCacheHistRightCss = 0;
-    this.rasterCacheOriginX = 0;
-    this.rasterCacheOriginY = 0;
-    this.rasterCacheBlitBounds = null;
-  }
-
   /** Releases this overlay's offscreen CPU raster canvas and returns reserved bytes once. */
   releaseRasterCache(): void {
     this.lastRasterKey = "";
