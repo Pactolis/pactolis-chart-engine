@@ -188,7 +188,7 @@ test("#341: letters and blocks cull to visible price/time viewport while preserv
   const fracSeries = new FootprintSeries({ intervalMs, priceStep: 0.05, pricePrecision: 2 });
   fracSeries.loadBars(Array.from({ length: 40 }, (_, i) => makeBar(start + i * intervalMs, 100.0, 101.0, 100.2, 100.5)));
   const logView = new View();
-  logView.area = { left: 0, top: 0, width: 320, height: 120 };
+  logView.area = { left: 0, top: 0, width: 520, height: 120 };
   logView.colWidth = 12;
   logView.setScaleMode("logarithmic");
   const sTop = logView.toScale(100.8);
@@ -253,22 +253,26 @@ test("#343: live ticks inside the same quantized price bin trigger 0 profile rec
   configurePerformanceTelemetry({ enabled: true });
   try {
     const cfg = { tpoProfilePeriod: "daily", tpoBracketSize: "auto" };
-    let cache = updateTpoProfileCache(null, series, [2860, 2880], cfg, 0.7, new Set());
+    let cache = updateTpoProfileCache(null, series, [1420, 2880], cfg, 0.7, new Set());
+    assert.equal(cache.groups.length, 2);
+    const closedResult = cache.groups[0].result;
     const initialResult = cache.groups[1].result;
     const baseCompute = snapshotPerformanceTelemetry().counters["chart.tpo.compute.groups"] ?? 0;
 
     const tailTime = bars[bars.length - 1].startTime;
     for (let i = 1; i <= 20; i++) {
-      series.addTrade(tailTime + 1000, 50_025 + i * 0.01, 1, "buy");
-      cache = updateTpoProfileCache(cache, series, [2860, 2880], cfg, 0.7, new Set());
+      series.addTrade({ time: tailTime + 1000, price: 50_025 + i * 0.01, qty: 1, isBuy: true });
+      cache = updateTpoProfileCache(cache, series, [1420, 2880], cfg, 0.7, new Set());
+      assert.strictEqual(cache.groups[0].result, closedResult);
       assert.strictEqual(cache.groups[1].result, initialResult);
     }
     assert.equal((snapshotPerformanceTelemetry().counters["chart.tpo.compute.groups"] ?? 0) - baseCompute, 0);
 
     // Crossing into the next quantized bin (50_120) triggers exactly 1 recompute.
-    series.addTrade(tailTime + 2000, 50_120, 1, "buy");
-    cache = updateTpoProfileCache(cache, series, [2860, 2880], cfg, 0.7, new Set());
+    series.addTrade({ time: tailTime + 2000, price: 50_120, qty: 1, isBuy: true });
+    cache = updateTpoProfileCache(cache, series, [1420, 2880], cfg, 0.7, new Set());
     assert.equal((snapshotPerformanceTelemetry().counters["chart.tpo.compute.groups"] ?? 0) - baseCompute, 1);
+    assert.strictEqual(cache.groups[0].result, closedResult);
     assert.notStrictEqual(cache.groups[1].result, initialResult);
   } finally {
     configurePerformanceTelemetry({ enabled });
@@ -293,7 +297,7 @@ test("#344: metadata-only live ticks avoid O(N) bracket array copies while keepi
 
   // Live volume-only trade on the tail bar: drawTpo + cache update must not materialize O(N) flat arrays.
   const tailTime = bars[bars.length - 1].startTime;
-  series.addTrade(tailTime + 500, 100.2, 7, "buy");
+  series.addTrade({ time: tailTime + 500, price: 100.2, qty: 7, isBuy: true });
   const next = updateTpoProfileCache(prev, series, [44_620, 44_640], cfg, 0.7, new Set());
 
   const { ctx } = makeMockCtx();
