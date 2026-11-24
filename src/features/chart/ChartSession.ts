@@ -51,6 +51,11 @@ import {
   recordGpuFrame,
 } from "../../core/gpu/gpuDiagnostics.js";
 import { readGpuSettings } from "../../core/gpu/gpuSettings.js";
+import {
+  getGlobalRenderScheduler,
+  getGlobalRenderSchedulerConfig,
+  type ChartRenderPriority,
+} from "./globalRenderScheduler.js";
 
 const CONTEXT_RESTORE_TIMEOUT_MS = 5000;
 
@@ -118,6 +123,10 @@ export interface ChartSessionOptions {
   maxDevicePixelRatio?: number | null;
   /** WebGL context attributes used for every session-owned context acquisition. */
   webglOptions?: ChartWebGlOptions;
+  /** Opt-in to the shared per-window multi-chart render scheduler. Defaults to global scheduler config. */
+  useGlobalScheduler?: boolean;
+  /** Initial render priority when using the global render scheduler. Defaults to "visible". */
+  renderPriority?: ChartRenderPriority;
 }
 
 export class ChartSession {
@@ -163,6 +172,9 @@ export class ChartSession {
   private disposeDprWatcher: (() => void) | null = null;
   private maxDevicePixelRatio: number | null;
   private readonly webglOptions?: ChartWebGlOptions;
+  private readonly useGlobalSchedulerOption?: boolean;
+  private renderPriority: ChartRenderPriority;
+  private scheduledOnWindow: Window | null = null;
 
   private dirtySurfaces = ChartSurfaceDirty.All;
   /** Semantic changes waiting for the next frame; travels with `dirtySurfaces`, never narrows it. */
@@ -237,6 +249,8 @@ export class ChartSession {
     this.onInvalidateCb = opts.onInvalidate;
     this.maxDevicePixelRatio = opts.maxDevicePixelRatio ?? null;
     this.webglOptions = opts.webglOptions;
+    this.useGlobalSchedulerOption = opts.useGlobalScheduler;
+    this.renderPriority = opts.renderPriority ?? "visible";
 
     this.lifecycle.start();
     this.setupContextLossHandling();
@@ -393,9 +407,9 @@ export class ChartSession {
       return Promise.reject(error);
     }
     this.dirtySurfaces |= ChartSurfaceDirty.GpuScene | ChartSurfaceDirty.Annotation;
-    this.startRaf();
     return new Promise<NativeCaptureFrame>((resolve, reject) => {
       this.pendingCapture = { resolve, reject };
+      this.startRaf();
     });
   }
 
@@ -418,36 +432,77 @@ export class ChartSession {
     pending?.reject(new ChartCaptureError("CAPTURE_FAILED", message));
   }
 
+  setRenderPriority(priority: ChartRenderPriority): void {
+    if (this.renderPriority === priority) return;
+    this.renderPriority = priority;
+    if (this.scheduledOnWindow !== null) {
+      getGlobalRenderScheduler(this.scheduledOnWindow)?.setPriority(this, priority);
+    }
+  }
+
+  private isUsingGlobalScheduler(): boolean {
+    return this.useGlobalSchedulerOption ?? getGlobalRenderSchedulerConfig().enabled;
+  }
+
   private startRaf(): void {
+    const win = this.ownerDocument.defaultView;
+    if (!win) return;
+
+    if (this.isUsingGlobalScheduler()) {
+      const scheduler = getGlobalRenderScheduler(win);
+      if (!scheduler) return;
+      const urgent = this.pendingCapture !== null || this.pendingContainerResize;
+      if (this.scheduledOnWindow !== null) {
+        incrementPerformanceCounter("chart.raf.coalesced");
+        if (urgent) {
+          scheduler.schedule(this, () => this.executeScheduledFrame(), {
+            priority: this.renderPriority,
+            urgent: true,
+          });
+        }
+        return;
+      }
+      incrementPerformanceCounter("chart.raf.scheduled");
+      this.scheduledOnWindow = win;
+      scheduler.schedule(this, () => this.executeScheduledFrame(), {
+        priority: this.renderPriority,
+        urgent,
+      });
+      return;
+    }
+
     if (this.rafId !== null) {
       incrementPerformanceCounter("chart.raf.coalesced");
       return;
     }
-    const win = this.ownerDocument.defaultView;
-    if (!win) return;
     incrementPerformanceCounter("chart.raf.scheduled");
     this.rafId = win.requestAnimationFrame(() => {
-      // Release the slot before any commit/render work: a reentrant notification inside a
-      // commit, or a throwing commit, must never leave a finished RAF id behind that
-      // coalesces away a future frame.
-      this.rafId = null;
-      this.inPreSnapshotFrame = true;
-      try {
-        if (this.pendingContainerResize) {
-          // Coalesced commit: collapse every pending measurement into one latest-bounds commit
-          // BEFORE the dirty snapshot, in the same owner-window frame that repaints the surfaces.
-          this.pendingContainerResize = false;
-          if (this.active && this.gpuValid) this.applyContainerSize();
-        }
-        if (!this.active || !this.gpuValid) return;
-        this.finishPendingResize();
-      } finally {
-        this.inPreSnapshotFrame = false;
-      }
-      incrementPerformanceCounter("chart.raf.frames");
-      this.renderDirtySurfaces();
-      if (this.dirtySurfaces !== ChartSurfaceDirty.None) this.startRaf();
+      this.executeScheduledFrame();
     });
+  }
+
+  private executeScheduledFrame(): void {
+    // Release the slot before any commit/render work: a reentrant notification inside a
+    // commit, or a throwing commit, must never leave a finished RAF id behind that
+    // coalesces away a future frame.
+    this.rafId = null;
+    this.scheduledOnWindow = null;
+    this.inPreSnapshotFrame = true;
+    try {
+      if (this.pendingContainerResize) {
+        // Coalesced commit: collapse every pending measurement into one latest-bounds commit
+        // BEFORE the dirty snapshot, in the same owner-window frame that repaints the surfaces.
+        this.pendingContainerResize = false;
+        if (this.active && this.gpuValid) this.applyContainerSize();
+      }
+      if (!this.active || !this.gpuValid) return;
+      this.finishPendingResize();
+    } finally {
+      this.inPreSnapshotFrame = false;
+    }
+    incrementPerformanceCounter("chart.raf.frames");
+    this.renderDirtySurfaces();
+    if (this.dirtySurfaces !== ChartSurfaceDirty.None) this.startRaf();
   }
 
   private renderDirtySurfaces(): void {
@@ -592,6 +647,10 @@ export class ChartSession {
   }
 
   private cancelRaf(): void {
+    if (this.scheduledOnWindow !== null) {
+      getGlobalRenderScheduler(this.scheduledOnWindow)?.unregister(this);
+      this.scheduledOnWindow = null;
+    }
     if (this.rafId !== null) {
       this.ownerDocument.defaultView?.cancelAnimationFrame(this.rafId);
       this.rafId = null;
@@ -791,7 +850,7 @@ export class ChartSession {
     // Whether this owner actually owed a frame (pending paint/capture/resize intent). The
     // swap re-homes that intent on the new owner as exactly one callback; an idle or
     // inactive session must not invent paint debt on adoption.
-    const transferPendingWork = this.rafId !== null && this.active && this.gpuValid;
+    const transferPendingWork = (this.rafId !== null || this.scheduledOnWindow !== null) && this.active && this.gpuValid;
     if (container.ownerDocument !== this.ownerDocument) {
       // Cancel a pending frame on its actual old scheduling window before the owner swap;
       // raf ids are realm-local, so a post-swap cancel could hit an unrelated new frame.
