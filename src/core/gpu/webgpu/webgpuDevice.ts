@@ -22,6 +22,7 @@ export interface WebGpuDeviceHandle {
   readonly device: any;
   readonly format: string;
   readonly limits: WebGpuLimits;
+  readonly adapterInfo?: GpuAdapterInfo;
   readonly supportsTimestampQuery?: boolean;
   isLost(): boolean;
   onLost(callback: (reason: string) => void): () => void;
@@ -31,6 +32,37 @@ export interface WebGpuDeviceHandle {
 let sharedHandle: WebGpuDeviceHandle | null = null;
 let sharedDevicePromise: Promise<WebGpuDeviceHandle | null> | null = null;
 let sharedPowerPreference: ChartPowerPreference = "default";
+let fatalDeviceReason: string | null = null;
+let fatalErrorHandler: ((reason: string) => void) | null = null;
+let sessionResetHandler: (() => void) | null = null;
+
+export function registerWebGpuSessionHandlers(handlers: {
+  onFatal: (reason: string) => void;
+  onReset: () => void;
+}): void {
+  fatalErrorHandler = handlers.onFatal;
+  sessionResetHandler = handlers.onReset;
+  if (fatalDeviceReason !== null) {
+    fatalErrorHandler(fatalDeviceReason);
+  }
+}
+
+export function getWebGpuFatalReason(): string | null {
+  return fatalDeviceReason;
+}
+
+export function clearWebGpuFatalReasonForTest(): void {
+  fatalDeviceReason = null;
+}
+
+function triggerFatalSessionFallback(reason: string): void {
+  fatalDeviceReason = reason;
+  try {
+    fatalErrorHandler?.(reason);
+  } catch (err) {
+    console.error("[WebGPU] fatal session fallback handler error", err);
+  }
+}
 
 function classifyWebGpuError(error: unknown): GpuErrorKind {
   if (!error || typeof error !== "object") return "unknown";
@@ -213,6 +245,7 @@ export async function requestWebGpuDevice(options?: {
           console.error("[WebGPU] uncaptured error", event?.error);
           return;
         }
+        const fatalReason = kind === "out-of-memory" ? "out-of-memory" : "internal-error";
         terminalState = "lost";
         try {
           device.removeEventListener?.("uncapturederror", onUncapturedError);
@@ -220,7 +253,8 @@ export async function requestWebGpuDevice(options?: {
           // mock safety
         }
         clearSharedIfOwned();
-        notifyLostListeners(kind === "out-of-memory" ? "out-of-memory" : "internal-error");
+        triggerFatalSessionFallback(fatalReason);
+        notifyLostListeners(fatalReason);
         try {
           device.destroy?.();
         } catch {
@@ -238,6 +272,7 @@ export async function requestWebGpuDevice(options?: {
         }
         recordGpuDeviceLoss();
         clearSharedIfOwned();
+        triggerFatalSessionFallback("device-lost");
         notifyLostListeners("device-lost");
       };
 
@@ -263,6 +298,7 @@ export async function requestWebGpuDevice(options?: {
         device,
         format,
         limits,
+        adapterInfo: resolvedAdapterInfo,
         supportsTimestampQuery,
         isLost(): boolean {
           return terminalState !== "alive";
@@ -328,4 +364,6 @@ export function resetSharedWebGpuDevice(): void {
   }
   sharedDevicePromise = null;
   sharedPowerPreference = "default";
+  fatalDeviceReason = null;
+  sessionResetHandler?.();
 }

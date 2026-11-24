@@ -24,12 +24,21 @@ export interface GpuDiagnosticsSnapshot {
   readonly engine: string;
   readonly requested: string;
   readonly active: string;
+  readonly selectionReason?: string;
+  readonly nativeWebGpuActive?: boolean;
+  readonly nativeWebGpuDisabledReason?: string;
   readonly fallbacks: readonly GpuFallbackRecord[];
   readonly adapter?: GpuAdapterInfo;
   readonly limits?: Record<string, number>;
   readonly counters: Record<string, number>;
   readonly featurePaths?: Record<string, string>;
   readonly frame?: GpuFrameMetrics;
+}
+
+export interface GpuSelectionDecision {
+  readonly selectionReason?: string;
+  readonly nativeWebGpuActive?: boolean;
+  readonly nativeWebGpuDisabledReason?: string;
 }
 
 const ENGINE_VERSION = "0.2.7";
@@ -43,6 +52,9 @@ const FRAME_COUNTER_KEYS: Record<string, string> = {
 
 let requestedBackend = "webgl2";
 let activeBackend = "webgl2";
+let selectionReason: string | undefined;
+let nativeWebGpuActive: boolean | undefined;
+let nativeWebGpuDisabledReason: string | undefined;
 const fallbacks: GpuFallbackRecord[] = [];
 let adapterInfo: GpuAdapterInfo | undefined;
 let limits: Record<string, number> | undefined;
@@ -159,6 +171,18 @@ export function recordCanvas2dContextEvent(
   incrementPerformanceCounter(surfaceKey);
 }
 
+export function setGpuSelectionDecision(decision: GpuSelectionDecision): void {
+  if ("selectionReason" in decision) {
+    selectionReason = decision.selectionReason;
+  }
+  if ("nativeWebGpuActive" in decision) {
+    nativeWebGpuActive = decision.nativeWebGpuActive;
+  }
+  if ("nativeWebGpuDisabledReason" in decision) {
+    nativeWebGpuDisabledReason = decision.nativeWebGpuDisabledReason;
+  }
+}
+
 export function setGpuAdapterInfo(info: GpuAdapterInfo | undefined): void {
   adapterInfo = info;
 }
@@ -183,6 +207,9 @@ export function getGpuDiagnostics(): GpuDiagnosticsSnapshot {
     engine: ENGINE_VERSION,
     requested: requestedBackend,
     active: activeBackend,
+    ...(selectionReason !== undefined ? { selectionReason } : {}),
+    ...(nativeWebGpuActive !== undefined ? { nativeWebGpuActive } : {}),
+    ...(nativeWebGpuDisabledReason !== undefined ? { nativeWebGpuDisabledReason } : {}),
     fallbacks: [...fallbacks],
     adapter: adapterInfo,
     limits: limits ? { ...limits } : undefined,
@@ -199,6 +226,9 @@ export function copyGpuDiagnosticsJson(): string {
 export function resetGpuDiagnosticsForTest(): void {
   requestedBackend = "webgl2";
   activeBackend = "webgl2";
+  selectionReason = undefined;
+  nativeWebGpuActive = undefined;
+  nativeWebGpuDisabledReason = undefined;
   fallbacks.length = 0;
   adapterInfo = undefined;
   limits = undefined;

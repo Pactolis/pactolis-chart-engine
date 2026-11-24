@@ -1,4 +1,5 @@
 export type GpuBackendPreference = "auto" | "webgpu" | "webgl2" | "canvas2d";
+export type WebGpuRolloutMode = "off" | "canary" | "auto";
 
 export function isWebGpuSupported(): boolean {
   return typeof navigator !== "undefined" && Boolean((navigator as any).gpu);
@@ -10,6 +11,8 @@ export interface GpuSettings {
   readonly asyncCapture: boolean;
   readonly nativeWebGpu?: boolean;
   readonly nativeWebGpuText?: boolean;
+  readonly webgpuRollout?: WebGpuRolloutMode;
+  readonly webgpuKillSwitch?: boolean;
 }
 
 export interface GpuSettingsSource {
@@ -79,6 +82,17 @@ function parseUrlBoolParam(search: string | undefined, names: readonly string[])
   return null;
 }
 
+function parseUrlWebGpuRolloutParam(search?: string): WebGpuRolloutMode | null {
+  if (!search) return null;
+  const match = /[?&]webgpuRollout=([a-z0-9_-]+)/i.exec(search);
+  if (!match) return null;
+  const val = match[1].toLowerCase();
+  if (val === "off" || val === "canary" || val === "auto") {
+    return val;
+  }
+  return null;
+}
+
 export function readGpuSettings(win?: { location?: { search?: string } } | null): GpuSettings {
   if (!cachedBaseSettings) {
     cachedBaseSettings = configuredSource ? configuredSource.read() : DEFAULT_GPU_SETTINGS;
@@ -96,13 +110,24 @@ export function readGpuSettings(win?: { location?: { search?: string } } | null)
   const nativeOverride = parseUrlBoolParam(search, ["webgpuNative", "gpuNative"]);
   const nativeTextOverride = parseUrlBoolParam(search, ["webgpuText", "gpuText"]);
   const residentHeatmapOverride = parseUrlBoolParam(search, ["residentHeatmap", "heatmapGpu"]);
-  if (override || nativeOverride !== null || nativeTextOverride !== null || residentHeatmapOverride !== null) {
+  const rolloutOverride = parseUrlWebGpuRolloutParam(search);
+  const killSwitchOverride = parseUrlBoolParam(search, ["webgpuKillSwitch"]);
+  if (
+    override ||
+    nativeOverride !== null ||
+    nativeTextOverride !== null ||
+    residentHeatmapOverride !== null ||
+    rolloutOverride !== null ||
+    killSwitchOverride !== null
+  ) {
     return {
       ...base,
       ...(override ? { backend: override } : {}),
       ...(nativeOverride !== null ? { nativeWebGpu: nativeOverride } : {}),
       ...(nativeTextOverride !== null ? { nativeWebGpuText: nativeTextOverride } : {}),
       ...(residentHeatmapOverride !== null ? { residentHeatmap: residentHeatmapOverride } : {}),
+      ...(rolloutOverride !== null ? { webgpuRollout: rolloutOverride } : {}),
+      ...(killSwitchOverride !== null ? { webgpuKillSwitch: killSwitchOverride } : {}),
     };
   }
 
