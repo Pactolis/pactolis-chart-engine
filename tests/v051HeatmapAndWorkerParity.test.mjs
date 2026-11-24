@@ -159,7 +159,7 @@ test("OrderbookHeatmapOverlay uses dirty-strip ImageData + putImageData with zer
       fixedCeiling: { usd: 1000, btc: 10 },
     }),
     async () => {
-      let nowMs = 10_000;
+      let nowMs = 1_025 * 60_000;
       const counters = {
         fillRect: 0,
         putImageData: 0,
