@@ -32,9 +32,7 @@ import { drawOverlayPill } from "./hudRenderer.js";
 import type { Crosshair } from "./interactionOverlayRenderer.js";
 import {
   cellTextCacheKey,
-  formatFootprintCellText,
   getOrCreateBarCellTextCache,
-  getOrCreateBarCellTextEntries,
   getOrFormatBarCellText,
   type BarCellTextCacheEntry,
   type FormattedCellText,

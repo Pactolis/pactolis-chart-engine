@@ -817,7 +817,7 @@ export class HeatmapGpuRenderer {
       this.uploadedInstances = new Float32Array(targetRetainedFloats);
       this.releaseBytes(oldRetainedBytes);
     }
-    this.uploadedInstances.set(view, 0);
+    this.uploadedInstances!.set(view, 0);
     this.uploadedInstancesFloats = view.length;
   }
 

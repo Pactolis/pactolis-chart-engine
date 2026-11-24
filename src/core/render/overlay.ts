@@ -53,7 +53,6 @@ import {
   priceAxisKeepOut,
   type AnnotationRendererHost,
   type BarCellTextCacheEntry,
-  type FormattedCellText,
   type IndicatorAxisRect,
   type LineLabelEntry,
   type VolumeProfileCacheState,
