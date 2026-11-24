@@ -41,6 +41,13 @@ export interface PeriodCandle {
   complete: boolean;
 }
 
+function isSortedByStartTime(bars: readonly FootprintBar[]): boolean {
+  for (let i = 1; i < bars.length; i++) {
+    if (bars[i].startTime < bars[i - 1].startTime) return false;
+  }
+  return true;
+}
+
 export function aggregatePeriodCandles(
   bars: readonly FootprintBar[],
   period: AnalysisPeriod,
@@ -49,7 +56,8 @@ export function aggregatePeriodCandles(
 ): PeriodCandle[] {
   const interval = PERIOD_INTERVAL[period];
   const groups = new Map<number, FootprintBar[]>();
-  for (const bar of [...bars].sort((a, b) => a.startTime - b.startTime)) {
+  const sortedBars = isSortedByStartTime(bars) ? bars : [...bars].sort((a, b) => a.startTime - b.startTime);
+  for (const bar of sortedBars) {
     const start = bucketStart(bar.startTime, interval);
     const group = groups.get(start);
     if (group) group.push(bar);
@@ -63,13 +71,20 @@ export function aggregatePeriodCandles(
     // Reject missing/non-finite OHLC rows here, and let time coverage plus the
     // `provisional` marker decide whether a CLOSED period is complete.
     const ohlcBars = group.filter(hasUsableOhlc);
+    let high = Number.NEGATIVE_INFINITY;
+    let low = Number.POSITIVE_INFINITY;
+    for (let i = 0; i < ohlcBars.length; i++) {
+      const bar = ohlcBars[i];
+      if (bar.high > high) high = bar.high;
+      if (bar.low < low) low = bar.low;
+    }
     return {
       period,
       start,
       end,
       open: ohlcBars[0]?.open ?? NaN,
-      high: Math.max(...ohlcBars.map((bar) => bar.high)),
-      low: Math.min(...ohlcBars.map((bar) => bar.low)),
+      high,
+      low,
       close: ohlcBars[ohlcBars.length - 1]?.close ?? NaN,
       complete: end <= now && completeCoverage(ohlcBars, start, end, sourceIntervalMs),
     };
@@ -94,7 +109,8 @@ function completeCoverage(
   if (!bars.length || bars.some((bar) => bar.completeness === "provisional")) return false;
 
   let cursor = start;
-  for (const bar of [...bars].sort((a, b) => a.startTime - b.startTime)) {
+  const sortedBars = isSortedByStartTime(bars) ? bars : [...bars].sort((a, b) => a.startTime - b.startTime);
+  for (const bar of sortedBars) {
     const barStart = bucketStart(bar.startTime, sourceIntervalMs);
     const barEnd = bucketEnd(barStart, sourceIntervalMs);
     if (barEnd <= cursor) continue;

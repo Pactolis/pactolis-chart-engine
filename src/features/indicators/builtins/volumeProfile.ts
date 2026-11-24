@@ -91,12 +91,20 @@ interface VolumeProfileCache {
   structureRevision: number;
   nonTailRevision: number;
   seriesRevision: number;
+  seriesRef: FootprintSeries;
+  priceStep: number;
+  valueAreaPct: number;
+  startIndex: number;
+  endIndex: number;
   firstTime: number;
   lastTime: number;
   length: number;
-  prefix: OrderFlowProfileAccumulator;
+  deltaOps: number;
+  prefix: OrderFlowProfileAccumulator | null;
+  visibleAcc: OrderFlowProfileAccumulator | null;
   prepared: VolumeProfilePreparedData;
 }
+const MAX_VOLUME_PROFILE_DELTA_OPS = 64;
 const volumeProfileCaches = createIndicatorSeriesStateStore<VolumeProfileCache>();
 const developingIndexCache = new WeakMap<
   VolumeProfileMeta,
@@ -105,6 +113,33 @@ const developingIndexCache = new WeakMap<
 
 function windowIsAscending(bars: readonly FootprintBar[]): boolean {
   for (let i = 1; i < bars.length; i++) if (bars[i].startTime <= bars[i - 1].startTime) return false;
+  return true;
+}
+
+function subtractOrderFlowProfileBar(acc: OrderFlowProfileAccumulator, bar: FootprintBar): boolean {
+  if (bar.cells.size === 0) return true;
+  if (acc.exactBarCount <= 1) return false;
+  acc.exactBarCount -= 1;
+  for (const cell of bar.cells.values()) {
+    const level = acc.byPrice.get(cell.priceBin);
+    if (!level) continue;
+    if (Number.isFinite(cell.buyVol) && cell.buyVol >= 0 && Number.isFinite(cell.sellVol) && cell.sellVol >= 0) {
+      level.buyVol -= cell.buyVol;
+      level.sellVol -= cell.sellVol;
+    }
+    const total = typeof cell.totalCount === "number" && Number.isFinite(cell.totalCount) && cell.totalCount >= 0 ? cell.totalCount : null;
+    const buy = typeof cell.buyCount === "number" && Number.isFinite(cell.buyCount) && cell.buyCount >= 0 ? cell.buyCount : null;
+    const sell = typeof cell.sellCount === "number" && Number.isFinite(cell.sellCount) && cell.sellCount >= 0 ? cell.sellCount : null;
+    if (total !== null) level.totalCount = Math.max(0, level.totalCount - total);
+    if (buy !== null) level.buyCount = Math.max(0, level.buyCount - buy);
+    if (sell !== null) level.sellCount = Math.max(0, level.sellCount - sell);
+    if (level.buyVol + level.sellVol <= 1e-12 && level.estimatedVol <= 1e-12) {
+      acc.byPrice.delete(cell.priceBin);
+    } else {
+      if (level.buyVol < 0) level.buyVol = 0;
+      if (level.sellVol < 0) level.sellVol = 0;
+    }
+  }
   return true;
 }
 
@@ -152,11 +187,12 @@ function buildVolumeProfilePrepared(
 function prepareVolumeProfile(ctx: IndicatorDrawContext<VolumeProfileIndicatorSettings>): VolumeProfilePreparedData {
   if (!ctx.instance.visible) return emptyPrepared("hidden", "");
   const settings = normalizedSettings(ctx.settings);
-  const { bars, startIndex } = selectBars(ctx, settings);
+  const { bars, startIndex, endIndex } = selectBars(ctx, settings);
   const profileMetric = settings.profileMetric;
   const developing = profileSupportsValueArea(profileMetric)
     && [settings.pocMode, settings.vahMode, settings.valMode].some(levelModeHasDeveloping);
   const { series } = ctx;
+  const mode = stringSetting(settings, "mode", "visible");
   const options: OrderFlowProfileOptions = {
     profileMetric,
     profileSide: settings.profileSide,
@@ -165,7 +201,7 @@ function prepareVolumeProfile(ctx: IndicatorDrawContext<VolumeProfileIndicatorSe
     priceStep: series.config.priceStep,
     allowOhlcvEstimate: true,
   };
-  const key = `${profileMetric}|${options.profileSide}|${options.valueAreaPercent}|${developing}|${series.config.priceStep}|${stringSetting(settings, "mode", "visible")}|${numericSetting(settings, "lookbackBars", 200, 1, 10_000)}`;
+  const key = `${profileMetric}|${options.profileSide}|${options.valueAreaPercent}|${developing}|${series.config.priceStep}|${mode}|${numericSetting(settings, "lookbackBars", 200, 1, 10_000)}`;
   const firstBar = bars[0];
   const lastBar = bars[bars.length - 1];
   const cached = volumeProfileCaches.get(series, ctx.instance.id);
@@ -185,15 +221,76 @@ function prepareVolumeProfile(ctx: IndicatorDrawContext<VolumeProfileIndicatorSe
       cached.seriesRevision = series.revision;
       return cached.prepared;
     }
-    const acc = cloneOrderFlowProfileAccumulator(cached.prefix);
-    accumulateOrderFlowProfileBar(acc, lastBar, options);
-    cached.prepared = buildVolumeProfilePrepared(ctx, finishOrderFlowProfile(acc, options), bars.length, startIndex);
-    cached.seriesRevision = series.revision;
-    incrementPerformanceCounter("indicator.incremental.hit.volumeProfile");
-    return cached.prepared;
+    if (cached.prefix) {
+      const acc = cloneOrderFlowProfileAccumulator(cached.prefix);
+      accumulateOrderFlowProfileBar(acc, lastBar, options);
+      cached.visibleAcc = acc;
+      cached.prepared = buildVolumeProfilePrepared(ctx, finishOrderFlowProfile(acc, options), bars.length, startIndex);
+      cached.seriesRevision = series.revision;
+      incrementPerformanceCounter("indicator.incremental.hit.volumeProfile");
+      return cached.prepared;
+    }
   }
 
   const ascending = firstBar !== undefined && windowIsAscending(bars);
+  if (
+    ascending
+    && mode === "visible"
+    && !developing
+    && cached
+    && cached.visibleAcc
+    && cached.key === key
+    && cached.seriesRef === series
+    && cached.seriesRevision === series.revision
+    && cached.priceStep === series.config.priceStep
+    && cached.valueAreaPct === options.valueAreaPercent
+    && cached.deltaOps < MAX_VOLUME_PROFILE_DELTA_OPS
+    && startIndex >= 0
+    && endIndex > startIndex
+    && startIndex < cached.endIndex
+    && endIndex > cached.startIndex
+    && (Math.abs(startIndex - cached.startIndex) + Math.abs(endIndex - cached.endIndex)) < Math.floor((endIndex - startIndex) / 2)
+  ) {
+    const all = series.listReadonly();
+    const acc = cached.visibleAcc;
+    let deltaOk = true;
+    for (let i = cached.startIndex; i < startIndex; i++) {
+      if (!subtractOrderFlowProfileBar(acc, all[i])) {
+        deltaOk = false;
+        break;
+      }
+    }
+    if (deltaOk) {
+      for (let i = endIndex; i < cached.endIndex; i++) {
+        if (!subtractOrderFlowProfileBar(acc, all[i])) {
+          deltaOk = false;
+          break;
+        }
+      }
+    }
+    if (deltaOk) {
+      for (let i = startIndex; i < cached.startIndex; i++) {
+        accumulateOrderFlowProfileBar(acc, all[i], options);
+      }
+      for (let i = cached.endIndex; i < endIndex; i++) {
+        accumulateOrderFlowProfileBar(acc, all[i], options);
+      }
+      acc.fromTime = firstBar.startTime;
+      acc.toTime = lastBar.startTime;
+      const prepared = buildVolumeProfilePrepared(ctx, finishOrderFlowProfile(acc, options), bars.length, startIndex);
+      cached.startIndex = startIndex;
+      cached.endIndex = endIndex;
+      cached.firstTime = firstBar.startTime;
+      cached.lastTime = lastBar.startTime;
+      cached.length = bars.length;
+      cached.deltaOps += 1;
+      cached.prefix = null;
+      cached.prepared = prepared;
+      incrementPerformanceCounter("indicator.incremental.delta.volumeProfile");
+      return prepared;
+    }
+  }
+
   if (!ascending) {
     volumeProfileCaches.delete(series, ctx.instance.id);
     const acc = createOrderFlowProfileAccumulator();
@@ -205,7 +302,25 @@ function prepareVolumeProfile(ctx: IndicatorDrawContext<VolumeProfileIndicatorSe
   const acc = cloneOrderFlowProfileAccumulator(prefix);
   accumulateOrderFlowProfileBar(acc, lastBar!, options);
   const prepared = buildVolumeProfilePrepared(ctx, finishOrderFlowProfile(acc, options), bars.length, startIndex);
-  volumeProfileCaches.set(series, ctx.instance.id, { key, structureRevision: series.structureRevision, nonTailRevision: series.nonTailRevision, seriesRevision: series.revision, firstTime: firstBar!.startTime, lastTime: lastBar!.startTime, length: bars.length, prefix, prepared });
+  const canDeltaTrack = mode === "visible" && !developing && acc.estimatedBarCount === 0 && !acc.hasUnsupportedEstimate && acc.exactBarCount > 0;
+  volumeProfileCaches.set(series, ctx.instance.id, {
+    key,
+    structureRevision: series.structureRevision,
+    nonTailRevision: series.nonTailRevision,
+    seriesRevision: series.revision,
+    seriesRef: series,
+    priceStep: series.config.priceStep,
+    valueAreaPct: options.valueAreaPercent ?? 0.7,
+    startIndex,
+    endIndex,
+    firstTime: firstBar!.startTime,
+    lastTime: lastBar!.startTime,
+    length: bars.length,
+    deltaOps: 0,
+    prefix,
+    visibleAcc: canDeltaTrack ? acc : null,
+    prepared,
+  });
   incrementPerformanceCounter("indicator.incremental.full.volumeProfile");
   return prepared;
 }
@@ -224,7 +339,7 @@ function lowerBoundBarIndex(all: readonly FootprintBar[], targetTime: number): n
 function selectBars(
   ctx: IndicatorDrawContext<VolumeProfileIndicatorSettings>,
   settings = normalizedSettings(ctx.settings),
-): { bars: FootprintBar[]; startIndex: number } {
+): { bars: FootprintBar[]; startIndex: number; endIndex: number } {
   const all = ctx.series.listReadonly();
   const [from, to] = ctx.range;
   const s = Math.max(0, from);
@@ -234,19 +349,19 @@ function selectBars(
   if (mode === "session") {
     const anchor = visible[visible.length - 1]?.startTime ?? all[all.length - 1]?.startTime;
     const bars = anchor === undefined ? visible : sessionBars(all, anchor);
-    if (bars.length === 0) return { bars, startIndex: -1 };
+    if (bars.length === 0) return { bars, startIndex: -1, endIndex: -1 };
     const idx = lowerBoundBarIndex(all, bars[0].startTime);
     const startIndex = idx < all.length && all[idx].startTime === bars[0].startTime ? idx : -1;
-    return { bars, startIndex };
+    return { bars, startIndex, endIndex: startIndex >= 0 ? startIndex + bars.length : -1 };
   }
   if (mode === "lookback") {
     const count = numericSetting(settings, "lookbackBars", 200, 1, 10_000);
     const last = visible.length > 0 ? e : all.length;
-    if (last <= 0) return { bars: [], startIndex: -1 };
+    if (last <= 0) return { bars: [], startIndex: -1, endIndex: -1 };
     const startIndex = Math.max(0, last - count);
-    return { bars: all.slice(startIndex, last), startIndex };
+    return { bars: all.slice(startIndex, last), startIndex, endIndex: last };
   }
-  return { bars: visible, startIndex: visible.length > 0 ? s : -1 };
+  return { bars: visible, startIndex: visible.length > 0 ? s : -1, endIndex: visible.length > 0 ? e : -1 };
 }
 
 function asVolumeProfileData(prepared?: IndicatorPreparedData): VolumeProfilePreparedData {

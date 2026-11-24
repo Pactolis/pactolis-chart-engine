@@ -27,7 +27,7 @@ const PERIODS: readonly CalendarPeriod[] = ["daily", "weekly", "monthly", "quart
 
 interface CurrentVwapTailState { periodStart: number; prefixPv: number; prefixVolume: number; }
 interface VwapIncrementalState {
-  instance: object; seriesRevision: number; structureRevision: number; start: number; end: number; lines: VwapLineConfig[]; resultPoints: VwapPoint[][]; plotSeries: Array<PlotSeries & { chartLabel?: string }>; prepared: ReturnType<typeof prepareOverlayData>; tails: CurrentVwapTailState[];
+  instance: object; seriesRevision: number; structureRevision: number; seriesLength: number; start: number; end: number; lines: VwapLineConfig[]; resultPoints: VwapPoint[][]; plotSeries: Array<PlotSeries & { chartLabel?: string }>; prepared: ReturnType<typeof prepareOverlayData>; tails: CurrentVwapTailState[];
 }
 const vwapIncrementalStates = createIndicatorSeriesStateStore<VwapIncrementalState>();
 
@@ -83,25 +83,57 @@ function prepareVwap(ctx: IndicatorDrawContext<VwapIndicatorSettings>) {
     incrementPerformanceCounter("indicator.incremental.hit.vwap");
     return cached.prepared;
   }
-  const canReuse = incrementalEligible && cached && cached.instance === ctx.instance && cached.start === start && cached.end === end && sameLines && sameShape;
-  if (canReuse && mutation.kind === "metadata") {
+  const canReuse = incrementalEligible && cached && cached.instance === ctx.instance && sameLines && sameShape && (bars.length === cached.seriesLength || bars.length === cached.seriesLength + 1);
+  if (canReuse && mutation.kind === "metadata" && bars.length === cached.seriesLength) {
+    if (cached.start !== start || cached.end !== end) {
+      lines.forEach((line, index) => {
+        cached.plotSeries[index] = { key: `vwap-${line.id}`, label: shortLabelForLine(line), color: line.color, chartLabel: labelForLine(line), points: makeNumberPoints(cached.resultPoints[index], bars, start, end) };
+      });
+      cached.start = start;
+      cached.end = end;
+      cached.lines = lines;
+      cached.prepared = prepareOverlayData(ctx, cached.plotSeries);
+    }
     cached.seriesRevision = ctx.series.revision;
     cached.structureRevision = ctx.series.structureRevision;
     incrementPerformanceCounter("indicator.incremental.hit.vwap");
     return cached.prepared;
   }
-  if (canReuse && mutation.kind === "tail" && mutation.tailIndex >= 0) {
+  if (canReuse && mutation.kind === "tail" && mutation.tailIndex >= 0 && (bars.length === cached.seriesLength || mutation.tailIndex === cached.seriesLength)) {
     const tail = bars[mutation.tailIndex];
     const periodStartsMatch = tail && cached.tails.every((state, index) => state.periodStart === calendarPeriodStart(tail.startTime, lines[index].period));
     if (periodStartsMatch) {
       return measurePerformance("indicator.prepare.incremental.vwap", () => {
+        const appended = bars.length === cached.seriesLength + 1;
+        const prevTailWeighted = appended && cached.seriesLength > 0 ? weightedBar(bars[cached.seriesLength - 1]) : null;
         const weighted = weightedBar(tail);
+        const rangeChanged = cached.start !== start || cached.end !== end || appended;
         for (let i = 0; i < lines.length; i++) {
-          const state = cached.tails[i]; const volume = state.prefixVolume + weighted.volume; const value = volume > 0 ? (state.prefixPv + weighted.pv) / volume : null;
+          const state = cached.tails[i];
+          if (prevTailWeighted) {
+            state.prefixPv += prevTailWeighted.pv;
+            state.prefixVolume += prevTailWeighted.volume;
+          }
+          const volume = state.prefixVolume + weighted.volume;
+          const value = volume > 0 ? (state.prefixPv + weighted.pv) / volume : null;
           cached.resultPoints[i][mutation.tailIndex] = { time: tail.startTime, value };
-          const point = cached.plotSeries[i].points.at(-1); if (point?.index === mutation.tailIndex) { point.time = tail.startTime; point.value = value; }
+          if (rangeChanged) {
+            const line = lines[i];
+            cached.plotSeries[i] = { key: `vwap-${line.id}`, label: shortLabelForLine(line), color: line.color, chartLabel: labelForLine(line), points: makeNumberPoints(cached.resultPoints[i], bars, start, end) };
+          } else {
+            const point = cached.plotSeries[i].points.at(-1);
+            if (point?.index === mutation.tailIndex) { point.time = tail.startTime; point.value = value; }
+          }
         }
-        cached.prepared = prepareOverlayData(ctx, cached.plotSeries); cached.seriesRevision = ctx.series.revision; cached.structureRevision = ctx.series.structureRevision; incrementPerformanceCounter("indicator.incremental.hit.vwap"); return cached.prepared;
+        cached.prepared = prepareOverlayData(ctx, cached.plotSeries);
+        cached.seriesRevision = ctx.series.revision;
+        cached.structureRevision = ctx.series.structureRevision;
+        cached.seriesLength = bars.length;
+        cached.start = start;
+        cached.end = end;
+        cached.lines = lines;
+        incrementPerformanceCounter("indicator.incremental.hit.vwap");
+        return cached.prepared;
       });
     }
     incrementPerformanceCounter("indicator.incremental.fallback.vwap.period-rollover");
@@ -110,7 +142,7 @@ function prepareVwap(ctx: IndicatorDrawContext<VwapIndicatorSettings>) {
     if (!incrementalEligible) fallbackReason = "ineligible";
     else if (!cached) fallbackReason = "initial";
     else if (cached.instance !== ctx.instance) fallbackReason = "instance";
-    else if (cached.start !== start || cached.end !== end) fallbackReason = "range";
+    else if (bars.length !== cached.seriesLength && bars.length !== cached.seriesLength + 1) fallbackReason = "length";
     else if (!sameLines) fallbackReason = "settings";
     else if (!sameShape) fallbackReason = "shape";
     else if (mutation.kind === "structure") fallbackReason = "structure";
@@ -127,7 +159,7 @@ function prepareVwap(ctx: IndicatorDrawContext<VwapIndicatorSettings>) {
       series.push({ key: `vwap-${line.id}-lower`, label: `${label} -${line.bandSigma}σ`, color: line.bandColor, points: makeOverlayPoints(bands.lower, bars, start, end) });
     });
     const prepared = prepareOverlayData(ctx, series);
-    if (incrementalEligible) vwapIncrementalStates.set(ctx.series, ctx.instance.id, { instance: ctx.instance, seriesRevision: ctx.series.revision, structureRevision: ctx.series.structureRevision, start, end, lines, resultPoints, plotSeries: series, prepared, tails: lines.map((line) => currentTailState(bars, line)) }); else vwapIncrementalStates.delete(ctx.series, ctx.instance.id);
+    if (incrementalEligible) vwapIncrementalStates.set(ctx.series, ctx.instance.id, { instance: ctx.instance, seriesRevision: ctx.series.revision, structureRevision: ctx.series.structureRevision, seriesLength: bars.length, start, end, lines, resultPoints, plotSeries: series, prepared, tails: lines.map((line) => currentTailState(bars, line)) }); else vwapIncrementalStates.delete(ctx.series, ctx.instance.id);
     incrementPerformanceCounter("indicator.incremental.full.vwap"); return prepared;
   });
 }

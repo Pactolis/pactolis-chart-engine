@@ -198,7 +198,18 @@ export function calculateUntouchedLevels(
   const result: ReferenceLevel[] = [];
   for (const period of periods) {
     const candles = aggregatePeriodCandles(bars, period, now, sourceIntervalMs).filter((item) => item.complete);
-    for (let i = 0; i < candles.length - 1; i++) {
+    const n = candles.length;
+    if (n < 2) continue;
+    const suffixMinLow = new Float64Array(n);
+    const suffixMaxHigh = new Float64Array(n);
+    suffixMinLow[n - 1] = candles[n - 1].low;
+    suffixMaxHigh[n - 1] = candles[n - 1].high;
+    for (let k = n - 2; k >= 0; k--) {
+      const c = candles[k];
+      suffixMinLow[k] = c.low < suffixMinLow[k + 1] ? c.low : suffixMinLow[k + 1];
+      suffixMaxHigh[k] = c.high > suffixMaxHigh[k + 1] ? c.high : suffixMaxHigh[k + 1];
+    }
+    for (let i = 0; i < n - 1; i++) {
       const first = candles[i];
       const second = candles[i + 1];
       if (!oppositeColors(first, second)) continue;
@@ -207,7 +218,17 @@ export function calculateUntouchedLevels(
         matchedPrice(first.close, second.open, priceStep),
       ].filter((value): value is number => value !== null);
       for (const price of [...new Set(candidates)]) {
-        if (candles.slice(i + 2).some((later) => later.low <= price && price <= later.high)) continue;
+        if (i + 2 < n && price >= suffixMinLow[i + 2] && price <= suffixMaxHigh[i + 2]) {
+          let touched = false;
+          for (let j = i + 2; j < n; j++) {
+            const later = candles[j];
+            if (later.low <= price && price <= later.high) {
+              touched = true;
+              break;
+            }
+          }
+          if (touched) continue;
+        }
         result.push({
           id: `${market}|level|${period}|${first.start}|${second.start}|${price}`,
           market,
@@ -217,7 +238,7 @@ export function calculateUntouchedLevels(
           sourceEnd: second.end,
           pairStart: first.start,
           price,
-          age: candles.length - i - 2,
+          age: n - i - 2,
           complete: true,
           label: `${periodPrefix(period)}-LVL`,
           color: color("level", period),

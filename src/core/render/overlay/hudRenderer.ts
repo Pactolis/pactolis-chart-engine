@@ -31,6 +31,47 @@ function isStandaloneOpenLiveOnlyBar(bar: FootprintBar, intervalMs: number): boo
 
 const hudNumberFormatters = new Map<string, Intl.NumberFormat>();
 
+interface HudMemoEntry {
+  ctx: CanvasRenderingContext2D;
+  barRef: FootprintBar;
+  count: number;
+  open: number;
+  high: number;
+  low: number;
+  close: number;
+  volume: number;
+  delta: number;
+  completeness: FootprintBar["completeness"];
+  hovered: boolean;
+  showNotional: boolean;
+  locale: string;
+  pd: number;
+  labelsVolume: string;
+  labelsTrades: string;
+  labelsRange: string;
+  labelsChange: string;
+  maxWidth: number;
+  liveOnly: boolean;
+  font: string;
+  hudText: string;
+  liveOnlyPart: string;
+  liveOnlyWidth: number;
+  prefix: string;
+  prefixWidth: number;
+  deltaPart: string;
+  deltaWidth: number;
+  tradesPart: string;
+  tradesWidth: number;
+  rangePart: string;
+  rangeWidth: number;
+  chgPart: string;
+  chgWidth: number;
+  changePct: number;
+  parts: readonly HudPart[] | null;
+}
+
+let lastHudMemo: HudMemoEntry | null = null;
+
 export function fmtFixed(v: number, digits: number, locale?: string, grouping = false): string {
   const legacyValue = v.toFixed(digits);
   if (!locale || (locale === "en-US" && !grouping) || !Number.isInteger(digits) || digits < 0 || digits > 100) return legacyValue;
@@ -95,20 +136,11 @@ export function drawHud(
     return;
   }
 
-  const unit = deps.showNotional ? "$" : "₿";
   const displayOptions = deps.displayOptions;
   const locale = displayOptions.numberLocale;
   const labels = displayOptions.labels;
   const liveOnly = bar.completeness !== "partial"
     && (deps.isOpenBarLiveOnly?.(bar) ?? isStandaloneOpenLiveOnlyBar(bar, series.config.intervalMs));
-  const partialMarker = bar.completeness === "partial" || liveOnly ? "≈" : "";
-  const liveOnlyTag = liveOnly ? `[${liveOnlyLabel(locale)}]` : "";
-  const volTxt = deps.showNotional ? fmtNotional(quoteVolumeForBar(bar), locale) : fmtVol(bar.volume, locale);
-  const deltaTxt = deps.showNotional
-    ? fmtNotional(Math.abs(bar.delta) * bar.close, locale)
-    : fmtFixed(Math.abs(bar.delta), 2, locale);
-  const rangePct = bar.low > 0 ? ((bar.high - bar.low) / bar.low) * 100 : 0;
-  const changePct = bar.open > 0 ? ((bar.close - bar.open) / bar.open) * 100 : 0;
   const pd = configDecimals(series.config);
   const x = view.area.left + 8;
 
@@ -116,36 +148,66 @@ export function drawHud(
   ctx.textAlign = "left";
   ctx.textBaseline = "top";
   ctx.fillStyle = uiColor.textHeading;
-  const livePrefix = liveOnlyTag ? `${liveOnlyTag} ` : "";
-  const hudText = `${livePrefix}O ${fmtFixed(bar.open, pd, locale)} H ${fmtFixed(bar.high, pd, locale)} L ${fmtFixed(bar.low, pd, locale)} `
-    + `C ${fmtFixed(bar.close, pd, locale)} ${labels.volume} ${partialMarker}${unit}${volTxt} Δ ${partialMarker}${bar.delta >= 0 ? "+" : "-"}${unit}${deltaTxt} `
-    + `${labels.trades} ${partialMarker}${bar.count} ${labels.range} ${fmtFixed(rangePct, 2, locale)}% ${labels.change} ${changePct >= 0 ? "+" : ""}${fmtFixed(changePct, 2, locale)}%`;
-  deps.onHudText?.(hudText);
 
-  const hover = hovered ? "◆ " : "";
-  const liveOnlyPart = liveOnlyTag ? `${hover}${liveOnlyTag}` : "";
-  const liveOnlyWidth = liveOnlyPart ? ctx.measureText(liveOnlyPart + "  ").width : 0;
-  const prefix = `${liveOnlyPart ? "" : hover}O ${fmtFixed(bar.open, pd, locale)}  H ${fmtFixed(bar.high, pd, locale)}  L ${fmtFixed(bar.low, pd, locale)}  C ${fmtFixed(bar.close, pd, locale)}  ${labels.volume} ${partialMarker}${unit}${volTxt}`;
-  const prefixWidth = ctx.measureText(prefix + "   ").width;
-  const deltaPart = `Δ ${partialMarker}${bar.delta >= 0 ? "+" : "-"}${unit}${deltaTxt}`;
-  const deltaWidth = ctx.measureText(deltaPart + "   ").width;
-  const tradesPart = `${labels.trades} ${partialMarker}${fmtFixed(bar.count, 0, locale, true)}`;
-  const tradesWidth = ctx.measureText(tradesPart + "   ").width;
-
-  const rangePart = `${labels.range} ${fmtFixed(rangePct, 2, locale)}%`;
-  const prefixX = x + liveOnlyWidth;
-  const rangeX = prefixX + prefixWidth + deltaWidth + tradesWidth;
-  const rangeWidth = ctx.measureText(rangePart + "   ").width;
-
-  const chgPart = `${labels.change} ${changePct >= 0 ? "+" : ""}${fmtFixed(changePct, 2, locale)}%`;
-  const chgWidth = ctx.measureText(chgPart).width;
-
-  // A plot too narrow for one line (a phone, a small pane) gets the readout in rows instead of
-  // running over the price axis. The corner menu button keeps its column in touch mode.
   const reserved = crosshair.touch && touchMenuButtonRect(view) !== null ? TOUCH_MENU_BUTTON_RESERVE : 0;
   const maxWidth = view.area.width - 16 - reserved;
-  if (liveOnlyWidth + prefixWidth + deltaWidth + tradesWidth + rangeWidth + chgWidth > maxWidth) {
-    const parts: HudPart[] = [
+  const font = ctx.font;
+
+  let entry = lastHudMemo;
+  if (
+    !entry
+    || entry.ctx !== ctx
+    || entry.barRef !== bar
+    || entry.count !== bar.count
+    || entry.open !== bar.open
+    || entry.high !== bar.high
+    || entry.low !== bar.low
+    || entry.close !== bar.close
+    || entry.volume !== bar.volume
+    || entry.delta !== bar.delta
+    || entry.completeness !== bar.completeness
+    || entry.hovered !== hovered
+    || entry.showNotional !== deps.showNotional
+    || entry.locale !== locale
+    || entry.pd !== pd
+    || entry.labelsVolume !== labels.volume
+    || entry.labelsTrades !== labels.trades
+    || entry.labelsRange !== labels.range
+    || entry.labelsChange !== labels.change
+    || entry.maxWidth !== maxWidth
+    || entry.liveOnly !== liveOnly
+    || entry.font !== font
+  ) {
+    const unit = deps.showNotional ? "$" : "₿";
+    const partialMarker = bar.completeness === "partial" || liveOnly ? "≈" : "";
+    const liveOnlyTag = liveOnly ? `[${liveOnlyLabel(locale)}]` : "";
+    const volTxt = deps.showNotional ? fmtNotional(quoteVolumeForBar(bar), locale) : fmtVol(bar.volume, locale);
+    const deltaTxt = deps.showNotional
+      ? fmtNotional(Math.abs(bar.delta) * bar.close, locale)
+      : fmtFixed(Math.abs(bar.delta), 2, locale);
+    const rangePct = bar.low > 0 ? ((bar.high - bar.low) / bar.low) * 100 : 0;
+    const changePct = bar.open > 0 ? ((bar.close - bar.open) / bar.open) * 100 : 0;
+    const livePrefix = liveOnlyTag ? `${liveOnlyTag} ` : "";
+    const hudText = `${livePrefix}O ${fmtFixed(bar.open, pd, locale)} H ${fmtFixed(bar.high, pd, locale)} L ${fmtFixed(bar.low, pd, locale)} `
+      + `C ${fmtFixed(bar.close, pd, locale)} ${labels.volume} ${partialMarker}${unit}${volTxt} Δ ${partialMarker}${bar.delta >= 0 ? "+" : "-"}${unit}${deltaTxt} `
+      + `${labels.trades} ${partialMarker}${bar.count} ${labels.range} ${fmtFixed(rangePct, 2, locale)}% ${labels.change} ${changePct >= 0 ? "+" : ""}${fmtFixed(changePct, 2, locale)}%`;
+
+    const hover = hovered ? "◆ " : "";
+    const liveOnlyPart = liveOnlyTag ? `${hover}${liveOnlyTag}` : "";
+    const liveOnlyWidth = liveOnlyPart ? ctx.measureText(liveOnlyPart + "  ").width : 0;
+    const prefix = `${liveOnlyPart ? "" : hover}O ${fmtFixed(bar.open, pd, locale)}  H ${fmtFixed(bar.high, pd, locale)}  L ${fmtFixed(bar.low, pd, locale)}  C ${fmtFixed(bar.close, pd, locale)}  ${labels.volume} ${partialMarker}${unit}${volTxt}`;
+    const prefixWidth = ctx.measureText(prefix + "   ").width;
+    const deltaPart = `Δ ${partialMarker}${bar.delta >= 0 ? "+" : "-"}${unit}${deltaTxt}`;
+    const deltaWidth = ctx.measureText(deltaPart + "   ").width;
+    const tradesPart = `${labels.trades} ${partialMarker}${fmtFixed(bar.count, 0, locale, true)}`;
+    const tradesWidth = ctx.measureText(tradesPart + "   ").width;
+    const rangePart = `${labels.range} ${fmtFixed(rangePct, 2, locale)}%`;
+    const rangeWidth = ctx.measureText(rangePart + "   ").width;
+    const chgPart = `${labels.change} ${changePct >= 0 ? "+" : ""}${fmtFixed(changePct, 2, locale)}%`;
+    const chgWidth = ctx.measureText(chgPart).width;
+
+    const overflows = liveOnlyWidth + prefixWidth + deltaWidth + tradesWidth + rangeWidth + chgWidth > maxWidth;
+    const parts: readonly HudPart[] | null = overflows ? [
       ...(liveOnlyTag ? [{ text: `${hover}${liveOnlyTag}`, color: uiColor.warn, dropOrder: 0 }] : []),
       { text: `${liveOnlyTag ? "" : hover}O ${fmtFixed(bar.open, pd, locale)}`, color: uiColor.textHeading, dropOrder: 0 },
       { text: `H ${fmtFixed(bar.high, pd, locale)}`, color: uiColor.textHeading, dropOrder: 0 },
@@ -156,30 +218,77 @@ export function drawHud(
       { text: tradesPart, color: uiColor.textSecondary, dropOrder: 4 },
       { text: rangePart, color: uiColor.textSecondary, dropOrder: 5 },
       { text: chgPart, color: changePct >= 0 ? uiColor.buy : uiColor.sell, dropOrder: 1 },
-    ];
-    drawHudRows(ctx, view, x, maxWidth, parts);
+    ] : null;
+
+    entry = {
+      ctx,
+      barRef: bar,
+      count: bar.count,
+      open: bar.open,
+      high: bar.high,
+      low: bar.low,
+      close: bar.close,
+      volume: bar.volume,
+      delta: bar.delta,
+      completeness: bar.completeness,
+      hovered,
+      showNotional: deps.showNotional,
+      locale,
+      pd,
+      labelsVolume: labels.volume,
+      labelsTrades: labels.trades,
+      labelsRange: labels.range,
+      labelsChange: labels.change,
+      maxWidth,
+      liveOnly,
+      font,
+      hudText,
+      liveOnlyPart,
+      liveOnlyWidth,
+      prefix,
+      prefixWidth,
+      deltaPart,
+      deltaWidth,
+      tradesPart,
+      tradesWidth,
+      rangePart,
+      rangeWidth,
+      chgPart,
+      chgWidth,
+      changePct,
+      parts,
+    };
+    lastHudMemo = entry;
+  }
+
+  deps.onHudText?.(entry.hudText);
+
+  if (entry.parts) {
+    drawHudRows(ctx, view, x, maxWidth, entry.parts);
     return;
   }
 
+  const prefixX = x + entry.liveOnlyWidth;
+  const rangeX = prefixX + entry.prefixWidth + entry.deltaWidth + entry.tradesWidth;
   const pillW = Math.min(
     Math.max(0, view.area.width - 8),
-    liveOnlyWidth + prefixWidth + deltaWidth + tradesWidth + rangeWidth + chgWidth + 12,
+    entry.liveOnlyWidth + entry.prefixWidth + entry.deltaWidth + entry.tradesWidth + entry.rangeWidth + entry.chgWidth + 12,
   );
   drawOverlayPill(ctx, x - 6, 4, pillW, 20, 5, "rgba(11, 16, 24, 0.78)", "rgba(148, 163, 184, 0.16)");
 
-  if (liveOnlyPart) {
+  if (entry.liveOnlyPart) {
     ctx.fillStyle = uiColor.warn;
-    ctx.fillText(liveOnlyPart, x, 8);
+    ctx.fillText(entry.liveOnlyPart, x, 8);
   }
   ctx.fillStyle = uiColor.textHeading;
-  ctx.fillText(prefix, prefixX, 8);
+  ctx.fillText(entry.prefix, prefixX, 8);
   ctx.fillStyle = bar.delta >= 0 ? uiColor.buy : uiColor.sell;
-  ctx.fillText(deltaPart, prefixX + prefixWidth, 8);
+  ctx.fillText(entry.deltaPart, prefixX + entry.prefixWidth, 8);
   ctx.fillStyle = uiColor.textSecondary;
-  ctx.fillText(tradesPart, prefixX + prefixWidth + deltaWidth, 8);
-  ctx.fillText(rangePart, rangeX, 8);
-  ctx.fillStyle = changePct >= 0 ? uiColor.buy : uiColor.sell;
-  ctx.fillText(chgPart, rangeX + rangeWidth, 8);
+  ctx.fillText(entry.tradesPart, prefixX + entry.prefixWidth + entry.deltaWidth, 8);
+  ctx.fillText(entry.rangePart, rangeX, 8);
+  ctx.fillStyle = entry.changePct >= 0 ? uiColor.buy : uiColor.sell;
+  ctx.fillText(entry.chgPart, rangeX + entry.rangeWidth, 8);
 }
 
 /** The readout as rows of `parts`, widest row no wider than `maxWidth`; see layoutHud for what gives way. */

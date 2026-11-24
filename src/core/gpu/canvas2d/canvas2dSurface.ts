@@ -6,23 +6,30 @@ function clamp01(v: number): number {
 
 const RGBA_CACHE = new Map<number, string>();
 
-function formatCssRgba(c: RGBA): string {
-  const rByte = Math.round(clamp01(c.r) * 255);
-  const gByte = Math.round(clamp01(c.g) * 255);
-  const bByte = Math.round(clamp01(c.b) * 255);
-  const aNorm = Number(clamp01(c.a).toFixed(3));
-  const aByte = Math.round(aNorm * 255);
-  const key = (rByte | (gByte << 8) | (bByte << 16) | (aByte << 24)) >>> 0;
+function packRgbaKey(rByte: number, gByte: number, bByte: number, aByte: number): number {
+  return (rByte | (gByte << 8) | (bByte << 16) | (aByte << 24)) >>> 0;
+}
+
+function getCssRgbaFromBytes(rByte: number, gByte: number, bByte: number, aByte: number, key: number): string {
   let css = RGBA_CACHE.get(key);
   if (css !== undefined) return css;
+  const aNorm = Number((aByte / 255).toFixed(3));
   css = `rgba(${rByte}, ${gByte}, ${bByte}, ${aNorm})`;
   if (RGBA_CACHE.size >= 4096) RGBA_CACHE.clear();
   RGBA_CACHE.set(key, css);
   return css;
 }
 
+function formatCssRgba(c: RGBA): string {
+  const rByte = (clamp01(c.r) * 255 + 0.5) | 0;
+  const gByte = (clamp01(c.g) * 255 + 0.5) | 0;
+  const bByte = (clamp01(c.b) * 255 + 0.5) | 0;
+  const aByte = (clamp01(c.a) * 255 + 0.5) | 0;
+  return getCssRgbaFromBytes(rByte, gByte, bByte, aByte, packRgbaKey(rByte, gByte, bByte, aByte));
+}
+
 export class Canvas2dQuadSink implements QuadSink {
-  private lastCss = "";
+  private lastKey = -1;
 
   constructor(private ctx: CanvasRenderingContext2D) {}
 
@@ -32,16 +39,20 @@ export class Canvas2dQuadSink implements QuadSink {
   }
 
   rect(x: number, y: number, w: number, h: number, c: RGBA): void {
-    const css = formatCssRgba(c);
-    if (this.lastCss !== css) {
-      this.ctx.fillStyle = css;
-      this.lastCss = css;
+    const rByte = (clamp01(c.r) * 255 + 0.5) | 0;
+    const gByte = (clamp01(c.g) * 255 + 0.5) | 0;
+    const bByte = (clamp01(c.b) * 255 + 0.5) | 0;
+    const aByte = (clamp01(c.a) * 255 + 0.5) | 0;
+    const key = packRgbaKey(rByte, gByte, bByte, aByte);
+    if (this.lastKey !== key) {
+      this.ctx.fillStyle = getCssRgbaFromBytes(rByte, gByte, bByte, aByte, key);
+      this.lastKey = key;
     }
     this.ctx.fillRect(x, y, w, h);
   }
 
   reset(): void {
-    this.lastCss = "";
+    this.lastKey = -1;
   }
 }
 

@@ -146,6 +146,7 @@ export interface ChartInputHost extends ChartCommandTarget {
   autoFit(): void;
   emitVisibleRange(): void;
   notifyCrosshair(e: { time: number | null; price: number | null }): void;
+  setPointerDragging?(active: boolean): void;
   isReplaySelecting(): boolean;
   previewReplayStart(time: number | null): void;
   selectReplayStart(time: number): void;
@@ -181,6 +182,25 @@ function attachChartInput(canvas: HTMLCanvasElement, crosshair: Crosshair, host:
   let transientMagnetActive = false;
   const transientMagnetSource = {};
   let controllerDisposed = false;
+  let lastNotifiedCrosshairTime: number | null | undefined = undefined;
+  let lastNotifiedCrosshairPrice: number | null | undefined = undefined;
+
+  const notifyCrosshairIfChanged = (time: number | null, price: number | null): void => {
+    if (
+      Object.is(lastNotifiedCrosshairTime, time)
+      && Object.is(lastNotifiedCrosshairPrice, price)
+    ) {
+      return;
+    }
+    lastNotifiedCrosshairTime = time;
+    lastNotifiedCrosshairPrice = price;
+    host.notifyCrosshair({ time, price });
+  };
+
+  const resetLastNotifiedCrosshair = (): void => {
+    lastNotifiedCrosshairTime = undefined;
+    lastNotifiedCrosshairPrice = undefined;
+  };
 
   const nowMs = (): number => ownerWindow?.performance?.now() ?? Date.now();
 
@@ -350,7 +370,7 @@ function attachChartInput(canvas: HTMLCanvasElement, crosshair: Crosshair, host:
     session.invalidate(ChartChange.Interaction);
     if (!host.applyingExternal) {
       const pointer = host.resolveScreenCrosshair(crosshair.x, crosshair.y);
-      host.notifyCrosshair({ time: pointer.time, price: pointer.price });
+      notifyCrosshairIfChanged(pointer.time, pointer.price);
     }
   };
 
@@ -361,6 +381,7 @@ function attachChartInput(canvas: HTMLCanvasElement, crosshair: Crosshair, host:
     if (host.isReplaySelecting()) host.previewReplayStart(null);
     if (!gestures.pan) canvas.style.cursor = "default";
     session.invalidate(ChartChange.Interaction);
+    resetLastNotifiedCrosshair();
     if (!host.applyingExternal) {
       host.notifyCrosshair({ time: null, price: null });
     }
@@ -376,6 +397,7 @@ function attachChartInput(canvas: HTMLCanvasElement, crosshair: Crosshair, host:
     if (target === "time-axis") host.timeViewport.endTimeAxisScale();
     if (target === "plot") host.timeViewport.endPlotPan();
     gestures.pan = null;
+    host.setPointerDragging?.(false);
     if (!keepCapture) gestures.releasePointer(pointerId ?? capturedPointerId);
     canvas.style.cursor = "default";
   };
@@ -426,6 +448,7 @@ function attachChartInput(canvas: HTMLCanvasElement, crosshair: Crosshair, host:
   const hideCrosshair = (): void => {
     crosshair.visible = false;
     session.invalidate(ChartChange.Interaction);
+    resetLastNotifiedCrosshair();
     if (!host.applyingExternal) host.notifyCrosshair({ time: null, price: null });
   };
 
@@ -438,7 +461,7 @@ function attachChartInput(canvas: HTMLCanvasElement, crosshair: Crosshair, host:
     session.invalidate(ChartChange.Interaction);
     if (!host.applyingExternal) {
       const pointer = host.resolveScreenCrosshair(crosshair.x, crosshair.y);
-      host.notifyCrosshair({ time: pointer.time, price: pointer.price });
+      notifyCrosshairIfChanged(pointer.time, pointer.price);
     }
   };
 
@@ -680,6 +703,7 @@ function attachChartInput(canvas: HTMLCanvasElement, crosshair: Crosshair, host:
       pointerId: e.pointerId,
       tap,
     };
+    host.setPointerDragging?.(true);
     canvas.setPointerCapture(e.pointerId);
     if (touch && target === "plot") armLongPress(e.pointerId);
   };

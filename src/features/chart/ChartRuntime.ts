@@ -1251,6 +1251,7 @@ class ChartRuntimeImpl implements ChartRuntime, ChartInputHost {
   resetIndicatorPaneScale(paneId: string): boolean { return this.indicatorController.resetPaneScale(paneId); }
   toggleIndicatorPaneAutoScale(paneId: string): boolean { return this.indicatorController.togglePaneAutoScale(paneId); }
   notifyCrosshair(e: { time: number | null; price: number | null }): void { this.syncController.notifyCrosshair(e); }
+  setPointerDragging(active: boolean): void { this.orderbookHeatmap?.setPointerDragging(active); }
   /** Internal ChartInputHost seam: raw cursor mapping owned by this runtime instance. */
   resolveScreenCrosshair(cx: number, cy: number): { time: number | null; price: number | null } {
     const source = captureRawSource(this, this.pipeline.series, {

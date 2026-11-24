@@ -248,11 +248,31 @@ export function getHeatmapThresholdSparseBar(
   unit: "usd" | "btc",
   threshold: number,
   step: number,
+  alreadyFiltered = false,
 ): HeatmapThresholdSparseBar {
-  const key = `${unit}|${threshold}|${step}|${bar.cells.length}`;
+  const noFilter = threshold <= 0 || alreadyFiltered;
+  const key = `${unit}|${threshold}|${step}|${bar.cells.length}|${noFilter ? 1 : 0}`;
   const cached = heatmapThresholdSparseCache.get(bar);
   if (cached && cached.key === key) {
     return cached;
+  }
+  if (noFilter) {
+    const values = new Array<number>(bar.cells.length);
+    let maxValue = 0;
+    for (let i = 0; i < bar.cells.length; i++) {
+      const cell = bar.cells[i];
+      const value = heatmapValueInUnit(heatmapCellUsd(cell), cell[0], step, unit);
+      if (value > maxValue) maxValue = value;
+      values[i] = value;
+    }
+    const entry: HeatmapThresholdSparseBar = {
+      key,
+      maxValue,
+      cells: bar.cells,
+      values,
+    };
+    heatmapThresholdSparseCache.set(bar, entry);
+    return entry;
   }
   const sparseCells: OrderbookHeatmapCell[] = [];
   const sparseValues: number[] = [];

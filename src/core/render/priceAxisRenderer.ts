@@ -89,26 +89,28 @@ function paintPriceAxis(
 
   const marks = view.priceMarks(dec, 11);
   const gridYs: number[] = [];
+  ctx.fillStyle = axisMajorLabelColor;
+  ctx.textAlign = "right";
   for (const mark of marks) {
     const y = view.area.top + mark.coord;
     if (y < view.area.top - 1 || y > view.area.top + view.area.height + 1) continue;
     gridYs.push(y);
-    // Global grid toggle: skip only the plot grid stroke. Labels, background,
-    // separator, price markers and crosshair stay untouched.
-    if (options.drawGrid && settings.grid) {
-      ctx.strokeStyle = axisGridLineColor;
-      ctx.beginPath();
-      ctx.moveTo(view.area.left, y);
-      ctx.lineTo(axisX, y);
-      ctx.stroke();
-    }
     const label = formatPriceAxisMark(mark.price, mark.label, dec, displayOptions);
     const boxH = 16;
     const labelY = clampLabelY(view, y, boxH);
     if (keepOut.some((zone) => labelY + boxH / 2 > zone.y && labelY - boxH / 2 < zone.y + zone.h)) continue;
-    ctx.fillStyle = axisMajorLabelColor;
-    ctx.textAlign = "right";
     ctx.fillText(label, axisX + axisW - 6, labelY);
+  }
+  // Global grid toggle: skip only the plot grid stroke. Labels, background,
+  // separator, price markers and crosshair stay untouched.
+  if (options.drawGrid && settings.grid && gridYs.length > 0) {
+    ctx.strokeStyle = axisGridLineColor;
+    ctx.beginPath();
+    for (const y of gridYs) {
+      ctx.moveTo(view.area.left, y);
+      ctx.lineTo(axisX, y);
+    }
+    ctx.stroke();
   }
   return gridYs;
 }
@@ -150,13 +152,13 @@ export function drawPriceAxisGridLines(
 ): void {
   if (!settings.grid || gridYs.length === 0) return;
   const axisX = view.area.left + view.area.width;
+  ctx.strokeStyle = axisGridLineColor;
+  ctx.beginPath();
   for (const y of gridYs) {
-    ctx.strokeStyle = axisGridLineColor;
-    ctx.beginPath();
     ctx.moveTo(view.area.left, y);
     ctx.lineTo(axisX, y);
-    ctx.stroke();
   }
+  ctx.stroke();
 }
 
 export function drawPriceMarkers(

@@ -215,6 +215,7 @@ export interface OrderbookHeatmapOverlayOptions {
 
 export class OrderbookHeatmapOverlay {
   private static readonly MAX_CACHED_CHUNKS = 12;
+  private static readonly MAX_EMPTY_CHUNK_KEYS = 64;
   private readonly fetchHeatmap: OrderbookHeatmapFetch;
   private readonly invalidate: () => void;
   private readonly now: () => number;
@@ -244,6 +245,7 @@ export class OrderbookHeatmapOverlay {
   private canonicalTailBars = new Map<number, CanonicalHeatmapTailBar>();
   private canonicalProjectionKey = "";
   private chunks = new Map<number, ChunkState>();
+  private readonly emptyChunkKeys = new Set<string>();
   private chunkCoverage = new Map<number, OrderbookHeatmapCoverage>();
   private lastErrorCode: string | undefined = undefined;
   private lastErrorMessage: string | undefined = undefined;
@@ -266,6 +268,7 @@ export class OrderbookHeatmapOverlay {
   private explicitVisible = true;
   private needsRedrawOnVisible = false;
   private rasterCacheDisabledForTest = false;
+  private pointerDragging = false;
   private lastRasterViewportKey = "";
   private rasterViewportChangedAt = Number.NEGATIVE_INFINITY;
   private visibilityObservedDoc: Document | null = null;
@@ -800,6 +803,7 @@ export class OrderbookHeatmapOverlay {
     this.liveBarTimes.clear();
     this.canonicalProjectionKey = "";
     this.chunks = new Map();
+    this.emptyChunkKeys.clear();
     this.chunkCoverage = new Map();
     this.lastErrorCode = undefined;
     this.lastErrorMessage = undefined;
@@ -957,6 +961,32 @@ export class OrderbookHeatmapOverlay {
     if (disabled) {
       this.releaseRasterCache();
     }
+  }
+
+  /** Suppresses hover fetches while the pointer is actively dragging the chart. */
+  setPointerDragging(active: boolean): void {
+    this.pointerDragging = active;
+    if (active && this.hoverTimer) {
+      clearTimeout(this.hoverTimer);
+      this.hoverTimer = null;
+      this.pendingHoverKey = "";
+    }
+  }
+
+  private isViewportMoving(): boolean {
+    return this.now() - this.rasterViewportChangedAt < HEATMAP_CPU_RASTER_QUIET_MS;
+  }
+
+  /** Invalidates raster cache metadata while keeping the offscreen canvas and ImageData buffer pooled. */
+  private invalidateRasterCacheContents(): void {
+    this.lastRasterKey = "";
+    this.rasterCacheHasCells = false;
+    this.rasterCacheDataSig = "";
+    this.rasterCacheView = null;
+    this.rasterCacheHistRightCss = 0;
+    this.rasterCacheOriginX = 0;
+    this.rasterCacheOriginY = 0;
+    this.rasterCacheBlitBounds = null;
   }
 
   /** Releases this overlay's offscreen CPU raster canvas and returns reserved bytes once. */
@@ -1170,7 +1200,7 @@ export class OrderbookHeatmapOverlay {
       this.visibleThreshold = frame.threshold;
       this.visibleOpacity = resolved.opacity;
       if (knownCellCount === 0) {
-        this.releaseRasterCache();
+        this.invalidateRasterCacheContents();
         if (canUseRasterCache) {
           this.lastRasterKey = rasterKey;
           this.rasterCacheHasCells = false;
@@ -1182,9 +1212,10 @@ export class OrderbookHeatmapOverlay {
         return;
       }
 
-      if (canUseRasterCache) {
+      if (rasterEligible) {
         const transform = this.resolveCtxTransform(ctx, view);
         if (
+          canUseRasterCache &&
           this.tryStaticLiveTailPatch(
             ctx,
             view,
@@ -1239,13 +1270,15 @@ export class OrderbookHeatmapOverlay {
           );
           offCtx.restore();
           if (paintedCells === 0) {
-            this.releaseRasterCache();
-            this.lastRasterKey = rasterKey;
-            this.rasterCacheHasCells = false;
-            this.rasterCacheFloor = resolved.floor;
-            this.rasterCacheCeiling = resolved.ceiling;
-            this.rasterCacheThreshold = frame.threshold;
-            this.rasterCacheOpacity = resolved.opacity;
+            this.invalidateRasterCacheContents();
+            if (canUseRasterCache) {
+              this.lastRasterKey = rasterKey;
+              this.rasterCacheHasCells = false;
+              this.rasterCacheFloor = resolved.floor;
+              this.rasterCacheCeiling = resolved.ceiling;
+              this.rasterCacheThreshold = frame.threshold;
+              this.rasterCacheOpacity = resolved.opacity;
+            }
             return;
           }
           this.rasterCacheOriginX = 0;
@@ -1328,13 +1361,15 @@ export class OrderbookHeatmapOverlay {
                 );
                 croppedCtx.restore();
                 if (paintedCells === 0) {
-                  this.releaseRasterCache();
-                  this.lastRasterKey = rasterKey;
-                  this.rasterCacheHasCells = false;
-                  this.rasterCacheFloor = resolved.floor;
-                  this.rasterCacheCeiling = resolved.ceiling;
-                  this.rasterCacheThreshold = frame.threshold;
-                  this.rasterCacheOpacity = resolved.opacity;
+                  this.invalidateRasterCacheContents();
+                  if (canUseRasterCache) {
+                    this.lastRasterKey = rasterKey;
+                    this.rasterCacheHasCells = false;
+                    this.rasterCacheFloor = resolved.floor;
+                    this.rasterCacheCeiling = resolved.ceiling;
+                    this.rasterCacheThreshold = frame.threshold;
+                    this.rasterCacheOpacity = resolved.opacity;
+                  }
                   return;
                 }
                 this.rasterCacheOriginX = rx;
@@ -1356,7 +1391,7 @@ export class OrderbookHeatmapOverlay {
       incrementPerformanceCounter("chart.cpu.heatmap.raster.direct");
       const paintedCells = this.paintCellsToContext(ctx, view, series, frame);
       if (paintedCells === 0) {
-        this.releaseRasterCache();
+        this.invalidateRasterCacheContents();
       }
     } finally {
       if (startedAt !== null) recordPerformanceDuration("chart.cpu.heatmap.draw.ms", performance.now() - startedAt);
@@ -2028,11 +2063,8 @@ export class OrderbookHeatmapOverlay {
     let clipPxTop = 0;
     let clipPxRight = 0;
     let clipPxBottom = 0;
-    // Narrow overlapping columns (colWidth < 1, where drawWidth = 1 > colWidth) fall back
-    // to fillRect to preserve exact Skia 8-bit premultiplied multi-layer coverage parity.
     if (
       imageDataTransform &&
-      colWidth >= 1 &&
       imageDataTransform.b === 0 &&
       imageDataTransform.c === 0 &&
       imageDataTransform.a > 0 &&
@@ -2269,7 +2301,13 @@ export class OrderbookHeatmapOverlay {
       let cells: readonly OrderbookHeatmapCell[] = bar.cells;
       let sparseValues: readonly number[] | null = null;
       if (threshold > 0) {
-        const sparse = getHeatmapThresholdSparseBar(bar, unit, threshold, step);
+        const chunkState = !live && !this.liveBarTimes.has(bar.time)
+          ? this.chunks.get(heatmapChunkStart(bar.time, frame.tier))
+          : undefined;
+        const serverFiltered = chunkState?.status === "ready"
+          && chunkState.fullThreshold === threshold
+          && chunkState.fullUnit === unit;
+        const sparse = getHeatmapThresholdSparseBar(bar, unit, threshold, step, serverFiltered);
         if (sparse.maxValue < threshold || sparse.cells.length === 0) continue;
         cells = sparse.cells;
         sparseValues = sparse.values;
@@ -2383,7 +2421,13 @@ export class OrderbookHeatmapOverlay {
       if (!bar || bar.cells.length === 0) continue;
       let cells: readonly OrderbookHeatmapCell[] = bar.cells;
       if (preamble.threshold > 0) {
-        const sparse = getHeatmapThresholdSparseBar(bar, preamble.settings.unit, preamble.threshold, step);
+        const chunkState = !live && !this.liveBarTimes.has(bar.time)
+          ? this.chunks.get(heatmapChunkStart(bar.time, preamble.tier))
+          : undefined;
+        const serverFiltered = chunkState?.status === "ready"
+          && chunkState.fullThreshold === preamble.threshold
+          && chunkState.fullUnit === preamble.settings.unit;
+        const sparse = getHeatmapThresholdSparseBar(bar, preamble.settings.unit, preamble.threshold, step, serverFiltered);
         if (sparse.maxValue < preamble.threshold || sparse.cells.length === 0) continue;
         cells = sparse.cells;
       }
@@ -3205,6 +3249,8 @@ export class OrderbookHeatmapOverlay {
       const chunkEnd = heatmapChunkEnd(chunkStart, tier);
       const state = this.chunks.get(chunkStart);
       const live = now <= chunkEnd + tier.periodMs;
+      const emptyKey = `${key}|${unit}|${threshold}|${chunkStart}`;
+      if (!live && this.emptyChunkKeys.has(emptyKey)) continue;
       if (state?.status === "loading") continue;
       if (state?.status === "error" && now - state.fetchedAt < RETRY_MS) continue;
 
@@ -3261,15 +3307,25 @@ export class OrderbookHeatmapOverlay {
         }
         this.lastErrorCode = undefined;
         this.lastErrorMessage = undefined;
-        this.chunks.set(chunkStart, {
-          status: "ready",
-          fetchedAt: this.now(),
-          threshold,
-          unit,
-          fullThreshold,
-          fullUnit,
-        });
-        this.evictStaleChunks(tier);
+        if (!live && refreshFrom === chunkStart && response.bars.length === 0) {
+          this.chunks.delete(chunkStart);
+          if (this.emptyChunkKeys.size >= OrderbookHeatmapOverlay.MAX_EMPTY_CHUNK_KEYS) {
+            const oldest = this.emptyChunkKeys.values().next().value;
+            if (oldest !== undefined) this.emptyChunkKeys.delete(oldest);
+          }
+          this.emptyChunkKeys.add(emptyKey);
+        } else {
+          this.emptyChunkKeys.delete(emptyKey);
+          this.chunks.set(chunkStart, {
+            status: "ready",
+            fetchedAt: this.now(),
+            threshold,
+            unit,
+            fullThreshold,
+            fullUnit,
+          });
+          this.evictStaleChunks(tier);
+        }
         this.emitStatus();
         if (dataChanged || state?.status !== "ready") this.invalidate();
       }, (error: unknown) => {
@@ -3329,7 +3385,15 @@ export class OrderbookHeatmapOverlay {
       : "";
     const hoverKey = `${this.dataKey}|${sourcesKey}|${windowFrom}|${windowTo}|${bucket}|${replayActive}|${liveSlot}`;
     const hover = this.hoverWindows.get(hoverKey);
-    if (!hover) this.scheduleHover(hoverKey, series, columns, rows, tier);
+    if (this.pointerDragging || this.isViewportMoving()) {
+      if (this.hoverTimer) {
+        clearTimeout(this.hoverTimer);
+        this.hoverTimer = null;
+        this.pendingHoverKey = "";
+      }
+    } else if (!hover) {
+      this.scheduleHover(hoverKey, series, columns, rows, tier);
+    }
 
     const threshold = activeOrderbookHeatmapThreshold(settings);
     const values = rows.map((price) => columns.map((index) => {

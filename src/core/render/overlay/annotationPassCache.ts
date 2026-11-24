@@ -7,7 +7,11 @@ export interface ChartRenderPass {
   readonly captureMain?: boolean;
 }
 
-const STATIC_ANNOTATION = ChartChange.All & ~ChartChange.DataTail;
+const STATIC_ANNOTATION = ChartChange.All & ~(ChartChange.DataTail | ChartChange.Interaction);
+
+export function isCachePreservingChange(changes: ChartChange): boolean {
+  return changes !== ChartChange.None && (changes & ~(ChartChange.DataTail | ChartChange.Interaction)) === 0;
+}
 export function annotationPass(id: string, live = false): ChartRenderPass {
   if (live) return { id, interests: ChartChange.All };
   if (id === "closed-tpo") return { id, interests: STATIC_ANNOTATION, captureMain: true };
@@ -95,15 +99,15 @@ export class AnnotationPassCache<T> {
   }
 
   canHit(pass: ChartRenderPass, key: string, changes: ChartChange): boolean {
-    if (changes !== ChartChange.DataTail || !this.sameGeometry) return false;
-    if ((pass.interests & ChartChange.DataTail) !== 0) return false;
+    if (!isCachePreservingChange(changes) || !this.sameGeometry) return false;
+    if ((pass.interests & changes) !== 0) return false;
     const retained = this.entries.get(pass.id);
     return Boolean(retained?.valid && retained.key === key);
   }
 
   begin(changes: ChartChange, key: string): void {
     this.sameGeometry = key === this.frameKey;
-    if (changes !== ChartChange.DataTail || !this.sameGeometry) {
+    if (!isCachePreservingChange(changes) || !this.sameGeometry) {
       for (const entry of this.entries.values()) entry.valid = false;
     }
     this.frameKey = key;
@@ -121,11 +125,11 @@ export class AnnotationPassCache<T> {
     changes: ChartChange, draw: (target: CanvasRenderingContext2D) => T, replay: (effects: T) => void,
     dirtyRect?: AnnotationDirtyRect): "hit" | "miss" | false {
     const retained = this.entries.get(pass.id);
-    if (changes === ChartChange.None || (pass.interests & ChartChange.DataTail) !== 0) {
+    if (!isCachePreservingChange(changes) || (pass.interests & changes) !== 0) {
       if (retained) retained.valid = false;
       return false;
     }
-    if (changes === ChartChange.DataTail && retained?.valid && retained.key === key) {
+    if (this.sameGeometry && retained?.valid && retained.key === key) {
       replay(retained.effects);
       if (dirtyRect) this.blitRegion(ctx, retained.canvas, dirtyRect);
       else this.blit(ctx, retained.canvas);
