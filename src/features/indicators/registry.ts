@@ -58,6 +58,7 @@ type HeavyIndicatorType =
   | "funding-regime"
   | "futures-positioning"
   | "liquidations"
+  | "liquidation-profile"
   | "options-gex-wall";
 
 const heavyCatalog: Record<HeavyIndicatorType, IndicatorCatalogEntry> = {
@@ -65,6 +66,7 @@ const heavyCatalog: Record<HeavyIndicatorType, IndicatorCatalogEntry> = {
   "funding-regime": { type: "funding-regime", name: "Funding Regime", category: "derivatives", defaultPane: "separate" },
   "futures-positioning": { type: "futures-positioning", name: "Futures Positioning", category: "derivatives", defaultPane: "separate" },
   liquidations: { type: "liquidations", name: "Liquidations", category: "derivatives", defaultPane: "separate" },
+  "liquidation-profile": { type: "liquidation-profile", name: "Liquidation Profile", category: "derivatives", defaultPane: "overlay" },
   "options-gex-wall": { type: "options-gex-wall", name: "Options GEX Wall", category: "derivatives", defaultPane: "overlay" },
 };
 
@@ -73,6 +75,7 @@ const heavyLoaders: Record<HeavyIndicatorType, () => Promise<IndicatorDefinition
   "funding-regime": () => import("./builtins/fundingRegime.js").then((module) => module.fundingRegimeIndicatorDefinition as IndicatorDefinition),
   "futures-positioning": () => import("./builtins/futuresPositioning.js").then((module) => module.futuresPositioningIndicatorDefinition as IndicatorDefinition),
   liquidations: () => import("./builtins/liquidations.js").then((module) => module.liquidationsIndicatorDefinition as IndicatorDefinition),
+  "liquidation-profile": () => import("./builtins/liquidationProfile.js").then((module) => module.liquidationProfileIndicatorDefinition as IndicatorDefinition),
   "options-gex-wall": () => import("./builtins/optionsGexWall.js").then((module) => module.optionsGexWallIndicatorDefinition as IndicatorDefinition),
 };
 

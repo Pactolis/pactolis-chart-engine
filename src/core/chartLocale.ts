@@ -63,6 +63,66 @@ const CHART_LOCALE_FALLBACKS: Readonly<Record<string, { tr: string; en: string }
     tr: "Aralık Sonu (Sağ)",
     en: "Range End (Right)",
   },
+  "indicator.liquidationProfile.badge": {
+    tr: "Hyperliquid · snapshot {minutes} dk önce · tahmini",
+    en: "Hyperliquid · snapshot {minutes} min ago · estimated",
+  },
+  "indicator.liquidationProfile.badgeNow": {
+    tr: "Hyperliquid · şimdi · tahmini",
+    en: "Hyperliquid · just now · estimated",
+  },
+  "indicator.liquidationProfile.unsupported": {
+    tr: "Hyperliquid'de bu market yok",
+    en: "Market unavailable on Hyperliquid",
+  },
+  "indicator.liquidationProfile.unavailable": {
+    tr: "Likidasyon verisi yok",
+    en: "No liquidation data",
+  },
+  "indicator.liquidationProfile.hlPriceStale": {
+    tr: "HL fiyatı eski",
+    en: "HL price stale",
+  },
+  "indicator.liquidationProfile.priceDivergence": {
+    tr: "HL/Binance fiyat farkı >%1",
+    en: "HL/Binance price divergence >1%",
+  },
+  "indicator.liquidationProfile.densityNote": {
+    tr: "bekleyen tahmini likidasyon yoğunluğu",
+    en: "estimated pending liquidation density",
+  },
+  "indicator.liquidationProfile.rangePct": {
+    tr: "Fiyat Aralığı",
+    en: "Price Range",
+  },
+  "indicator.liquidationProfile.rangeAll": {
+    tr: "Tümü",
+    en: "All",
+  },
+  "indicator.liquidationProfile.minNotionalUsd": {
+    tr: "Min. Hacim (USD)",
+    en: "Min Notional (USD)",
+  },
+  "indicator.liquidationProfile.profileWidth": {
+    tr: "Genişlik",
+    en: "Width",
+  },
+  "indicator.liquidationProfile.opacity": {
+    tr: "Opaklık",
+    en: "Opacity",
+  },
+  "indicator.liquidationProfile.showCumulative": {
+    tr: "Kümülatif Eğri",
+    en: "Cumulative Curve",
+  },
+  "indicator.liquidationProfile.longColor": {
+    tr: "Long Likidasyon Rengi",
+    en: "Long Liquidation Color",
+  },
+  "indicator.liquidationProfile.shortColor": {
+    tr: "Short Likidasyon Rengi",
+    en: "Short Liquidation Color",
+  },
 };
 
 let configured: ChartLocale | null = null;

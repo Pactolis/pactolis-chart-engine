@@ -173,3 +173,50 @@ export interface FuturesPositioningRequestInput {
   to: number;
   onUpdate?: () => void;
 }
+
+export interface LiquidationClusterLevel {
+  price: number;
+  longNotional: number;
+  shortNotional: number;
+  longCount: number;
+  shortCount: number;
+}
+
+export type LiquidationClustersStatus =
+  | "ready"
+  | "stale"
+  | "source-changed"
+  | "unsupported"
+  | "disabled"
+  | "unavailable";
+
+export interface LiquidationClustersResponse {
+  status: LiquidationClustersStatus;
+  source?: string;
+  hlCoin?: string | null;
+  snapshotId?: string | null;
+  takenAt?: number | null;
+  fetchedAt?: number | null;
+  stale?: boolean;
+  hlMarkPx?: number | null;
+  hlMarkAt?: number | null;
+  rangePct?: number | null;
+  clusters: LiquidationClusterLevel[];
+  totals?: { longNotional: number; shortNotional: number } | null;
+}
+
+export type LiquidationClustersState =
+  | { status: "idle" }
+  | { status: "loading" }
+  | { status: "unsupported"; message?: string }
+  | { status: "disabled"; message?: string }
+  | { status: "unavailable"; message?: string }
+  | { status: "ready"; data: LiquidationClustersResponse }
+  | { status: "error"; message: string };
+
+export interface LiquidationClustersRequestInput {
+  market: string;
+  rangePct?: number;
+  source?: string;
+  onUpdate?: () => void;
+}
