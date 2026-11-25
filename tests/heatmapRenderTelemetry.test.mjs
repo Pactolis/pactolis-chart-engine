@@ -29,10 +29,10 @@ function fakeGl({ onDraw } = {}) {
     getProgramParameter: () => true,
     getShaderInfoLog: () => "",
     getProgramInfoLog: () => "",
-    getAttribLocation: (_program, name) => ["a_unit", "a_rect", "a_texel", "a_alphaScale"].indexOf(name),
+    getAttribLocation: (_program, name) => ["a_rect", "a_run"].indexOf(name),
     getUniformLocation: (_program, name) => ({ name }),
-    drawArraysInstanced: () => {
-      calls.push("drawArraysInstanced");
+    drawArrays: () => {
+      calls.push("drawArrays");
       onDraw?.();
     },
   };
@@ -77,7 +77,7 @@ test("a drawn frame records one render sample and issues the same GL calls as wi
     assert.equal(sampleCount() - before, 1);
     const snapshot = snapshotPerformanceTelemetry().metrics[METRIC];
     assert.ok(Number.isFinite(snapshot.p95Ms) && snapshot.p95Ms >= 0 && snapshot.maxMs >= snapshot.minMs);
-    assert.equal(on.calls.filter((call) => call === "drawArraysInstanced").length, 1);
+    assert.equal(on.calls.filter((call) => call === "drawArrays").length, 1);
     assert.deepEqual(on.calls, off.calls);
   } finally {
     rendererOff.dispose();

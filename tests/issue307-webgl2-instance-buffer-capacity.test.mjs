@@ -89,7 +89,7 @@ function makeGlTracker() {
     blendFunc: noop,
     blendFuncSeparate: noop,
     scissor: noop,
-    drawArraysInstanced: noop,
+    drawArrays: noop,
   };
   return { gl, bufferDataSizes, bufferSubDataSizes };
 }
@@ -115,13 +115,14 @@ test("#307: VBO & staging capacity separation avoids per-frame bufferData on +1 
     const dataBefore = bufferDataSizes.length;
     const subBefore = bufferSubDataSizes.length;
 
-    // Grow +1 cell per frame for 60 frames (12,001 -> 12,060): 0 VBO reallocations and only 28 B/frame tail upload!
+    // Grow +1 cell per frame for 60 frames (12,001 -> 12,060): 0 VBO reallocations and only one run's
+    // tail upload per frame (these cells never stack, so each is its own run: 6 vertices x 7 floats = 168 B).
     for (let step = 1; step <= 60; step++) {
       assert.equal(renderer.renderFrame(gl, { main: makeCells(12_000 + step), extension: [], ceiling: 15_000, threshold: 10, dataKey: "k" }, plot), true);
     }
     assert.equal(bufferDataSizes.length - dataBefore, 0, "60 frames of +1 growth must perform 0 VBO bufferData reallocations");
     const subBytes = bufferSubDataSizes.slice(subBefore).reduce((a, b) => a + b, 0);
-    assert.equal(subBytes, 60 * 28, "60 frames of +1 growth must upload only 60 * 28 B = 1,680 B");
+    assert.equal(subBytes, 60 * 168, "60 frames of +1 growth must upload only 60 * 168 B = 10,080 B");
 
     // 12,288 <-> 12,289 oscillation -> 0 VBO reallocations after initial headroom
     assert.equal(renderer.renderFrame(gl, { main: makeCells(12_288), extension: [], ceiling: 15_000, threshold: 10, dataKey: "k" }, plot), true);

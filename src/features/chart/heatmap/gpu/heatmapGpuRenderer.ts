@@ -79,7 +79,19 @@ export const HEATMAP_GPU_MODULE_BUDGET_BYTES = 256 * 1024 * 1024;
 /** Module realm accounting: grows/shrinks with real allocations, never on DPR changes. */
 let moduleReservedBytes = 0;
 
-const FLOATS_PER_INSTANCE = 7; // rect.x, rect.y, rect.w, rect.h, texel.u, texel.v, alphaScale
+const FLOATS_PER_VERTEX = 7; // rect.x, rect.y, rect.w, rect.h, firstCell, signedCount, alphaScale
+/**
+ * Geometry is drawn per RUN, not per cell: consecutive MAIN cells of one
+ * column that stack exactly (same x/width/height, touching edges) become one
+ * quad whose fragment row picks its own cell texel (CE #364 item 3). Each run
+ * is written as 6 plain vertices (two triangles, corner from gl_VertexID)
+ * instead of one instanced quad: software GL (SwiftShader) pays ~30 us per
+ * instance, and a typical 15m frame drops from ~13k cells to ~4.7k runs.
+ */
+const VERTICES_PER_RUN = 6;
+const FLOATS_PER_RUN = FLOATS_PER_VERTEX * VERTICES_PER_RUN;
+/** Relative tolerance for "same height" / "touching edges" when merging cells into a run. */
+const RUN_MERGE_EPSILON = 1e-6;
 const UNIT_QUAD = new Float32Array([0, 0, 1, 0, 1, 1, 0, 0, 1, 1, 0, 1]); // two triangles
 const GRID_MAX_WIDTH = 1024;
 const MAX_INSTANCE_BYTES = 64 * 1024 * 1024;
@@ -124,6 +136,8 @@ export class HeatmapGpuRenderer {
   private instanceData: Float32Array | null = null;
   private uploadedInstances: Float32Array | null = null;
   private uploadedInstancesFloats = 0;
+  /** Runs in the uploaded vertex data; the draw count of the fast-reuse path. */
+  private uploadedRunCount = 0;
   private instanceReservedFloats = 0;
   private gpuInstanceCapacityBytes = 0;
   /** Init-only capability read (MAX_TEXTURE_SIZE); never queried per frame. */
@@ -190,7 +204,8 @@ export class HeatmapGpuRenderer {
       && frame.extension === this.uploadedExtensionRef
       && frame.main.length === this.uploadedMainCount
       && frame.extension.length === this.uploadedExtensionCount
-      && cells * FLOATS_PER_INSTANCE * 4 <= this.gpuInstanceCapacityBytes
+      && this.uploadedRunCount > 0
+      && this.uploadedRunCount * FLOATS_PER_RUN * 4 <= this.gpuInstanceCapacityBytes
       && this.gridWidth > 0
       && this.gridHeight > 0
       && this.gridWidth * this.gridHeight >= cells;
@@ -248,7 +263,7 @@ export class HeatmapGpuRenderer {
       if (!canFastReuseUploaded) {
         // The texture grid must cover MAIN + EXT texels: extensions own their
         // own texels past the main count, capped by the grid bounds checks.
-        this.ensureResources(gl, cells, cells);
+        this.ensureResources(gl, cells, walkHeatmapRuns(frame, null));
         this.uploadData(gl, frame);
         this.uploadInstances(gl, frame);
       }
@@ -358,6 +373,7 @@ export class HeatmapGpuRenderer {
     this.instanceData = null;
     this.uploadedInstances = null;
     this.uploadedInstancesFloats = 0;
+    this.uploadedRunCount = 0;
     this.uploadedInstancesReservedBytes = 0;
     this.instanceReservedFloats = 0;
     this.gpuInstanceCapacityBytes = 0;
@@ -396,17 +412,17 @@ export class HeatmapGpuRenderer {
     currentCapFloats: number,
     bytesPerFloat: number,
   ): number {
-    const neededCells = Math.ceil(neededFloats / FLOATS_PER_INSTANCE);
-    const currentCells = Math.floor(currentCapFloats / FLOATS_PER_INSTANCE);
+    const neededCells = Math.ceil(neededFloats / FLOATS_PER_RUN);
+    const currentCells = Math.floor(currentCapFloats / FLOATS_PER_RUN);
     if (currentCapFloats >= neededFloats) {
       if (currentCells > 4096 && neededCells * 4 < currentCells) {
         const shrinkCells = Math.max(1024, Math.ceil((neededCells * 1.5) / 256) * 256);
-        return Math.max(neededFloats, shrinkCells * FLOATS_PER_INSTANCE);
+        return Math.max(neededFloats, shrinkCells * FLOATS_PER_RUN);
       }
       return currentCapFloats;
     }
     const idealCells = Math.min(Math.ceil((neededCells * 1.25) / 256) * 256, neededCells + 2048);
-    const idealFloats = Math.max(neededFloats, idealCells * FLOATS_PER_INSTANCE);
+    const idealFloats = Math.max(neededFloats, idealCells * FLOATS_PER_RUN);
     const availBytes = Math.min(
       HEATMAP_GPU_CHART_BUDGET_BYTES - (this.reservedBytes + this.preparedLeaseBytes),
       HEATMAP_GPU_MODULE_BUDGET_BYTES - moduleReservedBytes,
@@ -417,7 +433,7 @@ export class HeatmapGpuRenderer {
     return idealFloats;
   }
 
-  private ensureResources(gl: WebGL2RenderingContext, cellCount: number, instanceCount: number): void {
+  private ensureResources(gl: WebGL2RenderingContext, cellCount: number, runCount: number): void {
     if (this.gl !== null && this.gl !== gl) this.dispose();
     if (this.disposed) throw new Error("Heatmap GPU renderer disposed during resource init");
     this.gl = gl;
@@ -467,29 +483,22 @@ export class HeatmapGpuRenderer {
         this.releaseReservation();
         throw new Error("Failed to create heatmap prototype buffers");
       }
-      const aUnit = gl.getAttribLocation(program, "a_unit");
       const aRect = gl.getAttribLocation(program, "a_rect");
-      const aTexel = gl.getAttribLocation(program, "a_texel");
-      const aAlphaScale = gl.getAttribLocation(program, "a_alphaScale");
-      const stride = FLOATS_PER_INSTANCE * 4;
+      const aRun = gl.getAttribLocation(program, "a_run");
+      const stride = FLOATS_PER_VERTEX * 4;
       try {
         gl.bindVertexArray(vao);
         gl.bindBuffer(gl.ARRAY_BUFFER, unitBuffer);
         gl.bufferData(gl.ARRAY_BUFFER, UNIT_QUAD, gl.STATIC_DRAW);
-        gl.enableVertexAttribArray(aUnit);
-        gl.vertexAttribPointer(aUnit, 2, gl.FLOAT, false, 0, 0);
         gl.bindBuffer(gl.ARRAY_BUFFER, instanceBuffer);
         gl.bufferData(gl.ARRAY_BUFFER, 1, gl.DYNAMIC_DRAW); // sized on first real upload
         gl.enableVertexAttribArray(aRect);
         gl.vertexAttribPointer(aRect, 4, gl.FLOAT, false, stride, 0);
-        gl.vertexAttribDivisor(aRect, 1);
-        gl.enableVertexAttribArray(aTexel);
-        gl.vertexAttribPointer(aTexel, 2, gl.FLOAT, false, stride, 16);
-        gl.vertexAttribDivisor(aTexel, 1);
-        gl.enableVertexAttribArray(aAlphaScale);
-        // 7-float interleave: x, y, w, h, u, v, alpha -> alpha byte offset is 24.
-        gl.vertexAttribPointer(aAlphaScale, 1, gl.FLOAT, false, stride, 24);
-        gl.vertexAttribDivisor(aAlphaScale, 1);
+        gl.vertexAttribDivisor(aRect, 0);
+        gl.enableVertexAttribArray(aRun);
+        // 7-float interleave: x, y, w, h, firstCell, signedCount, alpha -> run byte offset is 16.
+        gl.vertexAttribPointer(aRun, 3, gl.FLOAT, false, stride, 16);
+        gl.vertexAttribDivisor(aRun, 0);
         gl.bindVertexArray(null);
         gl.bindBuffer(gl.ARRAY_BUFFER, null);
       } catch (uploadError) {
@@ -595,11 +604,11 @@ export class HeatmapGpuRenderer {
     }
     if (!this.stagingValidity) throw new Error("Heatmap GPU staging missing");
 
-    const neededFloats = instanceCount * FLOATS_PER_INSTANCE;
+    const neededFloats = runCount * FLOATS_PER_RUN;
     const instanceBytes = neededFloats * 4;
     if (instanceBytes > MAX_INSTANCE_BYTES) throw new Error("Heatmap GPU prototype instance buffer out of budget");
-    const currentInstanceCells = Math.floor(this.instanceReservedFloats / FLOATS_PER_INSTANCE);
-    const shouldShrinkInstance = currentInstanceCells > 4096 && instanceCount * 4 < currentInstanceCells;
+    const currentInstanceCells = Math.floor(this.instanceReservedFloats / FLOATS_PER_RUN);
+    const shouldShrinkInstance = currentInstanceCells > 4096 && runCount * 4 < currentInstanceCells;
     if (!this.instanceData || this.instanceData.length < neededFloats || shouldShrinkInstance) {
       const capacity = this.targetInstanceCapacityFloats(neededFloats, this.instanceReservedFloats, 4);
       const oldBytes = this.instanceReservedFloats * 4;
@@ -727,35 +736,20 @@ export class HeatmapGpuRenderer {
 
   private uploadInstances(gl: WebGL2RenderingContext, frame: HeatmapGpuCellFrame): void {
     const data = this.instanceData!;
-    const total = frame.main.length + frame.extension.length;
-    const width = this.gridWidth;
-    const height = this.gridHeight;
     let offset = 0;
-    const writeRect = (rect: HeatmapGpuRect, cellIndex: number, alphaScale: number): void => {
-      const col = cellIndex % width;
-      const row = Math.floor(cellIndex / width);
-      data[offset] = rect.x;
-      data[offset + 1] = rect.yTop;
-      data[offset + 2] = rect.width;
-      data[offset + 3] = rect.height;
-      data[offset + 4] = (col + 0.5) / width;
-      data[offset + 5] = (row + 0.5) / height;
-      data[offset + 6] = alphaScale;
-      offset += FLOATS_PER_INSTANCE;
-    };
-    // Preserve the canvas paint order: each row's MAIN rect is immediately
-    // followed by its own EXT rect, never all MAINs then all EXTs, so
-    // overlapping sub-pixel columns composite exactly like the CPU overlay.
-    let nextExt = 0;
-    for (let i = 0; i < frame.main.length; i++) {
-      writeRect(frame.main[i], i, 1);
-      while (nextExt < frame.extension.length && frame.extension[nextExt].sourceMainIndex === i) {
-        writeRect(frame.extension[nextExt], frame.main.length + nextExt, 0.45);
-        nextExt++;
+    const total = walkHeatmapRuns(frame, (x, y, w, h, firstCell, signedCount, alphaScale) => {
+      for (let k = 0; k < VERTICES_PER_RUN; k++) {
+        data[offset] = x;
+        data[offset + 1] = y;
+        data[offset + 2] = w;
+        data[offset + 3] = h;
+        data[offset + 4] = firstCell;
+        data[offset + 5] = signedCount;
+        data[offset + 6] = alphaScale;
+        offset += FLOATS_PER_VERTEX;
       }
-    }
-    if (nextExt !== frame.extension.length) throw new Error("Heatmap GPU extension source index out of order");
-    if (offset !== total * FLOATS_PER_INSTANCE) throw new Error("Heatmap GPU instance accounting mismatch");
+    });
+    if (offset !== total * FLOATS_PER_RUN) throw new Error("Heatmap GPU instance accounting mismatch");
 
     const view = data.subarray(0, offset);
     const uploaded = this.uploadedInstances;
@@ -774,7 +768,7 @@ export class HeatmapGpuRenderer {
     }
     gl.bindBuffer(gl.ARRAY_BUFFER, this.instanceBuffer);
     const currentGpuFloats = Math.floor(this.gpuInstanceCapacityBytes / 4);
-    const currentGpuCells = Math.floor(currentGpuFloats / FLOATS_PER_INSTANCE);
+    const currentGpuCells = Math.floor(currentGpuFloats / FLOATS_PER_RUN);
     const needVboResize =
       view.byteLength > this.gpuInstanceCapacityBytes
       || (currentGpuCells > 4096 && total * 4 < currentGpuCells);
@@ -810,7 +804,7 @@ export class HeatmapGpuRenderer {
       throw new Error("Heatmap GPU instance buffer smaller than the draw contract");
     }
     const currentRetainedFloats = this.uploadedInstances ? this.uploadedInstances.length : 0;
-    const currentRetainedCells = Math.floor(currentRetainedFloats / FLOATS_PER_INSTANCE);
+    const currentRetainedCells = Math.floor(currentRetainedFloats / FLOATS_PER_RUN);
     const needRetainedResize =
       !this.uploadedInstances
       || this.uploadedInstances.length < view.length
@@ -828,6 +822,7 @@ export class HeatmapGpuRenderer {
     }
     this.uploadedInstances!.set(view, 0);
     this.uploadedInstancesFloats = view.length;
+    this.uploadedRunCount = total;
   }
 
   private draw(gl: WebGL2RenderingContext, frame: HeatmapGpuCellFrame, plot: HeatmapGpuPlot): void {
@@ -848,7 +843,7 @@ export class HeatmapGpuRenderer {
     }
     const logSpan = floor > 0 ? Math.log10(ceiling / floor) : (ceiling > 0 ? ceiling : 0);
     if (!Number.isFinite(logSpan)) throw new Error("Heatmap GPU draw: invalid log span");
-    const instanceCount = frame.main.length + frame.extension.length;
+    const runCount = this.uploadedRunCount;
 
     // Preflight the scissor and the instance-buffer contract BEFORE any
     // program/texture/blend state is touched, so a rejected frame leaves the
@@ -861,7 +856,7 @@ export class HeatmapGpuRenderer {
       || scissorX + scissorW > bufferWidth || scissorY + scissorH > bufferHeight) {
       throw new Error("Heatmap GPU draw: plot bounds outside the framebuffer");
     }
-    if (instanceCount * FLOATS_PER_INSTANCE * 4 > this.gpuInstanceCapacityBytes) {
+    if (!(runCount > 0) || runCount * FLOATS_PER_RUN * 4 > this.gpuInstanceCapacityBytes) {
       throw new Error("Heatmap GPU draw: instance buffer smaller than the draw contract");
     }
 
@@ -897,7 +892,7 @@ export class HeatmapGpuRenderer {
       gl.blendFuncSeparate(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA, gl.ONE, gl.ONE_MINUS_SRC_ALPHA);
       gl.scissor(scissorX, scissorY, scissorW, scissorH);
       gl.enable(gl.SCISSOR_TEST);
-      gl.drawArraysInstanced(gl.TRIANGLES, 0, 6, instanceCount);
+      gl.drawArrays(gl.TRIANGLES, 0, runCount * VERTICES_PER_RUN);
     } finally {
       // Explicit state exit back to the FootprintRenderer/QuadBatch contract,
       // guaranteed also on exceptions: no VAO/program/buffer/texture/scissor
@@ -917,4 +912,79 @@ export class HeatmapGpuRenderer {
       gl.useProgram(null);
     }
   }
+}
+
+type HeatmapRunEmit = (
+  x: number, y: number, width: number, height: number,
+  firstCell: number, signedCount: number, alphaScale: number,
+) => void;
+
+/** +1 when `cur` sits directly below `prev`, -1 directly above, 0 when they cannot share a run. */
+function runAdjacency(prev: HeatmapGpuRect, cur: HeatmapGpuRect, runHeight: number): number {
+  if (cur.x !== prev.x || cur.width !== prev.width) return 0;
+  if (Math.abs(cur.height - runHeight) > RUN_MERGE_EPSILON * runHeight) return 0;
+  const tolerance = RUN_MERGE_EPSILON * Math.max(1, Math.abs(cur.yTop));
+  if (Math.abs(cur.yTop - (prev.yTop + prev.height)) <= tolerance) return 1;
+  if (Math.abs(prev.yTop - (cur.yTop + cur.height)) <= tolerance) return -1;
+  return 0;
+}
+
+/**
+ * Walks the frame in canvas paint order (each MAIN rect immediately followed
+ * by its own EXT rects) and merges consecutive MAIN cells that stack exactly
+ * in one column into a run. Returns the run count; with `emit` it also
+ * reports each run's quad, first grid index, signed cell count (positive when
+ * grid indices grow downward) and alpha scale. A single cell keeps its own
+ * rect unchanged. EXT rects never merge, so paint order is preserved.
+ */
+export function walkHeatmapRuns(frame: HeatmapGpuCellFrame, emit: HeatmapRunEmit | null): number {
+  const main = frame.main;
+  const extension = frame.extension;
+  const mainCount = main.length;
+  let runs = 0;
+  let runStart = -1;
+  let runCount = 0;
+  let runDir = 0;
+  const flush = (): void => {
+    if (runCount === 0) return;
+    runs++;
+    if (emit) {
+      const first = main[runStart];
+      if (runCount === 1) {
+        emit(first.x, first.yTop, first.width, first.height, runStart, 1, 1);
+      } else {
+        const last = main[runStart + runCount - 1];
+        const top = runDir > 0 ? first : last;
+        const bottom = runDir > 0 ? last : first;
+        emit(top.x, top.yTop, top.width, bottom.yTop + bottom.height - top.yTop, runStart, runDir * runCount, 1);
+      }
+    }
+    runCount = 0;
+    runDir = 0;
+  };
+  let nextExt = 0;
+  for (let i = 0; i < mainCount; i++) {
+    const rect = main[i];
+    const dir = runCount > 0 ? runAdjacency(main[i - 1], rect, main[runStart].height) : 0;
+    if (dir !== 0 && (runDir === 0 || runDir === dir)) {
+      runCount++;
+      runDir = dir;
+    } else {
+      flush();
+      runStart = i;
+      runCount = 1;
+    }
+    if (nextExt < extension.length && extension[nextExt].sourceMainIndex === i) {
+      flush();
+      while (nextExt < extension.length && extension[nextExt].sourceMainIndex === i) {
+        const ext = extension[nextExt];
+        runs++;
+        if (emit) emit(ext.x, ext.yTop, ext.width, ext.height, mainCount + nextExt, 1, 0.45);
+        nextExt++;
+      }
+    }
+  }
+  flush();
+  if (nextExt !== extension.length) throw new Error("Heatmap GPU extension source index out of order");
+  return runs;
 }

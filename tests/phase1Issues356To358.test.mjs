@@ -136,7 +136,7 @@ function makeFakeGl() {
     blendFunc: noop,
     blendFuncSeparate: noop,
     scissor: noop,
-    drawArraysInstanced: noop,
+    drawArrays: noop,
   };
   return {
     gl,

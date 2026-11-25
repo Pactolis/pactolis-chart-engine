@@ -32,7 +32,7 @@ function fixture() {
     getProgramParameter(p, key) { assert.ok(p); assert.equal(key, gl.LINK_STATUS); return true; },
     getProgramInfoLog: () => "", deleteProgram() {},
     getUniformLocation: (p, name) => ({ name }),
-    getAttribLocation: (p, name) => ["a_unit", "a_rect", "a_texel", "a_alphaScale"].indexOf(name),
+    getAttribLocation: (p, name) => ["a_rect", "a_run"].indexOf(name),
     createVertexArray: () => ({}), bindVertexArray() {}, deleteVertexArray() {},
     createBuffer: () => ({}),
     bindBuffer(target, value) { assert.equal(target, gl.ARRAY_BUFFER); buffer = value; },

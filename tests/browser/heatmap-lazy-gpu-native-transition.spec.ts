@@ -106,7 +106,7 @@ async function installFixture(page: Page): Promise<string> {
     Object.defineProperty(window, "__heatmapNativeProbe", { value: state, configurable: false });
     const proto = WebGL2RenderingContext.prototype;
     const shaderSource = proto.shaderSource, attachShader = proto.attachShader;
-    const useProgram = proto.useProgram, draw = proto.drawArraysInstanced, readPixels = proto.readPixels;
+    const useProgram = proto.useProgram, draw = proto.drawArrays, readPixels = proto.readPixels;
     proto.shaderSource = function (shader, source) {
       state.shaderSources.set(shader, source);
       return shaderSource.call(this, shader, source);
@@ -126,7 +126,7 @@ async function installFixture(page: Page): Promise<string> {
       }
       return useProgram.call(this, program);
     };
-    proto.drawArraysInstanced = function (...args) {
+    proto.drawArrays = function (...args) {
       const p = state.currentByContext.get(this);
       const sources = p ? (state.programShaders.get(p) ?? []).map((s) => state.shaderSources.get(s) ?? "") : [];
       if (state.captureActive) {

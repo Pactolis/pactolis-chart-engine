@@ -94,7 +94,7 @@ function makeGlMock() {
     blendFunc: noop,
     blendFuncSeparate: noop,
     scissor: noop,
-    drawArraysInstanced: noop,
+    drawArrays: noop,
   };
   return { gl, texSubCalls, bufferSubCalls };
 }
