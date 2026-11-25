@@ -149,20 +149,20 @@ test("step(bar) opens, liquidates, and proportionally scales negative dOI", () =
   assert.ok(Math.abs(sumL - 60) < 1e-9);
   assert.ok(Math.abs(sumS - 40) < 1e-9);
 
-  // Bar 2: spike down to l=89 liquidates 20x/25x/50x/100x longs (liq >= 90.4), leaving 5x & 10x (0.25 + 0.30 = 0.55 of 60 = 33)
+  // Bar 2: spike down to l=89 liquidates 10x/20x/25x/50x/100x longs (liq >= 90.4), leaving 5x (0.25 of 60 = 15)
   const r2 = model.step({ t: 1_709_251_500_000, h: 100.2, l: 89, c: 95, v: 1000, tb: 400, oi: 200 });
-  assert.ok(r2.liqL > 26 && r2.liqL < 28, `expected ~27 liquidated long coins, got ${r2.liqL}`);
+  assert.ok(Math.abs(r2.liqL - 45) < 1e-6, `expected 45 liquidated long coins, got ${r2.liqL}`);
   assert.equal(r2.liqS, 0);
 
-  // Bar 3: dOI = -50 (after 0 liq on this bar) reduces both longb and shortb proportionally
-  const r3 = model.step({ t: 1_709_251_800_000, h: 96, l: 94, c: 95, v: 1000, tb: 500, oi: 150 });
-  assert.equal(r3.dOi, -50);
+  // Bar 3: dOI = -20 (after 0 liq on this bar) reduces both longb and shortb proportionally
+  const r3 = model.step({ t: 1_709_251_800_000, h: 96, l: 94, c: 95, v: 1000, tb: 500, oi: 180 });
+  assert.equal(r3.dOi, -20);
   book = model.book();
   sumL = book.longUsd.reduce((a, b) => a + b, 0) / book.lastClose;
   sumS = book.shortUsd.reduce((a, b) => a + b, 0) / book.lastClose;
-  // Remaining long = 33 - 25 = 8; remaining short = 40 - 25 = 15
-  assert.ok(Math.abs(sumL - 8) < 1e-6);
-  assert.ok(Math.abs(sumS - 15) < 1e-6);
+  // Remaining long = 15 - 10 = 5; remaining short = 40 - 10 = 30
+  assert.ok(Math.abs(sumL - 5) < 1e-6);
+  assert.ok(Math.abs(sumS - 30) < 1e-6);
 });
 
 test("dynamic bucket expansion grows below p0 and above nbk", () => {
@@ -220,14 +220,14 @@ test("golden fixture matches BE #551 math within < 1e-5 relative error", () => {
 
   // Analytical BE #551 values:
   // After bar 0: 60 long coins (5x:15, 10x:18, 20x:12, 25x:6, 50x:6, 100x:3), 40 short coins
-  // After bar 1 (l=89): 20x..100x longs liquidated = 27 coins; remaining long = 33 coins, short = 40 coins
-  // After bar 2 (dOI=-10, b=0.5): 5 coins removed from long -> 28 coins; 5 from short -> 35 coins
-  // At lastClose=95: longUsd = 28 * 95 = 2660, shortUsd = 35 * 95 = 3325
-  assert.ok(Math.abs(r2.liqL - 27) / 27 < 1e-5);
+  // After bar 1 (l=89): 10x..100x longs liquidated = 45 coins; remaining long = 15 coins, short = 40 coins
+  // After bar 2 (dOI=-10, b=0.5): 5 coins removed from long -> 10 coins; 5 from short -> 35 coins
+  // At lastClose=95: longUsd = 10 * 95 = 950, shortUsd = 35 * 95 = 3325
+  assert.ok(Math.abs(r2.liqL - 45) / 45 < 1e-5);
   const book = sim.book();
   const totalLongUsd = book.longUsd.reduce((a, b) => a + b, 0);
   const totalShortUsd = book.shortUsd.reduce((a, b) => a + b, 0);
-  assert.ok(Math.abs(totalLongUsd - 2660) / 2660 < 1e-5);
+  assert.ok(Math.abs(totalLongUsd - 950) / 950 < 1e-5);
   assert.ok(Math.abs(totalShortUsd - 3325) / 3325 < 1e-5);
 
   // Now encode into f32 LE base64 (like BE #551 storage.rs) and resume in a second model instance
@@ -340,10 +340,13 @@ test("auto source selection, V1 gate, status badges, and model hover readout", (
   });
 
   const { canvas: c1, fills: f1, texts: t1 } = canvasRecorder();
-  const ctx1 = makeCtx(c1, { source: "auto", rangePct: 100 }, { x: 200, y: 187, visible: true }, 74_430, "BINANCE_FUTURES:wifusdt");
-  const p1 = prepareLiquidationProfile(ctx1);
+  const ctx1Pre = makeCtx(c1, { source: "auto", rangePct: 100 }, undefined, 74_430, "BINANCE_FUTURES:wifusdt");
+  const p1 = prepareLiquidationProfile(ctx1Pre);
   assert.equal(p1.meta.activeSource, "model");
   assert.equal(p1.meta.replayedBars, 1);
+  assert.ok(p1.meta.clusters.length > 0);
+  const hoverY = 20 + ((80_000 - p1.meta.clusters[0].alignedPrice) / 10_000) * 300;
+  const ctx1 = makeCtx(c1, { source: "auto", rangePct: 100 }, { x: 200, y: hoverY, visible: true }, 74_430, "BINANCE_FUTURES:wifusdt");
   drawLiquidationProfileOverlay(ctx1, p1);
   assert.ok(t1.some((t) => t.text === "Model · tahmini · Binance"));
   assert.ok(!t1.some((t) => t.text === "Hyperliquid · gerçek pozisyon"));
