@@ -39,6 +39,30 @@ const CHART_LOCALE_FALLBACKS: Readonly<Record<string, { tr: string; en: string }
     tr: "Kullanılamıyor: gerçek footprint verisi gerekir",
     en: "Unavailable: exact footprint data required",
   },
+  "indicator.volumeProfile.placement": {
+    tr: "Yerleşim",
+    en: "Placement",
+  },
+  "indicator.volumeProfile.placement.left": {
+    tr: "Sol",
+    en: "Left",
+  },
+  "indicator.volumeProfile.placement.right": {
+    tr: "Sağ",
+    en: "Right",
+  },
+  "draw.fixedRangeVolumeProfile.placement": {
+    tr: "Profil Yerleşimi",
+    en: "Profile Placement",
+  },
+  "draw.fixedRangeVolumeProfile.placement.left": {
+    tr: "Aralık Başlangıcı (Sol)",
+    en: "Range Start (Left)",
+  },
+  "draw.fixedRangeVolumeProfile.placement.right": {
+    tr: "Aralık Sonu (Sağ)",
+    en: "Range End (Right)",
+  },
 };
 
 let configured: ChartLocale | null = null;

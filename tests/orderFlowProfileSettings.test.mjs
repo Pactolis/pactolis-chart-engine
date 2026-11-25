@@ -5,11 +5,19 @@ import {
   normalizeOrderFlowProfileSettings,
   normalizeFixedRangeOrderFlowProfileSettings,
 } from "../dist/core/orderFlowProfileSettings.js";
+import {
+  DRAWING_STYLE_PRESET_KEYS,
+  ORDER_FLOW_PROFILE_STYLE_KEYS,
+  applyStylePreset,
+  drawingStylePresetFromDrawing,
+  duplicateDrawing,
+} from "../dist/features/drawings/drawingPrimitives.js";
 
 test("new profile defaults are volume total with static independent levels", () => {
   assert.deepEqual(DEFAULT_ORDER_FLOW_PROFILE_SETTINGS, {
     profileMetric: "volume",
     profileSide: "total",
+    profilePlacement: "right",
     pocMode: "static",
     vahMode: "static",
     valMode: "static",
@@ -79,4 +87,51 @@ test("unsupported metrics keep hidden level preferences without enabling level c
   assert.equal(migrated.profileMetric, "delta");
   assert.equal(migrated.profileSide, "buy");
   assert.equal(migrated.pocMode, "both");
+});
+
+test("profilePlacement defaults to right for indicator and left for fixed-range with invalid fallback", () => {
+  assert.equal(normalizeOrderFlowProfileSettings({}).profilePlacement, "right");
+  assert.equal(normalizeOrderFlowProfileSettings({ profilePlacement: "left" }).profilePlacement, "left");
+  assert.equal(normalizeOrderFlowProfileSettings({ profilePlacement: "right" }).profilePlacement, "right");
+  assert.equal(normalizeOrderFlowProfileSettings({ profilePlacement: "center" }).profilePlacement, "right");
+  assert.equal(normalizeOrderFlowProfileSettings({ profilePlacement: 42 }).profilePlacement, "right");
+
+  assert.equal(normalizeFixedRangeOrderFlowProfileSettings({}).profilePlacement, "left");
+  assert.equal(normalizeFixedRangeOrderFlowProfileSettings({ profilePlacement: "right" }).profilePlacement, "right");
+  assert.equal(normalizeFixedRangeOrderFlowProfileSettings({ profilePlacement: "left" }).profilePlacement, "left");
+  assert.equal(normalizeFixedRangeOrderFlowProfileSettings({ profilePlacement: "center" }).profilePlacement, "left");
+  assert.equal(normalizeFixedRangeOrderFlowProfileSettings({ profilePlacement: null }).profilePlacement, "left");
+});
+
+test("drawing style preset keys include profilePlacement and preserve it across presets and duplicates", () => {
+  assert.ok(ORDER_FLOW_PROFILE_STYLE_KEYS.includes("profilePlacement"));
+  assert.ok(DRAWING_STYLE_PRESET_KEYS.includes("profilePlacement"));
+
+  const source = {
+    id: "frvp-1",
+    type: "fixed-range-volume-profile",
+    points: [
+      { time: 1_000, price: 100 },
+      { time: 2_000, price: 105 },
+    ],
+    color: "#ffffff",
+    lineWidth: 1,
+    locked: false,
+    visible: true,
+    market: "BINANCE_FUTURES:btcusdt",
+    profilePlacement: "right",
+  };
+  const preset = drawingStylePresetFromDrawing(source);
+  assert.equal(preset.profilePlacement, "right");
+
+  const target = {
+    ...source,
+    id: "frvp-2",
+    profilePlacement: "left",
+  };
+  applyStylePreset(target, preset);
+  assert.equal(target.profilePlacement, "right");
+
+  const copy = duplicateDrawing(source, [source]);
+  assert.equal(copy.profilePlacement, "right");
 });
