@@ -316,10 +316,10 @@ test("luminance palette increases brightness monotonically, keeps peak transluce
     getProgramParameter: () => true,
     getShaderInfoLog: () => "",
     getProgramInfoLog: () => "",
-    getAttribLocation: (_p, name) => ["a_unit", "a_rect", "a_texel", "a_alphaScale"].indexOf(name),
+    getAttribLocation: (_p, name) => ["a_rect", "a_run"].indexOf(name),
     getUniformLocation: (_p, name) => ({ name }),
     uniform1f: (loc, v) => { uniformValues.set(loc.name, v); },
-    drawArraysInstanced: () => {},
+    drawArrays: () => {},
   };
   const gl = new Proxy(modelled, {
     get(target, key) {
@@ -932,10 +932,10 @@ function makeWebGlMock() {
     getProgramParameter: () => true,
     getShaderInfoLog: () => "",
     getProgramInfoLog: () => "",
-    getAttribLocation: (_p, name) => ["a_unit", "a_rect", "a_texel", "a_alphaScale"].indexOf(name),
+    getAttribLocation: (_p, name) => ["a_rect", "a_run"].indexOf(name),
     getUniformLocation: (_p, name) => ({ name }),
     uniform1f: (loc, v) => { uniformValues.set(loc.name, v); },
-    drawArraysInstanced: () => {},
+    drawArrays: () => {},
   };
   const gl = new Proxy(modelled, {
     get(target, key) {
