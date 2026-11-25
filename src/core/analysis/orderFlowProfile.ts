@@ -1,11 +1,13 @@
 import { quantizeToStep } from "../priceStep.js";
 import type { FootprintBar, FootprintCell } from "../types.js";
+import type { OiDeltaDisplay } from "../orderFlowProfileSettings.js";
 
 export type ProfileMetric =
   | "volume"
   | "delta"
   | "trade-count"
-  | "average-trade-size";
+  | "average-trade-size"
+  | "oi-delta";
 
 export type ProfileSide = "total" | "buy" | "sell";
 
@@ -24,6 +26,7 @@ const ESTIMATED_PROFILE_CAPABILITIES: OrderFlowProfileCapabilities = Object.free
     delta: false,
     "trade-count": false,
     "average-trade-size": false,
+    "oi-delta": true,
   }),
   sides: Object.freeze({ total: true, buy: false, sell: false }),
 });
@@ -34,11 +37,12 @@ const BOUNDARY_SNAP_EPSILON = 1e-10;
 export interface OrderFlowProfileOptions {
   profileMetric?: ProfileMetric;
   profileSide?: ProfileSide;
+  oiDeltaDisplay?: OiDeltaDisplay;
   valueAreaPercent?: number;
   developing?: boolean;
   /** Price bin step used for deterministic OHLCV distribution when `allowOhlcvEstimate` is true. */
   priceStep?: number;
-  /** When true, an all-OHLCV window can fall back to OHLCV distribution (`volume`/`total` only). */
+  /** When true, an all-OHLCV window can fall back to OHLCV distribution (`volume`/`total` and `oi-delta`). */
   allowOhlcvEstimate?: boolean;
 }
 
@@ -53,6 +57,8 @@ export interface OrderFlowProfileLevel {
   value: number | null;
   buyValue: number | null;
   sellValue: number | null;
+  oiOpen?: number;
+  oiClose?: number;
   magnitude: number | null;
   complete: boolean;
 }
@@ -107,6 +113,8 @@ export interface AccumulatedLevel {
   buyVol: number;
   sellVol: number;
   estimatedVol: number;
+  oiOpen: number;
+  oiClose: number;
   totalCount: number;
   buyCount: number;
   sellCount: number;
@@ -141,6 +149,7 @@ interface ProfileSnapshot {
 interface ResolvedProfileOptions {
   profileMetric: ProfileMetric;
   profileSide: ProfileSide;
+  oiDeltaDisplay: OiDeltaDisplay;
   valueAreaPercent: number;
   developing: boolean;
   priceStep: number | undefined;
@@ -172,7 +181,8 @@ function resolveProfileOptions(options: OrderFlowProfileOptions): ResolvedProfil
     : undefined;
   return {
     profileMetric,
-    profileSide: profileMetric === "delta" ? "total" : requestedSide,
+    profileSide: profileMetric === "delta" || profileMetric === "oi-delta" ? "total" : requestedSide,
+    oiDeltaDisplay: options.oiDeltaDisplay === "split" ? "split" : "net",
     valueAreaPercent: clamp(options.valueAreaPercent ?? 0.7, 0.01, 0.99),
     developing: options.developing === true,
     priceStep,
@@ -261,7 +271,7 @@ export function accumulateOrderFlowProfileBar(
     }
   }
   if (resolved.developing) {
-    const snapshot = buildSnapshot(acc, resolved.profileMetric, resolved.profileSide, resolved.valueAreaPercent);
+    const snapshot = buildSnapshot(acc, resolved.profileMetric, resolved.profileSide, resolved.valueAreaPercent, resolved.oiDeltaDisplay);
     acc.developing.push({
       time: bar.startTime,
       poc: snapshot.dataComplete ? snapshot.poc : null,
@@ -272,12 +282,65 @@ export function accumulateOrderFlowProfileBar(
   }
 }
 
+/**
+ * Feeds one bar and its per-bar ΔOI into the profile accumulator.
+ * Distributes ΔOI across footprint cells proportionally to `totalVol`, or uniformly across
+ * `[low, high]` bins when the bar has no footprint cells and `allowOhlcvEstimate` is enabled.
+ * Returns `true` if the bar was covered and accumulated, `false` if skipped.
+ */
+export function accumulateOrderFlowOiDeltaBar(
+  acc: OrderFlowProfileAccumulator,
+  bar: FootprintBar,
+  barDeltaOi: number | null,
+  options: OrderFlowProfileOptions = {},
+): boolean {
+  const resolved = resolveProfileOptions({ ...options, profileMetric: "oi-delta" });
+  acc.fromTime = acc.fromTime === null ? bar.startTime : Math.min(acc.fromTime, bar.startTime);
+  acc.toTime = acc.toTime === null ? bar.startTime : Math.max(acc.toTime, bar.startTime);
+  if (barDeltaOi === null || !Number.isFinite(barDeltaOi)) {
+    return false;
+  }
+
+  if (bar.cells.size > 0) {
+    let totalCellVol = 0;
+    for (const cell of bar.cells.values()) {
+      if (isValidVolume(cell.buyVol) && isValidVolume(cell.sellVol)) {
+        totalCellVol += cell.buyVol + cell.sellVol;
+      }
+    }
+    if (totalCellVol > 0) {
+      acc.exactBarCount += 1;
+      for (const cell of bar.cells.values()) {
+        if (!isValidVolume(cell.buyVol) || !isValidVolume(cell.sellVol)) continue;
+        const cellVol = cell.buyVol + cell.sellVol;
+        if (!(cellVol > 0)) continue;
+        addOiDeltaToLevel(acc.byPrice, cell.priceBin, barDeltaOi * (cellVol / totalCellVol));
+      }
+      return true;
+    }
+  }
+
+  if (
+    resolved.allowOhlcvEstimate
+    && resolved.priceStep !== undefined
+    && isValidPriceRange(bar.low, bar.high)
+  ) {
+    acc.estimatedBarCount += 1;
+    distributeUniformOhlcvBins(bar.low, bar.high, resolved.priceStep, (priceBin, fraction) => {
+      addOiDeltaToLevel(acc.byPrice, priceBin, barDeltaOi * fraction);
+    });
+    return true;
+  }
+
+  return false;
+}
+
 export function finishOrderFlowProfile(
   acc: OrderFlowProfileAccumulator,
   options: OrderFlowProfileOptions = {},
 ): OrderFlowProfileResult {
   const resolved = resolveProfileOptions(options);
-  const snapshot = buildSnapshot(acc, resolved.profileMetric, resolved.profileSide, resolved.valueAreaPercent);
+  const snapshot = buildSnapshot(acc, resolved.profileMetric, resolved.profileSide, resolved.valueAreaPercent, resolved.oiDeltaDisplay);
   return {
     profileMetric: resolved.profileMetric,
     profileSide: resolved.profileSide,
@@ -306,6 +369,8 @@ function getOrCreateLevel(byPrice: Map<number, AccumulatedLevel>, priceBin: numb
       buyVol: 0,
       sellVol: 0,
       estimatedVol: 0,
+      oiOpen: 0,
+      oiClose: 0,
       totalCount: 0,
       buyCount: 0,
       sellCount: 0,
@@ -319,6 +384,16 @@ function getOrCreateLevel(byPrice: Map<number, AccumulatedLevel>, priceBin: numb
   return level;
 }
 
+function addOiDeltaToLevel(byPrice: Map<number, AccumulatedLevel>, priceBin: number, deltaOi: number): void {
+  if (!Number.isFinite(deltaOi)) return;
+  const level = getOrCreateLevel(byPrice, priceBin);
+  if (deltaOi >= 0) {
+    level.oiOpen += deltaOi;
+  } else {
+    level.oiClose += deltaOi;
+  }
+}
+
 function addEstimatedVolume(byPrice: Map<number, AccumulatedLevel>, priceBin: number, volume: number): void {
   if (!(volume > 0) || !Number.isFinite(volume)) return;
   const level = getOrCreateLevel(byPrice, priceBin);
@@ -329,20 +404,15 @@ function addEstimatedVolume(byPrice: Map<number, AccumulatedLevel>, priceBin: nu
   level.sellCountComplete = false;
 }
 
-/**
- * Distributes a bar's OHLCV volume uniformly across `priceStep` bins by [low, high] overlap.
- * Never fabricates taker buy/sell or trade-count splits; preserves total volume deterministically.
- */
-function accumulateEstimatedOhlcvBar(
-  byPrice: Map<number, AccumulatedLevel>,
+function distributeUniformOhlcvBins(
   low: number,
   high: number,
-  volume: number,
   step: number,
+  onBin: (priceBin: number, fraction: number) => void,
 ): void {
   const range = high - low;
   if (!(range > 0)) {
-    addEstimatedVolume(byPrice, quantizeToStep(low, step), volume);
+    onBin(quantizeToStep(low, step), 1);
     return;
   }
 
@@ -357,7 +427,7 @@ function accumulateEstimatedOhlcvBar(
   const maxTick = highOnBoundary ? highNearest - 1 : Math.floor(uHigh);
 
   if (maxTick <= lowTick) {
-    addEstimatedVolume(byPrice, quantizeToStep(lowTick * step, step), volume);
+    onBin(quantizeToStep(lowTick * step, step), 1);
     return;
   }
 
@@ -365,7 +435,7 @@ function accumulateEstimatedOhlcvBar(
   const clampedHigh = Math.min(uHigh, maxTick + 1);
   const effectiveSpan = clampedHigh - clampedLow;
   if (!(effectiveSpan > 0)) {
-    addEstimatedVolume(byPrice, quantizeToStep(lowTick * step, step), volume);
+    onBin(quantizeToStep(lowTick * step, step), 1);
     return;
   }
 
@@ -378,9 +448,24 @@ function accumulateEstimatedOhlcvBar(
     const groupEnd = Math.min(maxTick + 1, tick + stride);
     const overlap = Math.min(clampedHigh, groupEnd) - Math.max(clampedLow, tick);
     if (!(overlap > 0)) continue;
-    const share = volume * (overlap / effectiveSpan);
-    addEstimatedVolume(byPrice, quantizeToStep(tick * step, step), share);
+    onBin(quantizeToStep(tick * step, step), overlap / effectiveSpan);
   }
+}
+
+/**
+ * Distributes a bar's OHLCV volume uniformly across `priceStep` bins by [low, high] overlap.
+ * Never fabricates taker buy/sell or trade-count splits; preserves total volume deterministically.
+ */
+function accumulateEstimatedOhlcvBar(
+  byPrice: Map<number, AccumulatedLevel>,
+  low: number,
+  high: number,
+  volume: number,
+  step: number,
+): void {
+  distributeUniformOhlcvBins(low, high, step, (priceBin, fraction) => {
+    addEstimatedVolume(byPrice, priceBin, volume * fraction);
+  });
 }
 
 function accumulateCell(
@@ -472,11 +557,16 @@ function buildSnapshot(
   metric: ProfileMetric,
   side: ProfileSide,
   valueAreaPercent: number,
+  oiDeltaDisplay: OiDeltaDisplay = "net",
 ): ProfileSnapshot {
   const provenance = resolveProvenance(acc.exactBarCount, acc.estimatedBarCount);
   const isEstimated = provenance === "estimated" || provenance === "mixed";
 
-  if (acc.hasUnsupportedEstimate || (isEstimated && (metric !== "volume" || side !== "total"))) {
+  if (
+    acc.hasUnsupportedEstimate
+    || (isEstimated && metric !== "volume" && metric !== "oi-delta")
+    || (isEstimated && metric === "volume" && side !== "total")
+  ) {
     return {
       levels: [],
       summaryValue: null,
@@ -502,7 +592,7 @@ function buildSnapshot(
 
   const levels = [...acc.byPrice.values()]
     .sort((a, b) => a.priceBin - b.priceBin)
-    .map((raw) => materializeLevel(raw, metric, side, isEstimated));
+    .map((raw) => materializeLevel(raw, metric, side, isEstimated, oiDeltaDisplay));
 
   const totalBuyVolume = levels.reduce((sum, level) => sum + level.buyVol, 0);
   const totalSellVolume = levels.reduce((sum, level) => sum + level.sellVol, 0);
@@ -513,19 +603,21 @@ function buildSnapshot(
   const totalBuyCount = isEstimated ? null : sumNullable(levels, "buyCount");
   const totalSellCount = isEstimated ? null : sumNullable(levels, "sellCount");
   const dataComplete = levels.every((level) => level.complete);
-  const summaryValue = dataComplete
-    ? isEstimated
-      ? totalVolume
-      : calculateSummary(
-          metric,
-          side,
-          totalBuyVolume,
-          totalSellVolume,
-          totalTradeCount,
-          totalBuyCount,
-          totalSellCount,
-        )
-    : null;
+  const summaryValue = metric === "oi-delta"
+    ? levels.reduce((sum, level) => sum + (level.value ?? 0), 0)
+    : dataComplete
+      ? isEstimated
+        ? totalVolume
+        : calculateSummary(
+            metric,
+            side,
+            totalBuyVolume,
+            totalSellVolume,
+            totalTradeCount,
+            totalBuyCount,
+            totalSellCount,
+          )
+      : null;
 
   const supportsLevels = metric === "volume" || metric === "trade-count";
   const staticLevels = supportsLevels && dataComplete
@@ -559,8 +651,31 @@ function materializeLevel(
   metric: ProfileMetric,
   side: ProfileSide,
   isEstimated: boolean,
+  oiDeltaDisplay: OiDeltaDisplay = "net",
 ): OrderFlowProfileLevel {
   const totalVol = isEstimated ? raw.buyVol + raw.sellVol + raw.estimatedVol : raw.buyVol + raw.sellVol;
+  if (metric === "oi-delta") {
+    const net = raw.oiOpen + raw.oiClose;
+    const magnitude = oiDeltaDisplay === "split"
+      ? Math.max(raw.oiOpen, Math.abs(raw.oiClose))
+      : Math.abs(net);
+    return {
+      priceBin: raw.priceBin,
+      buyVol: raw.buyVol,
+      sellVol: raw.sellVol,
+      totalVol,
+      buyCount: null,
+      sellCount: null,
+      totalCount: null,
+      value: net,
+      buyValue: raw.oiOpen,
+      sellValue: raw.oiClose,
+      oiOpen: raw.oiOpen,
+      oiClose: raw.oiClose,
+      magnitude,
+      complete: true,
+    };
+  }
   const totalCount = !isEstimated && raw.totalCountComplete ? raw.totalCount : null;
   const buyCount = !isEstimated && raw.buyCountComplete ? raw.buyCount : null;
   const sellCount = !isEstimated && raw.sellCountComplete ? raw.sellCount : null;
@@ -624,6 +739,11 @@ function materializeLevel(
       value = complete ? selectedVolume / selectedCount! : null;
       if (side === "buy") buyValue = value;
       if (side === "sell") sellValue = value;
+      break;
+    case "oi-delta":
+      value = raw.oiOpen + raw.oiClose;
+      buyValue = raw.oiOpen;
+      sellValue = raw.oiClose;
       break;
   }
 
@@ -712,7 +832,7 @@ function sumNullable(
 }
 
 function normalizeMetric(metric: ProfileMetric | undefined): ProfileMetric {
-  return metric === "delta" || metric === "trade-count" || metric === "average-trade-size"
+  return metric === "delta" || metric === "trade-count" || metric === "average-trade-size" || metric === "oi-delta"
     ? metric
     : "volume";
 }

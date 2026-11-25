@@ -91,6 +91,46 @@ const CHART_LOCALE_FALLBACKS: Readonly<Record<string, { tr: string; en: string }
     tr: "Geçmiş başlangıcı: {time}",
     en: "History started: {time}",
   },
+  "indicator.volumeProfile.metric.oiDelta": {
+    tr: "OI Delta",
+    en: "OI Delta",
+  },
+  "indicator.volumeProfile.oiDeltaDisplay": {
+    tr: "OI Delta Görünümü",
+    en: "OI Delta Display",
+  },
+  "indicator.volumeProfile.oiDeltaDisplay.net": {
+    tr: "Net",
+    en: "Net",
+  },
+  "indicator.volumeProfile.oiDeltaDisplay.split": {
+    tr: "Açılış / Kapanış",
+    en: "Opened / Closed",
+  },
+  "indicator.volumeProfile.oiVenues": {
+    tr: "OI Borsaları",
+    en: "OI Venues",
+  },
+  "indicator.volumeProfile.oiNoData": {
+    tr: "OI verisi yok",
+    en: "No OI data",
+  },
+  "indicator.volumeProfile.oiLoading": {
+    tr: "OI yükleniyor...",
+    en: "Loading OI...",
+  },
+  "indicator.volumeProfile.oiEstimated": {
+    tr: "tahmini",
+    en: "estimated",
+  },
+  "indicator.volumeProfile.oiCoverage": {
+    tr: "kapsama %{percent}",
+    en: "coverage {percent}%",
+  },
+  "indicator.volumeProfile.oiRecordingSince": {
+    tr: "OI kaydı {time}'dan beri · kapsama %{percent}",
+    en: "OI recorded since {time} · coverage {percent}%",
+  },
 };
 
 let configured: ChartLocale | null = null;
