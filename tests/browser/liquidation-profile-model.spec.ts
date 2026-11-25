@@ -178,35 +178,56 @@ test("Liquidation Profile auto mode renders Hyperliquid badge on BTC and Model b
       const rt = harness.getChartRuntime(panelId)!;
 
       const texts: string[] = [];
-      const annotationCanvas = root.querySelector('[data-chart-surface="annotation"]') as HTMLCanvasElement;
-      const ctx2d = annotationCanvas.getContext("2d")!;
-      const origFillText = ctx2d.fillText.bind(ctx2d);
-      ctx2d.fillText = function (text: string, x: number, y: number, maxWidth?: number) {
+      const origCanvasFillText = CanvasRenderingContext2D.prototype.fillText;
+      const OffscreenProto = typeof OffscreenCanvasRenderingContext2D !== "undefined"
+        ? OffscreenCanvasRenderingContext2D.prototype
+        : null;
+      const origOffscreenFillText = OffscreenProto?.fillText;
+
+      CanvasRenderingContext2D.prototype.fillText = function (text: string, x: number, y: number, maxWidth?: number) {
         texts.push(String(text));
-        return maxWidth === undefined ? origFillText(text, x, y) : origFillText(text, x, y, maxWidth);
+        return maxWidth === undefined ? origCanvasFillText.call(this, text, x, y) : origCanvasFillText.call(this, text, x, y, maxWidth);
       };
+      if (OffscreenProto && origOffscreenFillText) {
+        OffscreenProto.fillText = function (text: string, x: number, y: number, maxWidth?: number) {
+          texts.push(String(text));
+          return maxWidth === undefined ? origOffscreenFillText.call(this, text, x, y) : origOffscreenFillText.call(this, text, x, y, maxWidth);
+        };
+      }
 
-      rt.invalidate();
-      await rt.session.captureCompositePng();
-      const capturedTexts = texts.slice();
-
-      const t0 = performance.now();
-      for (let i = 0; i < 5; i += 1) {
-        rt.view.panX(-20);
+      try {
+        rt.view.panX(-1);
         rt.invalidate();
         await rt.session.captureCompositePng();
-      }
-      const avgPanMs = (performance.now() - t0) / 5;
+        const capturedTexts = texts.slice();
 
-      handle.dispose();
-      root.remove();
-      return { capturedTexts, avgPanMs };
+        const t0 = performance.now();
+        for (let i = 0; i < 5; i += 1) {
+          rt.view.panX(-20);
+          rt.invalidate();
+          await rt.session.captureCompositePng();
+        }
+        const avgPanMs = (performance.now() - t0) / 5;
+
+        return { capturedTexts, avgPanMs };
+      } finally {
+        CanvasRenderingContext2D.prototype.fillText = origCanvasFillText;
+        if (OffscreenProto && origOffscreenFillText) {
+          OffscreenProto.fillText = origOffscreenFillText;
+        }
+        handle.dispose();
+        root.remove();
+      }
     };
 
     const btc = await runScenario("BINANCE_FUTURES:btcusdt", 10);
     const wif = await runScenario("BINANCE_FUTURES:wifusdt", 0.01);
     return { btc, wif };
   });
+
+  console.log(
+    `[liquidation-profile-model] btcTexts=${JSON.stringify(result.btc.capturedTexts)} wifTexts=${JSON.stringify(result.wif.capturedTexts)} wifAvgPanMs=${result.wif.avgPanMs.toFixed(2)}`,
+  );
 
   expect(result.btc.capturedTexts.some((t) => t.includes("Hyperliquid"))).toBe(true);
   expect(result.btc.capturedTexts.some((t) => t.includes("Model ·"))).toBe(false);
