@@ -47,8 +47,8 @@ const MIN_PANE_H = 60;
 const MIN_MAIN_CHART_H = 80;
 
 interface IndicatorManagerOptions {
-  ownerDocument: Document;
-  root: HTMLElement;
+  ownerDocument?: Document;
+  root?: HTMLElement;
   initial?: IndicatorInstance[];
   onChange: (instances: IndicatorInstance[]) => void;
   onLayoutChange: () => void;
@@ -278,8 +278,8 @@ function asObject(value: unknown): Record<string, unknown> {
 }
 
 export class IndicatorManager {
-  private ownerDocument: Document;
-  private readonly root: HTMLElement;
+  private ownerDocument?: Document;
+  private readonly root?: HTMLElement;
   private readonly onChange: (instances: IndicatorInstance[]) => void;
   private readonly onLayoutChange: () => void;
   private readonly onInvalidate: (changes?: ChartChange) => void;
@@ -357,8 +357,8 @@ export class IndicatorManager {
     this.headers.commands = null;
   }
 
-  updateOwnerDocument(ownerDocument: Document): void {
-    if (ownerDocument === this.ownerDocument) return;
+  updateOwnerDocument(ownerDocument?: Document): void {
+    if (!ownerDocument || ownerDocument === this.ownerDocument) return;
     this.dismissSettingsSession("dispose");
     this.ownerDocument = ownerDocument;
     this.renderHeaders();
@@ -1029,6 +1029,11 @@ export class IndicatorManager {
 
   private beginPaneResize(event: PointerEvent, id: string): void {
     if (event.button !== 0) return;
+    const target = (typeof HTMLElement !== "undefined" && event.currentTarget instanceof HTMLElement)
+      ? event.currentTarget
+      : null;
+    const doc = target?.ownerDocument ?? this.root?.ownerDocument ?? this.ownerDocument;
+    if (!doc) return;
     event.preventDefault();
     event.stopPropagation();
     const instance = this.instances.find((item) => item.id === id);
@@ -1036,8 +1041,6 @@ export class IndicatorManager {
     const startY = event.clientY;
     const startHeight = Math.max(MIN_PANE_H, paneHeightForInstance(instance));
     const maxHeight = this.maxPaneHeightFor(id);
-    const target = event.currentTarget instanceof HTMLElement ? event.currentTarget : null;
-    const doc = target?.ownerDocument ?? this.root.ownerDocument;
     const win = doc.defaultView;
     try { target?.setPointerCapture(event.pointerId); } catch { /* synthetic/browser edge case */ }
 
@@ -1063,6 +1066,7 @@ export class IndicatorManager {
   }
 
   private maxPaneHeightFor(id: string): number {
+    if (!this.root) return Math.max(MIN_PANE_H, 360);
     const rootHeight = this.root.getBoundingClientRect().height;
     const otherPanes = this.separateInstances()
       .filter((item) => item.id !== id)
@@ -1073,6 +1077,7 @@ export class IndicatorManager {
   }
 
   private currentSettingsTrigger(instanceId: string, fallback: HTMLElement | null): HTMLElement | null {
+    if (!this.root || !this.ownerDocument) return null;
     for (const candidate of this.root.querySelectorAll<HTMLElement>("[data-indicator-settings-trigger]")) {
       if (candidate.dataset.indicatorSettingsTrigger === instanceId) return candidate;
     }
@@ -1080,6 +1085,7 @@ export class IndicatorManager {
   }
 
   private requestSettings(instance: IndicatorInstance, trigger: HTMLElement | null): void {
+    if (!this.ownerDocument) return;
     const definition = getIndicatorDefinition(instance.type);
     if (!definition) return;
     const previous = this.activeSettingsSession;
@@ -1094,6 +1100,7 @@ export class IndicatorManager {
   }
 
   private dispatchSettingsRequest(instance: IndicatorInstance, trigger: HTMLElement | null, token: number): void {
+    if (!this.ownerDocument) return;
     const session = this.activeSettingsSession;
     if (!session || session.instanceId !== instance.id || session.token !== token || session.disposed) return;
     const liveTrigger = trigger?.ownerDocument === this.ownerDocument ? trigger : null;
@@ -1148,10 +1155,12 @@ export class IndicatorManager {
     const session = this.activeSettingsSession;
     if (!session) return;
     const detail: IndicatorSettingsModalDismissDetail = { instanceId: session.instanceId, token: session.token, reason };
-    const CustomEventCtor = this.ownerDocument.defaultView?.CustomEvent ?? (typeof CustomEvent === "function" ? CustomEvent : null);
+    const doc = this.ownerDocument;
     this.invalidateSettingsSession(session);
+    if (!doc) return;
+    const CustomEventCtor = doc.defaultView?.CustomEvent ?? (typeof CustomEvent === "function" ? CustomEvent : null);
     if (!CustomEventCtor) return;
-    this.ownerDocument.dispatchEvent(new CustomEventCtor(INDICATOR_SETTINGS_MODAL_DISMISS_EVENT, { bubbles: false, cancelable: true, detail }));
+    doc.dispatchEvent(new CustomEventCtor(INDICATOR_SETTINGS_MODAL_DISMISS_EVENT, { bubbles: false, cancelable: true, detail }));
   }
 }
 

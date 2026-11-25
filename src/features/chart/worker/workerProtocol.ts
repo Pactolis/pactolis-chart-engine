@@ -5,6 +5,9 @@
  * Strictly DOM-free: must never reference browser global DOM or window objects.
  */
 
+import type { OrderbookHeatmapSettings } from "../../../core/orderbookHeatmap/settings.js";
+import type { IndicatorInstance } from "../../indicators/types.js";
+
 export type WorkerPortChannel = "ingress" | "history" | "main";
 
 export type WorkerSurfaceRole = "gpu-scene" | "annotation" | "interaction";
@@ -76,7 +79,13 @@ export interface WorkerChartStatePatch {
   tpoMode?: "blocks" | "letters";
   scaleMode?: "linear" | "log";
   orderbookHeatmapMode?: "off" | "single" | "aggregated" | "custom";
+  orderbookHeatmapSettings?: Partial<OrderbookHeatmapSettings>;
   residentHeatmap?: boolean;
+  residentHeatmapExplicit?: boolean;
+  indicators?: ReadonlyArray<IndicatorInstance>;
+  telemetryEnabled?: boolean;
+  priceStep?: number;
+  pricePrecision?: number;
   backendPreference?: "auto" | "webgpu" | "webgl2" | "canvas2d";
   candles?: boolean;
   heat?: boolean;
