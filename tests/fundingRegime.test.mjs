@@ -250,7 +250,12 @@ test("fundingRegime requests from - zWindowDays warmup, computes zScore before s
   });
 
   const canvasMock = makeCanvasMock();
-  const ctx = makeDrawContext(visibleBars, { mode: "zScore", zWindowDays: 30, zThreshold: 2 }, [0, 24], canvasMock);
+  const ctx = makeDrawContext(
+    visibleBars,
+    { mode: "zScore", zWindowDays: 30, zThreshold: 2, showAxisTicks: false },
+    [0, 24],
+    canvasMock,
+  );
   const prepared = fundingRegimeIndicatorDefinition.prepareData(ctx);
 
   assert.equal(requests.length, 1);
