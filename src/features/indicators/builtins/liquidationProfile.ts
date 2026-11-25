@@ -267,7 +267,7 @@ export function buildLiquidationModelStatusText(modelStatus: LiquidationModelGat
     case "unverified":
       return safeTranslate("indicator.liquidationProfile.modelUnverified", "Model bu paritede doğrulanmadı");
     case "unsupported":
-      return safeTranslate("indicator.liquidationProfile.unsupported", "Bu market desteklenmiyor");
+      return safeTranslate("indicator.liquidationProfile.modelUnsupported", "Bu market desteklenmiyor");
     case "unavailable":
     default:
       return safeTranslate("indicator.liquidationProfile.unavailable", "Likidasyon verisi yok");

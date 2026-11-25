@@ -167,6 +167,10 @@ const CHART_LOCALE_FALLBACKS: Readonly<Record<string, { tr: string; en: string }
     tr: "Model bu paritede doğrulanmadı",
     en: "Model not verified on this pair",
   },
+  "indicator.liquidationProfile.modelUnsupported": {
+    tr: "Bu market desteklenmiyor",
+    en: "Market not supported by model",
+  },
 };
 
 let configured: ChartLocale | null = null;
