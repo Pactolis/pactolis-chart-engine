@@ -657,7 +657,7 @@ export class ChartWorkerPanelRuntime {
           undefined,
           undefined,
           drawIndicatorPaneBackground,
-          () => this.indicatorManager?.isPaneMaximized() ?? false,
+          () => this.indicatorManager?.isIndicatorPaneMaximized() ?? false,
           interactionCtx ?? undefined,
           undefined,
           (ctx, activeView, activeSeries, range) => {
