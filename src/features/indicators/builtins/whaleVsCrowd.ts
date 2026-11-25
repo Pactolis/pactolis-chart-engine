@@ -542,7 +542,6 @@ function computeRangeForMode(
   activeVenues: readonly WhaleCrowdVenue[],
   venuesMap: Partial<Record<WhaleCrowdVenue, PreparedVenueData>>,
 ): { min: number; max: number; baseline: number } {
-  const baseline = mode === "ratios" ? 1 : 0;
   let min = Infinity;
   let max = -Infinity;
 
