@@ -154,13 +154,24 @@ test("explicit ?residentHeatmap=1 override keeps GPU heatmap path open on SwiftS
       setOrderbookHeatmapModeFor,
     } = await import("/harness/chart.ts");
     const runtime = getChartRuntime(id!) as {
-      view: { fitPriceRange(min: number, max: number, pad?: number): void };
+      view: {
+        fitPriceRange(min: number, max: number, pad?: number): void;
+        colWidth: number;
+        offsetX: number;
+        area: { width: number };
+      };
+      pipeline: { series: { length: number } };
+      getState(): Record<string, unknown>;
+      updateState(next: Record<string, unknown>): void;
       invalidate(): void;
       whenHeatmapGpuRendererReady(): Promise<void>;
     };
+    runtime.updateState({ ...runtime.getState(), chartType: "candlestick" });
+    runtime.view.colWidth = 32;
+    runtime.view.offsetX = runtime.view.area.width - (runtime.pipeline.series.length + 2) * 32;
     runtime.view.fitPriceRange(50, 350, 0.1);
     updateOrderbookHeatmapSettings({ unit: "btc", bucketStep: 50, single: { usd: 0, btc: 16 } });
-    setOrderbookHeatmapModeFor("BINANCE_FUTURES:btcusdt", id!, "single");
+    setOrderbookHeatmapModeFor("BINANCE_FUTURES:btcusdt", "single");
     await runtime.whenHeatmapGpuRendererReady();
     runtime.invalidate();
   }, panelId);
