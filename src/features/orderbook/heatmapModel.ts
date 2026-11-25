@@ -3,10 +3,8 @@
 import {
   DEFAULT_HEATMAP_PALETTE,
   ORDERBOOK_HEATMAP_PALETTES,
-  computeRelativeHeatmapBucketStep,
   normalizeOrderbookHeatmapSources,
   resolveOrderbookHeatmapPalette,
-  shouldRecalculateRelativeBucketStep,
   type OrderbookHeatmapContrast,
   type OrderbookHeatmapPalette,
   type OrderbookHeatmapScaleMode,

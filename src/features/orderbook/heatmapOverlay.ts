@@ -442,18 +442,20 @@ export class OrderbookHeatmapOverlay {
     }
     if (series && series.length > 0) {
       const lastBar = series.at(series.length - 1);
-      const lastPrice = lastBar.close;
-      const priceStep = series.config.priceStep;
-      if (
-        !(this.resolvedRelativeBucketStep > 0)
-        || shouldRecalculateRelativeBucketStep(this.relativeStepAnchorPrice, lastPrice, 0.2)
-      ) {
-        this.relativeStepAnchorPrice = lastPrice;
-        this.resolvedRelativeBucketStep = computeRelativeHeatmapBucketStep({
-          lastPrice,
-          priceStep,
-          multiplier: settings.bucketStepMultiplier ?? 1,
-        });
+      if (lastBar) {
+        const lastPrice = lastBar.close;
+        const priceStep = series.config.priceStep;
+        if (
+          !(this.resolvedRelativeBucketStep > 0)
+          || shouldRecalculateRelativeBucketStep(this.relativeStepAnchorPrice, lastPrice, 0.2)
+        ) {
+          this.relativeStepAnchorPrice = lastPrice;
+          this.resolvedRelativeBucketStep = computeRelativeHeatmapBucketStep({
+            lastPrice,
+            priceStep,
+            multiplier: settings.bucketStepMultiplier ?? 1,
+          });
+        }
       }
       if (this.resolvedRelativeBucketStep > 0) return this.resolvedRelativeBucketStep;
     }
