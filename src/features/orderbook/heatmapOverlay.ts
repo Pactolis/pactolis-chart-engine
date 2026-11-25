@@ -14,14 +14,18 @@ import type { Crosshair } from "../../core/render/overlay.js";
 import { parseMarket } from "../../core/domain/market.js";
 import {
   activeOrderbookHeatmapThreshold,
+  computeRelativeHeatmapBucketStep,
+  isOrderbookHeatmapHistoryMarket,
   isOrderbookHeatmapMarket,
   normalizeOrderbookHeatmapSources,
   resolveOrderbookHeatmapOpacity,
   resolveOrderbookHeatmapPalette,
+  shouldRecalculateRelativeBucketStep,
   type OrderbookHeatmapPalette,
   type OrderbookHeatmapSettings,
   type OrderbookHeatmapUnit,
 } from "../../core/orderbookHeatmap/settings.js";
+import { tOr } from "../../core/chartLocale.js";
 import {
   incrementPerformanceCounter,
   isPerformanceTelemetryEnabled,
@@ -53,6 +57,7 @@ import {
   heatmapCellColor,
   heatmapChunksFor,
   heatmapIntensity,
+  heatmapStepDecimalPlaces,
   heatmapTierFor,
   heatmapValueInUnit,
   lastHeatmapSubBar,
@@ -60,8 +65,10 @@ import {
   mergeHeatmapBars,
   mergeHeatmapBarsWithDiff,
   projectCanonicalHeatmapTailBar,
+  rebucketHeatmapBars,
   resolveHeatmapColorRange,
   resolveHeatmapColorRangeFromTwoSorted,
+  snapHeatmapPriceToBucket,
   visibleHeatmapCellBounds,
   type HeatmapTier,
 } from "./heatmapModel.js";
@@ -182,6 +189,7 @@ interface ChunkState {
 interface HeatmapFramePreamble {
   settings: OrderbookHeatmapSettings;
   tier: HeatmapTier;
+  bucketStep: number;
   threshold: number;
   first: number;
   last: number;
@@ -231,8 +239,17 @@ interface HoverRangeRequest {
   consumers: Set<string>;
 }
 
+/** Resolves the localized status label for browser-sourced (non-BTC) orderbook heatmaps. */
+export function getOrderbookHeatmapBrowserSourceLabel(): string {
+  try {
+    return tOr("orderbook.heatmap.browserLiveSource");
+  } catch {
+    return "since app opened";
+  }
+}
+
 export interface OrderbookHeatmapOverlayOptions {
-  fetch: OrderbookHeatmapFetch;
+  fetch?: OrderbookHeatmapFetch;
   invalidate: () => void;
   /** The chart's current market; the overlay only draws on the BTCUSDT perp chart. */
   getMarket: () => string;
@@ -257,7 +274,7 @@ export interface OrderbookHeatmapOverlayOptions {
 export class OrderbookHeatmapOverlay {
   private static readonly MAX_CACHED_CHUNKS = 12;
   private static readonly MAX_EMPTY_CHUNK_KEYS = 64;
-  private readonly fetchHeatmap: OrderbookHeatmapFetch;
+  private readonly fetchHeatmap?: OrderbookHeatmapFetch;
   private readonly invalidate: () => void;
   private readonly now: () => number;
   private readonly getMarket: () => string;
@@ -278,6 +295,8 @@ export class OrderbookHeatmapOverlay {
   private currentTier: HeatmapTier | null = null;
   private lastVisibleFromMs = 0;
   private lastVisibleToMs = 0;
+  private relativeStepAnchorPrice = Number.NaN;
+  private resolvedRelativeBucketStep = Number.NaN;
 
   /** Identifies what the cached bars were fetched for; any change drops the cache. */
   private dataKey = "";
@@ -372,8 +391,11 @@ export class OrderbookHeatmapOverlay {
       }
 
       if (this.currentTier) {
-        const nextKey = this.dataKeyFor(nextSettings, this.currentTier);
-        if (nextKey !== this.dataKey) this.reset(nextKey);
+        const nextStep = this.resolveBucketStep(nextSettings);
+        const nextKey = this.dataKeyFor(nextSettings, this.currentTier, nextStep);
+        if (nextKey !== this.dataKey) {
+          this.applyBucketStepChangeOrReset(nextKey, nextStep, nextSettings, this.currentTier);
+        }
         this.syncCanonicalTailProjection(nextSettings, this.currentTier);
       }
       this.syncLiveTailSubscription();
@@ -411,10 +433,38 @@ export class OrderbookHeatmapOverlay {
     return settings !== null && this.activeFor(settings);
   }
 
+  private resolveBucketStep(settings: OrderbookHeatmapSettings, series?: FootprintSeries): number {
+    if (isOrderbookHeatmapHistoryMarket(this.getMarket())) {
+      return settings.bucketStep;
+    }
+    if (Number.isFinite(settings.bucketStep) && settings.bucketStep > 0) {
+      return settings.bucketStep;
+    }
+    if (series && series.length > 0) {
+      const lastBar = series.at(series.length - 1);
+      const lastPrice = lastBar.close;
+      const priceStep = series.config.priceStep;
+      if (
+        !(this.resolvedRelativeBucketStep > 0)
+        || shouldRecalculateRelativeBucketStep(this.relativeStepAnchorPrice, lastPrice, 0.2)
+      ) {
+        this.relativeStepAnchorPrice = lastPrice;
+        this.resolvedRelativeBucketStep = computeRelativeHeatmapBucketStep({
+          lastPrice,
+          priceStep,
+          multiplier: settings.bucketStepMultiplier ?? 1,
+        });
+      }
+      if (this.resolvedRelativeBucketStep > 0) return this.resolvedRelativeBucketStep;
+    }
+    return this.resolvedRelativeBucketStep > 0 ? this.resolvedRelativeBucketStep : 1;
+  }
+
   private liveTailKeyFor(market: string, settings: OrderbookHeatmapSettings | null): string {
     if (!settings) return `${market}|unconfigured`;
     if (settings.mode === "custom") return `${market}|canonical`;
-    return `${market}|${settings.mode}|${settings.unit}|${settings.bucketStep}|${activeOrderbookHeatmapThreshold(settings)}`;
+    const step = this.resolveBucketStep(settings);
+    return `${market}|${settings.mode}|${settings.unit}|${step}|${activeOrderbookHeatmapThreshold(settings)}`;
   }
 
   /** Synchronizes the active live-tail subscription with current market and heatmap settings. */
@@ -479,7 +529,7 @@ export class OrderbookHeatmapOverlay {
           ...(parsed.base ? { base: parsed.base } : {}),
         };
     if (settings && settings.mode !== "custom") {
-      request.bucketStep = settings.bucketStep;
+      request.bucketStep = this.resolveBucketStep(settings);
       if (settings.mode !== "off" && settings.unit === "usd") {
         request.minQuantityUsd = activeOrderbookHeatmapThreshold(settings);
       }
@@ -498,6 +548,8 @@ export class OrderbookHeatmapOverlay {
     if (this.disposed) return;
     this.lastMarket = this.getMarket();
     this.currentTier = null;
+    this.relativeStepAnchorPrice = Number.NaN;
+    this.resolvedRelativeBucketStep = Number.NaN;
     this.canonicalTailBars.clear();
     this.reset("");
     this.syncLiveTailSubscription();
@@ -729,6 +781,7 @@ export class OrderbookHeatmapOverlay {
   /** Re-fetches only the newest tail of the live chunk holding "now"; never drops or re-reads historical chunks. */
   private refreshLiveTailOnly(): void {
     if (!this.active() || !this.currentTier) return;
+    if (!isOrderbookHeatmapHistoryMarket(this.getMarket()) || !this.fetchHeatmap) return;
     const tier = this.currentTier;
     const now = this.now();
     const chunkStart = heatmapChunkStart(now, tier);
@@ -841,11 +894,61 @@ export class OrderbookHeatmapOverlay {
     return this.activeFor(this.settings);
   }
 
-  private dataKeyFor(settings: OrderbookHeatmapSettings, tier: HeatmapTier): string {
+  private dataKeyPrefixFor(settings: OrderbookHeatmapSettings, tier: HeatmapTier): string {
     const sourceKey = settings.mode === "custom"
       ? normalizeOrderbookHeatmapSources(settings.customSources ?? []).join(",")
       : "";
-    return `${settings.mode}|${sourceKey}|${tier.name}|${settings.bucketStep}`;
+    return `${settings.mode}|${sourceKey}|${tier.name}`;
+  }
+
+  private dataKeyFor(
+    settings: OrderbookHeatmapSettings,
+    tier: HeatmapTier,
+    bucketStep = this.resolveBucketStep(settings),
+  ): string {
+    return `${this.dataKeyPrefixFor(settings, tier)}|${bucketStep}`;
+  }
+
+  private applyBucketStepChangeOrReset(
+    nextKey: string,
+    nextStep: number,
+    settings: OrderbookHeatmapSettings,
+    tier: HeatmapTier,
+  ): void {
+    const prefix = `${this.dataKeyPrefixFor(settings, tier)}|`;
+    if (
+      !isOrderbookHeatmapHistoryMarket(this.getMarket())
+      && this.dataKey.startsWith(prefix)
+      && this.bars.size > 0
+      && nextStep > 0
+    ) {
+      const rebucketed = rebucketHeatmapBars(this.bars.values(), nextStep);
+      const nextBars = new Map<number, OrderbookHeatmapBar>();
+      for (const bar of rebucketed) {
+        nextBars.set(bar.t, bar);
+      }
+      this.bars = nextBars;
+      this.dataKey = nextKey;
+      this.hoverWindows = new Map();
+      this.lastCollectedKey = "";
+      this.lastCollected = null;
+      this.lastCollectedRange = null;
+      this.autoScaleCache = null;
+      this.autoScaleHistCache = null;
+      this.autoScaleInputSig = "";
+      this.autoScaleViewportKey = "";
+      this.autoScaleBarsRevision = -1;
+      this.gpuMotionWindow = null;
+      this.lastGpuExactPrepareKey = "";
+      this.residentPriceOrigin = Number.NaN;
+      this.residentPriceOriginInitializedFromBars = false;
+      this.releaseRasterCache();
+      this.barKeysRevision++;
+      this.bumpBarsRevision();
+      this.emitStatus();
+      return;
+    }
+    this.reset(nextKey);
   }
 
   private reset(key: string): void {
@@ -970,6 +1073,8 @@ export class OrderbookHeatmapOverlay {
 
   /** Returns current loading, error, and source-coverage status for this overlay instance. */
   getStatus(): OrderbookHeatmapRuntimeStatus {
+    const isHistoryMarket = isOrderbookHeatmapHistoryMarket(this.getMarket());
+    const sourceKind: "history" | "browser" = isHistoryMarket ? "history" : "browser";
     if (!this.isCurrentlyActive()) {
       return {
         state: "idle",
@@ -977,6 +1082,7 @@ export class OrderbookHeatmapOverlay {
         observedSources: [],
         missingSources: [],
         hasBars: false,
+        sourceKind,
       };
     }
     let hasLoading = false;
@@ -1005,6 +1111,8 @@ export class OrderbookHeatmapOverlay {
       observedSources: coverage.observedSources,
       missingSources: coverage.missingSources,
       hasBars: this.bars.size > 0,
+      sourceKind,
+      ...(isHistoryMarket ? {} : { sourceLabel: getOrderbookHeatmapBrowserSourceLabel() }),
     };
   }
 
@@ -2408,11 +2516,14 @@ export class OrderbookHeatmapOverlay {
     const tier = heatmapTierFor(series.config.intervalMs);
     this.currentTier = tier;
     const settings = this.settings;
+    const bucketStep = this.resolveBucketStep(settings, series);
     const threshold = activeOrderbookHeatmapThreshold(settings);
     // Threshold and unit only filter or convert a compatible mode/sources/tier/step
     // dataset. Raising threshold or switching visual settings reuses the compatible cache.
-    const key = this.dataKeyFor(settings, tier);
-    if (key !== this.dataKey) this.reset(key);
+    const key = this.dataKeyFor(settings, tier, bucketStep);
+    if (key !== this.dataKey) {
+      this.applyBucketStepChangeOrReset(key, bucketStep, settings, tier);
+    }
     this.syncCanonicalTailProjection(settings, tier);
     const first = Math.max(0, Math.floor(range[0]));
     const last = Math.min(series.length - 1, Math.ceil(range[1]));
@@ -2425,7 +2536,7 @@ export class OrderbookHeatmapOverlay {
     // Chunk scheduling runs every frame so a quiet chart still honors the
     // live-refresh TTL and error retries.
     this.ensureChunks(this.lastVisibleFromMs, this.lastVisibleToMs, tier);
-    return { settings, tier, threshold, first, last };
+    return { settings, tier, bucketStep, threshold, first, last };
   }
 
   /**
@@ -2436,7 +2547,7 @@ export class OrderbookHeatmapOverlay {
   private forEachVisibleCell(
     view: View,
     series: FootprintSeries,
-    frame: { settings: OrderbookHeatmapSettings; tier: HeatmapTier; threshold: number; first: number; last: number },
+    frame: { settings: OrderbookHeatmapSettings; tier: HeatmapTier; bucketStep?: number; threshold: number; first: number; last: number },
     cellLimit: number | null,
     visit: (x: number, yTop: number, cellHeight: number, value: number, live: boolean) => void,
     barFirst = frame.first,
@@ -2444,7 +2555,7 @@ export class OrderbookHeatmapOverlay {
     clipTop = view.area.top,
     clipHeight = view.area.height,
   ): number {
-    const step = frame.settings.bucketStep;
+    const step = frame.bucketStep ?? this.resolveBucketStep(frame.settings, series);
     const clipBottom = clipTop + clipHeight;
     let minVisPrice = Number.NEGATIVE_INFINITY;
     let maxVisPrice = Number.POSITIVE_INFINITY;
@@ -2558,7 +2669,7 @@ export class OrderbookHeatmapOverlay {
     const height = window ? window.clipHeight : view.area.height;
     const cellFirst = window ? window.first : preamble.first;
     const cellLast = window ? window.last : preamble.last;
-    const step = preamble.settings.bucketStep;
+    const step = preamble.bucketStep;
     const fixedCeiling = this.resolveFixedCeiling(preamble.settings);
     const replayActive = this.isReplayActive();
     const scalePlan = this.evaluateAutoScale(view, series, preamble.settings, preamble.threshold, fixedCeiling, replayActive);
@@ -2690,7 +2801,7 @@ export class OrderbookHeatmapOverlay {
     const startedAt = isPerformanceTelemetryEnabled() ? performance.now() : null;
     try {
       const unit = preamble.settings.unit;
-      const step = preamble.settings.bucketStep;
+      const step = preamble.bucketStep;
       const threshold = preamble.threshold;
       const replayActive = this.isReplayActive();
       const seriesStartTime = series.length > 0 ? series.timeOfIndex(0) : Number.NaN;
@@ -2706,7 +2817,7 @@ export class OrderbookHeatmapOverlay {
         for (const bar of candidates) {
           const samplePrice = bar?.cells?.[0]?.[0];
           if (typeof samplePrice === "number" && Number.isFinite(samplePrice)) {
-            return Math.floor(samplePrice);
+            return samplePrice;
           }
         }
         return null;
@@ -3117,7 +3228,7 @@ export class OrderbookHeatmapOverlay {
   ): { resolved: { floor: number; ceiling: number; opacity: number }; knownCellCount: number } {
     const scanStart = isPerformanceTelemetryEnabled() ? performance.now() : null;
     const liveIndex = replayActive ? -1 : series.length - 1;
-    const step = frame.settings.bucketStep;
+    const step = frame.bucketStep;
     const unit = frame.settings.unit;
     const threshold = frame.threshold;
     const sortedTimes = this.subBarTimesFor(series, frame.tier);
@@ -3555,6 +3666,7 @@ export class OrderbookHeatmapOverlay {
   }
 
   private ensureChunks(from: number, to: number, tier: HeatmapTier): void {
+    if (!isOrderbookHeatmapHistoryMarket(this.getMarket()) || !this.fetchHeatmap) return;
     const now = this.now();
     const key = this.dataKey;
     const threshold = activeOrderbookHeatmapThreshold(this.settings);
@@ -3676,18 +3788,21 @@ export class OrderbookHeatmapOverlay {
     if (crosshair.x < left || crosshair.x > left + width || crosshair.y < top || crosshair.y > top + height) return;
     const tier = heatmapTierFor(series.config.intervalMs);
     const settings = this.settings;
-    const expectedKey = this.dataKeyFor(settings, tier);
-    if (expectedKey !== this.dataKey) this.reset(expectedKey);
+    const step = this.resolveBucketStep(settings, series);
+    const expectedKey = this.dataKeyFor(settings, tier, step);
+    if (expectedKey !== this.dataKey) {
+      this.applyBucketStepChangeOrReset(expectedKey, step, settings, tier);
+    }
     this.syncCanonicalTailProjection(settings, tier);
-    const step = settings.bucketStep;
     const center = Math.floor(view.indexOfX(crosshair.x));
     if (center < 0 || center > series.length - 1) return;
-    const bucket = Math.floor(view.priceOfY(crosshair.y) / step) * step;
+    const bucket = snapHeatmapPriceToBucket(view.priceOfY(crosshair.y), step);
     if (!(bucket > 0)) return;
     const half = Math.floor(HEATMAP_HOVER_SPAN / 2);
     const columns = Array.from({ length: HEATMAP_HOVER_SPAN }, (_, offset) => center - half + offset)
       .filter((index) => index >= 0 && index <= series.length - 1);
-    const rows = Array.from({ length: HEATMAP_HOVER_SPAN }, (_, offset) => bucket + (half - offset) * step);
+    const rows = Array.from({ length: HEATMAP_HOVER_SPAN }, (_, offset) =>
+      snapHeatmapPriceToBucket(bucket + (half - offset) * step, step));
     const windowFrom = series.timeOfIndex(columns[0]);
     const windowTo = series.timeOfIndex(columns[columns.length - 1] + 1);
     const replayActive = this.isReplayActive();
@@ -3698,24 +3813,29 @@ export class OrderbookHeatmapOverlay {
       ? normalizeOrderbookHeatmapSources(settings.customSources ?? []).join(",")
       : "";
     const hoverKey = `${this.dataKey}|${sourcesKey}|${windowFrom}|${windowTo}|${bucket}|${replayActive}|${liveSlot}`;
-    const hover = this.hoverWindows.get(hoverKey);
-    if (this.pointerDragging || this.isViewportMoving()) {
-      if (this.hoverTimer) {
-        clearTimeout(this.hoverTimer);
-        this.hoverTimer = null;
-        this.pendingHoverKey = "";
+    const isHistoryMarket = isOrderbookHeatmapHistoryMarket(this.getMarket());
+    const hover = isHistoryMarket ? this.hoverWindows.get(hoverKey) : undefined;
+    if (isHistoryMarket && this.fetchHeatmap) {
+      if (this.pointerDragging || this.isViewportMoving()) {
+        if (this.hoverTimer) {
+          clearTimeout(this.hoverTimer);
+          this.hoverTimer = null;
+          this.pendingHoverKey = "";
+        }
+      } else if (!hover) {
+        this.scheduleHover(hoverKey, series, columns, rows, tier);
       }
-    } else if (!hover) {
-      this.scheduleHover(hoverKey, series, columns, rows, tier);
     }
 
     const threshold = activeOrderbookHeatmapThreshold(settings);
+    const sourceBars = isHistoryMarket ? (hover?.status === "ready" ? hover.bars : null) : this.bars;
+    const cellTol = step * 1e-6;
     const values = rows.map((price) => columns.map((index) => {
-      if (hover?.status !== "ready") return null;
+      if (!sourceBars) return null;
       const live = !replayActive && index === series.length - 1;
       const bar = (live ? liveHeatmapSubBar : lastHeatmapSubBar)(
-        hover.bars, series.timeOfIndex(index), series.timeOfIndex(index + 1), tier);
-      const cell = bar?.cells.find((candidate) => candidate[0] === price);
+        sourceBars, series.timeOfIndex(index), series.timeOfIndex(index + 1), tier);
+      const cell = bar?.cells.find((candidate) => Math.abs(candidate[0] - price) <= cellTol);
       return heatmapValueInUnit(cell ? heatmapCellUsd(cell) : 0, price, step, settings.unit);
     }));
     drawHoverTable(ctx, view, crosshair, {
@@ -3729,7 +3849,8 @@ export class OrderbookHeatmapOverlay {
       opacity: resolveOrderbookHeatmapOpacity(settings.opacity),
       palette: resolveOrderbookHeatmapPalette(settings.palette),
       unit: settings.unit,
-      failed: hover?.status === "error",
+      failed: isHistoryMarket && hover?.status === "error",
+      pricePrecision: Math.min(8, Math.max(1, heatmapStepDecimalPlaces(step))),
     });
   }
 
@@ -3753,6 +3874,8 @@ export class OrderbookHeatmapOverlay {
     rows: number[],
     tier: HeatmapTier,
   ): void {
+    const fetchHeatmap = this.fetchHeatmap;
+    if (!fetchHeatmap || !isOrderbookHeatmapHistoryMarket(this.getMarket())) return;
     if (this.pendingHoverKey === hoverKey) return;
     this.pendingHoverKey = hoverKey;
     if (this.hoverTimer) clearTimeout(this.hoverTimer);
@@ -3809,7 +3932,7 @@ export class OrderbookHeatmapOverlay {
           promise: null as unknown as Promise<OrderbookHeatmapResponse>,
           consumers: new Set([hoverKey]),
         };
-        const promise = this.fetchHeatmap({ ...base, from, to, priceFrom, priceTo }, controller.signal)
+        const promise = fetchHeatmap({ ...base, from, to, priceFrom, priceTo }, controller.signal)
           .finally(() => {
             if (this.hoverRangeRequests.get(rKey) === req) {
               this.hoverRangeRequests.delete(rKey);
@@ -3899,6 +4022,7 @@ interface HoverTable {
   palette: OrderbookHeatmapPalette;
   unit: "usd" | "btc";
   failed: boolean;
+  pricePrecision: number;
 }
 
 const HOVER_CELL_W = 62;
@@ -3965,7 +4089,7 @@ function drawHoverTable(ctx: CanvasRenderingContext2D, view: View, crosshair: Cr
       ctx.fillText(text, cellX + HOVER_CELL_W / 2, rowY + HOVER_ROW_H / 2);
     });
     ctx.fillStyle = "#94a3b8";
-    ctx.fillText(price.toFixed(1), priceColX + HOVER_PRICE_W / 2, rowY + HOVER_ROW_H / 2);
+    ctx.fillText(price.toFixed(table.pricePrecision), priceColX + HOVER_PRICE_W / 2, rowY + HOVER_ROW_H / 2);
   });
   ctx.restore();
 }

@@ -3,8 +3,10 @@
 import {
   DEFAULT_HEATMAP_PALETTE,
   ORDERBOOK_HEATMAP_PALETTES,
+  computeRelativeHeatmapBucketStep,
   normalizeOrderbookHeatmapSources,
   resolveOrderbookHeatmapPalette,
+  shouldRecalculateRelativeBucketStep,
   type OrderbookHeatmapContrast,
   type OrderbookHeatmapPalette,
   type OrderbookHeatmapScaleMode,
@@ -17,6 +19,12 @@ import type {
   OrderbookHeatmapSource,
   OrderbookResolution,
 } from "./heatmapContracts.js";
+
+export {
+  computeRelativeHeatmapBucketStep,
+  shouldRecalculateRelativeBucketStep,
+  type ComputeRelativeHeatmapBucketStepInput,
+} from "../../core/orderbookHeatmap/settings.js";
 
 export type {
   CanonicalHeatmapTailBar,
@@ -983,6 +991,87 @@ export function mergeHeatmapBarsWithDiff(
   return changed;
 }
 
+/** Returns the number of decimal places in `step` (supports scientific notation like `1e-8`). */
+export function heatmapStepDecimalPlaces(step: number): number {
+  if (!Number.isFinite(step) || step <= 0) return 0;
+  const str = step.toString();
+  const eIdx = str.indexOf("e-");
+  if (eIdx !== -1) {
+    const mantissa = str.slice(0, eIdx);
+    const exp = Number(str.slice(eIdx + 2));
+    const dotIdx = mantissa.indexOf(".");
+    const frac = dotIdx >= 0 ? mantissa.length - dotIdx - 1 : 0;
+    return exp + frac;
+  }
+  const dotIdx = str.indexOf(".");
+  return dotIdx >= 0 ? str.length - dotIdx - 1 : 0;
+}
+
+/** Snaps `price` to the containing `step` bucket start without floating-point drift. */
+export function snapHeatmapPriceToBucket(price: number, step: number): number {
+  if (!Number.isFinite(price) || !Number.isFinite(step) || step <= 0) return price;
+  const index = Math.floor(price / step + 1e-12);
+  const decimals = heatmapStepDecimalPlaces(step);
+  const raw = index * step;
+  return decimals > 0 && decimals <= 15 ? Number(raw.toFixed(decimals)) : raw;
+}
+
+/** Re-buckets a single heatmap bar's cells into a new `bucketStep` without mutating the input. */
+export function rebucketHeatmapBar(
+  bar: OrderbookHeatmapBar,
+  bucketStep: OrderbookHeatmapBucketStep,
+): OrderbookHeatmapBar {
+  if (!Number.isFinite(bucketStep) || bucketStep <= 0 || bar.cells.length === 0) {
+    return { t: bar.t, cells: [...bar.cells] };
+  }
+  const decimals = heatmapStepDecimalPlaces(bucketStep);
+  const buckets = new Map<number, [number, number]>();
+  for (const cell of bar.cells) {
+    const priceStart = cell[0];
+    const bid = cell[1];
+    const ask = cell[2];
+    if (!Number.isFinite(priceStart) || priceStart < 0 || !Number.isFinite(bid) || !Number.isFinite(ask)) continue;
+    const cleanBid = Math.max(0, bid);
+    const cleanAsk = Math.max(0, ask);
+    if (cleanBid === 0 && cleanAsk === 0) continue;
+    const index = Math.floor(priceStart / bucketStep + 1e-12);
+    const entry = buckets.get(index);
+    if (entry) {
+      entry[0] += cleanBid;
+      entry[1] += cleanAsk;
+    } else {
+      buckets.set(index, [cleanBid, cleanAsk]);
+    }
+  }
+  const cells: OrderbookHeatmapCell[] = [];
+  for (const [index, [bid, ask]] of buckets) {
+    const raw = index * bucketStep;
+    const priceStart = decimals > 0 && decimals <= 15 ? Number(raw.toFixed(decimals)) : raw;
+    cells.push([priceStart, Math.round(bid), Math.round(ask)]);
+  }
+  if (cells.length > HEATMAP_MAX_CELLS_PER_BAR) {
+    cells.sort((left, right) => {
+      const strengthDiff = (right[1] + right[2]) - (left[1] + left[2]);
+      return strengthDiff !== 0 ? strengthDiff : left[0] - right[0];
+    });
+    cells.length = HEATMAP_MAX_CELLS_PER_BAR;
+  }
+  cells.sort((left, right) => left[0] - right[0]);
+  return { t: bar.t, cells };
+}
+
+/** Re-buckets a collection of heatmap bars into `bucketStep`. */
+export function rebucketHeatmapBars(
+  bars: Iterable<OrderbookHeatmapBar>,
+  bucketStep: OrderbookHeatmapBucketStep,
+): OrderbookHeatmapBar[] {
+  const result: OrderbookHeatmapBar[] = [];
+  for (const bar of bars) {
+    result.push(rebucketHeatmapBar(bar, bucketStep));
+  }
+  return result;
+}
+
 export interface ProjectCanonicalHeatmapTailOptions {
   source: OrderbookHeatmapSource;
   customSources?: readonly string[];
@@ -1055,9 +1144,11 @@ export function projectCanonicalHeatmapTailBar(
     }
   }
 
+  const decimals = heatmapStepDecimalPlaces(step);
   const cells: OrderbookHeatmapCell[] = [];
   for (const [index, [bid, ask]] of buckets) {
-    const priceStart = index * step;
+    const rawPriceStart = index * step;
+    const priceStart = decimals > 0 && decimals <= 15 ? Number(rawPriceStart.toFixed(decimals)) : rawPriceStart;
     const total = bid + ask;
     if (!(total > 0)) continue;
     if (options.minUsd !== undefined && total < options.minUsd) continue;

@@ -419,7 +419,7 @@ class ChartRuntimeImpl implements ChartRuntime, ChartInputHost {
 
     const fetchOrderbookHeatmap = services.fetchOrderbookHeatmap?.bind(services);
     const subscribeHeatmapLiveTail = services.subscribeOrderbookHeatmapLiveTail?.bind(services);
-    this.orderbookHeatmap = fetchOrderbookHeatmap
+    this.orderbookHeatmap = fetchOrderbookHeatmap || subscribeHeatmapLiveTail
       ? new OrderbookHeatmapOverlay({
         fetch: fetchOrderbookHeatmap,
         invalidate: () => {
