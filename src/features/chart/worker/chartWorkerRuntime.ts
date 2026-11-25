@@ -19,13 +19,26 @@ import {
   DEFAULT_ORDERBOOK_HEATMAP_SETTINGS,
   isOrderbookHeatmapMarket,
   type OrderbookHeatmapMode,
+  type OrderbookHeatmapSettings,
 } from "../../../core/orderbookHeatmap/settings.js";
+import {
+  configurePerformanceTelemetry,
+  incrementPerformanceCounter,
+  isPerformanceTelemetryEnabled,
+  recordPerformanceDuration,
+  snapshotPerformanceTelemetry,
+} from "../../../core/performanceTelemetry.js";
 import { FootprintRenderer } from "../../../core/render/footprintRenderer.js";
 import { Overlay, type Crosshair } from "../../../core/render/overlay.js";
 import { settings, type ChartViewConfig } from "../../../core/settings.js";
 import type { FootprintBar, FootprintCell } from "../../../core/types.js";
 import { ChartHeatmapGpuCoordinator } from "../ChartHeatmapGpuCoordinator.js";
 import type { HeatmapGpuCellFrame } from "../heatmap/gpu/heatmapGpuRenderer.js";
+import { IndicatorManager, drawIndicatorPaneBackground } from "../../indicators/IndicatorManager.js";
+import type {
+  OrderbookHeatmapRequest,
+  OrderbookHeatmapResponse,
+} from "../../orderbook/heatmapContracts.js";
 import { OrderbookHeatmapOverlay } from "../../orderbook/heatmapOverlay.js";
 import {
   configureOrderbookHeatmapSettingsSource,
@@ -48,6 +61,7 @@ const PACKED_BAR_STRIDE = 6; // [time, open, high, low, close, volume]
 const DEFAULT_TIME_AXIS_HEIGHT = 24;
 
 const workerHeatmapPanelModes = new Map<string, OrderbookHeatmapMode>();
+const workerHeatmapPanelSettings = new Map<string, OrderbookHeatmapSettings>();
 const workerHeatmapListeners = new Set<() => void>();
 let workerHeatmapSourceInstalled = false;
 
@@ -60,9 +74,12 @@ function ensureWorkerHeatmapSettingsSource(): void {
     workerHeatmapSourceInstalled = true;
     configureOrderbookHeatmapSettingsSource({
       settingsFor: (market, panelId) => {
-        const mode = workerHeatmapPanelModes.get(`${panelId ?? ""}:${market}`) ?? "off";
+        const key = `${panelId ?? ""}:${market}`;
+        const stored = workerHeatmapPanelSettings.get(key);
+        const mode = workerHeatmapPanelModes.get(key) ?? stored?.mode ?? "off";
         return {
           ...DEFAULT_ORDERBOOK_HEATMAP_SETTINGS,
+          ...stored,
           mode,
         };
       },
@@ -79,6 +96,7 @@ function ensureWorkerHeatmapSettingsSource(): void {
 export interface ChartWorkerPanelOptions {
   panelId: string;
   marketId: string;
+  timeframe?: string;
   intervalMs?: number;
   priceStep?: number;
   pricePrecision?: number;
@@ -86,6 +104,7 @@ export interface ChartWorkerPanelOptions {
   initialGeneration?: number;
   createScratchCanvas?: () => CanvasTarget;
   getWebGl2Context?: (canvas: CanvasTarget) => WebGL2RenderingContext | null;
+  fetchOrderbookHeatmap?: (req: OrderbookHeatmapRequest, signal?: AbortSignal) => Promise<OrderbookHeatmapResponse>;
 }
 
 export interface ChartWorkerDiagnostics {
@@ -99,8 +118,14 @@ export interface ChartWorkerDiagnostics {
   readonly width: number;
   readonly height: number;
   readonly dpr: number;
+  readonly intervalMs: number;
+  readonly priceStep: number;
+  readonly pricePrecision: number;
   readonly barCount: number;
   readonly cellCount: number;
+  readonly oldestBarTime: number | null;
+  readonly visibleRange: [number, number];
+  readonly indicatorCount: number;
   readonly frameCount: number;
   readonly paused: boolean;
   readonly disposed: boolean;
@@ -108,6 +133,7 @@ export interface ChartWorkerDiagnostics {
   readonly gpuDiagnostics: GpuDiagnosticsSnapshot;
   readonly heatmap: ReturnType<ChartHeatmapGpuCoordinator["getDiagnostics"]> | null;
   readonly heatmapRaster: ReturnType<OrderbookHeatmapOverlay["getRasterDiagnostics"]> | null;
+  readonly telemetry?: ReturnType<typeof snapshotPerformanceTelemetry>;
 }
 
 function toFootprintBar(bar: WorkerHistoryBar, intervalMs: number): FootprintBar {
@@ -181,6 +207,7 @@ export class ChartWorkerPanelRuntime {
   readonly series: FootprintSeries;
 
   private requestedBackend: GpuBackendPreference;
+  private timeframe: string;
   private readonly createScratchCanvas?: () => CanvasTarget;
   private readonly getWebGl2Context?: (canvas: CanvasTarget) => WebGL2RenderingContext | null;
 
@@ -189,6 +216,7 @@ export class ChartWorkerPanelRuntime {
   private gpuSurface: GpuSurface | null = null;
   private renderer: FootprintRenderer | null = null;
   private overlay: Overlay | null = null;
+  private indicatorManager: IndicatorManager | null = null;
   private orderbookHeatmap: OrderbookHeatmapOverlay | null = null;
   private heatmapGpuCoordinator: ChartHeatmapGpuCoordinator | null = null;
   private offscreenCanvases?: Partial<Record<WorkerSurfaceRole, OffscreenCanvas>>;
@@ -222,6 +250,7 @@ export class ChartWorkerPanelRuntime {
   constructor(options: ChartWorkerPanelOptions) {
     this.panelId = options.panelId;
     this.marketId = options.marketId;
+    this.timeframe = options.timeframe ?? "1m";
     this.requestedBackend = options.backendPreference ?? "auto";
     this.createScratchCanvas = options.createScratchCanvas;
     this.getWebGl2Context = options.getWebGl2Context;
@@ -236,8 +265,31 @@ export class ChartWorkerPanelRuntime {
       referenceMarket: options.marketId,
     });
 
+    this.indicatorManager = new IndicatorManager({
+      initial: [],
+      onChange: () => {
+        // Authoritative indicator state is pushed from main thread via main:state-update.
+      },
+      onLayoutChange: () => {
+        if (this.disposed) return;
+        this.updateViewLayout();
+        this.invalidate(ChartChange.Layout | ChartChange.Viewport);
+      },
+      onInvalidate: (changes) => {
+        if (!this.disposed) this.invalidate(changes ?? ChartChange.All);
+      },
+      getChartContext: () => ({
+        market: this.marketId,
+        timeframe: this.timeframe,
+        intervalMs: this.series.config.intervalMs,
+      }),
+      queuePriceLabel: (price, text, color, priority) => {
+        this.overlay?.queuePriceAxisLabel(price, text, color, priority);
+      },
+    });
+
     this.orderbookHeatmap = new OrderbookHeatmapOverlay({
-      fetch: async (req) => ({
+      fetch: options.fetchOrderbookHeatmap ?? (async (req) => ({
         schemaVersion: 1,
         generatedAt: Date.now(),
         base: "BTC",
@@ -247,7 +299,7 @@ export class ChartWorkerPanelRuntime {
         from: req.from,
         to: req.to,
         bars: [],
-      }),
+      })),
       invalidate: () => {
         if (!this.disposed) this.invalidate(ChartChange.Data);
       },
@@ -339,6 +391,7 @@ export class ChartWorkerPanelRuntime {
 
     this.heatmapGpuCoordinator?.beginFrameAttempt();
     let heatmapFrame: HeatmapGpuCellFrame | null = null;
+    const gpuStartedAt = performance.now();
     try {
       heatmapFrame = this.heatmapGpuCoordinator?.prepareHeatmapGpuCells(this.view, this.series) ?? null;
       const isOrderbookHeatmapActive =
@@ -354,10 +407,12 @@ export class ChartWorkerPanelRuntime {
       heatmapFrame = null;
       throw error;
     }
+    recordPerformanceDuration("chart.surface.gpu.draw.ms", performance.now() - gpuStartedAt);
 
     if (this.overlay) {
       const range = this.renderer.visibleRange(this.view, this.series.length);
       const preset = resolveBuiltInLayerPreset(this.chartType);
+      const annotationStartedAt = performance.now();
       this.overlay.renderAnnotations(
         this.view,
         this.series,
@@ -366,6 +421,8 @@ export class ChartWorkerPanelRuntime {
         preset.annotation,
         changes as ChartChange,
       );
+      recordPerformanceDuration("chart.surface.annotation.draw.ms", performance.now() - annotationStartedAt);
+      const interactionStartedAt = performance.now();
       this.overlay.renderInteraction(
         this.view,
         this.series,
@@ -373,9 +430,12 @@ export class ChartWorkerPanelRuntime {
         range,
         preset.interaction,
       );
+      recordPerformanceDuration("chart.surface.interaction.draw.ms", performance.now() - interactionStartedAt);
     }
 
     const renderMs = performance.now() - frameStartedAt;
+    recordPerformanceDuration("chart.frame.render.ms", renderMs);
+    incrementPerformanceCounter("chart.raf.frames");
     this.heatmapGpuCoordinator?.observeRenderedFrame({
       renderMs,
       rafLatencyMs: null,
@@ -391,6 +451,11 @@ export class ChartWorkerPanelRuntime {
     for (let i = 0; i < this.series.length; i++) {
       cellCount += this.series.at(i)?.cells.size ?? 0;
     }
+    const visibleRange: [number, number] = this.renderer
+      ? this.renderer.visibleRange(this.view, this.series.length)
+      : [0, 0];
+    const indicatorCount = this.indicatorManager?.peekInstances().length ?? 0;
+    const telemetry = isPerformanceTelemetryEnabled() ? snapshotPerformanceTelemetry() : undefined;
     return {
       renderMode: "worker",
       panelId: this.panelId,
@@ -402,8 +467,14 @@ export class ChartWorkerPanelRuntime {
       width: this.width,
       height: this.height,
       dpr: this.dpr,
+      intervalMs: this.series.config.intervalMs,
+      priceStep: this.series.config.priceStep,
+      pricePrecision: this.series.config.pricePrecision ?? 2,
       barCount: this.series.length,
       cellCount,
+      oldestBarTime: this.series.length > 0 ? this.series.at(0)?.startTime ?? null : null,
+      visibleRange,
+      indicatorCount,
       frameCount: this.frameCount,
       paused: this.paused,
       disposed: this.disposed,
@@ -411,6 +482,7 @@ export class ChartWorkerPanelRuntime {
       gpuDiagnostics: getGpuDiagnostics(),
       heatmap: this.heatmapGpuCoordinator?.getDiagnostics() ?? null,
       heatmapRaster: this.orderbookHeatmap?.getRasterDiagnostics() ?? null,
+      ...(telemetry !== undefined ? { telemetry } : {}),
     };
   }
 
@@ -419,6 +491,11 @@ export class ChartWorkerPanelRuntime {
     this.disposed = true;
     this.scheduledFrame?.cancel();
     this.scheduledFrame = null;
+    const heatmapKey = `${this.panelId}:${this.marketId}`;
+    workerHeatmapPanelModes.delete(heatmapKey);
+    workerHeatmapPanelSettings.delete(heatmapKey);
+    this.indicatorManager?.dispose();
+    this.indicatorManager = null;
     this.heatmapGpuCoordinator?.dispose();
     this.heatmapGpuCoordinator = null;
     this.orderbookHeatmap?.dispose();
@@ -548,8 +625,12 @@ export class ChartWorkerPanelRuntime {
       this.renderer.setSurface(nextSurface);
     }
 
-    const resolvedGl = nextSurface.kind === "webgl2" && this.getWebGl2Context
-      ? this.getWebGl2Context(nextGpuCanvas)
+    const resolvedGl = nextSurface.kind === "webgl2"
+      ? (
+        this.getWebGl2Context?.(nextGpuCanvas)
+        ?? (nextSurface as { getGlContext?: () => WebGL2RenderingContext | null }).getGlContext?.()
+        ?? null
+      )
       : null;
     this.heatmapGpuCoordinator?.setGl(resolvedGl);
     this.heatmapGpuCoordinator?.setSurface(nextSurface);
@@ -571,12 +652,12 @@ export class ChartWorkerPanelRuntime {
           undefined,
           undefined,
           undefined,
+          () => this.indicatorManager?.getPaneRenders() ?? [],
+          () => this.indicatorManager?.getPriceOverlayRenders() ?? [],
           undefined,
           undefined,
-          undefined,
-          undefined,
-          undefined,
-          undefined,
+          drawIndicatorPaneBackground,
+          () => this.indicatorManager?.isPaneMaximized() ?? false,
           interactionCtx ?? undefined,
           undefined,
           (ctx, activeView, activeSeries, range) => {
@@ -636,16 +717,64 @@ export class ChartWorkerPanelRuntime {
     if (patch.stackedImbalance !== undefined) {
       this.stackedImbalanceVisible = patch.stackedImbalance;
     }
+    if (patch.orderbookHeatmapSettings !== undefined) {
+      const heatmapKey = `${this.panelId}:${this.marketId}`;
+      const prevSettings = workerHeatmapPanelSettings.get(heatmapKey) ?? {
+        ...DEFAULT_ORDERBOOK_HEATMAP_SETTINGS,
+        mode: this.orderbookHeatmapMode,
+      };
+      const nextMode = patch.orderbookHeatmapMode ?? patch.orderbookHeatmapSettings.mode ?? prevSettings.mode ?? this.orderbookHeatmapMode;
+      const mergedSettings: OrderbookHeatmapSettings = {
+        ...DEFAULT_ORDERBOOK_HEATMAP_SETTINGS,
+        ...prevSettings,
+        ...patch.orderbookHeatmapSettings,
+        mode: nextMode,
+      };
+      workerHeatmapPanelSettings.set(heatmapKey, mergedSettings);
+      if (patch.orderbookHeatmapMode === undefined && patch.orderbookHeatmapSettings.mode !== undefined) {
+        this.orderbookHeatmapMode = patch.orderbookHeatmapSettings.mode;
+        workerHeatmapPanelModes.set(heatmapKey, patch.orderbookHeatmapSettings.mode);
+      }
+      for (const listener of workerHeatmapListeners) {
+        listener();
+      }
+    }
     if (patch.orderbookHeatmapMode !== undefined) {
+      const heatmapKey = `${this.panelId}:${this.marketId}`;
       this.orderbookHeatmapMode = patch.orderbookHeatmapMode;
-      workerHeatmapPanelModes.set(`${this.panelId}:${this.marketId}`, patch.orderbookHeatmapMode);
+      workerHeatmapPanelModes.set(heatmapKey, patch.orderbookHeatmapMode);
+      const existingSettings = workerHeatmapPanelSettings.get(heatmapKey);
+      if (existingSettings) {
+        workerHeatmapPanelSettings.set(heatmapKey, {
+          ...existingSettings,
+          mode: patch.orderbookHeatmapMode,
+        });
+      }
       for (const listener of workerHeatmapListeners) {
         listener();
       }
     }
     if (patch.residentHeatmap !== undefined) {
       this.residentHeatmapEnabled = patch.residentHeatmap;
-      this.heatmapGpuCoordinator?.setResidentHeatmapEnabled(patch.residentHeatmap, false);
+      this.heatmapGpuCoordinator?.setResidentHeatmapEnabled(
+        patch.residentHeatmap,
+        patch.residentHeatmapExplicit === true,
+      );
+    }
+    if (patch.priceStep !== undefined && Number.isFinite(patch.priceStep) && patch.priceStep > 0) {
+      if (this.series.config.priceStep !== patch.priceStep) {
+        this.series.setPriceStep(patch.priceStep);
+      }
+    }
+    if (patch.pricePrecision !== undefined && Number.isFinite(patch.pricePrecision)) {
+      this.series.setPricePrecision(patch.pricePrecision);
+    }
+    if (patch.indicators !== undefined && this.indicatorManager) {
+      this.indicatorManager.restore([...patch.indicators]);
+      this.updateViewLayout();
+    }
+    if (patch.telemetryEnabled !== undefined) {
+      configurePerformanceTelemetry({ enabled: patch.telemetryEnabled });
     }
 
     this.applyChartConfig();
@@ -725,10 +854,18 @@ export class ChartWorkerPanelRuntime {
   }
 
   private updateViewLayout(): void {
-    const plotW = Math.max(1, this.width - this.view.priceAxisW);
-    const plotH = Math.max(1, this.height - DEFAULT_TIME_AXIS_HEIGHT);
+    const layoutOptions = this.view.chartLayoutOptions;
+    const timeAxisHeight = layoutOptions?.timeAxisHeight ?? DEFAULT_TIME_AXIS_HEIGHT;
+    const priceAxisWidth = layoutOptions?.priceAxisWidth ?? this.view.priceAxisW;
+    const availableHeight = Math.max(1, this.height - timeAxisHeight - 1);
+    const paneH = this.indicatorManager?.totalPaneHeight(availableHeight) ?? 0;
+    this.view.subPanesH = paneH;
+    this.view.priceAxisW = priceAxisWidth;
+    const plotW = Math.max(1, this.width - priceAxisWidth);
+    const plotH = Math.max(1, this.height - timeAxisHeight - paneH);
     this.view.area = { left: 0, top: 0, width: plotW, height: plotH };
     this.view.pixelRatio = this.dpr;
+    this.indicatorManager?.layout(this.view);
   }
 
   private handleTick(payload: {
