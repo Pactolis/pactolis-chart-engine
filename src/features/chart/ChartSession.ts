@@ -174,6 +174,13 @@ export class ChartSession {
   private readonly onBackendChangedCb?: (backend: string) => void;
   private readonly onResizeCb?: (w: number, h: number, dpr: number) => void;
   private readonly onRenderedCb?: (surfaces: ChartSurfaceDirty, changes: ChartChange) => void;
+  private onFrameCompletedCb: ((info: {
+    dirty: number;
+    renderMs: number;
+    rafLatencyMs: number | null;
+    visible: boolean;
+  }) => void) | null = null;
+  private rafScheduledAt: number | null = null;
   private readonly onInvalidateCb?: (changes: ChartChange) => void;
   private disposeDprWatcher: (() => void) | null = null;
   private maxDevicePixelRatio: number | null;
@@ -343,6 +350,12 @@ export class ChartSession {
     this.onInvalidateCb?.(changes);
   }
 
+  setFrameCompletedObserver(
+    cb: ((info: { dirty: number; renderMs: number; rafLatencyMs: number | null; visible: boolean }) => void) | null,
+  ): void {
+    this.onFrameCompletedCb = cb;
+  }
+
   getSurface(): GpuSurface {
     return this.gpuSurface;
   }
@@ -503,6 +516,9 @@ export class ChartSession {
         return;
       }
       incrementPerformanceCounter("chart.raf.scheduled");
+      if (this.rafScheduledAt === null) {
+        this.rafScheduledAt = performance.now();
+      }
       this.scheduledOnWindow = win;
       scheduler.schedule(this, () => this.executeScheduledFrame(), {
         priority: this.renderPriority,
@@ -516,6 +532,9 @@ export class ChartSession {
       return;
     }
     incrementPerformanceCounter("chart.raf.scheduled");
+    if (this.rafScheduledAt === null) {
+      this.rafScheduledAt = performance.now();
+    }
     this.rafId = win.requestAnimationFrame(() => {
       this.executeScheduledFrame();
     });
@@ -548,7 +567,11 @@ export class ChartSession {
   private renderDirtySurfaces(): void {
     if (!this.active || !this.gpuValid || this.dirtySurfaces === ChartSurfaceDirty.None) return;
     const telemetryEnabled = isPerformanceTelemetryEnabled();
-    const frameStartedAt = telemetryEnabled ? performance.now() : null;
+    const wallStart = performance.now();
+    const scheduledAt = this.rafScheduledAt;
+    this.rafScheduledAt = null;
+    const rafLatencyMs = scheduledAt !== null ? Math.max(0, wallStart - scheduledAt) : null;
+    const frameStartedAt = telemetryEnabled ? wallStart : null;
     const liveUpdateStartedAt = telemetryEnabled ? this.pendingLiveUpdateStartedAt : null;
     this.pendingLiveUpdateStartedAt = null;
     if (frameStartedAt !== null && liveUpdateStartedAt !== null) {
@@ -638,6 +661,12 @@ export class ChartSession {
       : undefined;
     this.lastRenderTimestamp = frameEndedAt;
     recordGpuFrame(this.gpuSurface.kind, renderMs, intervalMs);
+    this.onFrameCompletedCb?.({
+      dirty,
+      renderMs: frameEndedAt - wallStart,
+      rafLatencyMs,
+      visible: this.ownerDocument.visibilityState !== "hidden",
+    });
 
     if (this.pendingCapture && (dirty & ChartSurfaceDirty.Annotation)) {
       if (this.annotationContextLost) {
@@ -687,6 +716,7 @@ export class ChartSession {
   }
 
   private cancelRaf(): void {
+    this.rafScheduledAt = null;
     if (this.scheduledOnWindow !== null) {
       getGlobalRenderScheduler(this.scheduledOnWindow)?.unregister(this);
       this.scheduledOnWindow = null;
