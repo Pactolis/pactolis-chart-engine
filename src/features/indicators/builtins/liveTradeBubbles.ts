@@ -303,7 +303,7 @@ export function hitTestBubble(
 
 function formatEventTime(ms: number): string {
   try {
-    return tzDateTimeHud(ms);
+    return tzDateTimeHud(ms, 60_000);
   } catch {
     return new Date(ms).toISOString().slice(11, 19);
   }
