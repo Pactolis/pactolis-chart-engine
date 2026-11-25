@@ -12,9 +12,10 @@ test.use({
  * Given a BTCUSDT perp chart with acknowledged books and the private GPU
  * density opt-in on,
  * When frames render with performance telemetry off and then on,
- * Then `chart.gpu.heatmap.prepare.ms` and `chart.gpu.heatmap.render.ms` each
- * get a sample for every frame rendered with telemetry on, none before, and
- * the density was really GPU-owned.
+ * Then `chart.gpu.heatmap.render.ms` gets a sample for every frame rendered
+ * with telemetry on, `chart.gpu.heatmap.prepare.ms` one for each frame that
+ * really prepares (the first pan frame prepares the WebGL2 motion window,
+ * later pan frames reuse it), none before, and the density was really GPU-owned.
  */
 type RuntimeProbe = {
   heatmapTexturePrototypeEnabled: boolean;
@@ -146,11 +147,14 @@ test("GPU heatmap stage times reach performance telemetry only while it is on", 
     result.whileOnCached["chart.gpu.heatmap.render.ms"],
     "chart.gpu.heatmap.render.ms: a sample for every unchanged frame rendered with telemetry on",
   ).toBeGreaterThanOrEqual(3);
+  const pannedPrepares = result.whileOnPanned["chart.gpu.heatmap.prepare.ms"] - result.whileOnCached["chart.gpu.heatmap.prepare.ms"];
+  expect(pannedPrepares, "chart.gpu.heatmap.prepare.ms: the panned frames prepare (motion window)").toBeGreaterThanOrEqual(1);
+  expect(pannedPrepares, "chart.gpu.heatmap.prepare.ms: one sample per prepare, at most one per frame").toBeLessThanOrEqual(3);
+  expect(
+    result.whileOnPanned["chart.gpu.heatmap.render.ms"] - result.whileOnCached["chart.gpu.heatmap.render.ms"],
+    "chart.gpu.heatmap.render.ms: a sample for every viewport-changed frame rendered with telemetry on",
+  ).toBeGreaterThanOrEqual(3);
   for (const metric of METRICS) {
-    expect(
-      result.whileOnPanned[metric] - result.whileOnCached[metric],
-      `${metric}: a sample for every viewport-changed frame rendered with telemetry on`,
-    ).toBeGreaterThanOrEqual(3);
     expect(result.snapshot[metric].p95Ms, `${metric}: p95`).toBeGreaterThanOrEqual(0);
   }
 });

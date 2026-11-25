@@ -1047,6 +1047,12 @@ export class OrderbookHeatmapOverlay {
     }
   }
 
+  /** Test-only seam: every WebGL2 GPU frame takes the exact prepare, so cold prepare cost can be measured during motion. */
+  setGpuMotionReuseDisabledForTest(disabled: boolean): void {
+    this.gpuMotionReuseDisabledForTest = disabled;
+    if (disabled) this.gpuMotionWindow = null;
+  }
+
   /** Test-only seam: bypasses CPU raster caching so direct painting can be measured on identical viewports. */
   setRasterCacheDisabledForTest(disabled: boolean): void {
     this.rasterCacheDisabledForTest = disabled;
@@ -2895,7 +2901,7 @@ export class OrderbookHeatmapOverlay {
     const frame = this.beginFrame(series, range);
     if (!frame) return null;
     const exactKey = this.frameCacheKey(view, series, frame, false, false, includeOffsetX);
-    if (motionReuse) {
+    if (motionReuse && !this.gpuMotionReuseDisabledForTest) {
       // A sub-bar pan that keeps the exact key keeps reusing the exact frame;
       // a window is only prepared once the exact frame would be re-prepared.
       const allowCreate = this.gpuMotionWindow !== null || exactKey !== this.lastGpuExactPrepareKey;
@@ -3313,6 +3319,7 @@ export class OrderbookHeatmapOverlay {
   private gpuMotionWindowDisabled = false;
   private gpuMotionWindowSeq = 0;
   private lastGpuExactPrepareKey = "";
+  private gpuMotionReuseDisabledForTest = false;
   private gpuMotionSettleTimer: ReturnType<typeof setTimeout> | null = null;
   private scaleViewportChangedAt = Number.NEGATIVE_INFINITY;
   private scaleSettleTimer: ReturnType<typeof setTimeout> | null = null;
