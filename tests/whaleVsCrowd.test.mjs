@@ -287,15 +287,24 @@ test("warming (< 7 days) suppresses z-score line and emits warming badge; unsupp
   assert.equal(prepared.meta.venues.binance.points.every((p) => Number.isNaN(p.zScore)), true);
 
   const badgeTexts = prepared.meta.badges.map((b) => b.text);
-  assert.ok(badgeTexts.some((t) => /ısınıyor \(3\/30 gün\)/.test(t)), `Expected warming badge in: ${badgeTexts.join(" | ")}`);
-  assert.ok(badgeTexts.some((t) => /OKX: desteklenmiyor/.test(t)), `Expected OKX unsupported badge in: ${badgeTexts.join(" | ")}`);
-  assert.ok(badgeTexts.some((t) => /Hyperliquid kalabalık verisi yok/.test(t)), `Expected HL unavailable badge in: ${badgeTexts.join(" | ")}`);
+  assert.ok(
+    badgeTexts.some((t) => /(?:ısınıyor \(3\/30 gün\)|warming \(3\/30d\))/.test(t)),
+    `Expected warming badge in: ${badgeTexts.join(" | ")}`,
+  );
+  assert.ok(
+    badgeTexts.some((t) => /OKX: (?:desteklenmiyor|unsupported)/.test(t)),
+    `Expected OKX unsupported badge in: ${badgeTexts.join(" | ")}`,
+  );
+  assert.ok(
+    badgeTexts.some((t) => /Hyperliquid (?:kalabalık verisi yok|crowd data unavailable)/.test(t)),
+    `Expected HL unavailable badge in: ${badgeTexts.join(" | ")}`,
+  );
 
   whaleVsCrowdIndicatorDefinition.drawSubPane(ctx, prepared);
   // Only baseline + +/-2 threshold lines should be drawn (no venue z-score polylines)
   assert.equal(canvasMock.dashedLines.length, 2);
   const renderedTexts = canvasMock.fillTexts.map((f) => f.text);
-  assert.ok(renderedTexts.some((t) => /ısınıyor/.test(t)));
+  assert.ok(renderedTexts.some((t) => /(?:ısınıyor|warming)/.test(t)));
   assert.ok(renderedTexts.some((t) => /Hyperliquid/.test(t)));
 });
 
