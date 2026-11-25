@@ -1076,7 +1076,6 @@ export class OrderbookHeatmapOverlay {
   /** Returns current loading, error, and source-coverage status for this overlay instance. */
   getStatus(): OrderbookHeatmapRuntimeStatus {
     const isHistoryMarket = isOrderbookHeatmapHistoryMarket(this.getMarket());
-    const sourceKind: "history" | "browser" = isHistoryMarket ? "history" : "browser";
     if (!this.isCurrentlyActive()) {
       return {
         state: "idle",
@@ -1084,7 +1083,6 @@ export class OrderbookHeatmapOverlay {
         observedSources: [],
         missingSources: [],
         hasBars: false,
-        sourceKind,
       };
     }
     let hasLoading = false;
@@ -1113,8 +1111,7 @@ export class OrderbookHeatmapOverlay {
       observedSources: coverage.observedSources,
       missingSources: coverage.missingSources,
       hasBars: this.bars.size > 0,
-      sourceKind,
-      ...(isHistoryMarket ? {} : { sourceLabel: getOrderbookHeatmapBrowserSourceLabel() }),
+      ...(isHistoryMarket ? {} : { sourceKind: "browser" as const, sourceLabel: getOrderbookHeatmapBrowserSourceLabel() }),
     };
   }
 
