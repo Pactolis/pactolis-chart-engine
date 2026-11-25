@@ -209,7 +209,7 @@ function isReadyState(
 }
 
 function asOfAllowed(t: number, asOfTime: number | undefined): boolean {
-  return asOfTime === undefined || t <= asOfTime;
+  return asOfTime === undefined || t < asOfTime;
 }
 
 function settledRateAtHourEnd(

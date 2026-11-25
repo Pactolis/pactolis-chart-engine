@@ -688,20 +688,21 @@ test("replay as-of parity: external OI, Funding, Liquidations, and Futures Posit
         points: cutoffTime === null ? posPoints : posPoints.filter((p) => p.time < cutoffTime),
       },
     }),
-    requestVenueFundingSeries: ({ venues }) => {
+    requestVenueFundingSeries: ({ to, venues }) => {
+      const limit = cutoffTime ?? to;
       const settled = (cutoffTime === null ? fundPoints : fundPoints.filter((p) => p.time < cutoffTime)).map((p) => ({
         t: p.time,
         rate: p.value,
         intervalHours: 1,
         rate8h: p.value,
       }));
-      const predLast = (cutoffTime === null ? predFundPoints : predFundPoints.filter((p) => p.time < cutoffTime)).at(-1);
+      const predLast = predFundPoints.filter((p) => p.time < limit).at(-1);
       return {
         status: "ready",
         data: {
           market: "BTCUSDT",
           from: T0,
-          to: cutoffTime ?? T0 + 160 * MIN,
+          to: limit,
           venues,
           series: [
             {
