@@ -147,11 +147,51 @@ test("explicit ?residentHeatmap=1 override keeps GPU heatmap path open on SwiftS
   const panelId = await hook.getAttribute("data-panel-id");
   expect(panelId).toBeTruthy();
 
+  await page.evaluate(async (id) => {
+    const {
+      getChartRuntime,
+      updateOrderbookHeatmapSettings,
+      setOrderbookHeatmapModeFor,
+    } = await import("/harness/chart.ts");
+    const runtime = getChartRuntime(id!) as {
+      view: { fitPriceRange(min: number, max: number, pad?: number): void };
+      invalidate(): void;
+      whenHeatmapGpuRendererReady(): Promise<void>;
+    };
+    runtime.view.fitPriceRange(50, 350, 0.1);
+    updateOrderbookHeatmapSettings({ unit: "btc", bucketStep: 50, single: { usd: 0, btc: 16 } });
+    setOrderbookHeatmapModeFor("BINANCE_FUTURES:btcusdt", id!, "single");
+    await runtime.whenHeatmapGpuRendererReady();
+    runtime.invalidate();
+  }, panelId);
+
+  await expect
+    .poll(() =>
+      page.evaluate(async (id) => {
+        const { getChartRuntime } = await import("/harness/chart.ts");
+        const runtime = getChartRuntime(id!) as {
+          orderbookHeatmap: {
+            inFlight: Set<unknown>;
+            chunks: Map<number, { status: string }>;
+          };
+        };
+        return (
+          runtime.orderbookHeatmap.inFlight.size === 0
+          && runtime.orderbookHeatmap.chunks.size > 0
+          && [...runtime.orderbookHeatmap.chunks.values()].every((chunk) => chunk.status === "ready")
+        );
+      }, panelId),
+    )
+    .toBe(true);
+
   const probe = await page.evaluate(async (id) => {
-    const { getChartRuntime, setOrderbookHeatmapModeFor } = await import("/harness/chart.ts");
+    const { getChartRuntime } = await import("/harness/chart.ts");
     const runtime = getChartRuntime(id!) as {
       whenHeatmapGpuRendererReady(): Promise<void>;
       invalidate(): void;
+      session: {
+        captureCompositePng(): Promise<unknown>;
+      };
       getDiagnostics(): {
         heatmap: {
           enabled: boolean;
@@ -160,10 +200,9 @@ test("explicit ?residentHeatmap=1 override keeps GPU heatmap path open on SwiftS
         };
       };
     };
-    setOrderbookHeatmapModeFor("BINANCE_FUTURES:btcusdt", id!, "single");
     await runtime.whenHeatmapGpuRendererReady();
     runtime.invalidate();
-    await new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(r)));
+    await runtime.session.captureCompositePng();
     return runtime.getDiagnostics();
   }, panelId);
 
