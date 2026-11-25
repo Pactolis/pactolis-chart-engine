@@ -43,6 +43,7 @@ import { OrderbookHeatmapOverlay } from "../../orderbook/heatmapOverlay.js";
 import {
   configureOrderbookHeatmapSettingsSource,
   orderbookHeatmapSettingsSource,
+  type OrderbookHeatmapSettingsSource,
 } from "../../orderbook/heatmapSettingsSource.js";
 import {
   type WorkerChartStatePatch,
@@ -63,34 +64,45 @@ const DEFAULT_TIME_AXIS_HEIGHT = 24;
 const workerHeatmapPanelModes = new Map<string, OrderbookHeatmapMode>();
 const workerHeatmapPanelSettings = new Map<string, OrderbookHeatmapSettings>();
 const workerHeatmapListeners = new Set<() => void>();
-let workerHeatmapSourceInstalled = false;
+let installedFallbackSource: OrderbookHeatmapSettingsSource | null = null;
+
+const workerHeatmapSettingsSource: OrderbookHeatmapSettingsSource = {
+  settingsFor: (market, panelId) => {
+    const key = `${panelId ?? ""}:${market}`;
+    const stored = workerHeatmapPanelSettings.get(key);
+    const mode = workerHeatmapPanelModes.get(key);
+    if (stored !== undefined || mode !== undefined) {
+      return {
+        ...DEFAULT_ORDERBOOK_HEATMAP_SETTINGS,
+        ...stored,
+        mode: mode ?? stored?.mode ?? "off",
+      };
+    }
+    return installedFallbackSource?.settingsFor(market, panelId) ?? {
+      ...DEFAULT_ORDERBOOK_HEATMAP_SETTINGS,
+      mode: "off",
+    };
+  },
+  onChange: (listener) => {
+    workerHeatmapListeners.add(listener);
+    const unsubFallback = installedFallbackSource?.onChange(listener);
+    return () => {
+      workerHeatmapListeners.delete(listener);
+      unsubFallback?.();
+    };
+  },
+};
 
 function ensureWorkerHeatmapSettingsSource(): void {
+  let current: OrderbookHeatmapSettingsSource | null = null;
   try {
-    orderbookHeatmapSettingsSource();
-    return;
+    current = orderbookHeatmapSettingsSource();
   } catch {
-    if (workerHeatmapSourceInstalled) return;
-    workerHeatmapSourceInstalled = true;
-    configureOrderbookHeatmapSettingsSource({
-      settingsFor: (market, panelId) => {
-        const key = `${panelId ?? ""}:${market}`;
-        const stored = workerHeatmapPanelSettings.get(key);
-        const mode = workerHeatmapPanelModes.get(key) ?? stored?.mode ?? "off";
-        return {
-          ...DEFAULT_ORDERBOOK_HEATMAP_SETTINGS,
-          ...stored,
-          mode,
-        };
-      },
-      onChange: (listener) => {
-        workerHeatmapListeners.add(listener);
-        return () => {
-          workerHeatmapListeners.delete(listener);
-        };
-      },
-    });
+    current = null;
   }
+  if (current === workerHeatmapSettingsSource) return;
+  installedFallbackSource = current;
+  configureOrderbookHeatmapSettingsSource(workerHeatmapSettingsSource);
 }
 
 export interface ChartWorkerPanelOptions {

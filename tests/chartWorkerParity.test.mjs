@@ -202,7 +202,7 @@ test("ChartWorkerPanelRuntime wires custom fetchOrderbookHeatmap and orderbookHe
           from: req.from,
           to: req.to,
           bars: [
-            { t: 1_700_000_000_000, cells: [[100, 1200, 800]] },
+            { t: 1_700_000_100_000, cells: [[100, 1200, 800]] },
           ],
         };
       },
@@ -242,7 +242,7 @@ test("ChartWorkerPanelRuntime wires custom fetchOrderbookHeatmap and orderbookHe
         hasMore: false,
         chunkIndex: 0,
         bars: [
-          { time: 1_700_000_000_000, open: 100, high: 105, low: 98, close: 103, volume: 50 },
+          { time: 1_700_000_100_000, open: 100, high: 105, low: 98, close: 103, volume: 50 },
         ],
       },
     });
@@ -370,8 +370,8 @@ test("ChartWorkerPanelRuntime runs real IndicatorManager, priceStep/precision, d
       hasMore: false,
       chunkIndex: 0,
       bars: [
-        { time: 1_700_000_000_000, open: 100, high: 105, low: 98, close: 103, volume: 40 },
-        { time: 1_700_000_060_000, open: 103, high: 108, low: 101, close: 106, volume: 60 },
+        { time: 1_700_000_100_000, open: 100, high: 105, low: 98, close: 103, volume: 40 },
+        { time: 1_700_000_160_000, open: 103, high: 108, low: 101, close: 106, volume: 60 },
       ],
     },
   });
@@ -382,7 +382,7 @@ test("ChartWorkerPanelRuntime runs real IndicatorManager, priceStep/precision, d
   assert.equal(diag.intervalMs, 60_000);
   assert.equal(diag.priceStep, 2.5);
   assert.equal(diag.pricePrecision, 1);
-  assert.equal(diag.oldestBarTime, 1_700_000_000_000);
+  assert.equal(diag.oldestBarTime, 1_700_000_100_000);
   assert.equal(diag.indicatorCount, 3);
   assert.ok(Array.isArray(diag.visibleRange) && diag.visibleRange.length === 2);
   assert.ok(diag.telemetry !== undefined, "diagnostics.telemetry must be populated when telemetryEnabled is true");
