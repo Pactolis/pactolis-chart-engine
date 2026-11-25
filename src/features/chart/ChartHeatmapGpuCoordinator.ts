@@ -417,7 +417,10 @@ export class ChartHeatmapGpuCoordinator {
       return null;
     }
     const hasCacheKeyFn = typeof overlay.getPrepareCacheKey === "function";
-    const rawCacheKey = hasCacheKeyFn ? overlay.getPrepareCacheKey(v, s, range) : null;
+    // WebGL2 shifts/scales a cached frame in the shader, so it may reuse a
+    // wider motion-window prepare across pan frames; WebGPU keys on offsetX.
+    const motionReuse = !isWebGpu && !isLogScale;
+    const rawCacheKey = hasCacheKeyFn ? overlay.getPrepareCacheKey(v, s, range, false, motionReuse) : null;
     if (hasCacheKeyFn && rawCacheKey === null) {
       this.clearPreparedCache();
       return null;
@@ -427,12 +430,28 @@ export class ChartHeatmapGpuCoordinator {
       : (isWebGpu ? `${rawCacheKey}|offsetX:${v.offsetX}` : rawCacheKey);
 
     if (cacheKey !== null && cacheKey === this.cachedPrepareKey && this.cachedPrepareFrame) {
-      const panOffsetX = !isWebGpu && this.cachedPrepareFrame.anchorOffsetX !== undefined
-        ? v.offsetX - this.cachedPrepareFrame.anchorOffsetX
+      const cached = this.cachedPrepareFrame;
+      const panOffsetX = !isWebGpu && cached.anchorOffsetX !== undefined
+        ? v.offsetX - cached.anchorOffsetX
         : 0;
+      // y' = areaTop + (y - areaTop) * k0 / k1 + (priceTop1 - priceTop0) / k1 on a linear axis.
+      let panScaleY = 1;
+      let panOffsetY = 0;
+      if (
+        motionReuse
+        && cached.anchorPricePerPx !== undefined
+        && cached.anchorPriceTop !== undefined
+        && v.pricePerPx > 0
+        && (cached.anchorPricePerPx !== v.pricePerPx || cached.anchorPriceTop !== v.priceTop)
+      ) {
+        panScaleY = cached.anchorPricePerPx / v.pricePerPx;
+        panOffsetY = v.area.top * (1 - panScaleY) + (v.priceTop - cached.anchorPriceTop) / v.pricePerPx;
+      }
       return {
-        ...this.cachedPrepareFrame,
+        ...cached,
         panOffsetX,
+        panScaleY,
+        panOffsetY,
         ...(typeof (overlay as { getActivePalette?: () => unknown }).getActivePalette === "function"
           ? { palette: (overlay as { getActivePalette: () => HeatmapGpuCellFrame["palette"] }).getActivePalette() }
           : {}),
@@ -452,6 +471,7 @@ export class ChartHeatmapGpuCoordinator {
       s,
       range,
       reserve,
+      motionReuse,
     );
     if (!prepared || cacheKey === null) return prepared;
 
