@@ -94,7 +94,7 @@ async function prepare(page: Page, empty: boolean, log = false): Promise<string>
     }) });
     acknowledgements++;
   });
-  await openHarness(page, "?chart=BINANCE_FUTURES:btcusdt&timeframe=15m&priceStep=50&priceStepResolved=0");
+  await openHarness(page, "?chart=BINANCE_FUTURES:btcusdt&timeframe=15m&priceStep=50&priceStepResolved=0&residentHeatmap=0");
   const hook = page.locator(hookSelector);
   await expect(hook).toHaveCount(1);
   await expect(hook).toHaveAttribute("data-history-loading", "false");
@@ -114,7 +114,7 @@ async function prepare(page: Page, empty: boolean, log = false): Promise<string>
       throw new Error("Fixture: current runtime/capture contracts unavailable");
     }
     if (r.getState().market !== "BINANCE_FUTURES:btcusdt") throw new Error("Fixture: wrong market");
-    if (r.heatmapTexturePrototypeEnabled === true) throw new Error("Private opt-in must default false");
+    if (r.heatmapTexturePrototypeEnabled === true) throw new Error("Fixture: ?residentHeatmap=0 must start with GPU heatmap disabled");
     settings.grid = false;
     r.updateState({ ...r.getState(), chartType: "candlestick", scaleMode: log ? "log" : "linear" });
     // The history-loading hook can turn false before loadHistory's final latest

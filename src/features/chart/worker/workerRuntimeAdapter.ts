@@ -12,6 +12,7 @@ import {
   type HistoryWorkerMessage,
   type IngressWorkerMessage,
   type MainWorkerMessage,
+  type WorkerChartStatePatch,
   type WorkerEnvelopeBase,
   type WorkerInputEvent,
   type WorkerPortChannel,
@@ -275,6 +276,19 @@ export class WorkerChartHostBridge {
     });
   }
 
+  sendStateUpdate(patch: WorkerChartStatePatch): void {
+    this.enqueueAndFlush({
+      channel: "main",
+      kind: "main:state-update",
+      panelId: this.panelId,
+      marketId: this.marketId,
+      generation: this.generation,
+      seq: ++this.seq,
+      revision: ++this.revision,
+      payload: patch,
+    });
+  }
+
   sendLifecycle(
     action: "pause" | "resume" | "rehome" | "dispose" | "epoch-bump" | "abort",
     reason?: string,
@@ -515,6 +529,10 @@ export interface WorkerEndpointHandlers {
     envelope: MainWorkerMessage,
   ) => void;
   onInput?: (event: WorkerInputEvent, envelope: MainWorkerMessage) => void;
+  onStateUpdate?: (
+    payload: Extract<MainWorkerMessage, { kind: "main:state-update" }>["payload"],
+    envelope: MainWorkerMessage,
+  ) => void;
   onTick?: (
     payload: Extract<IngressWorkerMessage, { kind: "ingress:tick" }>["payload"],
     envelope: IngressWorkerMessage,
@@ -523,8 +541,16 @@ export interface WorkerEndpointHandlers {
     payload: Extract<IngressWorkerMessage, { kind: "ingress:bar" }>["payload"],
     envelope: IngressWorkerMessage,
   ) => void;
+  onHeatmapTail?: (
+    payload: Extract<IngressWorkerMessage, { kind: "ingress:heatmap-tail" }>["payload"],
+    envelope: IngressWorkerMessage,
+  ) => void;
   onHistoryChunk?: (
     payload: Extract<HistoryWorkerMessage, { kind: "history:chunk" }>["payload"],
+    envelope: HistoryWorkerMessage,
+  ) => void;
+  onHeatmapChunk?: (
+    payload: Extract<HistoryWorkerMessage, { kind: "history:heatmap-chunk" }>["payload"],
     envelope: HistoryWorkerMessage,
   ) => void;
   onCapture?: (
@@ -800,6 +826,12 @@ export class WorkerChartEndpoint {
       return;
     }
 
+    if (msg.kind === "ingress:heatmap-tail") {
+      this.processedIngress++;
+      this.handlers.onHeatmapTail?.(msg.payload, msg);
+      return;
+    }
+
     this.processedIngress++;
   }
 
@@ -807,6 +839,11 @@ export class WorkerChartEndpoint {
     if (msg.kind === "history:chunk") {
       this.processedHistory++;
       this.handlers.onHistoryChunk?.(msg.payload, msg);
+      return;
+    }
+    if (msg.kind === "history:heatmap-chunk") {
+      this.processedHistory++;
+      this.handlers.onHeatmapChunk?.(msg.payload, msg);
       return;
     }
     this.processedHistory++;
@@ -821,6 +858,10 @@ export class WorkerChartEndpoint {
     }
     if (msg.kind === "main:resize") {
       this.handlers.onResize?.(msg.payload, msg);
+      return;
+    }
+    if (msg.kind === "main:state-update") {
+      this.handlers.onStateUpdate?.(msg.payload, msg);
       return;
     }
     if (msg.kind === "main:input") {

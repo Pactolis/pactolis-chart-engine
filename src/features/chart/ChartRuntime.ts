@@ -117,7 +117,13 @@ export interface ChartRuntime {
   onReplayState?: (snap: ReplaySnapshot | null) => void;
   subscribeReplayState(cb: (snap: ReplaySnapshot | null) => void): () => void;
   applyExternalReplay(snapshot: ReplaySnapshot | null): void;
-  getDiagnostics(): { disposed: boolean; replayActive: boolean };
+  getDiagnostics(): {
+    disposed: boolean;
+    replayActive: boolean;
+    gpuBackend: string | null;
+    heatmap: ReturnType<ChartHeatmapGpuCoordinator["getDiagnostics"]>;
+    heatmapRaster: ReturnType<OrderbookHeatmapOverlay["getRasterDiagnostics"]> | null;
+  };
   invalidate(changes?: ChartChange): void;
   getNpocLevels(): readonly NakedPocLevel[];
   subscribeNpoc(listener: () => void): () => void;
@@ -294,6 +300,7 @@ class ChartRuntimeImpl implements ChartRuntime, ChartInputHost {
   }
   set heatmapTexturePrototypeEnabled(enabled: boolean) {
     this.heatmapGpuCoordinator.setHeatmapTexturePrototypeEnabled(enabled);
+    this.setHookAttr("data-heatmap-path", this.heatmapGpuCoordinator.getDiagnostics().heatmapPath);
   }
 
   get heatmapGpuFrame(): unknown {
@@ -575,6 +582,7 @@ class ChartRuntimeImpl implements ChartRuntime, ChartInputHost {
             // this GPU callback returns, so the Session's immediate readPixels
             // already owns it. Hover/axes/errors stay on the annotation canvas.
             this.renderHeatmapGpuCells(heatmapFrame, v, s);
+            this.setHookAttr("data-heatmap-path", this.heatmapGpuCoordinator.getDiagnostics().heatmapPath);
           } catch (error) {
             heatmapFrame?.preparedLease?.release();
             heatmapFrame = null;
@@ -1678,8 +1686,20 @@ class ChartRuntimeImpl implements ChartRuntime, ChartInputHost {
     return this.disposal.signal;
   }
 
-  getDiagnostics(): { disposed: boolean; replayActive: boolean } {
-    return { disposed: this.disposed, replayActive: this.replayCoordinator.isActive() };
+  getDiagnostics(): {
+    disposed: boolean;
+    replayActive: boolean;
+    gpuBackend: string | null;
+    heatmap: ReturnType<ChartHeatmapGpuCoordinator["getDiagnostics"]>;
+    heatmapRaster: ReturnType<OrderbookHeatmapOverlay["getRasterDiagnostics"]> | null;
+  } {
+    return {
+      disposed: this.disposed,
+      replayActive: this.replayCoordinator.isActive(),
+      gpuBackend: this.currentGpuSurface?.kind ?? null,
+      heatmap: this.heatmapGpuCoordinator.getDiagnostics(),
+      heatmapRaster: this.orderbookHeatmap?.getRasterDiagnostics() ?? null,
+    };
   }
 
   installDebugGlobals(): void {
@@ -2117,6 +2137,7 @@ class ChartRuntimeImpl implements ChartRuntime, ChartInputHost {
 
   setResidentHeatmapEnabled(enabled: boolean): void {
     this.heatmapGpuCoordinator.setResidentHeatmapEnabled(enabled);
+    this.setHookAttr("data-heatmap-path", this.heatmapGpuCoordinator.getDiagnostics().heatmapPath);
   }
 
   whenHeatmapGpuRendererReady(): Promise<void> {
@@ -2154,6 +2175,7 @@ function createChartTestHook(doc: Document, panelId: string): HTMLElement {
   hook.setAttribute("data-replay-visible", "");
   hook.setAttribute("data-replay-total", "");
   hook.setAttribute("data-gpu-backend", "webgl2");
+  hook.setAttribute("data-heatmap-path", "cpu");
   hook.style.cssText = "position:absolute;width:0;height:0;overflow:hidden;opacity:0;pointer-events:none;";
   return hook;
 }

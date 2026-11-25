@@ -141,7 +141,7 @@ async function installFixture(page: Page): Promise<string> {
       return result;
     };
   }, { vertex: HEATMAP_GPU_VERT_SRC, fragment: HEATMAP_GPU_FRAG_SRC });
-  await openHarness(page, "?chart=BINANCE_FUTURES:btcusdt&timeframe=15m&priceStep=50&priceStepResolved=0");
+  await openHarness(page, "?chart=BINANCE_FUTURES:btcusdt&timeframe=15m&priceStep=50&priceStepResolved=0&residentHeatmap=0");
   const hook = page.locator(hookSelector);
   await expect(hook).toHaveCount(1);
   await expect(hook).toHaveAttribute("data-history-loading", "false");
@@ -152,7 +152,7 @@ async function installFixture(page: Page): Promise<string> {
     const { settings } = await import("/src/core/settings.ts");
     const r = chart.getChartRuntime(id) as unknown as RuntimeProbe;
     if (!r?.session || r.heatmapTexturePrototypeEnabled || !r.getCaptureReadiness)
-      throw new Error("Fixture: actual default-off Runtime was not mounted");
+      throw new Error("Fixture: ?residentHeatmap=0 Runtime was not mounted in CPU mode");
     settings.grid = false;
     r.updateState({ ...r.getState(), chartType: "candlestick" });
     const selection = r.getState();
