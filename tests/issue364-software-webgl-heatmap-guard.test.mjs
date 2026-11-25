@@ -75,7 +75,6 @@ function makeCoordinatorAndHost() {
 
   const orderbookHeatmap = {
     currentDataKey: () => "key-1",
-    getPrepareCacheKey: () => null,
     prepareGpuCells: (_v, _s, _range, reserve) => ({
       dataKey: "key-1",
       threshold: 10,
@@ -169,7 +168,7 @@ test("ChartHeatmapGpuCoordinator guards software WebGL2 renderer unless explicit
   resetSoftwareRendererProbeCacheForTest();
 });
 
-test("ChartHeatmapGpuCoordinator latches session to cpu-raster after 5 consecutive slow GPU heatmap frames", () => {
+test("ChartHeatmapGpuCoordinator latches session to cpu-raster after 5 consecutive slow GPU heatmap frames", async () => {
   resetGpuDiagnosticsForTest();
   resetSoftwareRendererProbeCacheForTest();
   resetPerformanceTelemetry();
@@ -178,6 +177,7 @@ test("ChartHeatmapGpuCoordinator latches session to cpu-raster after 5 consecuti
   const { coordinator, view, series } = makeCoordinatorAndHost();
   coordinator.setGl(makeMockGl("AMD Radeon RX 7900"));
   coordinator.setResidentHeatmapEnabled(true, false);
+  await coordinator.whenHeatmapGpuRendererReady();
   coordinator.heatmapGpuRenderer = {
     reservePreparedPayload: () => ({ release() {} }),
     renderFrame: () => true,
@@ -229,6 +229,7 @@ test("ChartHeatmapGpuCoordinator latches session to cpu-raster after 5 consecuti
   const explicit = makeCoordinatorAndHost();
   explicit.coordinator.setGl(makeMockGl("AMD Radeon RX 7900"));
   explicit.coordinator.setResidentHeatmapEnabled(true, true);
+  await explicit.coordinator.whenHeatmapGpuRendererReady();
   explicit.coordinator.heatmapGpuRenderer = {
     reservePreparedPayload: () => ({ release() {} }),
     renderFrame: () => true,

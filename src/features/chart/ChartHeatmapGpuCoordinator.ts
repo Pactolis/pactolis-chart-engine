@@ -287,9 +287,6 @@ export class ChartHeatmapGpuCoordinator {
       this.cachedGlIsSoftware = detection.isSoftware;
       this.cachedGlRendererName = detection.renderer;
     }
-    if (this._heatmapTexturePrototypeEnabled) {
-      this.supportsHeatmapGpu();
-    }
   }
 
   setSurface(surface: GpuSurface | null): void {
