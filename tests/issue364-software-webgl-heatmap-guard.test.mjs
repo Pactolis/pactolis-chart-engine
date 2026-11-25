@@ -59,7 +59,7 @@ function makeCoordinatorAndHost() {
     referenceMarket: "BINANCE_FUTURES:btcusdt",
   });
   series.upsertBar({
-    startTime: 1_700_000_000_000,
+    startTime: 1_699_999_980_000,
     open: 100,
     high: 105,
     low: 95,
