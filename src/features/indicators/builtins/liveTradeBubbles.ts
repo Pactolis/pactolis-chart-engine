@@ -369,6 +369,7 @@ function ensureSubscription(
   const current = activeSubscriptions.get(ctx.instance.id);
   if (current?.key === key) return "ok";
 
+  runIndicatorCleanup(ctx.instance.id);
   unsubscribeInstance(ctx.instance.id);
   const unsubscribe = source.subscribeLiveTradeEvents({
     market,
