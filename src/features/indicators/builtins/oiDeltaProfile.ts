@@ -59,10 +59,17 @@ function effectiveStartBoundary(
   return hist ?? rec;
 }
 
-function isTimeInGap(time: number, gaps: readonly OpenInterestGap[] | undefined): boolean {
+function isTimeInGap(
+  time: number,
+  gaps: readonly OpenInterestGap[] | undefined,
+  allowBoundaryAt?: number,
+): boolean {
   if (!gaps || !gaps.length) return false;
   for (const gap of gaps) {
-    if (time >= gap.from && time < gap.to) return true;
+    if (time >= gap.from && time < gap.to) {
+      if (allowBoundaryAt !== undefined && time === allowBoundaryAt && time === gap.from) continue;
+      return true;
+    }
   }
   return false;
 }
@@ -99,8 +106,8 @@ function latestValidPointInRange(
     if (pt.time <= minTimeExclusive) return null;
     if (
       Number.isFinite(pt.value)
-      && !isTimeInGap(pt.time, venueGaps)
-      && !isTimeInGap(pt.time, responseGaps)
+      && !isTimeInGap(pt.time, venueGaps, maxTimeInclusive)
+      && !isTimeInGap(pt.time, responseGaps, maxTimeInclusive)
     ) {
       return pt;
     }

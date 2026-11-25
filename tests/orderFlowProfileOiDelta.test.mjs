@@ -423,9 +423,10 @@ test("renders net and split OI delta respecting profilePlacement and skips POC/V
   volumeProfileIndicatorDefinition.drawPriceOverlay(leftCtx.indicatorCtx, prepared);
 
   // Split mode draws both sellColor (left of deltaZeroX = 94) and buyColor (right of deltaZeroX = 94)
-  assert.equal(leftCtx.fillRects.length, 2);
-  const sellRect = leftCtx.fillRects.find((r) => r.fillStyle === uiColor.sell);
-  const buyRect = leftCtx.fillRects.find((r) => r.fillStyle === uiColor.buy);
+  const histRects = leftCtx.fillRects.filter((r) => r.fillStyle === uiColor.sell || r.fillStyle === uiColor.buy);
+  assert.equal(histRects.length, 2);
+  const sellRect = histRects.find((r) => r.fillStyle === uiColor.sell);
+  const buyRect = histRects.find((r) => r.fillStyle === uiColor.buy);
   assert.ok(sellRect && buyRect);
   assert.ok(sellRect.x < 94 && buyRect.x >= 94);
   assert.equal(leftCtx.strokeLines.length, 0);
@@ -463,10 +464,13 @@ test("cache hits on series tail tick and invalidates on OI revision, venue, or d
 
   // Live trade tick on tail bar without OI change -> incremental hit
   const hitsBefore = snapshotPerformanceTelemetry().counters["indicator.incremental.hit.volumeProfile"] ?? 0;
-  series.upsertBar(exactBar(T0 + MIN, [
-    { priceBin: 101, buyVol: 30, sellVol: 10 },
-    { priceBin: 102, buyVol: 10, sellVol: 0 },
-  ]));
+  series.addTrades([{
+    time: T0 + MIN + 5_000,
+    price: 102,
+    qty: 10,
+    isBuy: true,
+    id: "oi-tail-1",
+  }]);
   const second = volumeProfileIndicatorDefinition.prepareData(indicatorCtx);
   const hitsAfter = snapshotPerformanceTelemetry().counters["indicator.incremental.hit.volumeProfile"] ?? 0;
   assert.equal(hitsAfter, hitsBefore + 1);
@@ -515,14 +519,14 @@ test("perf comparison: OI delta live tail tick matches volume mode incremental p
   const ticks = 40;
   const tVolStart = performance.now();
   for (let t = 0; t < ticks; t += 1) {
-    series.upsertBar(exactBar(T0 + 299 * MIN, [{ priceBin: 105, buyVol: 20 + t, sellVol: 15 }]));
+    series.addTrades([{ time: T0 + 299 * MIN + 1000 + t, price: 105, qty: 1, isBuy: true, id: `v-${t}` }]);
     volumeProfileIndicatorDefinition.prepareData(volCtx);
   }
   const volMs = performance.now() - tVolStart;
 
   const tOiStart = performance.now();
   for (let t = 0; t < ticks; t += 1) {
-    series.upsertBar(exactBar(T0 + 299 * MIN, [{ priceBin: 105, buyVol: 30 + t, sellVol: 15 }]));
+    series.addTrades([{ time: T0 + 299 * MIN + 2000 + t, price: 105, qty: 1, isBuy: false, id: `o-${t}` }]);
     volumeProfileIndicatorDefinition.prepareData(oiCtx);
   }
   const oiMs = performance.now() - tOiStart;

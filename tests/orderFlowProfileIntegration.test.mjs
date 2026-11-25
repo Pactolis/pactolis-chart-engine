@@ -22,14 +22,14 @@ test("metric, side, range and independent level controls are represented in the 
   const fields = volumeProfileIndicatorDefinition.settingsSchema.sections.flatMap((section) => section.fields);
   const byKey = new Map(fields.map((field) => [field.key, field]));
   assert.deepEqual(byKey.get("profileMetric").options.map((item) => item.value), [
-    "volume", "delta", "trade-count", "average-trade-size",
+    "volume", "delta", "trade-count", "average-trade-size", "oi-delta",
   ]);
   assert.deepEqual(byKey.get("profileSide").options.map((item) => item.value), ["total", "buy", "sell"]);
   assert.deepEqual(byKey.get("mode").options.map((item) => item.value), ["visible", "session", "lookback"]);
   for (const key of ["pocMode", "vahMode", "valMode"]) {
     assert.deepEqual(byKey.get(key).options.map((item) => item.value), ["off", "static", "developing", "both"]);
   }
-  assert.deepEqual(byKey.get("profileSide").visibleWhen, { key: "profileMetric", notValues: ["delta"] });
+  assert.deepEqual(byKey.get("profileSide").visibleWhen, { key: "profileMetric", notValues: ["delta", "oi-delta"] });
   assert.deepEqual(byKey.get("lookbackBars").visibleWhen, { key: "mode", values: ["lookback"] });
 });
 
