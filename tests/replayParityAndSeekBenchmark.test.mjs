@@ -676,6 +676,21 @@ test("replay as-of parity: external OI, Funding, Liquidations, and Futures Posit
         },
       };
     },
+    requestOpenInterestSeries: () => ({
+      status: "ready",
+      data: {
+        status: "ok",
+        unit: "base",
+        resolution: "1m",
+        venues: [
+          {
+            venue: "binance",
+            points: cutoffTime === null ? oiPoints : oiPoints.filter((p) => p.time < cutoffTime),
+            source: "backend",
+          },
+        ],
+      },
+    }),
     requestFuturesPositioningSeries: () => ({
       status: "ready",
       data: {

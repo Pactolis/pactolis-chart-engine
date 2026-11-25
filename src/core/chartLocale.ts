@@ -63,6 +63,34 @@ const CHART_LOCALE_FALLBACKS: Readonly<Record<string, { tr: string; en: string }
     tr: "Aralık Sonu (Sağ)",
     en: "Range End (Right)",
   },
+  "indicator.common.unit": {
+    tr: "Birim",
+    en: "Unit",
+  },
+  "indicator.crossExchangeOpenInterest.unit.usd": {
+    tr: "USD",
+    en: "USD",
+  },
+  "indicator.crossExchangeOpenInterest.unit.base": {
+    tr: "Base (Coin)",
+    en: "Base (Coin)",
+  },
+  "indicator.crossExchangeOpenInterest.unrecorded": {
+    tr: "OI kaydı yok (bu market kaydedilmiyor)",
+    en: "No OI record (this market is not recorded)",
+  },
+  "indicator.crossExchangeOpenInterest.instantOnly": {
+    tr: "yalnız anlık",
+    en: "instant-only",
+  },
+  "indicator.crossExchangeOpenInterest.recordingStarted": {
+    tr: "Kayıt başlangıcı: {time}",
+    en: "Recording started: {time}",
+  },
+  "indicator.crossExchangeOpenInterest.historyStarted": {
+    tr: "Geçmiş başlangıcı: {time}",
+    en: "History started: {time}",
+  },
 };
 
 let configured: ChartLocale | null = null;
