@@ -740,11 +740,6 @@ function materializeLevel(
       if (side === "buy") buyValue = value;
       if (side === "sell") sellValue = value;
       break;
-    case "oi-delta":
-      value = raw.oiOpen + raw.oiClose;
-      buyValue = raw.oiOpen;
-      sellValue = raw.oiClose;
-      break;
   }
 
   return {

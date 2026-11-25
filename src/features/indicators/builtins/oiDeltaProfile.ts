@@ -8,7 +8,6 @@ import type {
   OpenInterestPoint,
   OpenInterestSeriesResponse,
   OpenInterestVenue,
-  OpenInterestVenueSeries,
 } from "../metricContracts.js";
 
 export interface OiDeltaComputationResult {
