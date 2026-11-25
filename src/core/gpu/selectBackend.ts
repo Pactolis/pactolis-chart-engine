@@ -29,12 +29,18 @@ type PendingFallback = { from: string; to: string; reason: string };
 export const MIN_WEBGPU_MAX_BUFFER_SIZE = 64 * 1024 * 1024;
 export const MIN_WEBGPU_MAX_TEXTURE_DIMENSION_2D = 4096;
 
-const SOFTWARE_ADAPTER_PATTERNS = [
+export const SOFTWARE_ADAPTER_PATTERNS = [
   "swiftshader",
   "microsoft basic render",
   "llvmpipe",
   "lavapipe",
-];
+] as const;
+
+export function isSoftwareRendererName(renderer: string | null | undefined): boolean {
+  if (!renderer) return false;
+  const lower = renderer.toLowerCase();
+  return SOFTWARE_ADAPTER_PATTERNS.some((pattern) => lower.includes(pattern));
+}
 
 export interface WebGpuQualificationOptions {
   readonly preference?: GpuBackendPreference;
@@ -64,10 +70,9 @@ function isSoftwareOrFallbackAdapter(adapterInfo?: GpuAdapterInfo): boolean {
     adapterInfo.description,
   ]
     .filter((v): v is string => typeof v === "string" && v.length > 0)
-    .join(" ")
-    .toLowerCase();
+    .join(" ");
   if (!text) return false;
-  return SOFTWARE_ADAPTER_PATTERNS.some((pattern) => text.includes(pattern));
+  return isSoftwareRendererName(text);
 }
 
 function hasSufficientLimits(

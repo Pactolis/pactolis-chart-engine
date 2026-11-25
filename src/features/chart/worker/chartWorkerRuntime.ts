@@ -270,7 +270,7 @@ export class ChartWorkerPanelRuntime {
         if (!this.disposed) this.invalidate(ChartChange.All);
       },
     });
-    this.heatmapGpuCoordinator.setResidentHeatmapEnabled(this.residentHeatmapEnabled);
+    this.heatmapGpuCoordinator.setResidentHeatmapEnabled(this.residentHeatmapEnabled, false);
 
     this.endpoint = new WorkerChartEndpoint({
       panelId: options.panelId,
@@ -331,6 +331,7 @@ export class ChartWorkerPanelRuntime {
       return false;
     }
 
+    const frameStartedAt = performance.now();
     this.endpoint.flushInputs();
 
     const changes = this.pendingChanges === ChartChange.None ? ChartChange.All : this.pendingChanges;
@@ -373,6 +374,13 @@ export class ChartWorkerPanelRuntime {
         preset.interaction,
       );
     }
+
+    const renderMs = performance.now() - frameStartedAt;
+    this.heatmapGpuCoordinator?.observeRenderedFrame({
+      renderMs,
+      rafLatencyMs: null,
+      visible: true,
+    });
 
     this.frameCount++;
     return true;
@@ -637,7 +645,7 @@ export class ChartWorkerPanelRuntime {
     }
     if (patch.residentHeatmap !== undefined) {
       this.residentHeatmapEnabled = patch.residentHeatmap;
-      this.heatmapGpuCoordinator?.setResidentHeatmapEnabled(patch.residentHeatmap);
+      this.heatmapGpuCoordinator?.setResidentHeatmapEnabled(patch.residentHeatmap, false);
     }
 
     this.applyChartConfig();

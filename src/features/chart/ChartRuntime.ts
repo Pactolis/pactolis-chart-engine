@@ -442,6 +442,7 @@ class ChartRuntimeImpl implements ChartRuntime, ChartInputHost {
     });
     this.heatmapGpuCoordinator.setGl(gl);
     this.heatmapGpuCoordinator.setSurface(gpuSurface);
+    this.setHookAttr("data-heatmap-path", this.heatmapGpuCoordinator.getDiagnostics().heatmapPath);
     this.magnetController = new ChartMagnetController({
       view: this.view,
       pipeline: this.pipeline,
@@ -612,6 +613,7 @@ class ChartRuntimeImpl implements ChartRuntime, ChartInputHost {
             : null,
         );
         this.heatmapGpuCoordinator.setSurface(nextSurface);
+        this.setHookAttr("data-heatmap-path", this.heatmapGpuCoordinator.getDiagnostics().heatmapPath);
       },
     };
 
@@ -656,6 +658,7 @@ class ChartRuntimeImpl implements ChartRuntime, ChartInputHost {
         this.renderer = new FootprintRenderer(this.session.getSurface());
         this.renderer.setShowNotional(this.overlay.showNotional);
         this.heatmapGpuCoordinator.onRestoreContext(restoredGl);
+        this.setHookAttr("data-heatmap-path", this.heatmapGpuCoordinator.getDiagnostics().heatmapPath);
         this.overlay.invalidateAxisCache();
         this.renderCoordinator.applyConfig(this.chartViewConfig());
         this.session.invalidate();
@@ -707,6 +710,11 @@ class ChartRuntimeImpl implements ChartRuntime, ChartInputHost {
           });
         }
       },
+    });
+    this.session.setFrameCompletedObserver((info) => {
+      if (this.heatmapGpuCoordinator.observeRenderedFrame(info)) {
+        this.setHookAttr("data-heatmap-path", this.heatmapGpuCoordinator.getDiagnostics().heatmapPath);
+      }
     });
 
     this.renderCoordinator = new ChartRenderCoordinator({
@@ -2135,8 +2143,8 @@ class ChartRuntimeImpl implements ChartRuntime, ChartInputHost {
     return this.historyController.loadHistory(intervalMs, opts);
   }
 
-  setResidentHeatmapEnabled(enabled: boolean): void {
-    this.heatmapGpuCoordinator.setResidentHeatmapEnabled(enabled);
+  setResidentHeatmapEnabled(enabled: boolean, explicitOverride = false): void {
+    this.heatmapGpuCoordinator.setResidentHeatmapEnabled(enabled, explicitOverride);
     this.setHookAttr("data-heatmap-path", this.heatmapGpuCoordinator.getDiagnostics().heatmapPath);
   }
 
@@ -2342,7 +2350,7 @@ async function buildChartRuntime(
     panelRoot, surface, pipeline, panelId, hook, display,
     gpuSurface,
   );
-  runtime.setResidentHeatmapEnabled(gpuSettings.residentHeatmap);
+  runtime.setResidentHeatmapEnabled(gpuSettings.residentHeatmap, gpuSettings.residentHeatmapExplicit === true);
 
   let currentBackendPref = gpuSettings.backend;
   let swapRequestId = 0;
@@ -2357,7 +2365,7 @@ async function buildChartRuntime(
   const unbindGpuSettings = onGpuSettingsChange(async () => {
     if (runtime.getDiagnostics().disposed) return;
     const nextSettings = readGpuSettings(doc.defaultView);
-    runtime.setResidentHeatmapEnabled(nextSettings.residentHeatmap);
+    runtime.setResidentHeatmapEnabled(nextSettings.residentHeatmap, nextSettings.residentHeatmapExplicit === true);
 
     if (nextSettings.backend === currentBackendPref) {
       swapRequestId++;

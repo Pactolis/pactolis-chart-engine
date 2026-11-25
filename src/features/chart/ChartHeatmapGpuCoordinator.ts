@@ -4,9 +4,113 @@ import type { FootprintSeries } from "../../core/model/footprint.js";
 import type { HeatmapGpuRenderer, HeatmapGpuCellFrame } from "./heatmap/gpu/heatmapGpuRenderer.js";
 import type { OrderbookHeatmapOverlay } from "../orderbook/heatmapOverlay.js";
 import { recordGpuFeatureFallback, setGpuFeaturePath } from "../../core/gpu/gpuDiagnostics.js";
+import { isSoftwareRendererName } from "../../core/gpu/selectBackend.js";
 import { incrementPerformanceCounter } from "../../core/performanceTelemetry.js";
 
 const HEATMAP_GPU_FEATURE = "orderbook-heatmap";
+
+export const HEATMAP_GPU_SLOW_FRAME_THRESHOLD_MS = 50;
+export const HEATMAP_GPU_SLOW_FRAME_CONSECUTIVE_LIMIT = 5;
+
+let cachedCaveatProbeResult: boolean | null = null;
+
+export function resetSoftwareRendererProbeCacheForTest(): void {
+  cachedCaveatProbeResult = null;
+}
+
+function probeMajorPerformanceCaveat(): boolean {
+  if (cachedCaveatProbeResult !== null) {
+    return cachedCaveatProbeResult;
+  }
+  let canvas: HTMLCanvasElement | OffscreenCanvas | null = null;
+  try {
+    if (typeof document !== "undefined" && typeof document.createElement === "function") {
+      canvas = document.createElement("canvas");
+    } else if (typeof OffscreenCanvas === "function") {
+      canvas = new OffscreenCanvas(1, 1);
+    }
+  } catch {
+    canvas = null;
+  }
+  if (!canvas) {
+    return false;
+  }
+  try {
+    canvas.width = 1;
+    canvas.height = 1;
+    const strictGl = canvas.getContext("webgl2", { failIfMajorPerformanceCaveat: true }) as WebGL2RenderingContext | null;
+    if (strictGl) {
+      try {
+        (strictGl.getExtension?.("WEBGL_lose_context") as { loseContext?: () => void } | null)?.loseContext?.();
+      } catch {
+        // ignore
+      }
+      cachedCaveatProbeResult = false;
+      return false;
+    }
+    const plainGl = canvas.getContext("webgl2") as WebGL2RenderingContext | null;
+    if (plainGl) {
+      try {
+        (plainGl.getExtension?.("WEBGL_lose_context") as { loseContext?: () => void } | null)?.loseContext?.();
+      } catch {
+        // ignore
+      }
+      cachedCaveatProbeResult = true;
+      return true;
+    }
+    cachedCaveatProbeResult = false;
+    return false;
+  } catch {
+    cachedCaveatProbeResult = false;
+    return false;
+  } finally {
+    try {
+      canvas.width = 0;
+      canvas.height = 0;
+    } catch {
+      // ignore
+    }
+  }
+}
+
+function detectWebGl2SoftwareRenderer(
+  gl: WebGL2RenderingContext | null,
+): { isSoftware: boolean; renderer: string | null } {
+  if (!gl) {
+    return { isSoftware: false, renderer: null };
+  }
+  let renderer: string | null = null;
+  let unmaskedFound = false;
+  try {
+    const debugInfo = gl.getExtension?.("WEBGL_debug_renderer_info") as { UNMASKED_RENDERER_WEBGL?: number } | null;
+    if (debugInfo && typeof debugInfo.UNMASKED_RENDERER_WEBGL === "number") {
+      const unmasked = gl.getParameter?.(debugInfo.UNMASKED_RENDERER_WEBGL);
+      if (typeof unmasked === "string" && unmasked.trim().length > 0) {
+        renderer = unmasked.trim();
+        unmaskedFound = true;
+      }
+    }
+    if (!renderer) {
+      const masked = gl.getParameter?.(0x1f01);
+      if (typeof masked === "string" && masked.trim().length > 0) {
+        renderer = masked.trim();
+      }
+    }
+  } catch {
+    // ignore WebGL parameter probe errors on mock/lost contexts
+  }
+
+  if (renderer && isSoftwareRendererName(renderer)) {
+    return { isSoftware: true, renderer };
+  }
+
+  const isMaskedOrEmpty = !unmaskedFound && (!renderer || /^(webkit webgl|mozilla|webgl|angle)$/i.test(renderer));
+  if (isMaskedOrEmpty && probeMajorPerformanceCaveat()) {
+    return { isSoftware: true, renderer };
+  }
+
+  return { isSoftware: false, renderer };
+}
 
 export interface HeatmapGpuRenderFrame {
   dataKey: string;
@@ -44,13 +148,19 @@ export interface ChartHeatmapGpuCoordinatorHost {
  */
 export class ChartHeatmapGpuCoordinator {
   private _heatmapTexturePrototypeEnabled = false;
+  private explicitOverride = false;
   private heatmapTexturePrototypeLastEnabled: boolean | null = null;
   private heatmapGpuRenderer: HeatmapGpuRenderer | null = null;
   private heatmapGpuRendererPromise: Promise<typeof import("./heatmap/gpu/heatmapGpuRenderer.js")> | null = null;
   private heatmapGpuRendererGl: WebGL2RenderingContext | null = null;
+  private cachedGlRendererName: string | null = null;
+  private cachedGlIsSoftware = false;
   private surface: GpuSurface | null = null;
   private heatmapGpuFailureLatched = false;
   private heatmapGpuUnsupportedEpisode = false;
+  private heatmapGpuSoftwareEpisode = false;
+  private renderedGpuHeatmapThisFrame = false;
+  private consecutiveSlowGpuFrames = 0;
   private lastFallbackReason: string | null = null;
   private lastHeatmapPath = "cpu";
   private heatmapGpuFrame: HeatmapGpuRenderFrame | null = null;
@@ -69,21 +179,7 @@ export class ChartHeatmapGpuCoordinator {
   }
 
   set heatmapTexturePrototypeEnabled(enabled: boolean) {
-    this._heatmapTexturePrototypeEnabled = enabled;
-    if (enabled) {
-      if ((this.host.backendKind ?? "webgl2") !== "webgpu") {
-        void this.loadHeatmapGpuRenderer();
-      }
-    } else {
-      this.heatmapGpuFrame = null;
-      this.pendingResidentFrame = null;
-      this.releaseHeatmapGpuLease();
-      this.clearPreparedCache();
-      this.surface?.disposeNativeHeatmap?.();
-      setGpuFeaturePath(HEATMAP_GPU_FEATURE, undefined);
-      setGpuFeaturePath("heatmap", "off");
-    }
-    this.host.invalidateSession();
+    this.setResidentHeatmapEnabled(enabled, enabled);
   }
 
   isHeatmapTexturePrototypeEnabled(): boolean {
@@ -92,6 +188,10 @@ export class ChartHeatmapGpuCoordinator {
 
   setHeatmapTexturePrototypeEnabled(enabled: boolean): void {
     this.heatmapTexturePrototypeEnabled = enabled;
+  }
+
+  public isHeatmapGpuSupported(): boolean {
+    return !this.heatmapGpuFailureLatched && this.supportsHeatmapGpu();
   }
 
   private supportsHeatmapGpu(): boolean {
@@ -130,6 +230,17 @@ export class ChartHeatmapGpuCoordinator {
       return false;
     }
     this.heatmapGpuUnsupportedEpisode = false;
+    if (!this.explicitOverride && this.cachedGlIsSoftware) {
+      this.lastHeatmapPath = "cpu-raster";
+      this.lastFallbackReason = "software_renderer";
+      setGpuFeaturePath(HEATMAP_GPU_FEATURE, "cpu-raster");
+      setGpuFeaturePath("heatmap", "cpu-raster");
+      if (!this.heatmapGpuSoftwareEpisode) {
+        recordGpuFeatureFallback(HEATMAP_GPU_FEATURE, "software_renderer");
+        this.heatmapGpuSoftwareEpisode = true;
+      }
+      return false;
+    }
     if (!this.heatmapGpuFrame) {
       setGpuFeaturePath(HEATMAP_GPU_FEATURE, "cpu");
       setGpuFeaturePath("heatmap", "cpu");
@@ -137,20 +248,48 @@ export class ChartHeatmapGpuCoordinator {
     return true;
   }
 
-  setResidentHeatmapEnabled(enabled: boolean): void {
-    this.setHeatmapTexturePrototypeEnabled(enabled);
+  setResidentHeatmapEnabled(enabled: boolean, explicitOverride = false): void {
+    this.explicitOverride = enabled && explicitOverride;
+    this._heatmapTexturePrototypeEnabled = enabled;
+    if (enabled) {
+      if ((this.host.backendKind ?? "webgl2") !== "webgpu" && this.supportsHeatmapGpu() && !this.heatmapGpuFailureLatched) {
+        void this.loadHeatmapGpuRenderer();
+      }
+    } else {
+      this.heatmapGpuFrame = null;
+      this.pendingResidentFrame = null;
+      this.releaseHeatmapGpuLease();
+      this.clearPreparedCache();
+      this.surface?.disposeNativeHeatmap?.();
+      setGpuFeaturePath(HEATMAP_GPU_FEATURE, undefined);
+      setGpuFeaturePath("heatmap", "off");
+    }
+    this.host.invalidateSession();
   }
 
   setGl(gl: WebGL2RenderingContext | null): void {
-    if (this.heatmapGpuRendererGl !== gl) {
+    const glChanged = this.heatmapGpuRendererGl !== gl;
+    if (glChanged) {
       this.heatmapGpuFrame = null;
       this.pendingResidentFrame = null;
       this.releaseHeatmapGpuLease();
       this.clearPreparedCache();
       setGpuFeaturePath(HEATMAP_GPU_FEATURE, undefined);
       setGpuFeaturePath("heatmap", undefined);
+      this.heatmapGpuSoftwareEpisode = false;
     }
     this.heatmapGpuRendererGl = gl;
+    if (!gl) {
+      this.cachedGlIsSoftware = false;
+      this.cachedGlRendererName = null;
+    } else if (glChanged || (this.cachedGlRendererName === null && !this.cachedGlIsSoftware)) {
+      const detection = detectWebGl2SoftwareRenderer(gl);
+      this.cachedGlIsSoftware = detection.isSoftware;
+      this.cachedGlRendererName = detection.renderer;
+    }
+    if (this._heatmapTexturePrototypeEnabled) {
+      this.supportsHeatmapGpu();
+    }
   }
 
   setSurface(surface: GpuSurface | null): void {
@@ -180,6 +319,7 @@ export class ChartHeatmapGpuCoordinator {
     heatmapPath: string;
     failureLatched: boolean;
     fallbackReason: string | null;
+    renderer: string | null;
   } {
     return {
       enabled: this._heatmapTexturePrototypeEnabled,
@@ -187,6 +327,7 @@ export class ChartHeatmapGpuCoordinator {
       heatmapPath: this.lastHeatmapPath,
       failureLatched: this.heatmapGpuFailureLatched,
       fallbackReason: this.lastFallbackReason,
+      renderer: this.cachedGlRendererName,
     };
   }
 
@@ -221,6 +362,7 @@ export class ChartHeatmapGpuCoordinator {
   }
 
   beginFrameAttempt(): void {
+    this.renderedGpuHeatmapThisFrame = false;
     this.heatmapGpuFrame = null;
     this.pendingResidentFrame = null;
     this.releaseHeatmapGpuLease();
@@ -400,6 +542,7 @@ export class ChartHeatmapGpuCoordinator {
         ceiling: residentFrame.ceiling,
         opacity: residentFrame.opacity,
       }, null);
+      this.renderedGpuHeatmapThisFrame = true;
       this.lastFallbackReason = null;
       this.lastHeatmapPath = "webgpu-native";
       setGpuFeaturePath(HEATMAP_GPU_FEATURE, "webgpu");
@@ -513,10 +656,56 @@ export class ChartHeatmapGpuCoordinator {
         ? null
         : (frame.preparedLease ?? null),
     );
+    this.renderedGpuHeatmapThisFrame = true;
     this.lastFallbackReason = null;
     this.lastHeatmapPath = isWebGpu ? "webgpu-immediate" : "webgl2";
     setGpuFeaturePath(HEATMAP_GPU_FEATURE, isWebGpu ? "webgpu" : "webgl2");
     setGpuFeaturePath("heatmap", isWebGpu ? "webgpu-immediate" : "webgl2");
+  }
+
+  observeRenderedFrame(sample: {
+    renderMs: number;
+    rafLatencyMs?: number | null;
+    visible?: boolean;
+  }): boolean {
+    if (
+      !this.renderedGpuHeatmapThisFrame
+      || this.explicitOverride
+      || this.heatmapGpuFailureLatched
+      || !this._heatmapTexturePrototypeEnabled
+    ) {
+      return false;
+    }
+    if (sample.visible === false) {
+      this.consecutiveSlowGpuFrames = 0;
+      return false;
+    }
+    const effectiveMs = Math.max(sample.renderMs, sample.rafLatencyMs ?? 0);
+    if (effectiveMs > HEATMAP_GPU_SLOW_FRAME_THRESHOLD_MS) {
+      this.consecutiveSlowGpuFrames++;
+    } else {
+      this.consecutiveSlowGpuFrames = 0;
+      return false;
+    }
+    if (this.consecutiveSlowGpuFrames < HEATMAP_GPU_SLOW_FRAME_CONSECUTIVE_LIMIT) {
+      return false;
+    }
+    const gl = this.heatmapGpuRendererGl;
+    const isSw = this.cachedGlIsSoftware;
+    const rName = this.cachedGlRendererName;
+    this.disposeHeatmapGpuRenderer();
+    this.heatmapGpuRendererGl = gl;
+    this.cachedGlIsSoftware = isSw;
+    this.cachedGlRendererName = rName;
+    this.heatmapGpuFailureLatched = true;
+    this.lastHeatmapPath = "cpu-raster";
+    this.lastFallbackReason = "slow_frame_budget";
+    setGpuFeaturePath(HEATMAP_GPU_FEATURE, "cpu-raster");
+    setGpuFeaturePath("heatmap", "cpu-raster");
+    recordGpuFeatureFallback(HEATMAP_GPU_FEATURE, "slow_frame_budget");
+    incrementPerformanceCounter("chart.gpu.heatmap.fallback.permanent");
+    this.host.invalidateSession();
+    return true;
   }
 
   private recordHeatmapGpuClaim(
@@ -606,13 +795,17 @@ export class ChartHeatmapGpuCoordinator {
 
   onRestoreContext(restoredGl: WebGL2RenderingContext | null): void {
     this.disposeHeatmapGpuRenderer();
-    this.heatmapGpuRendererGl = restoredGl;
     this.heatmapGpuFailureLatched = false;
-    if (this.heatmapTexturePrototypeEnabled) void this.loadHeatmapGpuRenderer();
+    this.consecutiveSlowGpuFrames = 0;
+    this.setGl(restoredGl);
+    if (this.heatmapTexturePrototypeEnabled && this.supportsHeatmapGpu()) {
+      void this.loadHeatmapGpuRenderer();
+    }
   }
 
   onLostContext(): void {
     this.disposeHeatmapGpuRenderer();
     this.heatmapGpuFailureLatched = false;
+    this.consecutiveSlowGpuFrames = 0;
   }
 }

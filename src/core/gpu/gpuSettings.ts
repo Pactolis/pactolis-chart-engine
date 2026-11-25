@@ -8,6 +8,7 @@ export function isWebGpuSupported(): boolean {
 export interface GpuSettings {
   readonly backend: GpuBackendPreference;
   readonly residentHeatmap: boolean;
+  readonly residentHeatmapExplicit?: boolean;
   readonly asyncCapture: boolean;
   readonly nativeWebGpu?: boolean;
   readonly nativeWebGpuText?: boolean;
@@ -125,7 +126,9 @@ export function readGpuSettings(win?: { location?: { search?: string } } | null)
       ...(override ? { backend: override } : {}),
       ...(nativeOverride !== null ? { nativeWebGpu: nativeOverride } : {}),
       ...(nativeTextOverride !== null ? { nativeWebGpuText: nativeTextOverride } : {}),
-      ...(residentHeatmapOverride !== null ? { residentHeatmap: residentHeatmapOverride } : {}),
+      ...(residentHeatmapOverride !== null
+        ? { residentHeatmap: residentHeatmapOverride, residentHeatmapExplicit: residentHeatmapOverride }
+        : {}),
       ...(rolloutOverride !== null ? { webgpuRollout: rolloutOverride } : {}),
       ...(killSwitchOverride !== null ? { webgpuKillSwitch: killSwitchOverride } : {}),
     };
