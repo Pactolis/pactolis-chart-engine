@@ -345,7 +345,9 @@ test("auto source selection, V1 gate, status badges, and model hover readout", (
   assert.equal(p1.meta.activeSource, "model");
   assert.equal(p1.meta.replayedBars, 1);
   assert.ok(p1.meta.clusters.length > 0);
-  const hoverY = 20 + ((80_000 - p1.meta.clusters[0].alignedPrice) / 10_000) * 300;
+  const visibleCluster = p1.meta.clusters.find((c) => c.alignedPrice >= 71_000 && c.alignedPrice <= 79_000);
+  assert.ok(visibleCluster, "expected at least one cluster in visible [71000, 79000] range");
+  const hoverY = 20 + ((80_000 - visibleCluster.alignedPrice) / 10_000) * 300;
   const ctx1 = makeCtx(c1, { source: "auto", rangePct: 100 }, { x: 200, y: hoverY, visible: true }, 74_430, "BINANCE_FUTURES:wifusdt");
   drawLiquidationProfileOverlay(ctx1, p1);
   assert.ok(t1.some((t) => t.text === "Model · tahmini · Binance"));
