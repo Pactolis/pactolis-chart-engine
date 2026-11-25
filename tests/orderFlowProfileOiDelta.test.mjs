@@ -148,6 +148,12 @@ function makeIndicatorCtx(series, range, overrides = {}, intervalMs = MIN) {
   };
 }
 
+function makeSeries(bars, intervalMs = MIN) {
+  const series = new FootprintSeries({ priceStep: 1, intervalMs });
+  for (const b of bars) series.upsertBar(b);
+  return series;
+}
+
 function setOiDataSource(stateProvider) {
   configureIndicatorDataSource({
     requestLiquidationSeries: () => ({ status: "idle" }),
@@ -326,7 +332,7 @@ test("skips missing venue per bar and excludes gaps & pre-recordingStartedAt bar
   assert.equal(comp.coveredBarCount, 2);
   assert.equal(comp.coveragePercent, 50);
 
-  const series = new FootprintSeries({ priceStep: 1, intervalMs: MIN }, bars);
+  const series = makeSeries(bars);
   setOiDataSource(() => ({ status: "ready", data: response }));
   const { indicatorCtx } = makeIndicatorCtx(series, [0, 4]);
   const prepared = volumeProfileIndicatorDefinition.prepareData(indicatorCtx);
@@ -355,7 +361,7 @@ test("OHLCV bars without footprint distribute OI delta uniformly and mark isEsti
       },
     ],
   };
-  const series = new FootprintSeries({ priceStep: 1, intervalMs: MIN }, bars);
+  const series = makeSeries(bars);
   setOiDataSource(() => ({ status: "ready", data: response }));
   const { indicatorCtx } = makeIndicatorCtx(series, [0, 2]);
   const prepared = volumeProfileIndicatorDefinition.prepareData(indicatorCtx);
@@ -371,7 +377,7 @@ test("OHLCV bars without footprint distribute OI delta uniformly and mark isEsti
 
 test("no OI data returns status no-data with OI verisi yok message (not error)", () => {
   installLocale("tr-TR");
-  const series = new FootprintSeries({ priceStep: 1, intervalMs: MIN }, [
+  const series = makeSeries([
     exactBar(T0, [{ priceBin: 100, buyVol: 10, sellVol: 10 }]),
   ]);
   setOiDataSource(() => ({ status: "unsupported", message: "unrecorded" }));
@@ -409,7 +415,7 @@ test("renders net and split OI delta respecting profilePlacement and skips POC/V
       ],
     }],
   };
-  const series = new FootprintSeries({ priceStep: 1, intervalMs: MIN }, bars);
+  const series = makeSeries(bars);
   setOiDataSource(() => ({ status: "ready", data: response }));
 
   const leftCtx = makeIndicatorCtx(series, [0, 2], { profilePlacement: "left", oiDeltaDisplay: "split" });
@@ -450,7 +456,7 @@ test("cache hits on series tail tick and invalidates on OI revision, venue, or d
     },
   }));
 
-  const series = new FootprintSeries({ priceStep: 1, intervalMs: MIN }, bars);
+  const series = makeSeries(bars);
   const { indicatorCtx } = makeIndicatorCtx(series, [0, 2]);
   const first = volumeProfileIndicatorDefinition.prepareData(indicatorCtx);
   assert.ok(Math.abs(first.meta.result.summaryValue - 100) < 1e-9);
@@ -497,7 +503,7 @@ test("perf comparison: OI delta live tail tick matches volume mode incremental p
     data: { unit: "base", resolution: "1m", venues: [{ venue: "binance", points: oiPoints }] },
   }));
 
-  const series = new FootprintSeries({ priceStep: 1, intervalMs: MIN }, bars);
+  const series = makeSeries(bars);
   const volCtx = makeIndicatorCtx(series, [0, 300], { profileMetric: "volume" }).indicatorCtx;
   const oiCtx = makeIndicatorCtx(series, [0, 300], { profileMetric: "oi-delta" }).indicatorCtx;
   oiCtx.instance = { id: "vp-perf-oi", type: "volume-profile", visible: true, settings: oiCtx.settings };
