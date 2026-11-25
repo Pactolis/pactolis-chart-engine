@@ -14,7 +14,7 @@ import {
   type IndicatorPrepareRevisionStamp,
   type IndicatorPrepareRunner,
 } from "./prepareScheduler.js";
-import { purgeIndicatorBuiltinState } from "./builtins/stateRegistry.js";
+import { purgeIndicatorBuiltinState, runIndicatorCleanup } from "./builtins/stateRegistry.js";
 import { buildIndicatorAnalysisSnapshot } from "./analysisSnapshot.js";
 import {
   createIndicatorPaneHeadersModel,
@@ -384,6 +384,9 @@ export class IndicatorManager {
     for (const prevId of prevIds) {
       if (!nextIds.has(prevId)) purgeIndicatorBuiltinState(prevId);
     }
+    for (const instance of this.instances) {
+      if (!instance.visible) runIndicatorCleanup(instance.id);
+    }
     this.renderRevision++;
     this.renderHeaders();
     if (this.latestView) this.layout(this.latestView);
@@ -419,8 +422,20 @@ export class IndicatorManager {
     const current = this.instances.find((item) => item.id === id);
     if (!current || current.visible === visible) return;
     this.dismissRemoveUndo();
+    if (!visible) runIndicatorCleanup(id);
     this.instances = this.instances.map((item) => item.id === id ? { ...item, visible } : item);
     this.emit(true, ChartChange.Visibility);
+  }
+
+  handleMarketChange(market?: string): void {
+    void market;
+    this.managerGeneration++;
+    this.prepareScheduler.cancelAll();
+    this.preparedDataCache.clear();
+    for (const instance of this.instances) runIndicatorCleanup(instance.id);
+    this.renderRevision++;
+    this.renderHeaders();
+    this.onInvalidate(ChartChange.Style);
   }
 
   deleteIndicator(id: string): void {
@@ -955,7 +970,14 @@ export class IndicatorManager {
 
   private toggleVisible(id: string): void {
     this.dismissRemoveUndo();
-    this.instances = this.instances.map((item) => item.id === id ? { ...item, visible: !item.visible } : item);
+    let becameHidden = false;
+    this.instances = this.instances.map((item) => {
+      if (item.id !== id) return item;
+      const nextVisible = !item.visible;
+      if (!nextVisible) becameHidden = true;
+      return { ...item, visible: nextVisible };
+    });
+    if (becameHidden) runIndicatorCleanup(id);
     this.emit(true, ChartChange.Visibility);
   }
 

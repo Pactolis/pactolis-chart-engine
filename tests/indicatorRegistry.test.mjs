@@ -11,6 +11,7 @@ const heavyTypes = [
   "funding-regime",
   "futures-positioning",
   "liquidations",
+  "live-trade-bubbles",
   "options-gex-wall",
 ];
 
@@ -26,11 +27,11 @@ test("indicator catalog exposes heavyweight entries without requiring definition
   for (const type of heavyTypes) assert.ok(catalog.some((entry) => entry.type === type));
 });
 
-test("indicator catalog keeps all 26 addable types with settings and serializable defaults", async () => {
+test("indicator catalog keeps all 27 addable types with settings and serializable defaults", async () => {
   const module = await registry();
   const catalog = module.listIndicatorDefinitions();
-  assert.equal(catalog.length, 26);
-  assert.equal(new Set(catalog.map((entry) => entry.type)).size, 26);
+  assert.equal(catalog.length, 27);
+  assert.equal(new Set(catalog.map((entry) => entry.type)).size, 27);
 
   for (const [order, entry] of catalog.entries()) {
     const definition = module.getIndicatorDefinition(entry.type);
