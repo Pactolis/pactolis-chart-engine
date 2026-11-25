@@ -3,6 +3,8 @@ import type { FuturesPositioningRequestInput, FuturesPositioningSeriesState } fr
 import type {
   LiquidationClustersRequestInput,
   LiquidationClustersState,
+  LiquidationModelRequestInput,
+  LiquidationModelSeriesState,
   LiquidationRequestInput,
   LiquidationSeriesState,
 } from "./metricContracts.js";
@@ -25,6 +27,7 @@ export interface IndicatorDataSource {
   requestFuturesPositioningSeries(input: FuturesPositioningRequestInput): FuturesPositioningSeriesState;
   fetchOptionsGexSurface(request: OptionsGexSurfaceRequest, signal?: AbortSignal): Promise<GexWallSurface>;
   requestLiquidationClusters?(input: LiquidationClustersRequestInput): LiquidationClustersState;
+  requestLiquidationModel?(input: LiquidationModelRequestInput): LiquidationModelSeriesState;
 }
 
 let configured: IndicatorDataSource | null = null;

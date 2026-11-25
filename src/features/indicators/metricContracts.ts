@@ -220,3 +220,70 @@ export interface LiquidationClustersRequestInput {
   source?: string;
   onUpdate?: () => void;
 }
+
+export interface LiquidationModelBar {
+  t: number;
+  h: number;
+  l: number;
+  c: number;
+  v: number;
+  tb: number;
+  oi: number;
+}
+
+export interface LiquidationModelStatePayload {
+  schemaVersion: number;
+  modelVersion: number;
+  symbol: string;
+  params: {
+    lev: number[];
+    lw: number[];
+    mmr: number;
+    bw: number;
+    p0: number;
+    nbk: number;
+  };
+  asOf: number;
+  lastOi: number;
+  longb: string | number[];
+  shortb: string | number[];
+  v1: {
+    passed: boolean;
+    tested: boolean;
+    fallingBp: number;
+    risingBp: number;
+    bestPlaceboBp: number;
+    days: number;
+  };
+  seam: LiquidationModelBar[];
+}
+
+export type LiquidationModelStatus =
+  | "ready"
+  | "warming"
+  | "unsupported"
+  | "stale"
+  | "seam-mismatch"
+  | "unavailable";
+
+export interface LiquidationModelResponse {
+  status: LiquidationModelStatus;
+  state?: LiquidationModelStatePayload;
+  bars?: LiquidationModelBar[];
+}
+
+export type LiquidationModelSeriesState =
+  | { status: "idle" }
+  | { status: "loading" }
+  | { status: "warming"; message?: string }
+  | { status: "unsupported"; message?: string }
+  | { status: "stale"; message?: string }
+  | { status: "seam-mismatch"; message?: string }
+  | { status: "unavailable"; message?: string }
+  | { status: "ready"; data: LiquidationModelResponse }
+  | { status: "error"; message: string };
+
+export interface LiquidationModelRequestInput {
+  market: string;
+  onUpdate?: () => void;
+}

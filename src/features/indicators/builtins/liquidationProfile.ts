@@ -1,4 +1,5 @@
 import { tOr } from "../../../core/chartLocale.js";
+import { checkSeamAndDetectShift, createLiquidationModel } from "../../../core/analysis/liquidationModel.js";
 import { uiColor } from "../../../core/ui/seriesPalette.js";
 import { indicatorDataSource } from "../indicatorDataSource.js";
 import type {
@@ -6,6 +7,9 @@ import type {
   LiquidationClustersResponse,
   LiquidationClustersState,
   LiquidationClustersStatus,
+  LiquidationModelBar,
+  LiquidationModelSeriesState,
+  LiquidationModelStatus,
 } from "../metricContracts.js";
 import { compactUsd, drawIndicatorBadge } from "../render/indicatorPaneUi.js";
 import type {
@@ -31,8 +35,8 @@ export interface LiquidationProfileSettings extends IndicatorSettings {
   shortColor: string;
   showReadout: boolean;
   showPlotLabel: boolean;
-  /** Reserved for #380 multi-source selection. */
-  source?: LiquidationProfileSource;
+  source: LiquidationProfileSource;
+  showUnverifiedModel: boolean;
 }
 
 export interface AlignedLiquidationCluster extends LiquidationClusterLevel {
@@ -58,8 +62,14 @@ export interface LiquidationAlignmentWarnings {
   divergencePct: number | null;
 }
 
+export type LiquidationModelGateStatus = LiquidationModelStatus | "unverified";
+
 export interface LiquidationProfileMeta extends Record<string, unknown> {
+  activeSource: "hyperliquid" | "model";
   responseStatus: LiquidationClustersStatus;
+  modelStatus?: LiquidationModelGateStatus;
+  modelAsOf?: number | null;
+  replayedBars?: number;
   response?: LiquidationClustersResponse;
   binanceLast: number | null;
   hlMarkPx: number | null;
@@ -75,6 +85,7 @@ export type LiquidationProfilePreparedData = IndicatorPreparedData<never, Liquid
 
 const HL_MARK_STALE_MS = 60_000;
 const HL_DIVERGENCE_THRESHOLD = 0.01;
+const MODEL_STALE_MS = 30 * 86_400_000;
 
 function safeTranslate(key: string, fallback: string, params?: Record<string, string | number>): string {
   try {
@@ -243,17 +254,41 @@ export function buildLiquidationProfileStatusText(
   return safeTranslate("indicator.liquidationProfile.badgeNow", "Hyperliquid · şimdi · tahmini");
 }
 
+export function buildLiquidationModelStatusText(modelStatus: LiquidationModelGateStatus): string {
+  switch (modelStatus) {
+    case "ready":
+      return safeTranslate("indicator.liquidationProfile.badgeModelSource", "Model · tahmini · Binance");
+    case "warming":
+      return safeTranslate("indicator.liquidationProfile.warming", "Model ısınıyor");
+    case "stale":
+      return safeTranslate("indicator.liquidationProfile.modelStale", "Model verisi eski (>30 gün)");
+    case "seam-mismatch":
+      return safeTranslate("indicator.liquidationProfile.seamMismatch", "Model seam uyuşmazlığı");
+    case "unverified":
+      return safeTranslate("indicator.liquidationProfile.modelUnverified", "Model bu paritede doğrulanmadı");
+    case "unsupported":
+      return safeTranslate("indicator.liquidationProfile.unsupported", "Bu market desteklenmiyor");
+    case "unavailable":
+    default:
+      return safeTranslate("indicator.liquidationProfile.unavailable", "Likidasyon verisi yok");
+  }
+}
+
 function emptyPrepared(
   status: IndicatorPreparedData["status"],
   responseStatus: LiquidationClustersStatus,
   message: string,
   binanceLast: number | null = null,
+  activeSource: "hyperliquid" | "model" = "hyperliquid",
+  modelStatus?: LiquidationModelGateStatus,
 ): LiquidationProfilePreparedData {
   return {
     status,
     points: [],
     meta: {
+      activeSource,
       responseStatus,
+      ...(modelStatus ? { modelStatus } : {}),
       binanceLast,
       hlMarkPx: null,
       hlMarkAt: null,
@@ -287,6 +322,167 @@ function queryClustersState(
   }
 }
 
+function hasModelProvider(): boolean {
+  try {
+    const ds = indicatorDataSource();
+    return typeof ds.requestLiquidationModel === "function";
+  } catch {
+    return false;
+  }
+}
+
+function queryModelState(market: string, onUpdate: () => void): LiquidationModelSeriesState {
+  try {
+    const ds = indicatorDataSource();
+    if (typeof ds.requestLiquidationModel !== "function") {
+      return { status: "unavailable" };
+    }
+    return ds.requestLiquidationModel({ market, onUpdate });
+  } catch {
+    return { status: "unavailable" };
+  }
+}
+
+function prepareModelProfile(
+  market: string,
+  rangePct: number,
+  minNotionalUsd: number,
+  binanceLast: number | null,
+  showUnverifiedModel: boolean,
+  onUpdate: () => void,
+  nowMs = Date.now(),
+): LiquidationProfilePreparedData {
+  const state = queryModelState(market, onUpdate);
+  if (state.status === "idle" || state.status === "loading") {
+    return emptyPrepared("loading", "unavailable", "loading", binanceLast, "model");
+  }
+  if (state.status === "error") {
+    return emptyPrepared(
+      "error",
+      "unavailable",
+      state.message || buildLiquidationModelStatusText("unavailable"),
+      binanceLast,
+      "model",
+      "unavailable",
+    );
+  }
+  if (
+    state.status === "warming"
+    || state.status === "unsupported"
+    || state.status === "stale"
+    || state.status === "seam-mismatch"
+    || state.status === "unavailable"
+  ) {
+    const prepStatus: IndicatorPreparedData["status"] = state.status === "unsupported" ? "unsupported" : "no-data";
+    return emptyPrepared(
+      prepStatus,
+      state.status === "unsupported" ? "unsupported" : "unavailable",
+      state.message ?? buildLiquidationModelStatusText(state.status),
+      binanceLast,
+      "model",
+      state.status,
+    );
+  }
+
+  const response = state.data;
+  if (response.status !== "ready" || !response.state) {
+    const ms: LiquidationModelGateStatus = response.status === "ready" ? "unavailable" : response.status;
+    return emptyPrepared(
+      ms === "unsupported" ? "unsupported" : "no-data",
+      ms === "unsupported" ? "unsupported" : "unavailable",
+      buildLiquidationModelStatusText(ms),
+      binanceLast,
+      "model",
+      ms,
+    );
+  }
+
+  const modelState = response.state;
+  if (Number.isFinite(modelState.asOf) && nowMs - modelState.asOf > MODEL_STALE_MS) {
+    return emptyPrepared("no-data", "stale", buildLiquidationModelStatusText("stale"), binanceLast, "model", "stale");
+  }
+
+  if (modelState.v1?.passed !== true && !showUnverifiedModel) {
+    return emptyPrepared(
+      "no-data",
+      "unavailable",
+      buildLiquidationModelStatusText("unverified"),
+      binanceLast,
+      "model",
+      "unverified",
+    );
+  }
+
+  let replayBars: LiquidationModelBar[] = Array.isArray(response.bars) ? response.bars : [];
+  if (replayBars.length > 0 && Array.isArray(modelState.seam) && modelState.seam.length > 0) {
+    const seamCheck = checkSeamAndDetectShift(modelState.seam, replayBars);
+    if (seamCheck.status === "seam-mismatch") {
+      return emptyPrepared(
+        "no-data",
+        "unavailable",
+        buildLiquidationModelStatusText("seam-mismatch"),
+        binanceLast,
+        "model",
+        "seam-mismatch",
+      );
+    }
+    replayBars = seamCheck.correctedBars;
+  }
+
+  const sim = createLiquidationModel(modelState);
+  let replayedBars = 0;
+  for (const bar of replayBars) {
+    if (bar.t > modelState.asOf) {
+      sim.step(bar);
+      replayedBars += 1;
+    }
+  }
+
+  const book = sim.book();
+  const rawClusters: LiquidationClusterLevel[] = [];
+  for (let i = 0; i < book.centers.length; i += 1) {
+    const longNotional = book.longUsd[i] ?? 0;
+    const shortNotional = book.shortUsd[i] ?? 0;
+    if (longNotional > 0 || shortNotional > 0) {
+      rawClusters.push({
+        price: book.centers[i],
+        longNotional,
+        shortNotional,
+        longCount: 0,
+        shortCount: 0,
+      });
+    }
+  }
+
+  const refPrice = binanceLast ?? (sim.lastClose > 0 ? sim.lastClose : null);
+  const filtered = filterLiquidationClusters(rawClusters, rangePct, minNotionalUsd, refPrice);
+  const aligned: AlignedLiquidationCluster[] = filtered.map((cluster) => ({
+    ...cluster,
+    hlPrice: cluster.price,
+    alignedPrice: cluster.price,
+  }));
+  aligned.sort((a, b) => a.alignedPrice - b.alignedPrice);
+
+  return {
+    status: aligned.length > 0 ? "ok" : "no-data",
+    points: [],
+    meta: {
+      activeSource: "model",
+      responseStatus: "ready",
+      modelStatus: "ready",
+      modelAsOf: modelState.asOf,
+      replayedBars,
+      binanceLast,
+      hlMarkPx: null,
+      hlMarkAt: null,
+      takenAt: modelState.asOf,
+      clusters: aligned,
+      warnings: { staleMarkPx: false, priceDivergence: false, divergencePct: null },
+    },
+    message: buildLiquidationModelStatusText("ready"),
+  };
+}
+
 export function prepareLiquidationProfile(
   ctx: IndicatorDrawContext<LiquidationProfileSettings>,
 ): LiquidationProfilePreparedData {
@@ -304,12 +500,31 @@ export function prepareLiquidationProfile(
   const rangePct = numericSetting(ctx.settings, "rangePct", 15, 5, 100);
   const minNotionalUsd = numericSetting(ctx.settings, "minNotionalUsd", 0, 0, 1_000_000_000);
   const market = ctx.chart?.market ?? "";
-  const source = typeof ctx.settings.source === "string" ? ctx.settings.source as LiquidationProfileSource : undefined;
+  const source: LiquidationProfileSource =
+    ctx.settings.source === "hyperliquid" || ctx.settings.source === "model" ? ctx.settings.source : "auto";
+  const showUnverifiedModel = boolSetting(ctx.settings, "showUnverifiedModel", false);
+
+  if (source === "model") {
+    return prepareModelProfile(market, rangePct, minNotionalUsd, binanceLast, showUnverifiedModel, ctx.requestRefresh);
+  }
 
   const state = queryClustersState(market, rangePct, source, ctx.requestRefresh);
   if (state.status === "idle" || state.status === "loading") {
     return emptyPrepared("loading", "unavailable", "loading", binanceLast);
   }
+
+  const hlUnavailable =
+    state.status === "error"
+    || state.status === "unsupported"
+    || state.status === "disabled"
+    || state.status === "unavailable"
+    || (state.status === "ready"
+      && (state.data.status === "unsupported" || state.data.status === "disabled" || state.data.status === "unavailable"));
+
+  if (source === "auto" && hlUnavailable && hasModelProvider()) {
+    return prepareModelProfile(market, rangePct, minNotionalUsd, binanceLast, showUnverifiedModel, ctx.requestRefresh);
+  }
+
   if (state.status === "error") {
     return emptyPrepared("error", "unavailable", state.message || buildLiquidationProfileStatusText("unavailable", null), binanceLast);
   }
@@ -351,6 +566,7 @@ export function prepareLiquidationProfile(
     status: aligned.length > 0 ? "ok" : "no-data",
     points: [],
     meta: {
+      activeSource: "hyperliquid",
       responseStatus,
       response,
       binanceLast,
@@ -378,6 +594,14 @@ function formatAlignedPrice(price: number): string {
   return price.toFixed(4);
 }
 
+function formatModelAsOf(asOfMs: number): string {
+  if (!Number.isFinite(asOfMs)) return "—";
+  const d = new Date(asOfMs);
+  const hh = String(d.getUTCHours()).padStart(2, "0");
+  const mm = String(d.getUTCMinutes()).padStart(2, "0");
+  return `${d.toISOString().slice(0, 10)} ${hh}:${mm} UTC`;
+}
+
 function drawCumulativeCurves(
   canvas: CanvasRenderingContext2D,
   rows: readonly MergedLiquidationRow[],
@@ -391,6 +615,7 @@ function drawCumulativeCurves(
   yOfPrice: (price: number) => number,
   areaTop: number,
   areaBottom: number,
+  dashed = false,
 ): void {
   if (rows.length === 0 && clusters.length === 0) return;
   const pivot = binanceLast ?? (clusters[Math.floor(clusters.length / 2)]?.alignedPrice ?? 0);
@@ -428,6 +653,9 @@ function drawCumulativeCurves(
     if (pts.length < 2) return;
     canvas.strokeStyle = color;
     canvas.lineWidth = 1.5;
+    if (dashed && typeof canvas.setLineDash === "function") {
+      canvas.setLineDash([4, 3]);
+    }
     canvas.beginPath();
     for (let i = 0; i < pts.length; i += 1) {
       const offset = maxWidth * (pts[i].cum / maxCum);
@@ -436,6 +664,9 @@ function drawCumulativeCurves(
       else canvas.lineTo(x, pts[i].y);
     }
     canvas.stroke();
+    if (dashed && typeof canvas.setLineDash === "function") {
+      canvas.setLineDash([]);
+    }
   };
 
   drawCurve(longPoints, longColor);
@@ -448,7 +679,17 @@ export function drawLiquidationProfileOverlay(
 ): void {
   const data = asLiquidationProfileData(prepared ?? prepareLiquidationProfile(ctx));
   const { view, ctx: canvas, settings } = ctx;
-  const { responseStatus, clusters, warnings, takenAt, binanceLast } = data.meta;
+  const {
+    activeSource = "hyperliquid",
+    responseStatus,
+    modelStatus,
+    modelAsOf,
+    replayedBars,
+    clusters,
+    warnings,
+    takenAt,
+    binanceLast,
+  } = data.meta;
   const placement: LiquidationProfilePlacement = settings.profilePlacement === "left" ? "left" : "right";
   const showPlotLabel = settings.showPlotLabel !== false;
   const areaTop = view.area.top;
@@ -456,7 +697,26 @@ export function drawLiquidationProfileOverlay(
   const badgeX = placement === "left" ? view.area.left + 8 : view.area.left + view.area.width - 8;
   const badgeMaxW = Math.max(180, Math.min(360, view.area.width - 16));
 
-  if (responseStatus === "unsupported" || responseStatus === "disabled" || responseStatus === "unavailable") {
+  if (activeSource === "model" && modelStatus !== "ready") {
+    if (showPlotLabel && data.status !== "hidden" && data.status !== "loading") {
+      const statusKey = modelStatus ?? "unavailable";
+      const isWarn = statusKey === "stale" || statusKey === "seam-mismatch" || statusKey === "unverified" || statusKey === "unsupported";
+      drawIndicatorBadge(
+        canvas,
+        buildLiquidationModelStatusText(statusKey),
+        badgeX,
+        areaTop + 18,
+        {
+          color: isWarn ? uiColor.warn : uiColor.textSecondary,
+          align: placement,
+          maxWidth: badgeMaxW,
+        },
+      );
+    }
+    return;
+  }
+
+  if (activeSource === "hyperliquid" && (responseStatus === "unsupported" || responseStatus === "disabled" || responseStatus === "unavailable")) {
     if (showPlotLabel && data.status !== "hidden" && data.status !== "loading") {
       drawIndicatorBadge(
         canvas,
@@ -475,6 +735,7 @@ export function drawLiquidationProfileOverlay(
 
   const maxWidth = Math.min(view.area.width * 0.34, numericSetting(settings, "profileWidth", 180, 40, 500));
   const opacity = numericSetting(settings, "opacity", 0.72, 0.1, 1);
+  const drawAlpha = activeSource === "model" ? Math.max(0.08, opacity * 0.55) : opacity;
   const anchorX = placement === "left" ? view.area.left + 4 : view.area.left + view.area.width - 4;
   const longColor = stringSetting(settings, "longColor", uiColor.buy);
   const shortColor = stringSetting(settings, "shortColor", uiColor.sell);
@@ -491,7 +752,7 @@ export function drawLiquidationProfileOverlay(
   canvas.rect(view.area.left, areaTop, view.area.width, view.area.height);
   canvas.clip();
 
-  canvas.globalAlpha = opacity;
+  canvas.globalAlpha = drawAlpha;
   for (const row of rows) {
     const longW = maxWidth * (row.longNotional / normDenom);
     const shortW = maxWidth * (row.shortNotional / normDenom);
@@ -520,7 +781,7 @@ export function drawLiquidationProfileOverlay(
   }
 
   if (boolSetting(settings, "showCumulative", false)) {
-    canvas.globalAlpha = Math.min(1, opacity + 0.15);
+    canvas.globalAlpha = Math.min(1, drawAlpha + 0.15);
     drawCumulativeCurves(
       canvas,
       rows,
@@ -534,6 +795,7 @@ export function drawLiquidationProfileOverlay(
       (p) => view.yOfPrice(p),
       areaTop,
       areaBottom,
+      activeSource === "model",
     );
   }
   canvas.globalAlpha = 1;
@@ -541,39 +803,67 @@ export function drawLiquidationProfileOverlay(
 
   let nextBadgeY = areaTop + 18;
   if (showPlotLabel) {
-    const isWarn = responseStatus === "stale" || responseStatus === "source-changed";
-    drawIndicatorBadge(
-      canvas,
-      buildLiquidationProfileStatusText(responseStatus, takenAt),
-      badgeX,
-      nextBadgeY,
-      {
-        color: isWarn ? uiColor.warn : uiColor.info,
-        align: placement,
-        maxWidth: badgeMaxW,
-      },
-    );
-    nextBadgeY += 24;
+    if (activeSource === "model") {
+      drawIndicatorBadge(
+        canvas,
+        safeTranslate("indicator.liquidationProfile.badgeModelSource", "Model · tahmini · Binance"),
+        badgeX,
+        nextBadgeY,
+        {
+          color: uiColor.info,
+          align: placement,
+          maxWidth: badgeMaxW,
+        },
+      );
+      nextBadgeY += 24;
+    } else {
+      drawIndicatorBadge(
+        canvas,
+        safeTranslate("indicator.liquidationProfile.badgeHyperliquidSource", "Hyperliquid · gerçek pozisyon"),
+        badgeX,
+        nextBadgeY,
+        {
+          color: uiColor.info,
+          align: placement,
+          maxWidth: badgeMaxW,
+        },
+      );
+      nextBadgeY += 24;
 
-    if (warnings.staleMarkPx) {
+      const isWarn = responseStatus === "stale" || responseStatus === "source-changed";
       drawIndicatorBadge(
         canvas,
-        safeTranslate("indicator.liquidationProfile.hlPriceStale", "HL fiyatı eski"),
+        buildLiquidationProfileStatusText(responseStatus, takenAt),
         badgeX,
         nextBadgeY,
-        { color: uiColor.warn, align: placement, maxWidth: badgeMaxW },
+        {
+          color: isWarn ? uiColor.warn : uiColor.info,
+          align: placement,
+          maxWidth: badgeMaxW,
+        },
       );
       nextBadgeY += 24;
-    }
-    if (warnings.priceDivergence) {
-      drawIndicatorBadge(
-        canvas,
-        safeTranslate("indicator.liquidationProfile.priceDivergence", "HL/Binance fiyat farkı >%1"),
-        badgeX,
-        nextBadgeY,
-        { color: uiColor.warn, align: placement, maxWidth: badgeMaxW },
-      );
-      nextBadgeY += 24;
+
+      if (warnings.staleMarkPx) {
+        drawIndicatorBadge(
+          canvas,
+          safeTranslate("indicator.liquidationProfile.hlPriceStale", "HL fiyatı eski"),
+          badgeX,
+          nextBadgeY,
+          { color: uiColor.warn, align: placement, maxWidth: badgeMaxW },
+        );
+        nextBadgeY += 24;
+      }
+      if (warnings.priceDivergence) {
+        drawIndicatorBadge(
+          canvas,
+          safeTranslate("indicator.liquidationProfile.priceDivergence", "HL/Binance fiyat farkı >%1"),
+          badgeX,
+          nextBadgeY,
+          { color: uiColor.warn, align: placement, maxWidth: badgeMaxW },
+        );
+        nextBadgeY += 24;
+      }
     }
   }
 
@@ -591,9 +881,17 @@ export function drawLiquidationProfileOverlay(
       }
       if (best) {
         const parts: string[] = [];
-        if (best.longNotional > 0) parts.push(`L ${compactUsd(best.longNotional)} (${best.longCount})`);
-        if (best.shortNotional > 0) parts.push(`S ${compactUsd(best.shortNotional)} (${best.shortCount})`);
-        parts.push(`HL ${formatAlignedPrice(best.hlPrice)} → Binance ≈ ${formatAlignedPrice(best.alignedPrice)}`);
+        if (activeSource === "model") {
+          parts.push(`Seviye ${formatAlignedPrice(best.alignedPrice)}`);
+          if (best.longNotional > 0) parts.push(`L ~${compactUsd(best.longNotional)}`);
+          if (best.shortNotional > 0) parts.push(`S ~${compactUsd(best.shortNotional)}`);
+          if (modelAsOf != null) parts.push(`asOf ${formatModelAsOf(modelAsOf)}`);
+          parts.push(`+${replayedBars ?? 0} bar`);
+        } else {
+          if (best.longNotional > 0) parts.push(`L ${compactUsd(best.longNotional)} (${best.longCount})`);
+          if (best.shortNotional > 0) parts.push(`S ${compactUsd(best.shortNotional)} (${best.shortCount})`);
+          parts.push(`HL ${formatAlignedPrice(best.hlPrice)} → Binance ≈ ${formatAlignedPrice(best.alignedPrice)}`);
+        }
         drawIndicatorBadge(
           canvas,
           parts.join(" · "),
@@ -622,9 +920,11 @@ function headerLabel(ctx: {
     ? safeTranslate("indicator.liquidationProfile.rangeAll", "Tümü")
     : `%${rangePct}`;
   const densityNote = safeTranslate("indicator.liquidationProfile.densityNote", "bekleyen tahmini likidasyon yoğunluğu");
-  const status = data?.meta?.responseStatus;
+  const activeSource = data?.meta?.activeSource ?? "hyperliquid";
+  const sourceLabel = activeSource === "model" ? "Model (Binance)" : "Hyperliquid";
+  const status = activeSource === "model" ? data?.meta?.modelStatus : data?.meta?.responseStatus;
   const statusTag = status && status !== "ready" ? ` · ${status}` : "";
-  return `Liquidation Profile · Hyperliquid · ${rangeText} · ${densityNote}${statusTag}`;
+  return `Liquidation Profile · ${sourceLabel} · ${rangeText} · ${densityNote}${statusTag}`;
 }
 
 export const liquidationProfileIndicatorDefinition: IndicatorDefinition<LiquidationProfileSettings> = {
@@ -647,6 +947,8 @@ export const liquidationProfileIndicatorDefinition: IndicatorDefinition<Liquidat
     shortColor: uiColor.sell,
     showReadout: true,
     showPlotLabel: true,
+    source: "auto",
+    showUnverifiedModel: false,
   }),
   settingsSchema: {
     sections: [
@@ -654,6 +956,25 @@ export const liquidationProfileIndicatorDefinition: IndicatorDefinition<Liquidat
         title: "Calculation",
         titleKey: "indicator.common.section.calculation",
         fields: [
+          {
+            kind: "select",
+            key: "source",
+            label: "Source",
+            labelKey: "indicator.liquidationProfile.source",
+            options: [
+              { label: "Auto", value: "auto", labelKey: "indicator.liquidationProfile.source.auto" },
+              { label: "Hyperliquid", value: "hyperliquid", labelKey: "indicator.liquidationProfile.source.hyperliquid" },
+              { label: "Model (Binance)", value: "model", labelKey: "indicator.liquidationProfile.source.model" },
+            ],
+            requiresRecalc: true,
+          },
+          {
+            kind: "boolean",
+            key: "showUnverifiedModel",
+            label: "Show unverified model anyway",
+            labelKey: "indicator.liquidationProfile.showUnverifiedModel",
+            requiresRecalc: true,
+          },
           {
             kind: "select",
             key: "rangePct",

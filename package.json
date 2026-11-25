@@ -26,6 +26,10 @@
       "types": "./dist/core/analysis/anchoredVwap.d.ts",
       "default": "./dist/core/analysis/anchoredVwap.js"
     },
+    "./core/analysis/liquidationModel": {
+      "types": "./dist/core/analysis/liquidationModel.d.ts",
+      "default": "./dist/core/analysis/liquidationModel.js"
+    },
     "./core/analysis/mondayRange": {
       "types": "./dist/core/analysis/mondayRange.d.ts",
       "default": "./dist/core/analysis/mondayRange.js"
