@@ -1,6 +1,7 @@
 import type { CoinalyzeDerivativeRequestInput, CoinalyzeDerivativeSeriesState } from "./metricContracts.js";
 import type { FuturesPositioningRequestInput, FuturesPositioningSeriesState } from "./metricContracts.js";
 import type { LiquidationRequestInput, LiquidationSeriesState } from "./metricContracts.js";
+import type { OpenInterestRequestInput, OpenInterestSeriesState } from "./metricContracts.js";
 import type { GexWallSurface } from "./gexWall.js";
 
 export interface OptionsGexSurfaceRequest {
@@ -18,6 +19,7 @@ export interface IndicatorDataSource {
   requestLiquidationSeries(input: LiquidationRequestInput): LiquidationSeriesState;
   requestCoinalyzeDerivativeSeries(input: CoinalyzeDerivativeRequestInput): CoinalyzeDerivativeSeriesState;
   requestFuturesPositioningSeries(input: FuturesPositioningRequestInput): FuturesPositioningSeriesState;
+  requestOpenInterestSeries?(input: OpenInterestRequestInput): OpenInterestSeriesState;
   fetchOptionsGexSurface(request: OptionsGexSurfaceRequest, signal?: AbortSignal): Promise<GexWallSurface>;
 }
 
