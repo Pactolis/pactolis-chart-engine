@@ -87,17 +87,18 @@ test("Order Flow Profile indicator and Fixed-Range drawing render left/right pla
     const services = createHarnessServices({ priceStep: 1, priceStepResolved: true });
     const market = "BINANCE_FUTURES:btcusdt";
     const panelId = "vp-placement-test";
+    const baseState = {
+      type: "chart",
+      market,
+      timeframe: "15m",
+      scaleMode: "linear",
+      chartType: "candlestick",
+      candles: true,
+      indicators: [vpInstance],
+    } as any;
     const handle = harness.mountChart(
       root,
-      {
-        type: "chart",
-        market,
-        timeframe: "15m",
-        scaleMode: "linear",
-        chartType: "candlestick",
-        candles: true,
-        indicators: [vpInstance],
-      } as any,
+      baseState,
       services,
       panelId,
       harness.createChartSurfaceModel(),
@@ -126,7 +127,13 @@ test("Order Flow Profile indicator and Fixed-Range drawing render left/right pla
     const effectiveMaxWidth = Math.min(rt.view.area.width * 0.34, 120);
 
     const captureIndicatorRects = async (overrides: Record<string, unknown>) => {
-      Object.assign(vpInstance.settings, overrides);
+      handle.updateState({
+        ...baseState,
+        indicators: [{
+          ...vpInstance,
+          settings: { ...vpInstance.settings, ...overrides },
+        }],
+      } as any);
       rects.length = 0;
       rt.invalidate();
       await rt.session.captureCompositePng();
@@ -139,7 +146,13 @@ test("Order Flow Profile indicator and Fixed-Range drawing render left/right pla
     const indDeltaLeft = await captureIndicatorRects({ profileMetric: "delta", profilePlacement: "left" });
 
     // Remove indicator from overlay before exercising drawAnalysisDrawings directly.
-    vpInstance.visible = false;
+    handle.updateState({
+      ...baseState,
+      indicators: [{
+        ...vpInstance,
+        visible: false,
+      }],
+    } as any);
     rt.invalidate();
     await rt.session.captureCompositePng();
 
