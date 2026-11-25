@@ -58,7 +58,8 @@ type HeavyIndicatorType =
   | "funding-regime"
   | "futures-positioning"
   | "liquidations"
-  | "options-gex-wall";
+  | "options-gex-wall"
+  | "whale-vs-crowd";
 
 const heavyCatalog: Record<HeavyIndicatorType, IndicatorCatalogEntry> = {
   "cross-exchange-open-interest": { type: "cross-exchange-open-interest", name: "Cross-Exchange OI", category: "derivatives", defaultPane: "separate" },
@@ -66,6 +67,7 @@ const heavyCatalog: Record<HeavyIndicatorType, IndicatorCatalogEntry> = {
   "futures-positioning": { type: "futures-positioning", name: "Futures Positioning", category: "derivatives", defaultPane: "separate" },
   liquidations: { type: "liquidations", name: "Liquidations", category: "derivatives", defaultPane: "separate" },
   "options-gex-wall": { type: "options-gex-wall", name: "Options GEX Wall", category: "derivatives", defaultPane: "overlay" },
+  "whale-vs-crowd": { type: "whale-vs-crowd", name: "Whale vs Crowd", category: "derivatives", defaultPane: "separate" },
 };
 
 const heavyLoaders: Record<HeavyIndicatorType, () => Promise<IndicatorDefinition>> = {
@@ -74,6 +76,7 @@ const heavyLoaders: Record<HeavyIndicatorType, () => Promise<IndicatorDefinition
   "futures-positioning": () => import("./builtins/futuresPositioning.js").then((module) => module.futuresPositioningIndicatorDefinition as IndicatorDefinition),
   liquidations: () => import("./builtins/liquidations.js").then((module) => module.liquidationsIndicatorDefinition as IndicatorDefinition),
   "options-gex-wall": () => import("./builtins/optionsGexWall.js").then((module) => module.optionsGexWallIndicatorDefinition as IndicatorDefinition),
+  "whale-vs-crowd": () => import("./builtins/whaleVsCrowd.js").then((module) => module.whaleVsCrowdIndicatorDefinition as IndicatorDefinition),
 };
 
 export const indicatorRegistry: Record<string, IndicatorDefinition> = Object.fromEntries(

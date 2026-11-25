@@ -39,6 +39,30 @@ const CHART_LOCALE_FALLBACKS: Readonly<Record<string, { tr: string; en: string }
     tr: "Kullanılamıyor: gerçek footprint verisi gerekir",
     en: "Unavailable: exact footprint data required",
   },
+  "indicator.whaleVsCrowd.warmingBadge": {
+    tr: "{venue}: ısınıyor ({days}/{target} gün)",
+    en: "{venue}: warming ({days}/{target}d)",
+  },
+  "indicator.whaleVsCrowd.hlCrowdUnavailable": {
+    tr: "Hyperliquid kalabalık verisi yok",
+    en: "Hyperliquid crowd data unavailable",
+  },
+  "indicator.whaleVsCrowd.venueUnsupported": {
+    tr: "{venue}: desteklenmiyor",
+    en: "{venue}: unsupported",
+  },
+  "indicator.whaleVsCrowd.venueUnavailable": {
+    tr: "{venue}: veri yok",
+    en: "{venue}: unavailable",
+  },
+  "indicator.whaleVsCrowd.noData": {
+    tr: "Balina/Kalabalık verisi yok",
+    en: "No Whale vs Crowd data",
+  },
+  "indicator.whaleVsCrowd.sourceUnsupported": {
+    tr: "Balina/Kalabalık veri kaynağı desteklenmiyor",
+    en: "Whale vs Crowd data source unsupported",
+  },
 };
 
 let configured: ChartLocale | null = null;

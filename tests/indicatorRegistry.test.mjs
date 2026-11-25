@@ -12,6 +12,7 @@ const heavyTypes = [
   "futures-positioning",
   "liquidations",
   "options-gex-wall",
+  "whale-vs-crowd",
 ];
 
 async function registry() {
@@ -26,11 +27,11 @@ test("indicator catalog exposes heavyweight entries without requiring definition
   for (const type of heavyTypes) assert.ok(catalog.some((entry) => entry.type === type));
 });
 
-test("indicator catalog keeps all 26 addable types with settings and serializable defaults", async () => {
+test("indicator catalog keeps all 27 addable types with settings and serializable defaults", async () => {
   const module = await registry();
   const catalog = module.listIndicatorDefinitions();
-  assert.equal(catalog.length, 26);
-  assert.equal(new Set(catalog.map((entry) => entry.type)).size, 26);
+  assert.equal(catalog.length, 27);
+  assert.equal(new Set(catalog.map((entry) => entry.type)).size, 27);
 
   for (const [order, entry] of catalog.entries()) {
     const definition = module.getIndicatorDefinition(entry.type);
@@ -65,24 +66,29 @@ test("built-in separate-pane indicators do not advertise unsupported overlays", 
   const funding = getIndicatorDefinition("funding-regime");
   const positioning = getIndicatorDefinition("futures-positioning");
   const liquidations = getIndicatorDefinition("liquidations");
+  const whaleVsCrowd = getIndicatorDefinition("whale-vs-crowd");
   assert.ok(cvd);
   assert.ok(crossOi);
   assert.ok(funding);
   assert.ok(positioning);
   assert.ok(liquidations);
+  assert.ok(whaleVsCrowd);
   assert.equal(defaultIndicatorPlacement(cvd), "separate-pane");
   assert.equal(defaultIndicatorPlacement(crossOi), "separate-pane");
   assert.equal(defaultIndicatorPlacement(funding), "separate-pane");
   assert.equal(defaultIndicatorPlacement(positioning), "separate-pane");
+  assert.equal(defaultIndicatorPlacement(whaleVsCrowd), "separate-pane");
   assert.deepEqual(supportedIndicatorPlacements(cvd), ["separate-pane"]);
   assert.deepEqual(supportedIndicatorPlacements(crossOi), ["separate-pane"]);
   assert.deepEqual(supportedIndicatorPlacements(funding), ["separate-pane"]);
   assert.deepEqual(supportedIndicatorPlacements(positioning), ["separate-pane"]);
+  assert.deepEqual(supportedIndicatorPlacements(whaleVsCrowd), ["separate-pane"]);
   assert.equal(isIndicatorPlacementSupported(cvd, "price-overlay"), false);
   assert.equal(isIndicatorPlacementSupported(crossOi, "price-overlay"), false);
   assert.equal(isIndicatorPlacementSupported(funding, "price-overlay"), false);
   assert.equal(isIndicatorPlacementSupported(positioning, "price-overlay"), false);
   assert.equal(isIndicatorPlacementSupported(liquidations, "overlay-scale"), false);
+  assert.equal(isIndicatorPlacementSupported(whaleVsCrowd, "price-overlay"), false);
 });
 
 test("Order Flow Profile only supports price-overlay placement", async () => {
