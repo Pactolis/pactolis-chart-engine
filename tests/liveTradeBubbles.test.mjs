@@ -43,7 +43,7 @@ async function loadModules() {
 }
 
 function makeBars(count, intervalMs = 60_000) {
-  const baseTime = 1_700_000_000_000;
+  const baseTime = 1_699_999_980_000;
   return Array.from({ length: count }, (_, i) => ({
     startTime: baseTime + i * intervalMs,
     open: 50_000 + i * 10,
