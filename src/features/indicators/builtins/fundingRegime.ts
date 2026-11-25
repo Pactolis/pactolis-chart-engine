@@ -683,10 +683,11 @@ function formatFundingRegimeReadout(
   } else {
     items.push({ label: "Z", value: formatZScore(point.zScore) });
   }
+  const activeVenueCount = data.meta.activeVenues?.length ?? activeFundingVenues(ctx.settings.exchanges).length;
   items.push(
     { label: "rate8h", value: formatFundingRate(point.fundingRate) },
     { label: "ort", value: formatFundingRate(point.windowMean) },
-    { label: "borsa", value: `${data.meta.activeVenues.length}/4` },
+    { label: "borsa", value: `${activeVenueCount}/4` },
   );
   if (data.meta.excludedVenues?.length) {
     items.push({ label: "haric", value: data.meta.excludedVenues.join(",") });
