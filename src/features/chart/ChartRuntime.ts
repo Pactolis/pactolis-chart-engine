@@ -986,7 +986,8 @@ class ChartRuntimeImpl implements ChartRuntime, ChartInputHost {
     const indicatorInstances = this.indicatorController.listInstances();
     const indicatorsSignature = indicatorInstances.length === 0
       ? "0"
-      : indicatorInstances.map((inst) => `${inst.id}:${inst.type}:${inst.visible ?? true}`).join(";");
+      // Settings are part of the key: a changed metric or period must not reuse the old snapshot.
+      : indicatorInstances.map((inst) => `${inst.id}:${inst.type}:${inst.visible ?? true}:${JSON.stringify(inst.settings ?? null)}`).join(";");
 
     const cached = this.lastAnalysisSnapshotCache;
     if (

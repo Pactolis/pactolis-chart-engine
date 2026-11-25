@@ -187,6 +187,38 @@ interface HeatmapFramePreamble {
   last: number;
 }
 
+/**
+ * WebGL2 pan/zoom-in-motion prepare window: the cells of a wider bar range and
+ * price band than the viewport, prepared once at an anchor view. While the
+ * viewport stays inside it (and the column width, area and data are unchanged)
+ * the prepared frame is reused and the shader maps the anchor x/price axes to
+ * the current ones, so a pan no longer re-prepares and re-uploads every frame.
+ */
+interface HeatmapGpuMotionWindow {
+  id: number;
+  baseKey: string;
+  first: number;
+  last: number;
+  clipTop: number;
+  clipHeight: number;
+  priceLo: number;
+  priceHi: number;
+  anchorPricePerPx: number;
+}
+
+/** Overscan on each side of the viewport, as a fraction of its bar span. */
+const GPU_MOTION_WINDOW_OVERSCAN_X = 0.5;
+/** Overscan above and below the viewport, as a fraction of its price span (autoscale drift). */
+const GPU_MOTION_WINDOW_OVERSCAN_Y = 0.25;
+/**
+ * Quiet time after the last viewport change before the exact frame replaces
+ * the motion window. Longer than the CPU raster quiet period so a slow device
+ * (100-200 ms frames) or a crosshair-only re-render mid-drag keeps the window.
+ */
+export const HEATMAP_GPU_MOTION_SETTLE_MS = 400;
+/** Price-scale change (either way) beyond which the motion window is re-prepared. */
+const GPU_MOTION_WINDOW_MAX_SCALE_RATIO = 2;
+
 interface HoverWindow {
   status: "loading" | "ready" | "error";
   bars: Map<number, OrderbookHeatmapBar>;
@@ -779,6 +811,10 @@ export class OrderbookHeatmapOverlay {
       clearTimeout(this.scaleSettleTimer);
       this.scaleSettleTimer = null;
     }
+    if (this.gpuMotionSettleTimer) {
+      clearTimeout(this.gpuMotionSettleTimer);
+      this.gpuMotionSettleTimer = null;
+    }
     this.unsubscribe();
     this.unsubscribeLiveTail?.();
     this.unsubscribeLiveTail = null;
@@ -825,8 +861,17 @@ export class OrderbookHeatmapOverlay {
       clearTimeout(this.scaleSettleTimer);
       this.scaleSettleTimer = null;
     }
+    if (this.gpuMotionSettleTimer) {
+      clearTimeout(this.gpuMotionSettleTimer);
+      this.gpuMotionSettleTimer = null;
+    }
     this.scaleViewportKey = "";
     this.scaleViewportChangedAt = Number.NEGATIVE_INFINITY;
+    this.gpuMotionViewportKey = "";
+    this.gpuMotionChangedAt = Number.NEGATIVE_INFINITY;
+    this.gpuMotionWindow = null;
+    this.gpuMotionWindowDisabled = false;
+    this.lastGpuExactPrepareKey = "";
     this.autoScaleCache = null;
     this.autoScaleHistCache = null;
     this.autoScaleInputSig = "";
@@ -1000,6 +1045,12 @@ export class OrderbookHeatmapOverlay {
       this.needsRedrawOnVisible = false;
       this.invalidate();
     }
+  }
+
+  /** Test-only seam: every WebGL2 GPU frame takes the exact prepare, so cold prepare cost can be measured during motion. */
+  setGpuMotionReuseDisabledForTest(disabled: boolean): void {
+    this.gpuMotionReuseDisabledForTest = disabled;
+    if (disabled) this.gpuMotionWindow = null;
   }
 
   /** Test-only seam: bypasses CPU raster caching so direct painting can be measured on identical viewports. */
@@ -2467,6 +2518,7 @@ export class OrderbookHeatmapOverlay {
     series: FootprintSeries,
     range: [number, number],
     reserve?: (logicalBytes: number) => { release(): void } | null,
+    motionReuse = false,
   ): HeatmapGpuCellFrame | null {
     if (!reserve) {
       const visible = this.collectVisibleCells(view, series, range, GPU_MAX_PREPARED_CELLS);
@@ -2477,6 +2529,15 @@ export class OrderbookHeatmapOverlay {
     if (!preamble) return null;
     const startedAt = isPerformanceTelemetryEnabled() ? performance.now() : null;
     try {
+      // The window is the one `getPrepareCacheKey(..., motionReuse)` resolved for this frame.
+      const window = motionReuse ? this.gpuMotionWindow : null;
+      if (window) {
+        const prepared = this.prepareReservedGpuCells(preamble, view, series, reserve, window);
+        if (prepared) return prepared;
+        // Too many cells or no budget for the wider window: exact prepares until the motion settles.
+        this.gpuMotionWindow = null;
+        this.gpuMotionWindowDisabled = true;
+      }
       return this.prepareReservedGpuCells(preamble, view, series, reserve);
     } finally {
       if (startedAt !== null) recordPerformanceDuration("chart.gpu.heatmap.prepare.ms", performance.now() - startedAt);
@@ -2489,8 +2550,14 @@ export class OrderbookHeatmapOverlay {
     view: View,
     series: FootprintSeries,
     reserve: (logicalBytes: number) => { release(): void } | null,
+    window: HeatmapGpuMotionWindow | null = null,
   ): HeatmapGpuCellFrame | null {
-    const { top, height } = view.area;
+    // Scale and chunk scheduling follow the visible preamble; only the
+    // collected cells widen to the motion window.
+    const top = window ? window.clipTop : view.area.top;
+    const height = window ? window.clipHeight : view.area.height;
+    const cellFirst = window ? window.first : preamble.first;
+    const cellLast = window ? window.last : preamble.last;
     const step = preamble.settings.bucketStep;
     const fixedCeiling = this.resolveFixedCeiling(preamble.settings);
     const replayActive = this.isReplayActive();
@@ -2532,9 +2599,10 @@ export class OrderbookHeatmapOverlay {
       !Object.hasOwn(view, "yOfPrice") &&
       Number.isFinite(view.priceTop) &&
       view.pricePerPx > 0;
+    const areaTop = view.area.top;
     const priceTop = view.priceTop;
     const pricePerPx = view.pricePerPx;
-    for (let index = preamble.first; index <= preamble.last; index++) {
+    for (let index = cellFirst; index <= cellLast; index++) {
       const live = index === liveIndex;
       const bar = (live ? liveHeatmapSubBar : lastHeatmapSubBar)(
         this.bars, series.timeOfIndex(index), series.timeOfIndex(index + 1), preamble.tier, sortedTimes);
@@ -2551,10 +2619,10 @@ export class OrderbookHeatmapOverlay {
         const priceStart = cell[0];
         if (priceStart + step < minVisPrice || priceStart > maxVisPrice) continue;
         const yTop = isLinearFast
-          ? top + (priceTop - (priceStart + step)) / pricePerPx
+          ? areaTop + (priceTop - (priceStart + step)) / pricePerPx
           : view.yOfPrice(priceStart + step);
         const yBottom = isLinearFast
-          ? top + (priceTop - priceStart) / pricePerPx
+          ? areaTop + (priceTop - priceStart) / pricePerPx
           : view.yOfPrice(priceStart);
         if (yBottom < top || yTop > top + height) continue;
         mainCount++;
@@ -2578,6 +2646,8 @@ export class OrderbookHeatmapOverlay {
         contentRevision: ++this.gpuFrameContentRevision,
         anchorOffsetX: view.offsetX,
         panOffsetX: 0,
+        anchorPriceTop: view.priceTop,
+        anchorPricePerPx: view.pricePerPx,
       };
     }
     if (mainCount >= GPU_MAX_PREPARED_CELLS) return null;
@@ -2590,7 +2660,7 @@ export class OrderbookHeatmapOverlay {
       const visible: Array<{ x: number; yTop: number; cellHeight: number; value: number; live: boolean }> = [];
       this.forEachVisibleCell(view, series, preamble, GPU_MAX_PREPARED_CELLS, (x, yTop, cellHeight, value, live) => {
         visible.push({ x, yTop, cellHeight, value, live });
-      });
+      }, cellFirst, cellLast, top, height);
       if (visible.length !== mainCount || visible.length >= GPU_MAX_PREPARED_CELLS) {
         lease.release();
         return null;
@@ -2797,6 +2867,8 @@ export class OrderbookHeatmapOverlay {
       contentRevision: ++this.gpuFrameContentRevision,
       anchorOffsetX: view.offsetX,
       panOffsetX: 0,
+      anchorPriceTop: view.priceTop,
+      anchorPricePerPx: view.pricePerPx,
     };
   }
 
@@ -2819,10 +2891,114 @@ export class OrderbookHeatmapOverlay {
    * Returns a deterministic cache key for GPU prepare inputs (while running
    * `beginFrame` chunk TTL and error retry scheduling), or `null` when nothing can be drawn.
    */
-  getPrepareCacheKey(view: View, series: FootprintSeries, range: [number, number], includeOffsetX = false): string | null {
+  getPrepareCacheKey(
+    view: View,
+    series: FootprintSeries,
+    range: [number, number],
+    includeOffsetX = false,
+    motionReuse = false,
+  ): string | null {
     const frame = this.beginFrame(series, range);
     if (!frame) return null;
-    return this.frameCacheKey(view, series, frame, false, false, includeOffsetX);
+    const exactKey = this.frameCacheKey(view, series, frame, false, false, includeOffsetX);
+    if (motionReuse && !this.gpuMotionReuseDisabledForTest) {
+      // A sub-bar pan that keeps the exact key keeps reusing the exact frame;
+      // a window is only prepared once the exact frame would be re-prepared.
+      const allowCreate = this.gpuMotionWindow !== null || exactKey !== this.lastGpuExactPrepareKey;
+      this.lastGpuExactPrepareKey = exactKey;
+      const window = this.resolveGpuMotionWindow(view, series, frame, allowCreate);
+      if (window) return `motion|${window.id}|${window.baseKey}`;
+    } else {
+      this.gpuMotionWindow = null;
+    }
+    return exactKey;
+  }
+
+  /**
+   * While the viewport is moving (changed within `HEATMAP_GPU_MOTION_SETTLE_MS`)
+   * on a linear price axis, returns the motion window covering it, creating a
+   * new one when the viewport left the current window. Returns `null` when the
+   * viewport is still (the exact prepare is used, so live updates and Auto
+   * scale stay exact) or the window had to be dropped this motion.
+   */
+  private resolveGpuMotionWindow(
+    view: View,
+    series: FootprintSeries,
+    frame: HeatmapFramePreamble,
+    allowCreate: boolean,
+  ): HeatmapGpuMotionWindow | null {
+    const { top, height, left, width } = view.area;
+    const viewportKey = `${view.offsetX}|${view.colWidth}|${view.priceTop}|${view.pricePerPx}|${left}|${top}|${width}|${height}`;
+    const now = this.now();
+    if (this.gpuMotionViewportKey !== "" && this.gpuMotionViewportKey !== viewportKey) {
+      this.gpuMotionChangedAt = now;
+      this.scheduleGpuMotionSettleTimer();
+    }
+    this.gpuMotionViewportKey = viewportKey;
+    const moving = this.gpuMotionChangedAt > Number.NEGATIVE_INFINITY
+      && now - this.gpuMotionChangedAt < HEATMAP_GPU_MOTION_SETTLE_MS;
+    if (!moving) {
+      this.gpuMotionWindow = null;
+      this.gpuMotionWindowDisabled = false;
+      return null;
+    }
+    const linear =
+      !(typeof view.isLogScale === "function" && view.isLogScale()) &&
+      !Object.hasOwn(view, "yOfPrice") &&
+      Number.isFinite(view.priceTop) &&
+      view.pricePerPx > 0 &&
+      height > 0;
+    if (!linear || this.gpuMotionWindowDisabled) {
+      this.gpuMotionWindow = null;
+      return null;
+    }
+    const scaleMode = frame.settings.scaleMode ?? "auto";
+    const fixedCeiling = scaleMode === "fixed" ? (frame.settings.fixedCeiling?.[frame.settings.unit] ?? 0) : 0;
+    const seriesStructRev = (series as { structureRevision?: number }).structureRevision ?? 0;
+    const baseKey = `${this.dataKey}|${frame.settings.unit}|${frame.threshold}|${scaleMode}|${fixedCeiling}|${frame.settings.contrast ?? "medium"}|${this.barsRevision}|${seriesIdentityId(series)}|${seriesStructRev}|${series.length}|${this.isReplayActive()}|${view.colWidth}|${left}|${top}|${width}|${height}|${view.priceScaleMode}`;
+    const priceHi = view.priceTop;
+    const priceLo = view.priceTop - height * view.pricePerPx;
+    const current = this.gpuMotionWindow;
+    if (
+      current &&
+      current.baseKey === baseKey &&
+      frame.first >= current.first &&
+      frame.last <= current.last &&
+      priceHi <= current.priceHi &&
+      priceLo >= current.priceLo &&
+      current.anchorPricePerPx / view.pricePerPx <= GPU_MOTION_WINDOW_MAX_SCALE_RATIO &&
+      view.pricePerPx / current.anchorPricePerPx <= GPU_MOTION_WINDOW_MAX_SCALE_RATIO
+    ) {
+      return current;
+    }
+    if (!allowCreate) {
+      this.gpuMotionWindow = null;
+      return null;
+    }
+    const barMargin = Math.ceil((frame.last - frame.first + 1) * GPU_MOTION_WINDOW_OVERSCAN_X);
+    const pxMargin = height * GPU_MOTION_WINDOW_OVERSCAN_Y;
+    const window: HeatmapGpuMotionWindow = {
+      id: ++this.gpuMotionWindowSeq,
+      baseKey,
+      first: Math.max(0, frame.first - barMargin),
+      last: Math.min(series.length - 1, frame.last + barMargin),
+      clipTop: top - pxMargin,
+      clipHeight: height + 2 * pxMargin,
+      priceHi: priceHi + pxMargin * view.pricePerPx,
+      priceLo: priceLo - pxMargin * view.pricePerPx,
+      anchorPricePerPx: view.pricePerPx,
+    };
+    this.gpuMotionWindow = window;
+    return window;
+  }
+
+  /** Re-renders once the motion settles so the exact frame replaces the motion window. */
+  private scheduleGpuMotionSettleTimer(): void {
+    if (this.gpuMotionSettleTimer) clearTimeout(this.gpuMotionSettleTimer);
+    this.gpuMotionSettleTimer = setTimeout(() => {
+      this.gpuMotionSettleTimer = null;
+      if (!this.disposed && this.gpuMotionWindow !== null) this.invalidate();
+    }, HEATMAP_GPU_MOTION_SETTLE_MS);
   }
 
   private scheduleScaleSettleTimer(): void {
@@ -3137,6 +3313,14 @@ export class OrderbookHeatmapOverlay {
   private sortedBarTimesKeysRevision = -1;
   private gpuFrameContentRevision = 0;
   private scaleViewportKey = "";
+  private gpuMotionViewportKey = "";
+  private gpuMotionChangedAt = Number.NEGATIVE_INFINITY;
+  private gpuMotionWindow: HeatmapGpuMotionWindow | null = null;
+  private gpuMotionWindowDisabled = false;
+  private gpuMotionWindowSeq = 0;
+  private lastGpuExactPrepareKey = "";
+  private gpuMotionReuseDisabledForTest = false;
+  private gpuMotionSettleTimer: ReturnType<typeof setTimeout> | null = null;
   private scaleViewportChangedAt = Number.NEGATIVE_INFINITY;
   private scaleSettleTimer: ReturnType<typeof setTimeout> | null = null;
   private autoScaleCache: { floor: number; ceiling: number; hadCells: boolean } | null = null;

@@ -35,6 +35,7 @@ type RuntimeProbe = {
     releaseRasterCache(): void;
     setVisible(visible: boolean): void;
     setRasterCacheDisabledForTest(disabled: boolean): void;
+    setGpuMotionReuseDisabledForTest(disabled: boolean): void;
   };
   session: {
     gl: WebGL2RenderingContext;
@@ -443,6 +444,8 @@ test("15,000-cell SwiftShader benchmark and CPU raster cache budget / GPU takeov
     const gpuColdPrepareMs: number[] = [];
     const gpuColdRenderMs: number[] = [];
     const calibratedPriceTop = v.priceTop;
+    // Cold = every frame re-prepares; the WebGL2 motion window would reuse these frames.
+    r.orderbookHeatmap.setGpuMotionReuseDisabledForTest(true);
     for (let i = 0; i < 6; i++) {
       v.priceTop = i % 2 === 0 ? calibratedPriceTop + 0.05 : calibratedPriceTop;
       const b = telemetry.snapshotPerformanceTelemetry();
@@ -456,6 +459,7 @@ test("15,000-cell SwiftShader benchmark and CPU raster cache budget / GPU takeov
       if (prep.count > 0) gpuColdPrepareMs.push(prep.totalMs / prep.count);
       if (rend.count > 0) gpuColdRenderMs.push(rend.totalMs / rend.count);
     }
+    r.orderbookHeatmap.setGpuMotionReuseDisabledForTest(false);
     v.priceTop = calibratedPriceTop;
     r.invalidate();
     await r.session.captureCompositePng();

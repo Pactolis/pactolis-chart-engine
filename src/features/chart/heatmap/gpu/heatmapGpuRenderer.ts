@@ -52,6 +52,16 @@ export interface HeatmapGpuCellFrame {
   readonly anchorOffsetX?: number;
   readonly panOffsetX?: number;
   /**
+   * Linear-price motion reuse (WebGL2): y' = y * panScaleY + panOffsetY and
+   * h' = h * panScaleY, mapping the prepared anchor price axis onto the
+   * current one. Omitted, the identity.
+   */
+  readonly panScaleY?: number;
+  readonly panOffsetY?: number;
+  /** Price axis the cell rects were prepared at (motion reuse anchor). */
+  readonly anchorPriceTop?: number;
+  readonly anchorPricePerPx?: number;
+  /**
    * Production prepare only: lease covering the prepared lists' known
    * logical payload, held by the caller while it retains the frame. When
    * present, renderFrame skips its own transient prepared-lists charge so
@@ -109,6 +119,7 @@ export class HeatmapGpuRenderer {
   private validityTexture: WebGLTexture | null = null;
   private uResolution: WebGLUniformLocation | null = null;
   private uPanOffsetX: WebGLUniformLocation | null = null;
+  private uPanY: WebGLUniformLocation | null = null;
   private uFloor: WebGLUniformLocation | null = null;
   private uLogSpan: WebGLUniformLocation | null = null;
   private uOpacity: WebGLUniformLocation | null = null;
@@ -228,8 +239,10 @@ export class HeatmapGpuRenderer {
     const floor = frame.floor ?? frame.threshold;
     const opacity = frame.opacity ?? 1;
     const panOffsetX = frame.panOffsetX ?? 0;
+    const panScaleY = frame.panScaleY ?? 1;
+    const panOffsetY = frame.panOffsetY ?? 0;
     if (!val(frame.threshold) || !val(frame.ceiling) || !val(floor)) return false;
-    if (!f32(panOffsetX)) return false;
+    if (!f32(panOffsetX) || !f32(panOffsetY) || !f32(panScaleY) || !(panScaleY > 0)) return false;
     if (!Number.isFinite(opacity) || opacity < 0 || opacity > 1) return false;
     if (!(plot.width > 0) || !(plot.height > 0)) return false;
     const canvas = gl.canvas as CanvasTarget | undefined;
@@ -359,6 +372,7 @@ export class HeatmapGpuRenderer {
     this.validityTexture = null;
     this.program = null;
     this.uPanOffsetX = null;
+    this.uPanY = null;
     this.gl = null;
     this.stagingValues = null;
     this.stagingValidity = null;
@@ -455,6 +469,7 @@ export class HeatmapGpuRenderer {
       const program = createProgram(gl, HEATMAP_GPU_VERT_SRC, HEATMAP_GPU_FRAG_SRC);
       const uResolution = gl.getUniformLocation(program, "u_resolution");
       const uPanOffsetX = gl.getUniformLocation(program, "u_panOffsetX");
+      const uPanY = gl.getUniformLocation(program, "u_panY");
       const uFloor = gl.getUniformLocation(program, "u_floor");
       const uLogSpan = gl.getUniformLocation(program, "u_logSpan");
       const uOpacity = gl.getUniformLocation(program, "u_opacity");
@@ -523,6 +538,7 @@ export class HeatmapGpuRenderer {
       this.program = program;
       this.uResolution = uResolution;
       this.uPanOffsetX = uPanOffsetX;
+      this.uPanY = uPanY;
       this.uFloor = uFloor;
       this.uLogSpan = uLogSpan;
       this.uOpacity = uOpacity;
@@ -836,9 +852,12 @@ export class HeatmapGpuRenderer {
     const floor = frame.floor ?? frame.threshold;
     const opacity = frame.opacity ?? 1;
     const panOffsetX = frame.panOffsetX ?? 0;
+    const panScaleY = frame.panScaleY ?? 1;
+    const panOffsetY = frame.panOffsetY ?? 0;
     const ceiling = floor > 0 ? Math.max(frame.ceiling, floor * HEATMAP_MIN_CEILING_RATIO) : frame.ceiling;
     if (!Number.isFinite(Math.fround(floor)) || !Number.isFinite(Math.fround(ceiling))
-      || !Number.isFinite(Math.fround(opacity)) || !Number.isFinite(Math.fround(panOffsetX))) {
+      || !Number.isFinite(Math.fround(opacity)) || !Number.isFinite(Math.fround(panOffsetX))
+      || !Number.isFinite(Math.fround(panOffsetY)) || !(Math.fround(panScaleY) > 0)) {
       throw new Error("Heatmap GPU draw: non-finite uniforms");
     }
     const logSpan = floor > 0 ? Math.log10(ceiling / floor) : (ceiling > 0 ? ceiling : 0);
@@ -866,6 +885,7 @@ export class HeatmapGpuRenderer {
       gl.bindVertexArray(this.vao);
       gl.uniform2f(this.uResolution, bufferWidth / dpr, bufferHeight / dpr);
       if (this.uPanOffsetX !== null) gl.uniform1f(this.uPanOffsetX, panOffsetX);
+      if (this.uPanY !== null) gl.uniform2f(this.uPanY, panScaleY, panOffsetY);
       gl.uniform1f(this.uFloor, floor);
       gl.uniform1f(this.uLogSpan, logSpan);
       gl.uniform1f(this.uOpacity, opacity);

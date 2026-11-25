@@ -10,6 +10,7 @@ in vec4 a_rect; // per run (repeated on its 6 vertices): x, y, w, h in CSS pixel
 in vec3 a_run;  // per run: first cell index, signed cell count (+ indices grow downward, - upward), alpha scale
 uniform vec2 u_resolution; // canvas size in CSS pixels
 uniform float u_panOffsetX;
+uniform vec2 u_panY;       // y' = y * u_panY.x + u_panY.y, h' = h * u_panY.x (motion reuse of a prepared window)
 out float v_row;           // 0..count across the run, top to bottom
 flat out vec3 v_run;
 const vec2 QUAD_CORNERS[6] = vec2[6](
@@ -18,7 +19,8 @@ const vec2 QUAD_CORNERS[6] = vec2[6](
 ); // two triangles, same order as the former instanced unit quad
 void main() {
   vec2 unit = QUAD_CORNERS[gl_VertexID % 6];
-  vec2 pos = a_rect.xy + vec2(u_panOffsetX, 0.0) + unit * a_rect.zw;
+  vec2 origin = vec2(a_rect.x + u_panOffsetX, a_rect.y * u_panY.x + u_panY.y);
+  vec2 pos = origin + unit * vec2(a_rect.z, a_rect.w * u_panY.x);
   vec2 clip = (pos / u_resolution) * 2.0 - 1.0;
   gl_Position = vec4(clip.x, -clip.y, 0.0, 1.0); // flip Y -> top-left origin
   v_row = unit.y * abs(a_run.y);
