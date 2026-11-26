@@ -7,6 +7,11 @@ import type {
   LiquidationModelSeriesState,
   LiquidationRequestInput,
   LiquidationSeriesState,
+  LiveTradeEventsRequest,
+  OpenInterestRequestInput,
+  OpenInterestSeriesState,
+  VenueFundingRequestInput,
+  VenueFundingSeriesState,
 } from "./metricContracts.js";
 import type { GexWallSurface } from "./gexWall.js";
 
@@ -25,9 +30,12 @@ export interface IndicatorDataSource {
   requestLiquidationSeries(input: LiquidationRequestInput): LiquidationSeriesState;
   requestCoinalyzeDerivativeSeries(input: CoinalyzeDerivativeRequestInput): CoinalyzeDerivativeSeriesState;
   requestFuturesPositioningSeries(input: FuturesPositioningRequestInput): FuturesPositioningSeriesState;
+  requestOpenInterestSeries?(input: OpenInterestRequestInput): OpenInterestSeriesState;
+  requestVenueFundingSeries?(input: VenueFundingRequestInput): VenueFundingSeriesState;
   fetchOptionsGexSurface(request: OptionsGexSurfaceRequest, signal?: AbortSignal): Promise<GexWallSurface>;
   requestLiquidationClusters?(input: LiquidationClustersRequestInput): LiquidationClustersState;
   requestLiquidationModel?(input: LiquidationModelRequestInput): LiquidationModelSeriesState;
+  subscribeLiveTradeEvents?(input: LiveTradeEventsRequest): () => void;
 }
 
 let configured: IndicatorDataSource | null = null;

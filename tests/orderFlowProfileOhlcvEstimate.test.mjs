@@ -240,7 +240,7 @@ test("OHLCV-only estimator distributes volume deterministically and conserves to
   assert.equal(uniform.provenance, "estimated");
   assert.equal(uniform.availability, "available");
   assert.deepEqual(uniform.capabilities, {
-    metrics: { volume: true, delta: false, "trade-count": false, "average-trade-size": false },
+    metrics: { volume: true, delta: false, "trade-count": false, "average-trade-size": false, "oi-delta": true },
     sides: { total: true, buy: false, sell: false },
   });
   assert.equal(uniform.isEstimated, true);

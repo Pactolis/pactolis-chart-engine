@@ -287,3 +287,148 @@ export interface LiquidationModelRequestInput {
   market: string;
   onUpdate?: () => void;
 }
+
+export type LiveTradeEventKind = "trade" | "liquidation";
+export type LiveTradeEventScope = "base" | "market";
+
+export interface LiveTradeEvent {
+  id: string;
+  kind: LiveTradeEventKind;
+  time: number;
+  price: number;
+  qty: number;
+  notionalUsd: number;
+  side: "buy" | "sell" | "long" | "short";
+  venue: string;
+  sampled?: boolean;
+}
+
+export interface LiveTradeEventsRequest {
+  market: string;
+  kinds: LiveTradeEventKind[];
+  scope: LiveTradeEventScope;
+  onEvents: (events: LiveTradeEvent[]) => void;
+}
+
+export type OpenInterestVenue = "binance" | "bybit" | "okx" | "hyperliquid";
+export type OpenInterestUnit = "usd" | "base";
+
+export interface OpenInterestPoint {
+  time: number;
+  value: number;
+}
+
+export interface OpenInterestGap {
+  from: number;
+  to: number;
+}
+
+export interface OpenInterestVenueSeries {
+  venue: OpenInterestVenue;
+  points: OpenInterestPoint[];
+  recordingStartedAt?: number | null;
+  historyStartedAt?: number | null;
+  gaps?: OpenInterestGap[];
+  source?: "backend" | "browser" | "instant-only";
+}
+
+export interface OpenInterestSeriesResponse {
+  status?: "ok" | "partial" | "no-data" | "unsupported";
+  unit: "base";
+  resolution: string;
+  venues: OpenInterestVenueSeries[];
+  recordingStartedAt?: number | null;
+  historyStartedAt?: number | null;
+  gaps?: OpenInterestGap[];
+  source?: "backend" | "browser" | "instant-only";
+  truncated?: boolean;
+  message?: string;
+}
+
+export type OpenInterestSeriesState =
+  | { status: "idle" }
+  | { status: "unsupported"; message: string }
+  | { status: "loading" }
+  | { status: "ready"; data: OpenInterestSeriesResponse }
+  | { status: "error"; message: string };
+
+export interface OpenInterestRequestInput {
+  market: string;
+  timeframe: string;
+  intervalMs: number;
+  venues: OpenInterestVenue[];
+  from?: number;
+  to?: number;
+  onUpdate?: () => void;
+}
+
+export type FundingVenue = "binancef" | "bybitf" | "okxf" | "hyperliquid";
+
+export interface VenueFundingSettledPoint {
+  t: number;
+  rate: number;
+  intervalHours: number;
+  rate8h: number;
+}
+
+export interface VenueFundingCurrentPoint {
+  t: number;
+  rate: number;
+  rate8h: number;
+  nextFundingTime?: number;
+}
+
+export interface VenueFundingSeries {
+  venue: FundingVenue;
+  symbol?: string;
+  intervalHours?: number;
+  settled: VenueFundingSettledPoint[];
+  current?: VenueFundingCurrentPoint | null;
+}
+
+export interface VenueFundingAggregatePoint {
+  t: number;
+  rate8h: number;
+  venues?: FundingVenue[];
+  estimated?: boolean;
+}
+
+export interface VenueFundingAggregateSeries {
+  points: VenueFundingAggregatePoint[];
+  current?: {
+    t: number;
+    rate8h: number;
+    venues?: FundingVenue[];
+  } | null;
+  excludedVenues?: FundingVenue[];
+  source?: string;
+}
+
+export interface VenueFundingResponse {
+  market: string;
+  base?: string;
+  from: number;
+  to: number;
+  venues: FundingVenue[];
+  series: VenueFundingSeries[];
+  aggregate?: VenueFundingAggregateSeries | null;
+  excludedVenues?: FundingVenue[];
+  source?: string;
+  truncated?: boolean;
+  cacheHit?: boolean;
+}
+
+export type VenueFundingSeriesState =
+  | { status: "idle" }
+  | { status: "unsupported"; message: string }
+  | { status: "loading" }
+  | { status: "ready"; data: VenueFundingResponse }
+  | { status: "error"; message: string };
+
+export interface VenueFundingRequestInput {
+  market: string;
+  from: number;
+  to: number;
+  venues: FundingVenue[];
+  onUpdate?: () => void;
+}
