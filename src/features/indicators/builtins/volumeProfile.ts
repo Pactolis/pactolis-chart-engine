@@ -17,6 +17,7 @@ import {
   levelModeHasStatic,
   normalizeOrderFlowProfileSettings,
   profileSupportsValueArea,
+  type OrderFlowProfilePlacement,
   type ProfileLevelDisplay,
   type ProfileLineStyle,
 } from "../../../core/orderFlowProfileSettings.js";
@@ -35,6 +36,7 @@ interface VolumeProfileIndicatorSettings extends IndicatorSettings {
   lookbackBars: number;
   profileMetric: ProfileMetric;
   profileSide: ProfileSide;
+  profilePlacement: OrderFlowProfilePlacement;
   valueAreaPercent: number;
   maxWidth: number;
   buyColor: string;
@@ -412,25 +414,26 @@ function drawVolumeProfileOverlay(ctx: IndicatorDrawContext<VolumeProfileIndicat
   const data = asVolumeProfileData(prepared);
   const { view, series, ctx: canvas } = ctx;
   const { result, maxMagnitude } = data.meta;
+  const settings = normalizedSettings(ctx.settings);
+  const placement: OrderFlowProfilePlacement = settings.profilePlacement === "left" ? "left" : "right";
   if (data.status !== "ok") {
     if (result.isEstimated && ctx.settings.showPlotLabel !== false) {
       drawIndicatorBadge(
         canvas,
         data.message ?? tOr("indicator.volumeProfile.estimatedMetricUnsupported"),
-        view.area.left + view.area.width - 8,
+        placement === "left" ? view.area.left + 8 : view.area.left + view.area.width - 8,
         view.area.top + 18,
-        { color: uiColor.warn, align: "right", maxWidth: Math.max(180, view.area.width - 16) },
+        { color: uiColor.warn, align: placement, maxWidth: Math.max(180, view.area.width - 16) },
       );
     }
     return;
   }
-  const settings = normalizedSettings(ctx.settings);
   const step = series.config.priceStep;
   const maxWidth = Math.min(view.area.width * 0.34, numericSetting(settings, "maxWidth", 180, 40, 500));
-  const right = view.area.left + view.area.width - 4;
+  const anchorX = placement === "left" ? view.area.left + 4 : view.area.left + view.area.width - 4;
   const buyColor = stringSetting(settings, "buyColor", uiColor.buy);
   const sellColor = stringSetting(settings, "sellColor", uiColor.sell);
-  const deltaZeroX = right - maxWidth / 2;
+  const deltaZeroX = placement === "left" ? anchorX + maxWidth / 2 : anchorX - maxWidth / 2;
 
   canvas.save();
   canvas.beginPath();
@@ -451,16 +454,22 @@ function drawVolumeProfileOverlay(ctx: IndicatorDrawContext<VolumeProfileIndicat
       canvas.fillRect(part.signed >= 0 ? deltaZeroX : deltaZeroX - width, yTop, width, rowHeight);
       continue;
     }
-    let cursor = right;
-    for (const part of [...parts].reverse()) {
+    let cursor = anchorX;
+    const orderedParts = placement === "left" ? parts : [...parts].reverse();
+    for (const part of orderedParts) {
       const width = maxWidth * (part.value / Math.max(maxMagnitude, Number.EPSILON));
       canvas.fillStyle = part.side === "sell"
         ? sellColor
         : part.side === "total" && result.isEstimated
           ? uiColor.info
           : buyColor;
-      canvas.fillRect(cursor - width, yTop, width, rowHeight);
-      cursor -= width;
+      if (placement === "left") {
+        canvas.fillRect(cursor, yTop, width, rowHeight);
+        cursor += width;
+      } else {
+        canvas.fillRect(cursor - width, yTop, width, rowHeight);
+        cursor -= width;
+      }
     }
   }
   canvas.globalAlpha = 1;
@@ -478,9 +487,9 @@ function drawVolumeProfileOverlay(ctx: IndicatorDrawContext<VolumeProfileIndicat
   }
   if (result.isEstimated && settings.showPlotLabel !== false) {
     const badge = tOr(result.provenance === "mixed" ? "indicator.volumeProfile.mixed" : "indicator.volumeProfile.estimated");
-    drawIndicatorBadge(canvas, badge, right, view.area.top + 16, {
+    drawIndicatorBadge(canvas, badge, anchorX, view.area.top + 16, {
       color: uiColor.warn,
-      align: "right",
+      align: placement,
       maxWidth: Math.max(120, Math.min(240, view.area.width - 16)),
     });
   }
@@ -740,6 +749,7 @@ export const volumeProfileIndicatorDefinition: IndicatorDefinition<VolumeProfile
     lookbackBars: 200,
     profileMetric: "volume",
     profileSide: "total",
+    profilePlacement: "right",
     valueAreaPercent: 70,
     maxWidth: 180,
     buyColor: uiColor.buy,
@@ -793,6 +803,10 @@ export const volumeProfileIndicatorDefinition: IndicatorDefinition<VolumeProfile
       { kind: "select", key: "valMode", label: "VAL", labelKey: "indicator.volumeProfile.valMode", options: [...levelModeOptions], requiresRecalc: true, visibleWhen: supportsLevels },
     ] },
     { title: "Style", titleKey: "indicator.common.section.style", fields: [
+      { kind: "select", key: "profilePlacement", label: "Placement", labelKey: "indicator.volumeProfile.placement", options: [
+        { label: "Right", value: "right", labelKey: "indicator.volumeProfile.placement.right" },
+        { label: "Left", value: "left", labelKey: "indicator.volumeProfile.placement.left" },
+      ], requiresRecalc: false },
       { kind: "number", key: "maxWidth", label: "Max Width", labelKey: "indicator.volumeProfile.maxWidth", min: 40, max: 500, step: 5 },
       { kind: "color", key: "buyColor", label: "Buy Color", labelKey: "indicator.volumeProfile.buyColor" },
       { kind: "color", key: "sellColor", label: "Sell Color", labelKey: "indicator.volumeProfile.sellColor" },

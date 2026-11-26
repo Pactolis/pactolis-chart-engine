@@ -2,10 +2,12 @@ import type { ProfileMetric, ProfileSide } from "./analysis/orderFlowProfile.js"
 
 export type ProfileLevelDisplay = "off" | "static" | "developing" | "both";
 export type ProfileLineStyle = "solid" | "dashed" | "dotted";
+export type OrderFlowProfilePlacement = "right" | "left";
 
 export interface CommonOrderFlowProfileSettings {
   profileMetric: ProfileMetric;
   profileSide: ProfileSide;
+  profilePlacement?: OrderFlowProfilePlacement;
   pocMode: ProfileLevelDisplay;
   vahMode: ProfileLevelDisplay;
   valMode: ProfileLevelDisplay;
@@ -36,10 +38,11 @@ export interface FixedRangeOrderFlowProfileSettings extends CommonOrderFlowProfi
 
 export const DEFAULT_ORDER_FLOW_PROFILE_SETTINGS: Readonly<Pick<
   CommonOrderFlowProfileSettings,
-  "profileMetric" | "profileSide" | "pocMode" | "vahMode" | "valMode"
+  "profileMetric" | "profileSide" | "profilePlacement" | "pocMode" | "vahMode" | "valMode"
 >> = {
   profileMetric: "volume",
   profileSide: "total",
+  profilePlacement: "right",
   pocMode: "static",
   vahMode: "static",
   valMode: "static",
@@ -59,6 +62,7 @@ export function normalizeOrderFlowProfileSettings(
   const next: CommonOrderFlowProfileSettings & UnknownSettings = { ...source } as CommonOrderFlowProfileSettings & UnknownSettings;
   next.profileMetric = normalizeMetric(source.profileMetric);
   next.profileSide = normalizeSide(source.profileSide);
+  next.profilePlacement = normalizePlacement(source.profilePlacement, "right");
   next.pocMode = normalizeLevelMode(source.pocMode, legacyMode(source.showPoc, true));
   const legacyVa = legacyMode(source.showValueArea, true);
   next.vahMode = normalizeLevelMode(source.vahMode, legacyVa);
@@ -86,6 +90,7 @@ export function normalizeFixedRangeOrderFlowProfileSettings(
     pocMode: source.pocMode ?? legacyMode(source.showPoc, true),
     vahMode: source.vahMode ?? legacyMode(source.showVah, true),
     valMode: source.valMode ?? legacyMode(source.showVal, true),
+    profilePlacement: normalizePlacement(source.profilePlacement, "left"),
   }) as FixedRangeOrderFlowProfileSettings & UnknownSettings;
   if (typeof source.valueAreaPercent === "number" && Number.isFinite(source.valueAreaPercent)) {
     next.valueAreaPercent = Math.max(0.01, Math.min(0.99, source.valueAreaPercent));
@@ -140,6 +145,10 @@ function normalizeMetric(value: unknown): ProfileMetric {
 
 function normalizeSide(value: unknown): ProfileSide {
   return value === "buy" || value === "sell" ? value : "total";
+}
+
+function normalizePlacement(value: unknown, fallback: OrderFlowProfilePlacement): OrderFlowProfilePlacement {
+  return value === "left" || value === "right" ? value : fallback;
 }
 
 function normalizeLevelMode(value: unknown, fallback: ProfileLevelDisplay): ProfileLevelDisplay {

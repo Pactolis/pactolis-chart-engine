@@ -225,3 +225,74 @@ export interface OpenInterestRequestInput {
   to?: number;
   onUpdate?: () => void;
 }
+
+export type FundingVenue = "binancef" | "bybitf" | "okxf" | "hyperliquid";
+
+export interface VenueFundingSettledPoint {
+  t: number;
+  rate: number;
+  intervalHours: number;
+  rate8h: number;
+}
+
+export interface VenueFundingCurrentPoint {
+  t: number;
+  rate: number;
+  rate8h: number;
+  nextFundingTime?: number;
+}
+
+export interface VenueFundingSeries {
+  venue: FundingVenue;
+  symbol?: string;
+  intervalHours?: number;
+  settled: VenueFundingSettledPoint[];
+  current?: VenueFundingCurrentPoint | null;
+}
+
+export interface VenueFundingAggregatePoint {
+  t: number;
+  rate8h: number;
+  venues?: FundingVenue[];
+  estimated?: boolean;
+}
+
+export interface VenueFundingAggregateSeries {
+  points: VenueFundingAggregatePoint[];
+  current?: {
+    t: number;
+    rate8h: number;
+    venues?: FundingVenue[];
+  } | null;
+  excludedVenues?: FundingVenue[];
+  source?: string;
+}
+
+export interface VenueFundingResponse {
+  market: string;
+  base?: string;
+  from: number;
+  to: number;
+  venues: FundingVenue[];
+  series: VenueFundingSeries[];
+  aggregate?: VenueFundingAggregateSeries | null;
+  excludedVenues?: FundingVenue[];
+  source?: string;
+  truncated?: boolean;
+  cacheHit?: boolean;
+}
+
+export type VenueFundingSeriesState =
+  | { status: "idle" }
+  | { status: "unsupported"; message: string }
+  | { status: "loading" }
+  | { status: "ready"; data: VenueFundingResponse }
+  | { status: "error"; message: string };
+
+export interface VenueFundingRequestInput {
+  market: string;
+  from: number;
+  to: number;
+  venues: FundingVenue[];
+  onUpdate?: () => void;
+}
