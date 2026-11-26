@@ -674,10 +674,12 @@ export class ChartWorkerPanelRuntime {
           undefined,
           (ctx, activeView, activeSeries, range) => {
             if (this.heatmapGpuCoordinator?.heatmapGpuSuppressedAnnotation(activeView, activeSeries, range)) {
+              incrementPerformanceCounter("chart.gpu.heatmap.annotation.suppressed");
               this.orderbookHeatmap?.releaseRasterCache();
               return false;
             }
             if (!this.orderbookHeatmap) return false;
+            incrementPerformanceCounter("chart.cpu.heatmap.annotation.fallback");
             this.orderbookHeatmap.draw(ctx, activeView, activeSeries, range);
             return this.chartType !== "tpo" || (
               isOrderbookHeatmapMarket(this.marketId)

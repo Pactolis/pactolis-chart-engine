@@ -338,6 +338,10 @@ class ChartRuntimeImpl implements ChartRuntime, ChartInputHost {
     return this.heatmapGpuCoordinator.getFrame();
   }
 
+  getHeatmapGpuDiagnostics() {
+    return this.heatmapGpuCoordinator.getDiagnostics();
+  }
+
   get npocMarket(): string | null {
     return this.levelContextController.npocMarket;
   }
@@ -570,10 +574,12 @@ class ChartRuntimeImpl implements ChartRuntime, ChartInputHost {
         // successful GPU frame with identical inputs/geometry/layer key; any
         // mismatch (or legacy mode) keeps the annotation path authoritative.
         if (this.heatmapGpuSuppressedAnnotation(activeView, activeSeries, range)) {
+          incrementPerformanceCounter("chart.gpu.heatmap.annotation.suppressed");
           this.orderbookHeatmap?.releaseRasterCache();
           return false;
         }
         if (!this.orderbookHeatmap) return false;
+        incrementPerformanceCounter("chart.cpu.heatmap.annotation.fallback");
         this.orderbookHeatmap.draw(ctx, activeView, activeSeries, range);
         return this.state.chartType !== "tpo" || (isOrderbookHeatmapMarket(this.state.market)
           && orderbookHeatmapSettingsSource().settingsFor(this.state.market, this.panelId).mode !== "off");
@@ -618,7 +624,9 @@ class ChartRuntimeImpl implements ChartRuntime, ChartInputHost {
             // this GPU callback returns, so the Session's immediate readPixels
             // already owns it. Hover/axes/errors stay on the annotation canvas.
             this.renderHeatmapGpuCells(heatmapFrame, v, s);
-            this.setHookAttr("data-heatmap-path", this.heatmapGpuCoordinator.getDiagnostics().heatmapPath);
+            const heatmapDiag = this.heatmapGpuCoordinator.getDiagnostics();
+            this.setHookAttr("data-heatmap-path", heatmapDiag.heatmapPath);
+            this.setHookAttr("data-heatmap-fallback-reason", heatmapDiag.fallbackReason ?? "none");
           } catch (error) {
             heatmapFrame?.preparedLease?.release();
             heatmapFrame = null;
@@ -748,7 +756,9 @@ class ChartRuntimeImpl implements ChartRuntime, ChartInputHost {
     });
     this.session.setFrameCompletedObserver((info) => {
       if (this.heatmapGpuCoordinator.observeRenderedFrame(info)) {
-        this.setHookAttr("data-heatmap-path", this.heatmapGpuCoordinator.getDiagnostics().heatmapPath);
+        const heatmapDiag = this.heatmapGpuCoordinator.getDiagnostics();
+        this.setHookAttr("data-heatmap-path", heatmapDiag.heatmapPath);
+        this.setHookAttr("data-heatmap-fallback-reason", heatmapDiag.fallbackReason ?? "none");
       }
     });
 
