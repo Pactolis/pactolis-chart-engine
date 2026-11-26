@@ -1112,11 +1112,12 @@ test("four-chart WebGPU immediate vs GPU-native PoC comparison across pan, zoom,
   expect(gpuNative.scenarios.pan.uploads.totalBytes).toBeLessThan(immediate.scenarios.pan.uploads.totalBytes * 0.25);
   expect(gpuNative.scenarios.zoom.uploads.totalBytes).toBeLessThan(immediate.scenarios.zoom.uploads.totalBytes * 0.25);
 
+  const expectedRolloversPerRep = Math.floor((LIVE_ROLLOVER_FRAMES_PER_REPETITION - 1) / LIVE_ROLLOVER_EVERY_FRAMES);
   for (const rep of immediate.scenarios["live-rollover"].repetitions) {
-    expect(rep.rolloverCount).toBeGreaterThanOrEqual(10);
+    expect(rep.rolloverCount).toBeGreaterThanOrEqual(expectedRolloversPerRep);
   }
   for (const rep of gpuNative.scenarios["live-rollover"].repetitions) {
-    expect(rep.rolloverCount).toBeGreaterThanOrEqual(10);
+    expect(rep.rolloverCount).toBeGreaterThanOrEqual(expectedRolloversPerRep);
   }
   expect(gpuNative.scenarios["live-rollover"].uploads.totalBytes).toBeLessThan(
     immediate.scenarios["live-rollover"].uploads.totalBytes * 0.25,
