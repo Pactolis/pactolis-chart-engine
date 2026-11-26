@@ -196,7 +196,18 @@ test("Liquidation Profile auto mode renders Hyperliquid badge on BTC and Model b
       }
 
       try {
-        rt.view.panX(-1);
+        handle.updateState({
+          type: "chart",
+          market,
+          timeframe: "15m",
+          scaleMode: "linear",
+          chartType: "candlestick",
+          candles: true,
+          indicators: [{
+            ...lpInstance,
+            settings: { ...lpInstance.settings, showPlotLabel: true },
+          }],
+        } as any);
         rt.invalidate();
         await rt.session.captureCompositePng();
         const capturedTexts = texts.slice();
