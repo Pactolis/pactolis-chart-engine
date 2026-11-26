@@ -14,12 +14,13 @@ function buildBars(count: number, basePrice: number) {
   const first = alignedEnd - (count - 1) * INTERVAL_MS;
   return Array.from({ length: count }, (_, idx) => {
     const base = basePrice + Math.sin(idx * 0.25) * (basePrice * 0.004);
+    const close = idx === count - 1 ? basePrice : base * 1.0005;
     return {
       t: first + idx * INTERVAL_MS,
       o: base,
-      h: base * 1.002,
-      l: base * 0.998,
-      c: idx === count - 1 ? basePrice : base * 1.0005,
+      h: Math.max(base * 1.002, close),
+      l: Math.min(base * 0.998, close),
+      c: close,
       v: 120,
       d: 10,
       n: 20,
@@ -49,9 +50,11 @@ test("Liquidation Profile auto mode renders Hyperliquid badge on BTC and Model b
   });
 
   let historyHits = 0;
+  const historyUrls: string[] = [];
   await page.route(/\/history(?:\?|$)/, (route) => {
     historyHits += 1;
     const url = new URL(route.request().url());
+    historyUrls.push(url.search);
     const from = Number(url.searchParams.get("from"));
     const to = Number(url.searchParams.get("to"));
     const market = url.searchParams.get("markets") ?? url.searchParams.get("market") ?? "";
@@ -246,7 +249,7 @@ test("Liquidation Profile auto mode renders Hyperliquid badge on BTC and Model b
   });
 
   console.log(
-    `[liquidation-profile-model] historyHits=${historyHits} btcSeries=${result.btc.seriesLen} wifSeries=${result.wif.seriesLen} btcTexts=${JSON.stringify(result.btc.capturedTexts)} wifTexts=${JSON.stringify(result.wif.capturedTexts)} wifAvgPanMs=${result.wif.avgPanMs.toFixed(2)}`,
+    `[liquidation-profile-model] historyHits=${historyHits} urls=${JSON.stringify(historyUrls.slice(0, 4))} btcSeries=${result.btc.seriesLen} wifSeries=${result.wif.seriesLen} btcTexts=${JSON.stringify(result.btc.capturedTexts)} wifTexts=${JSON.stringify(result.wif.capturedTexts)} wifAvgPanMs=${result.wif.avgPanMs.toFixed(2)}`,
   );
 
   expect(result.btc.capturedTexts.some((t) => t.includes("Hyperliquid"))).toBe(true);
