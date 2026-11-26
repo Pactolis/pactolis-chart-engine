@@ -151,7 +151,7 @@ test("Live Trade Bubbles market switch invokes handleMarketChange once and measu
     const { getChartRuntime } = await import("/harness/chart.ts");
     const runtime = getChartRuntime("harness-chart") as unknown as {
       getState(): { market: string; [key: string]: unknown };
-      setState(next: Record<string, unknown>): void;
+      updateState(next: Record<string, unknown>): void;
       indicatorController: {
         handleMarketChange(market?: string): void;
         manager: { handleMarketChange(market?: string): void };
@@ -177,7 +177,7 @@ test("Live Trade Bubbles market switch invokes handleMarketChange once and measu
       const prev = runtime.getState();
       const nextMarket = prev.market === "BINANCE_FUTURES:ethusdt" ? "BINANCE_FUTURES:btcusdt" : "BINANCE_FUTURES:ethusdt";
       const t0 = performance.now();
-      runtime.setState({ ...prev, market: nextMarket });
+      runtime.updateState({ ...prev, market: nextMarket });
       await new Promise<void>((resolve) => requestAnimationFrame(() => resolve()));
       const marketSwitchFrameMs = Number((performance.now() - t0).toFixed(2));
       return {
