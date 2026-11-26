@@ -3,6 +3,8 @@ import type { FuturesPositioningRequestInput, FuturesPositioningSeriesState } fr
 import type {
   LiquidationClustersRequestInput,
   LiquidationClustersState,
+  LiquidationModelRequestInput,
+  LiquidationModelSeriesState,
   LiquidationRequestInput,
   LiquidationSeriesState,
   LiveTradeEventsRequest,
@@ -32,6 +34,7 @@ export interface IndicatorDataSource {
   requestVenueFundingSeries?(input: VenueFundingRequestInput): VenueFundingSeriesState;
   fetchOptionsGexSurface(request: OptionsGexSurfaceRequest, signal?: AbortSignal): Promise<GexWallSurface>;
   requestLiquidationClusters?(input: LiquidationClustersRequestInput): LiquidationClustersState;
+  requestLiquidationModel?(input: LiquidationModelRequestInput): LiquidationModelSeriesState;
   subscribeLiveTradeEvents?(input: LiveTradeEventsRequest): () => void;
 }
 

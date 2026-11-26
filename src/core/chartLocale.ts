@@ -147,6 +147,54 @@ const CHART_LOCALE_FALLBACKS: Readonly<Record<string, { tr: string; en: string }
     tr: "Short Likidasyon Rengi",
     en: "Short Liquidation Color",
   },
+  "indicator.liquidationProfile.source": {
+    tr: "Kaynak",
+    en: "Source",
+  },
+  "indicator.liquidationProfile.source.auto": {
+    tr: "Otomatik",
+    en: "Auto",
+  },
+  "indicator.liquidationProfile.source.hyperliquid": {
+    tr: "Hyperliquid",
+    en: "Hyperliquid",
+  },
+  "indicator.liquidationProfile.source.model": {
+    tr: "Model (Binance)",
+    en: "Model (Binance)",
+  },
+  "indicator.liquidationProfile.showUnverifiedModel": {
+    tr: "Doğrulanmamış modeli yine de göster",
+    en: "Show unverified model anyway",
+  },
+  "indicator.liquidationProfile.badgeHyperliquidSource": {
+    tr: "Hyperliquid · gerçek pozisyon",
+    en: "Hyperliquid · real positions",
+  },
+  "indicator.liquidationProfile.badgeModelSource": {
+    tr: "Model · tahmini · Binance",
+    en: "Model · estimated · Binance",
+  },
+  "indicator.liquidationProfile.warming": {
+    tr: "Model ısınıyor",
+    en: "Model warming up",
+  },
+  "indicator.liquidationProfile.modelStale": {
+    tr: "Model verisi eski (>30 gün)",
+    en: "Model state stale (>30d)",
+  },
+  "indicator.liquidationProfile.seamMismatch": {
+    tr: "Model seam uyuşmazlığı",
+    en: "Model seam mismatch",
+  },
+  "indicator.liquidationProfile.modelUnverified": {
+    tr: "Model bu paritede doğrulanmadı",
+    en: "Model not verified on this pair",
+  },
+  "indicator.liquidationProfile.modelUnsupported": {
+    tr: "Bu market desteklenmiyor",
+    en: "Market not supported by model",
+  },
   "indicator.common.unit": {
     tr: "Birim",
     en: "Unit",
