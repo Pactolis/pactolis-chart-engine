@@ -1,6 +1,6 @@
 import { calculateAnchoredVwap } from "../../core/analysis/anchoredVwap.js";
 import { calculateOrderFlowRangeProfile } from "../../core/analysis/rangeProfile.js";
-import { tOr } from "../../core/chartLocale.js";
+import { tOr } from "../../core/chartLocaleFallbacks.js";
 import type { AnalysisContext } from "../../core/analysisContext.js";
 import type { AnalysisRevisionSnapshot } from "../../core/analysisRevision.js";
 import type {

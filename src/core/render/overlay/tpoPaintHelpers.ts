@@ -9,7 +9,7 @@ import {
   type TpoProfileGroup,
 } from "../../analysis/tpoProfile.js";
 import { getTpoCacheBracket, getTpoCacheBracketCount, updateTpoProfileCache } from "./tpoProfileCache.js";
-import { tOr } from "../../chartLocale.js";
+import { tOr } from "../../chartLocaleFallbacks.js";
 import { tpoPalette } from "../../ui/seriesPalette.js";
 import { isPerformanceTelemetryEnabled, recordPerformanceDuration } from "../../performanceTelemetry.js";
 

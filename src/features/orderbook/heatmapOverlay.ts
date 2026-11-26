@@ -25,7 +25,7 @@ import {
   type OrderbookHeatmapSettings,
   type OrderbookHeatmapUnit,
 } from "../../core/orderbookHeatmap/settings.js";
-import { tOr } from "../../core/chartLocale.js";
+import { tOr } from "../../core/chartLocaleFallbacks.js";
 import {
   incrementPerformanceCounter,
   isPerformanceTelemetryEnabled,

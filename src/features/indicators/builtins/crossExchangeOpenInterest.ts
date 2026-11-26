@@ -1,5 +1,5 @@
 import { BoundedCache } from "../../../core/cache/boundedCache.js";
-import { tOr } from "../../../core/chartLocale.js";
+import { tOr } from "../../../core/chartLocaleFallbacks.js";
 import { bucketEnd } from "../../../core/time.js";
 import { tzDateTimeHud } from "../../../core/tzFormat.js";
 import type {

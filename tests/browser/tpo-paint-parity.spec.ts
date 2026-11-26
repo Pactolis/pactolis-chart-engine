@@ -32,7 +32,8 @@ for (const scenario of ["blocks", "collapsed", "letters", "volume underlay"] as 
       const { ChartChange } = await import("/src/core/render/scene/chartScene.ts");
       const { neighbourBin, quantizeToStep } = await import("/src/core/priceStep.ts");
       const { settings } = await import("/src/core/settings.ts");
-      const { chartLocale, configureChartLocale, tOr } = await import("/src/core/chartLocale.ts");
+      const { chartLocale, configureChartLocale } = await import("/src/core/chartLocale.ts");
+      const { tOr } = await import("/src/core/chartLocaleFallbacks.ts");
       const { configurePerformanceTelemetry, snapshotPerformanceTelemetry } = await import("/src/core/performanceTelemetry.ts");
       const runtime = getChartRuntime("harness-chart")!;
       const overlay = Reflect.get(runtime, "overlay") as import("../../src/core/render/overlay.js").Overlay;
