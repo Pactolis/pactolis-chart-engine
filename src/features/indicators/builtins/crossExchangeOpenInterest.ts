@@ -1,7 +1,15 @@
 import { BoundedCache } from "../../../core/cache/boundedCache.js";
+import { tOr } from "../../../core/chartLocale.js";
 import { bucketEnd } from "../../../core/time.js";
 import { tzDateTimeHud } from "../../../core/tzFormat.js";
-import type { CoinalyzeDerivativePoint } from "../metricContracts.js";
+import type {
+  OpenInterestGap,
+  OpenInterestPoint,
+  OpenInterestSeriesResponse,
+  OpenInterestUnit,
+  OpenInterestVenue,
+  OpenInterestVenueSeries,
+} from "../metricContracts.js";
 import { indicatorDataSource } from "../indicatorDataSource.js";
 import type {
   IndicatorDefinition,
@@ -11,9 +19,11 @@ import type {
   IndicatorSettings,
 } from "../types.js";
 import {
+  compactNumber,
   compactUsd,
   drawHoveredVerticalGuide,
   drawIndicatorAxisTicks,
+  drawIndicatorBadge,
   drawIndicatorCrosshairValueLabel,
   drawIndicatorLastValueLabel,
   drawIndicatorMessage,
@@ -28,8 +38,26 @@ import { findLastPointWithData, findPointByIndex } from "./pointLookup.js";
 
 export type CrossExchangeOpenInterestMode = "openInterestUsd" | "openInterestDeltaUsd";
 
+export const OPEN_INTEREST_VENUES: readonly OpenInterestVenue[] = [
+  "binance",
+  "bybit",
+  "okx",
+  "hyperliquid",
+];
+
+const LEGACY_EXCHANGE_KEY_MAP: Readonly<Record<string, OpenInterestVenue>> = {
+  binance: "binance",
+  binancef: "binance",
+  bybit: "bybit",
+  bybitf: "bybit",
+  okx: "okx",
+  okxf: "okx",
+  hyperliquid: "hyperliquid",
+};
+
 export interface CrossExchangeOpenInterestSettings extends IndicatorSettings {
   mode: CrossExchangeOpenInterestMode;
+  unit: OpenInterestUnit;
   lineWidth: number;
   lineColor: string;
   positiveColor: string;
@@ -40,42 +68,48 @@ export interface CrossExchangeOpenInterestSettings extends IndicatorSettings {
   showReadout?: boolean;
   showAxisTicks?: boolean;
   showPlotLabel: boolean;
-  marketTypes: {
-    spot: boolean;
-    futuresUsdPerp: boolean;
-    futuresCoinPerp: boolean;
-  };
-  exchanges: Record<string, boolean>;
+  exchanges: Record<OpenInterestVenue, boolean>;
 }
 
-const DEFAULT_EXCHANGES: Record<string, boolean> = {
-  binancef: true,
-  "binancef-inverse": true,
-  bitmexf: true,
-  "bitmex-inverse": true,
-  bybitf: true,
-  "bybitf-inverse": true,
-  coinbasef: true,
+const DEFAULT_EXCHANGES: Record<OpenInterestVenue, boolean> = {
+  binance: true,
+  bybit: true,
+  okx: true,
   hyperliquid: true,
-  okxf: true,
 };
 
-type ChartOpenInterestPoint = {
+export type ChartOpenInterestPoint = {
   index: number;
   candleStart: number;
   candleEnd: number;
   time: number;
   openInterestUsd: number;
   openInterestDeltaUsd: number;
+  openInterestBase: number;
+  openInterestDeltaBase: number;
   value: number;
   hasData: boolean;
+};
+
+export type OpenInterestVenueMeta = {
+  venue: OpenInterestVenue;
+  historyStartedAt?: number | null;
+  recordingStartedAt?: number | null;
+  source?: "backend" | "browser" | "instant-only";
+  instantOnly: boolean;
 };
 
 type CrossExchangeOpenInterestMeta = Record<string, unknown> & {
   interval: string;
   mode: CrossExchangeOpenInterestMode;
+  unit: OpenInterestUnit;
   truncated: boolean;
-  symbolCount: number;
+  recordingStartedAt: number | null;
+  historyStartedAt: number | null;
+  venues: OpenInterestVenueMeta[];
+  activeVenueCount: number;
+  selectedVenueCount: number;
+  hasInstantOnlyVenue: boolean;
 };
 
 type CrossExchangeOpenInterestData = IndicatorPreparedData<ChartOpenInterestPoint, CrossExchangeOpenInterestMeta> & {
@@ -84,15 +118,81 @@ type CrossExchangeOpenInterestData = IndicatorPreparedData<ChartOpenInterestPoin
   meta: CrossExchangeOpenInterestMeta;
 };
 
-// Memoizes derived draw data per (instance x series revision x range x settings)
-// key; keys naturally rotate as the chart advances, so this is a size-bounded
-// LRU rather than a TTL concern (a generous TTL is just a safety net for a key
-// that stops rotating, e.g. a hidden/inactive instance).
 const preparedCache = new BoundedCache<CrossExchangeOpenInterestData>({ maxEntries: 64, ttlMs: 60 * 60_000 });
 
 function rememberPreparedData(key: string, value: CrossExchangeOpenInterestData): CrossExchangeOpenInterestData {
   preparedCache.set(key, value);
   return value;
+}
+
+function trText(key: string, fallback: string, params?: Record<string, string | number>): string {
+  try {
+    return tOr(key, params);
+  } catch {
+    if (!params) return fallback;
+    return fallback.replace(/\{(\w+)\}/g, (match, name: string) => (name in params ? String(params[name]) : match));
+  }
+}
+
+export function normalizeCrossExchangeOpenInterestSettings(
+  raw: unknown,
+): CrossExchangeOpenInterestSettings {
+  const source = raw && typeof raw === "object" && !Array.isArray(raw)
+    ? (raw as Record<string, unknown>)
+    : {};
+
+  const mode: CrossExchangeOpenInterestMode =
+    source.mode === "openInterestUsd" ? "openInterestUsd" : "openInterestDeltaUsd";
+  const unit: OpenInterestUnit = source.unit === "base" ? "base" : "usd";
+
+  const exchanges: Record<OpenInterestVenue, boolean> = {
+    binance: false,
+    bybit: false,
+    okx: false,
+    hyperliquid: false,
+  };
+
+  const rawExchanges = source.exchanges;
+  if (rawExchanges && typeof rawExchanges === "object" && !Array.isArray(rawExchanges)) {
+    const legacy = rawExchanges as Record<string, unknown>;
+    for (const [key, val] of Object.entries(legacy)) {
+      const mapped = LEGACY_EXCHANGE_KEY_MAP[key];
+      if (!mapped || typeof val !== "boolean") continue;
+      if (key === mapped || !(mapped in legacy)) {
+        exchanges[mapped] = val;
+      }
+    }
+  }
+
+  if (!OPEN_INTEREST_VENUES.some((venue) => exchanges[venue])) {
+    for (const venue of OPEN_INTEREST_VENUES) {
+      exchanges[venue] = true;
+    }
+  }
+
+  const lineWidth = typeof source.lineWidth === "number" && Number.isFinite(source.lineWidth)
+    ? source.lineWidth
+    : 2;
+
+  return {
+    mode,
+    unit,
+    lineWidth,
+    lineColor: typeof source.lineColor === "string" && source.lineColor ? source.lineColor : openInterestLineColorDefault,
+    positiveColor: typeof source.positiveColor === "string" && source.positiveColor ? source.positiveColor : uiColor.buy,
+    negativeColor: typeof source.negativeColor === "string" && source.negativeColor ? source.negativeColor : uiColor.sell,
+    baselineColor: typeof source.baselineColor === "string" && source.baselineColor ? source.baselineColor : uiColor.separatorStrong,
+    showScaleLabel: typeof source.showScaleLabel === "boolean" ? source.showScaleLabel : true,
+    showLastValueLabel: typeof source.showLastValueLabel === "boolean" ? source.showLastValueLabel : true,
+    showReadout: typeof source.showReadout === "boolean" ? source.showReadout : true,
+    showAxisTicks: typeof source.showAxisTicks === "boolean" ? source.showAxisTicks : true,
+    showPlotLabel: typeof source.showPlotLabel === "boolean" ? source.showPlotLabel : true,
+    exchanges,
+  };
+}
+
+function selectedVenues(settings: CrossExchangeOpenInterestSettings): OpenInterestVenue[] {
+  return OPEN_INTEREST_VENUES.filter((venue) => settings.exchanges[venue] === true);
 }
 
 function showLastValueLabel(settings: CrossExchangeOpenInterestSettings): boolean {
@@ -103,86 +203,229 @@ function showReadout(settings: CrossExchangeOpenInterestSettings): boolean {
   return settingEnabled(settings, "showReadout", "showScaleLabel", true);
 }
 
-function enabledExchangeCount(settings: CrossExchangeOpenInterestSettings): number {
-  return Object.values(settings.exchanges ?? {}).filter(Boolean).length;
-}
-
-function marketTypesLabel(settings: CrossExchangeOpenInterestSettings): string {
-  const parts: string[] = [];
-  if (settings.marketTypes?.spot) parts.push("SPOT");
-  if (settings.marketTypes?.futuresUsdPerp) parts.push("USD");
-  if (settings.marketTypes?.futuresCoinPerp) parts.push("COIN");
-  return parts.length ? parts.join("+") : "no market";
-}
-
 function modeLabel(mode: CrossExchangeOpenInterestMode): string {
   return mode === "openInterestDeltaUsd" ? "OI Delta" : "Total OI";
 }
 
-function valueForMode(point: Omit<ChartOpenInterestPoint, "value">, mode: CrossExchangeOpenInterestMode): number {
+function formatOiValue(value: number, unit: OpenInterestUnit): string {
+  return unit === "base" ? compactNumber(value) : compactUsd(value);
+}
+
+function scaleFormatter(unit: OpenInterestUnit): (value: number) => string {
+  return unit === "base" ? compactNumber : compactUsd;
+}
+
+function valueForMode(
+  point: Omit<ChartOpenInterestPoint, "value">,
+  mode: CrossExchangeOpenInterestMode,
+  unit: OpenInterestUnit,
+): number {
+  if (unit === "base") {
+    return mode === "openInterestDeltaUsd" ? point.openInterestDeltaBase : point.openInterestBase;
+  }
   return mode === "openInterestDeltaUsd" ? point.openInterestDeltaUsd : point.openInterestUsd;
 }
 
-function aggregateToChartCandles(
+function finiteOrNull(value: unknown): number | null {
+  return typeof value === "number" && Number.isFinite(value) ? value : null;
+}
+
+function isInGap(time: number, gaps: readonly OpenInterestGap[] | undefined): boolean {
+  if (!gaps || !gaps.length) return false;
+  for (const gap of gaps) {
+    if (time >= gap.from && time < gap.to) return true;
+  }
+  return false;
+}
+
+function effectiveStartBoundary(
+  historyStartedAt: number | null | undefined,
+  recordingStartedAt: number | null | undefined,
+): number | null {
+  const hist = finiteOrNull(historyStartedAt);
+  const rec = finiteOrNull(recordingStartedAt);
+  if (hist !== null && rec !== null) return Math.min(hist, rec);
+  return hist ?? rec;
+}
+
+type VenueCursorState = {
+  venue: OpenInterestVenue;
+  sorted: OpenInterestPoint[];
+  cursor: number;
+  lastSeen: OpenInterestPoint | null;
+  startBoundary: number | null;
+  gaps: readonly OpenInterestGap[] | undefined;
+};
+
+function createVenueCursor(series: OpenInterestVenueSeries): VenueCursorState {
+  const sorted = [...series.points].sort((a, b) => a.time - b.time);
+  return {
+    venue: series.venue,
+    sorted,
+    cursor: 0,
+    lastSeen: null,
+    startBoundary: effectiveStartBoundary(series.historyStartedAt, series.recordingStartedAt),
+    gaps: series.gaps,
+  };
+}
+
+function sampleVenueForCandle(
+  state: VenueCursorState,
+  candleStart: number,
+  candleEnd: number,
+  asOfTime: number | undefined,
+): { value: number; time: number; hasNewSample: boolean } | null {
+  const upperBound = asOfTime !== undefined ? Math.min(candleEnd, asOfTime) : candleEnd;
+
+  while (state.cursor < state.sorted.length && state.sorted[state.cursor].time < candleStart) {
+    const pt = state.sorted[state.cursor];
+    if (!isInGap(pt.time, state.gaps)) {
+      state.lastSeen = pt;
+    }
+    state.cursor++;
+  }
+
+  let latestInCandle: OpenInterestPoint | null = null;
+  while (state.cursor < state.sorted.length && state.sorted[state.cursor].time < upperBound) {
+    const pt = state.sorted[state.cursor];
+    if (!isInGap(pt.time, state.gaps)) {
+      latestInCandle = pt;
+    }
+    state.cursor++;
+  }
+
+  if (state.startBoundary !== null && candleStart < state.startBoundary) {
+    return null;
+  }
+
+  if (isInGap(candleStart, state.gaps)) {
+    state.lastSeen = null;
+    return null;
+  }
+
+  if (latestInCandle) {
+    state.lastSeen = latestInCandle;
+  }
+
+  const chosen = latestInCandle ?? state.lastSeen;
+  if (!chosen || !Number.isFinite(chosen.value)) return null;
+  if (state.startBoundary !== null && chosen.time < state.startBoundary && !latestInCandle) {
+    return null;
+  }
+
+  return {
+    value: chosen.value,
+    time: chosen.time,
+    hasNewSample: latestInCandle !== null,
+  };
+}
+
+export function aggregateOpenInterestToChartCandles(
   ctx: IndicatorDrawContext<CrossExchangeOpenInterestSettings>,
-  source: CoinalyzeDerivativePoint[],
+  response: OpenInterestSeriesResponse,
+  settings: CrossExchangeOpenInterestSettings,
 ): ChartOpenInterestPoint[] {
   const [from, to] = ctx.range;
-  if (from >= to || ctx.series.length === 0 || source.length === 0) return [];
+  if (from >= to || ctx.series.length === 0) return [];
 
-  const sorted = [...source].sort((a, b) => a.time - b.time);
-  let cursor = 0;
-  let lastSeen: CoinalyzeDerivativePoint | null = null;
-  let previousOpenInterestUsd: number | null = null;
-  const points: ChartOpenInterestPoint[] = [];
+  const enabledSet = new Set(selectedVenues(settings));
+  const venueCursors = response.venues
+    .filter((venueSeries) => enabledSet.has(venueSeries.venue))
+    .map(createVenueCursor);
+
+  if (!venueCursors.length) return [];
+
+  const seriesStart = effectiveStartBoundary(response.historyStartedAt, response.recordingStartedAt);
+  const asOfTime = ctx.chart?.asOfTime;
+  const intervalMs = ctx.series.config.intervalMs;
   const startIndex = Math.max(0, Math.floor(from) - 1);
   const endIndex = Math.min(ctx.series.length, Math.ceil(to) + 1);
+  const seedIndex = Math.max(0, startIndex - 1);
 
-  for (let index = startIndex; index < endIndex; index++) {
+  let prevByVenue = new Map<OpenInterestVenue, number>();
+  const points: ChartOpenInterestPoint[] = [];
+
+  for (let index = seedIndex; index < endIndex; index++) {
     const bar = ctx.series.at(index);
     if (!bar) continue;
     const candleStart = bar.startTime;
-    const candleEnd = bucketEnd(candleStart, ctx.series.config.intervalMs);
+    const candleEnd = bucketEnd(candleStart, intervalMs);
 
-    while (cursor < sorted.length && sorted[cursor].time < candleStart) {
-      lastSeen = sorted[cursor];
-      cursor++;
+    if (asOfTime !== undefined && candleStart >= asOfTime) {
+      break;
     }
 
-    const bucket: CoinalyzeDerivativePoint[] = [];
-    let scan = cursor;
-    while (scan < sorted.length && sorted[scan].time < candleEnd) {
-      bucket.push(sorted[scan]);
-      scan++;
-    }
-    if (bucket.length) lastSeen = bucket[bucket.length - 1];
-    const latest = bucket[bucket.length - 1] ?? lastSeen;
-    if (!latest) continue;
+    const beforeSeriesStart = seriesStart !== null && candleStart < seriesStart;
+    const inResponseGap = isInGap(candleStart, response.gaps);
 
-    const openInterestDeltaUsd = previousOpenInterestUsd === null
-      ? 0
-      : latest.value - previousOpenInterestUsd;
-    previousOpenInterestUsd = latest.value;
+    const currentByVenue = new Map<OpenInterestVenue, number>();
+    let latestTime = candleStart;
+    let anyNewSample = false;
+
+    for (const cursor of venueCursors) {
+      const sample = sampleVenueForCandle(cursor, candleStart, candleEnd, asOfTime);
+      if (beforeSeriesStart || inResponseGap || !sample) continue;
+      currentByVenue.set(cursor.venue, sample.value);
+      if (sample.time > latestTime) latestTime = sample.time;
+      if (sample.hasNewSample) anyNewSample = true;
+    }
+
+    if (beforeSeriesStart || inResponseGap || currentByVenue.size === 0) {
+      prevByVenue = new Map();
+      continue;
+    }
+
+    let totalCoin = 0;
+    for (const val of currentByVenue.values()) {
+      totalCoin += val;
+    }
+
+    let coinDelta = 0;
+    let overlapCount = 0;
+    for (const [venue, currentVal] of currentByVenue.entries()) {
+      const prevVal = prevByVenue.get(venue);
+      if (prevVal !== undefined && Number.isFinite(prevVal)) {
+        coinDelta += currentVal - prevVal;
+        overlapCount++;
+      }
+    }
+    if (overlapCount === 0) {
+      coinDelta = 0;
+    }
+
+    prevByVenue = currentByVenue;
+
+    if (index < startIndex) continue;
+
+    const closePrice = Number.isFinite(bar.close) ? bar.close : 0;
+    const openInterestUsd = totalCoin * closePrice;
+    const openInterestDeltaUsd = coinDelta * closePrice;
 
     const base = {
       index,
       candleStart,
       candleEnd,
-      time: latest.time,
-      openInterestUsd: latest.value,
+      time: latestTime,
+      openInterestUsd,
       openInterestDeltaUsd,
-      hasData: bucket.length > 0,
+      openInterestBase: totalCoin,
+      openInterestDeltaBase: coinDelta,
+      hasData: anyNewSample || currentByVenue.size > 0,
     };
+
     points.push({
       ...base,
-      value: valueForMode(base, ctx.settings.mode),
+      value: valueForMode(base, settings.mode, settings.unit),
     });
   }
 
   return points;
 }
 
-function rangeForPoints(points: ChartOpenInterestPoint[], mode: CrossExchangeOpenInterestMode): { min: number; max: number; baseline?: number } {
+function rangeForPoints(
+  points: ChartOpenInterestPoint[],
+  mode: CrossExchangeOpenInterestMode,
+): { min: number; max: number; baseline?: number } {
   const baseline = mode === "openInterestDeltaUsd" ? 0 : undefined;
   let min = baseline ?? Infinity;
   let max = baseline ?? -Infinity;
@@ -200,15 +443,57 @@ function rangeForPoints(points: ChartOpenInterestPoint[], mode: CrossExchangeOpe
   return { min, max, baseline };
 }
 
+function isVenueInstantOnly(venueSeries: OpenInterestVenueSeries): boolean {
+  if (venueSeries.source === "instant-only") return true;
+  return (
+    venueSeries.venue === "hyperliquid"
+    && venueSeries.source !== "backend"
+    && finiteOrNull(venueSeries.historyStartedAt) === null
+    && venueSeries.points.length <= 1
+  );
+}
+
+function buildVenueMeta(
+  venues: readonly OpenInterestVenueSeries[],
+  selected: readonly OpenInterestVenue[],
+): OpenInterestVenueMeta[] {
+  const selectedSet = new Set(selected);
+  return venues
+    .filter((v) => selectedSet.has(v.venue))
+    .map((v) => ({
+      venue: v.venue,
+      historyStartedAt: finiteOrNull(v.historyStartedAt),
+      recordingStartedAt: finiteOrNull(v.recordingStartedAt),
+      source: v.source,
+      instantOnly: isVenueInstantOnly(v),
+    }));
+}
+
 function prepareCrossExchangeOpenInterestData(
   ctx: IndicatorDrawContext<CrossExchangeOpenInterestSettings>,
 ): CrossExchangeOpenInterestData {
+  const settings = normalizeCrossExchangeOpenInterestSettings(ctx.settings);
+  const venues = selectedVenues(settings);
+
+  const emptyMeta = (interval: string): CrossExchangeOpenInterestMeta => ({
+    interval,
+    mode: settings.mode,
+    unit: settings.unit,
+    truncated: false,
+    recordingStartedAt: null,
+    historyStartedAt: null,
+    venues: [],
+    activeVenueCount: 0,
+    selectedVenueCount: venues.length,
+    hasInstantOnlyVenue: false,
+  });
+
   if (!ctx.instance.visible) {
     return {
       status: "hidden",
       points: [],
       range: { min: 0, max: 1 },
-      meta: { interval: ctx.chart?.timeframe ?? "", mode: ctx.settings.mode, truncated: false, symbolCount: 0 },
+      meta: emptyMeta(ctx.chart?.timeframe ?? ""),
       message: "gizli",
     };
   }
@@ -219,19 +504,29 @@ function prepareCrossExchangeOpenInterestData(
       status: "error",
       points: [],
       range: { min: 0, max: 1 },
-      meta: { interval: "", mode: ctx.settings.mode, truncated: false, symbolCount: 0 },
+      meta: emptyMeta(""),
       message: "chart context yok",
       error: "chart context yok",
     };
   }
 
-  const state = indicatorDataSource().requestCoinalyzeDerivativeSeries({
-    metric: "openInterest",
+  const requestFn = indicatorDataSource().requestOpenInterestSeries;
+  if (!requestFn) {
+    const msg = trText("indicator.crossExchangeOpenInterest.unrecorded", "OI kaydı yok (bu market kaydedilmiyor)");
+    return {
+      status: "no-data",
+      points: [],
+      range: { min: 0, max: 1 },
+      meta: emptyMeta(chart.timeframe),
+      message: msg,
+    };
+  }
+
+  const state = requestFn({
     market: chart.market,
     timeframe: chart.timeframe,
     intervalMs: chart.intervalMs,
-    exchanges: ctx.settings.exchanges,
-    marketTypes: ctx.settings.marketTypes,
+    venues,
     onUpdate: ctx.requestRefresh,
   });
 
@@ -240,70 +535,98 @@ function prepareCrossExchangeOpenInterestData(
       status: "loading",
       points: [],
       range: { min: 0, max: 1 },
-      meta: { interval: chart.timeframe, mode: ctx.settings.mode, truncated: false, symbolCount: 0 },
+      meta: emptyMeta(chart.timeframe),
       message: "yukleniyor...",
     };
   }
-  if (state.status === "unsupported" || state.status === "error") {
+
+  if (state.status === "unsupported") {
+    const msg = state.message || trText("indicator.crossExchangeOpenInterest.unrecorded", "OI kaydı yok (bu market kaydedilmiyor)");
+    return {
+      status: "no-data",
+      points: [],
+      range: { min: 0, max: 1 },
+      meta: emptyMeta(chart.timeframe),
+      message: msg,
+    };
+  }
+
+  if (state.status === "error") {
     return {
       status: "error",
       points: [],
       range: { min: 0, max: 1 },
-      meta: { interval: chart.timeframe, mode: ctx.settings.mode, truncated: false, symbolCount: 0 },
+      meta: emptyMeta(chart.timeframe),
       message: state.message,
       error: state.message,
     };
   }
 
+  const response = state.data;
+  const venueMeta = buildVenueMeta(response.venues, venues);
+  const hasInstantOnlyVenue = venueMeta.some((v) => v.instantOnly);
+  const meta: CrossExchangeOpenInterestMeta = {
+    interval: response.resolution || chart.timeframe,
+    mode: settings.mode,
+    unit: settings.unit,
+    truncated: response.truncated === true,
+    recordingStartedAt: finiteOrNull(response.recordingStartedAt),
+    historyStartedAt: finiteOrNull(response.historyStartedAt),
+    venues: venueMeta,
+    activeVenueCount: venueMeta.length,
+    selectedVenueCount: venues.length,
+    hasInstantOnlyVenue,
+  };
+
+  if (response.status === "unsupported" || response.status === "no-data" || response.venues.length === 0) {
+    const msg = response.message || trText("indicator.crossExchangeOpenInterest.unrecorded", "OI kaydı yok (bu market kaydedilmiyor)");
+    return {
+      status: "no-data",
+      points: [],
+      range: { min: 0, max: 1 },
+      meta,
+      message: msg,
+    };
+  }
+
+  const pointCounts = response.venues.map((v) => `${v.venue}:${v.points.length}`).join(",");
   const cacheKey = [
     ctx.instance.id,
     ctx.series.revision,
     ctx.series.length,
     ctx.series.config.intervalMs,
+    ctx.chart?.asOfTime ?? "",
     Math.floor(ctx.range[0]),
     Math.ceil(ctx.range[1]),
-    state.data.interval,
-    state.data.from,
-    state.data.to,
-    state.data.symbols.length,
-    state.data.points.length,
-    state.data.truncated === true ? "trunc" : "full",
-    ctx.settings.mode,
+    response.resolution,
+    pointCounts,
+    response.recordingStartedAt ?? "",
+    response.historyStartedAt ?? "",
+    response.gaps?.length ?? 0,
+    response.truncated === true ? "trunc" : "full",
+    settings.mode,
+    settings.unit,
+    venues.join(","),
   ].join("|");
+
   const cached = preparedCache.get(cacheKey);
   if (cached) return cached;
 
-  const meta = {
-    interval: state.data.interval,
-    mode: ctx.settings.mode,
-    truncated: state.data.truncated === true,
-    symbolCount: state.data.symbols.length,
-  };
-  if (!state.data.symbols.length) {
-    return rememberPreparedData(cacheKey, {
-      status: "no-data",
-      points: [],
-      range: { min: 0, max: 1 },
-      meta,
-      message: "secili borsalarda Coinalyze OI sembolu bulunamadi",
-    });
-  }
-
-  const points = aggregateToChartCandles(ctx, state.data.points);
+  const points = aggregateOpenInterestToChartCandles(ctx, response, settings);
   if (!points.length) {
     return rememberPreparedData(cacheKey, {
       status: "no-data",
       points: [],
       range: { min: 0, max: 1 },
       meta,
-      message: "bu gorunumde OI verisi yok",
+      message: response.message || trText("indicator.crossExchangeOpenInterest.unrecorded", "OI kaydı yok (bu market kaydedilmiyor)"),
     });
   }
 
   return rememberPreparedData(cacheKey, {
     status: "ok",
     points,
-    range: rangeForPoints(points, ctx.settings.mode),
+    range: rangeForPoints(points, settings.mode),
     meta,
   });
 }
@@ -314,7 +637,18 @@ function asCrossExchangeOpenInterestData(prepared: IndicatorPreparedData | undef
     status: "no-data",
     points: [],
     range: { min: 0, max: 1 },
-    meta: { interval: "", mode: "openInterestUsd", truncated: false, symbolCount: 0 },
+    meta: {
+      interval: "",
+      mode: "openInterestDeltaUsd",
+      unit: "usd",
+      truncated: false,
+      recordingStartedAt: null,
+      historyStartedAt: null,
+      venues: [],
+      activeVenueCount: 0,
+      selectedVenueCount: 4,
+      hasInstantOnlyVenue: false,
+    },
     message: prepared?.message ?? prepared?.error ?? "bu gorunumde veri yok",
   };
 }
@@ -335,15 +669,36 @@ function formatCrossExchangeOpenInterestReadout(
   point: ChartOpenInterestPoint,
   isLast: boolean,
 ): IndicatorReadout {
+  const unit: OpenInterestUnit = data.meta.unit === "base" ? "base" : "usd";
+  const intervalMs = ctx.chart?.intervalMs ?? ctx.series.config.intervalMs;
+  const totalValue = unit === "base" && Number.isFinite(point.openInterestBase)
+    ? point.openInterestBase
+    : point.openInterestUsd;
+  const deltaValue = unit === "base" && Number.isFinite(point.openInterestDeltaBase)
+    ? point.openInterestDeltaBase
+    : point.openInterestDeltaUsd;
+
+  const items: IndicatorReadout["items"] = [
+    { label: modeLabel(data.meta.mode), value: formatOiValue(point.value, unit) },
+    { label: "OI", value: formatOiValue(totalValue, unit) },
+    { label: "dOI", value: formatOiValue(deltaValue, unit) },
+  ];
+
+  const venueCount = data.meta.activeVenueCount ?? 0;
+  if (venueCount > 0) {
+    items.push({ label: "venues", value: String(venueCount) });
+  }
+
+  const venueList = Array.isArray(data.meta.venues) ? data.meta.venues : [];
+  const hlVenue = venueList.find((v) => v.venue === "hyperliquid");
+  if (hlVenue?.instantOnly) {
+    items.push({ label: "HL", value: trText("indicator.crossExchangeOpenInterest.instantOnly", "instant-only") });
+  }
+
   return {
     title: isLast ? "Last" : "*",
-    time: tzDateTimeHud(point.candleStart, ctx.chart?.intervalMs ?? ctx.series.config.intervalMs),
-    items: [
-      { label: modeLabel(data.meta.mode), value: compactUsd(point.value) },
-      { label: "OI", value: compactUsd(point.openInterestUsd) },
-      { label: "dOI", value: compactUsd(point.openInterestDeltaUsd) },
-      { label: "sym", value: String(data.meta.symbolCount) },
-    ],
+    time: tzDateTimeHud(point.candleStart, intervalMs),
+    items,
   };
 }
 
@@ -368,33 +723,95 @@ function drawStatus(ctx: IndicatorDrawContext<CrossExchangeOpenInterestSettings>
     return true;
   }
   if (data.status === "error") {
-    drawIndicatorMessage(ctx, data.message ?? data.error ?? "Coinalyze OI verisi yuklenemedi", uiColor.sell);
+    drawIndicatorMessage(ctx, data.message ?? data.error ?? "OI verisi yuklenemedi", uiColor.sell);
     return true;
   }
   if (data.status === "no-data") {
-    drawIndicatorMessage(ctx, data.message ?? "bu gorunumde veri yok", indicatorWarningMessageColor);
+    drawIndicatorMessage(
+      ctx,
+      data.message ?? trText("indicator.crossExchangeOpenInterest.unrecorded", "OI kaydı yok (bu market kaydedilmiyor)"),
+      indicatorWarningMessageColor,
+    );
     return true;
   }
   return false;
+}
+
+function findBoundaryIndex(
+  ctx: IndicatorDrawContext<CrossExchangeOpenInterestSettings>,
+  boundaryTime: number,
+): number | null {
+  if (!ctx.series || ctx.series.length === 0) return null;
+  const [from, to] = ctx.range;
+  const start = Math.max(0, Math.floor(from));
+  const end = Math.min(ctx.series.length - 1, Math.ceil(to));
+  for (let i = start; i <= end; i++) {
+    const bar = ctx.series.at(i);
+    if (bar && bar.startTime >= boundaryTime) {
+      return i;
+    }
+  }
+  return null;
+}
+
+function drawStartBoundary(
+  ctx: IndicatorDrawContext<CrossExchangeOpenInterestSettings>,
+  data: CrossExchangeOpenInterestData,
+  top: number,
+  bottom: number,
+): void {
+  const boundaryTime = data.meta.historyStartedAt ?? data.meta.recordingStartedAt;
+  if (boundaryTime === null || boundaryTime === undefined || !Number.isFinite(boundaryTime)) return;
+  const boundaryIndex = findBoundaryIndex(ctx, boundaryTime);
+  if (boundaryIndex === null) return;
+
+  const x = ctx.view.xOfIndex(boundaryIndex);
+  const { ctx: canvas, view } = ctx;
+  if (x < view.area.left || x > view.area.left + view.area.width) return;
+
+  canvas.save();
+  canvas.strokeStyle = uiColor.separatorStrong;
+  canvas.lineWidth = 1;
+  canvas.setLineDash([4, 4]);
+  canvas.beginPath();
+  canvas.moveTo(x, top);
+  canvas.lineTo(x, bottom);
+  canvas.stroke();
+  canvas.restore();
+
+  const intervalMs = ctx.chart?.intervalMs ?? ctx.series.config.intervalMs;
+  const timeText = tzDateTimeHud(boundaryTime, intervalMs);
+  const labelKey = data.meta.historyStartedAt !== null && data.meta.historyStartedAt !== undefined
+    ? "indicator.crossExchangeOpenInterest.historyStarted"
+    : "indicator.crossExchangeOpenInterest.recordingStarted";
+  const label = trText(labelKey, `Start: ${timeText}`, { time: timeText });
+  drawIndicatorBadge(canvas, label, x + 4, top + 12, {
+    color: uiColor.info,
+    align: "left",
+    maxWidth: 220,
+  });
 }
 
 function drawCrossExchangeOpenInterest(
   ctx: IndicatorDrawContext<CrossExchangeOpenInterestSettings>,
   prepared?: IndicatorPreparedData,
 ): void {
-  const { ctx: canvas, view, rect, settings } = ctx;
+  const { ctx: canvas, view, rect } = ctx;
+  const settings = normalizeCrossExchangeOpenInterestSettings(ctx.settings);
   const data = asCrossExchangeOpenInterestData(prepared ?? prepareCrossExchangeOpenInterestData(ctx));
   if (drawStatus(ctx, data)) return;
 
   const { top, bottom } = panePlotBounds(rect, 32, 5);
   const mode = data.meta.mode;
+  const unit: OpenInterestUnit = data.meta.unit === "base" ? "base" : "usd";
+  const formatter = scaleFormatter(unit);
   const displayRange = indicatorDisplayRange(settings, data.range.min, data.range.max);
   const scale = createIndicatorScale({
-    mode: mode === "openInterestDeltaUsd" ? "signed-zero" : "usd",
+    mode: mode === "openInterestDeltaUsd" ? "signed-zero" : (unit === "base" ? "linear" : "usd"),
     min: displayRange.min,
     max: displayRange.max,
     baseline: data.range.baseline,
-    formatter: compactUsd,
+    formatter,
     displayMode: indicatorDisplayScaleMode(settings),
     paddingFraction: 0.08,
   }, { top, bottom });
@@ -410,6 +827,8 @@ function drawCrossExchangeOpenInterest(
     canvas.restore();
   }
 
+  drawStartBoundary(ctx, data, top, bottom);
+
   canvas.save();
   canvas.lineJoin = "round";
   canvas.lineCap = "round";
@@ -418,6 +837,7 @@ function drawCrossExchangeOpenInterest(
     const zeroY = scale.contains(0) ? scale.y(0) : bottom;
     const barWidth = Math.max(1, Math.min(view.colWidth * 0.58, 18));
     for (const point of data.points) {
+      if (!point.hasData || !Number.isFinite(point.value)) continue;
       const y = scale.y(point.value);
       canvas.fillStyle = point.value >= 0
         ? settings.positiveColor || uiColor.buy
@@ -429,12 +849,23 @@ function drawCrossExchangeOpenInterest(
   } else {
     canvas.strokeStyle = settings.lineColor || openInterestLineColorDefault;
     canvas.beginPath();
-    data.points.forEach((point, index) => {
+    let drawing = false;
+    let prevIndex = -2;
+    for (const point of data.points) {
+      if (!point.hasData || !Number.isFinite(point.value)) {
+        drawing = false;
+        continue;
+      }
       const x = pointX(ctx, point);
       const y = scale.y(point.value);
-      if (index === 0) canvas.moveTo(x, y);
-      else canvas.lineTo(x, y);
-    });
+      if (!drawing || point.index !== prevIndex + 1) {
+        canvas.moveTo(x, y);
+        drawing = true;
+      } else {
+        canvas.lineTo(x, y);
+      }
+      prevIndex = point.index;
+    }
     canvas.stroke();
   }
   canvas.restore();
@@ -455,7 +886,8 @@ function drawCrossExchangeOpenInterestInteraction(
   ctx: IndicatorDrawContext<CrossExchangeOpenInterestSettings>,
   prepared?: IndicatorPreparedData,
 ): void {
-  const { ctx: canvas, rect, settings } = ctx;
+  const { ctx: canvas, rect } = ctx;
+  const settings = normalizeCrossExchangeOpenInterestSettings(ctx.settings);
   const data = asCrossExchangeOpenInterestData(prepared ?? prepareCrossExchangeOpenInterestData(ctx));
   if (data.status !== "ok") return;
 
@@ -472,13 +904,14 @@ function drawCrossExchangeOpenInterestInteraction(
   }
 
   const mode = data.meta.mode;
+  const unit: OpenInterestUnit = data.meta.unit === "base" ? "base" : "usd";
   const displayRange = indicatorDisplayRange(settings, data.range.min, data.range.max);
   const scale = createIndicatorScale({
-    mode: mode === "openInterestDeltaUsd" ? "signed-zero" : "usd",
+    mode: mode === "openInterestDeltaUsd" ? "signed-zero" : (unit === "base" ? "linear" : "usd"),
     min: displayRange.min,
     max: displayRange.max,
     baseline: data.range.baseline,
-    formatter: compactUsd,
+    formatter: scaleFormatter(unit),
     displayMode: indicatorDisplayScaleMode(settings),
     paddingFraction: 0.08,
   }, { top, bottom });
@@ -492,14 +925,17 @@ function crossExchangeOpenInterestHeaderLabel(ctx: {
   chart?: { timeframe: string };
   prepared?: IndicatorPreparedData;
 }): string {
+  const settings = normalizeCrossExchangeOpenInterestSettings(ctx.settings);
   const timeframe = ctx.chart?.timeframe ? ` ${ctx.chart.timeframe}` : "";
   const meta = ctx.prepared?.meta as CrossExchangeOpenInterestMeta | undefined;
   const interval = meta?.interval || ctx.chart?.timeframe || "";
-  const parts = [`Cross OI${timeframe}`, modeLabel(ctx.settings.mode)];
+  const unitLabel = settings.unit === "base" ? "BASE" : "USD";
+  const parts = [`Cross OI${timeframe}`, modeLabel(settings.mode), unitLabel];
   if (interval) parts.push(`src ${interval}`);
-  parts.push(`${enabledExchangeCount(ctx.settings)}ex`);
-  parts.push(marketTypesLabel(ctx.settings));
-  if (meta?.symbolCount) parts.push(`${meta.symbolCount} sym`);
+  parts.push(`${selectedVenues(settings).length}ex`);
+  if (meta?.hasInstantOnlyVenue) {
+    parts.push(`HL ${trText("indicator.crossExchangeOpenInterest.instantOnly", "instant-only")}`);
+  }
   if (meta?.truncated) parts.push("truncated");
   return parts.join(" | ");
 }
@@ -515,6 +951,7 @@ export const crossExchangeOpenInterestIndicatorDefinition: IndicatorDefinition<C
   paneHeight: 120,
   defaultSettings: () => ({
     mode: "openInterestDeltaUsd",
+    unit: "usd",
     lineWidth: 2,
     lineColor: openInterestLineColorDefault,
     positiveColor: uiColor.buy,
@@ -525,11 +962,6 @@ export const crossExchangeOpenInterestIndicatorDefinition: IndicatorDefinition<C
     showReadout: true,
     showAxisTicks: true,
     showPlotLabel: true,
-    marketTypes: {
-      spot: false,
-      futuresUsdPerp: true,
-      futuresCoinPerp: true,
-    },
     exchanges: structuredClone(DEFAULT_EXCHANGES),
   }),
   settingsSchema: {
@@ -547,6 +979,17 @@ export const crossExchangeOpenInterestIndicatorDefinition: IndicatorDefinition<C
             options: [
               { label: "OI Delta", value: "openInterestDeltaUsd", labelKey: "indicator.crossExchangeOpenInterest.mode.delta" },
               { label: "Total OI", value: "openInterestUsd", labelKey: "indicator.crossExchangeOpenInterest.mode.total" },
+            ],
+          },
+          {
+            kind: "select",
+            key: "unit",
+            label: "Unit",
+            labelKey: "indicator.common.unit",
+            requiresRecalc: true,
+            options: [
+              { label: "USD", value: "usd", labelKey: "indicator.crossExchangeOpenInterest.unit.usd" },
+              { label: "Base (Coin)", value: "base", labelKey: "indicator.crossExchangeOpenInterest.unit.base" },
             ],
           },
           { kind: "exchange-matrix", key: "exchangeMatrix", label: "Aggregate Exchanges", labelKey: "indicator.common.aggregateExchanges", requiresRecalc: true },

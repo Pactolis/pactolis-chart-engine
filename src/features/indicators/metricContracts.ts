@@ -174,6 +174,58 @@ export interface FuturesPositioningRequestInput {
   onUpdate?: () => void;
 }
 
+export type OpenInterestVenue = "binance" | "bybit" | "okx" | "hyperliquid";
+export type OpenInterestUnit = "usd" | "base";
+
+export interface OpenInterestPoint {
+  time: number;
+  value: number;
+}
+
+export interface OpenInterestGap {
+  from: number;
+  to: number;
+}
+
+export interface OpenInterestVenueSeries {
+  venue: OpenInterestVenue;
+  points: OpenInterestPoint[];
+  recordingStartedAt?: number | null;
+  historyStartedAt?: number | null;
+  gaps?: OpenInterestGap[];
+  source?: "backend" | "browser" | "instant-only";
+}
+
+export interface OpenInterestSeriesResponse {
+  status?: "ok" | "partial" | "no-data" | "unsupported";
+  unit: "base";
+  resolution: string;
+  venues: OpenInterestVenueSeries[];
+  recordingStartedAt?: number | null;
+  historyStartedAt?: number | null;
+  gaps?: OpenInterestGap[];
+  source?: "backend" | "browser" | "instant-only";
+  truncated?: boolean;
+  message?: string;
+}
+
+export type OpenInterestSeriesState =
+  | { status: "idle" }
+  | { status: "unsupported"; message: string }
+  | { status: "loading" }
+  | { status: "ready"; data: OpenInterestSeriesResponse }
+  | { status: "error"; message: string };
+
+export interface OpenInterestRequestInput {
+  market: string;
+  timeframe: string;
+  intervalMs: number;
+  venues: OpenInterestVenue[];
+  from?: number;
+  to?: number;
+  onUpdate?: () => void;
+}
+
 export type FundingVenue = "binancef" | "bybitf" | "okxf" | "hyperliquid";
 
 export interface VenueFundingSettledPoint {
