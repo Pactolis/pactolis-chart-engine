@@ -34,6 +34,12 @@ function buildBars(count: number, basePrice: number) {
 
 test("Liquidation Profile auto mode renders Hyperliquid badge on BTC and Model badge on non-HL pair", async ({ page }) => {
   test.setTimeout(60_000);
+  page.on("pageerror", (err) => console.log("[pageerror]", err.message));
+  page.on("console", (msg) => {
+    if (msg.type() === "error" || msg.type() === "warning") {
+      console.log(`[console.${msg.type()}]`, msg.text());
+    }
+  });
   const btcBars = buildBars(80, 74_430);
   const wifBars = buildBars(80, 2.5);
 
@@ -48,7 +54,7 @@ test("Liquidation Profile auto mode renders Hyperliquid badge on BTC and Model b
     const url = new URL(route.request().url());
     const from = Number(url.searchParams.get("from"));
     const to = Number(url.searchParams.get("to"));
-    const market = url.searchParams.get("market") ?? "";
+    const market = url.searchParams.get("markets") ?? url.searchParams.get("market") ?? "";
     const bars = market.toLowerCase().includes("wif") ? wifBars : btcBars;
     return route.fulfill({
       contentType: "application/json",
@@ -171,7 +177,7 @@ test("Liquidation Profile auto mode renders Hyperliquid badge on BTC and Model b
         harness.createChartSurfaceModel(),
       );
 
-      const deadline = performance.now() + 20_000;
+      const deadline = performance.now() + 5_000;
       while (performance.now() < deadline) {
         const rt = harness.getChartRuntime(panelId);
         if (rt && rt.pipeline.series.length >= 60) break;
