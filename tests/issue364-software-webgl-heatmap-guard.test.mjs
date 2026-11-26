@@ -168,7 +168,7 @@ test("ChartHeatmapGpuCoordinator guards software WebGL2 renderer unless explicit
   resetSoftwareRendererProbeCacheForTest();
 });
 
-test("ChartHeatmapGpuCoordinator latches session to cpu-raster after 5 consecutive slow GPU heatmap frames", async () => {
+test("ChartHeatmapGpuCoordinator keeps WebGL2 on global slow frames and uses reversible cooldown on layer-specific slow frames", async () => {
   resetGpuDiagnosticsForTest();
   resetSoftwareRendererProbeCacheForTest();
   resetPerformanceTelemetry();
@@ -192,40 +192,72 @@ test("ChartHeatmapGpuCoordinator latches session to cpu-raster after 5 consecuti
     return coordinator.observeRenderedFrame(sample);
   };
 
-  // 4 consecutive slow frames must not latch.
+  // Global slow frames with low layer submit must NOT latch or demote.
+  for (let i = 0; i < HEATMAP_GPU_SLOW_FRAME_CONSECUTIVE_LIMIT + 1; i++) {
+    assert.equal(
+      runGpuHeatmapFrame({ renderMs: HEATMAP_GPU_SLOW_FRAME_THRESHOLD_MS + 15, rafLatencyMs: 85, visible: true, heatmapGpuMs: 1.5 }),
+      false,
+    );
+  }
+  assert.equal(coordinator.getDiagnostics().failureLatched, false);
+  assert.equal(coordinator.getDiagnostics().heatmapPath, "webgl2");
+
+  // 4 consecutive layer-specific slow frames must not enter cooldown.
   for (let i = 0; i < HEATMAP_GPU_SLOW_FRAME_CONSECUTIVE_LIMIT - 1; i++) {
-    assert.equal(runGpuHeatmapFrame({ renderMs: HEATMAP_GPU_SLOW_FRAME_THRESHOLD_MS + 10, visible: true }), false);
+    assert.equal(
+      runGpuHeatmapFrame({ renderMs: 65, visible: true, heatmapGpuMs: HEATMAP_GPU_SLOW_FRAME_THRESHOLD_MS + 10 }),
+      false,
+    );
   }
   assert.equal(coordinator.getDiagnostics().failureLatched, false);
 
-  // A fast frame resets the consecutive slow counter.
-  assert.equal(runGpuHeatmapFrame({ renderMs: 10, visible: true }), false);
+  // A fast layer frame resets the consecutive slow counter.
+  assert.equal(runGpuHeatmapFrame({ renderMs: 10, visible: true, heatmapGpuMs: 2 }), false);
   for (let i = 0; i < HEATMAP_GPU_SLOW_FRAME_CONSECUTIVE_LIMIT - 1; i++) {
-    assert.equal(runGpuHeatmapFrame({ renderMs: 65, visible: true }), false);
+    assert.equal(runGpuHeatmapFrame({ renderMs: 65, visible: true, heatmapGpuMs: 65 }), false);
   }
   assert.equal(coordinator.getDiagnostics().failureLatched, false);
 
   // Hidden tab frames reset the consecutive slow counter.
-  assert.equal(runGpuHeatmapFrame({ renderMs: 80, visible: false }), false);
+  assert.equal(runGpuHeatmapFrame({ renderMs: 80, visible: false, heatmapGpuMs: 80 }), false);
   for (let i = 0; i < HEATMAP_GPU_SLOW_FRAME_CONSECUTIVE_LIMIT - 1; i++) {
-    assert.equal(runGpuHeatmapFrame({ renderMs: 65, visible: true }), false);
+    assert.equal(runGpuHeatmapFrame({ renderMs: 65, visible: true, heatmapGpuMs: 65 }), false);
   }
   assert.equal(coordinator.getDiagnostics().failureLatched, false);
 
-  // 5th consecutive slow frame latches the session (combining renderMs and rafLatencyMs > 50ms).
+  // 5th consecutive layer-specific slow frame enters reversible cooldown (not permanent latch).
   assert.equal(
-    runGpuHeatmapFrame({ renderMs: 12, rafLatencyMs: HEATMAP_GPU_SLOW_FRAME_THRESHOLD_MS + 15, visible: true }),
+    runGpuHeatmapFrame({ renderMs: 12, rafLatencyMs: 12, visible: true, heatmapGpuMs: HEATMAP_GPU_SLOW_FRAME_THRESHOLD_MS + 15 }),
     true,
   );
-  const latchedDiag = coordinator.getDiagnostics();
-  assert.equal(latchedDiag.failureLatched, true);
-  assert.equal(latchedDiag.heatmapPath, "cpu-raster");
-  assert.equal(latchedDiag.fallbackReason, "slow_frame_budget");
-  assert.equal(coordinator.isHeatmapGpuSupported(), false);
-  assert.equal(getGpuDiagnostics().counters["gpu.featureFallback.orderbook-heatmap.slow_frame_budget"], 1);
-  assert.equal(snapshotPerformanceTelemetry().counters["chart.gpu.heatmap.fallback.permanent"], 1);
+  const cooldownDiag = coordinator.getDiagnostics();
+  assert.equal(cooldownDiag.failureLatched, false);
+  assert.equal(cooldownDiag.heatmapPath, "cpu-raster");
+  assert.equal(cooldownDiag.fallbackReason, "layer_slow_budget_cooldown");
+  assert.equal(getGpuDiagnostics().counters["gpu.featureFallback.orderbook-heatmap.layer_slow_budget_cooldown"], 1);
+  assert.ok((snapshotPerformanceTelemetry().counters["chart.gpu.heatmap.fallback.recoverable"] ?? 0) >= 1);
 
-  // explicitOverride = true must not latch even on sustained slow frames.
+  // Cooldown recovers automatically when frames settle.
+  let recovered = false;
+  for (let i = 0; i < 64; i++) {
+    coordinator.beginFrameAttempt();
+    const f = coordinator.prepareHeatmapGpuCells(view, series);
+    if (f) {
+      coordinator.renderHeatmapGpuCells(f, view, series);
+      coordinator.observeRenderedFrame({ renderMs: 8, visible: true, heatmapGpuMs: 1 });
+      if (coordinator.getDiagnostics().heatmapPath === "webgl2") {
+        recovered = true;
+        break;
+      }
+    } else {
+      coordinator.observeRenderedFrame({ renderMs: 8, visible: true, heatmapGpuMs: 0 });
+    }
+  }
+  assert.equal(recovered, true);
+  assert.equal(coordinator.getDiagnostics().fallbackReason, null);
+  assert.ok((snapshotPerformanceTelemetry().counters["chart.gpu.heatmap.recovery"] ?? 0) >= 1);
+
+  // explicitOverride = true must not enter cooldown even on sustained layer-slow frames.
   const explicit = makeCoordinatorAndHost();
   explicit.coordinator.setGl(makeMockGl("AMD Radeon RX 7900"));
   explicit.coordinator.setResidentHeatmapEnabled(true, true);
@@ -240,9 +272,10 @@ test("ChartHeatmapGpuCoordinator latches session to cpu-raster after 5 consecuti
     explicit.coordinator.beginFrameAttempt();
     const f = explicit.coordinator.prepareHeatmapGpuCells(explicit.view, explicit.series);
     explicit.coordinator.renderHeatmapGpuCells(f, explicit.view, explicit.series);
-    assert.equal(explicit.coordinator.observeRenderedFrame({ renderMs: 80, visible: true }), false);
+    assert.equal(explicit.coordinator.observeRenderedFrame({ renderMs: 80, visible: true, heatmapGpuMs: 80 }), false);
   }
   assert.equal(explicit.coordinator.getDiagnostics().failureLatched, false);
+  assert.equal(explicit.coordinator.getDiagnostics().fallbackReason, null);
 
   coordinator.dispose();
   explicit.coordinator.dispose();

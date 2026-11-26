@@ -17,7 +17,11 @@
 // per chart and a 256 MiB module-wide realm. Any allocation or GL failure
 // throws to the caller, which falls back to the legacy annotation path.
 import { createProgram } from "../../../../core/engine/gl.js";
-import { isPerformanceTelemetryEnabled, recordPerformanceDuration } from "../../../../core/performanceTelemetry.js";
+import {
+  incrementPerformanceCounter,
+  isPerformanceTelemetryEnabled,
+  recordPerformanceDuration,
+} from "../../../../core/performanceTelemetry.js";
 import { HEATMAP_MIN_CEILING_RATIO, heatmapPaletteIndex } from "../../../orderbook/heatmapModel.js";
 import { getCanvasOwnerDocument, type CanvasTarget } from "../../../../core/gpu/canvasTarget.js";
 import type { OrderbookHeatmapPalette } from "../../../../core/orderbookHeatmap/settings.js";
@@ -694,11 +698,23 @@ export class HeatmapGpuRenderer {
         if (startRow === endRow) {
           const x = firstVal - startRow * width;
           const w = lastVal - firstVal + 1;
-          gl.texSubImage2D(gl.TEXTURE_2D, 0, x, startRow, w, 1, gl.RED, gl.FLOAT, staging.subarray(firstVal, lastVal + 1));
+          const sub = staging.subarray(firstVal, lastVal + 1);
+          gl.texSubImage2D(gl.TEXTURE_2D, 0, x, startRow, w, 1, gl.RED, gl.FLOAT, sub);
+          if (isPerformanceTelemetryEnabled()) {
+            incrementPerformanceCounter("chart.gpu.heatmap.upload.calls");
+            incrementPerformanceCounter("chart.gpu.heatmap.upload.texSubImage2D");
+            incrementPerformanceCounter("chart.gpu.heatmap.upload.bytes", sub.byteLength);
+          }
         } else {
           const sliceStart = startRow * width;
           const sliceEnd = (endRow + 1) * width;
-          gl.texSubImage2D(gl.TEXTURE_2D, 0, 0, startRow, width, endRow - startRow + 1, gl.RED, gl.FLOAT, staging.subarray(sliceStart, sliceEnd));
+          const sub = staging.subarray(sliceStart, sliceEnd);
+          gl.texSubImage2D(gl.TEXTURE_2D, 0, 0, startRow, width, endRow - startRow + 1, gl.RED, gl.FLOAT, sub);
+          if (isPerformanceTelemetryEnabled()) {
+            incrementPerformanceCounter("chart.gpu.heatmap.upload.calls");
+            incrementPerformanceCounter("chart.gpu.heatmap.upload.texSubImage2D");
+            incrementPerformanceCounter("chart.gpu.heatmap.upload.bytes", sub.byteLength);
+          }
         }
         uploaded.set(staging.subarray(firstVal, lastVal + 1), firstVal);
       }
@@ -711,11 +727,23 @@ export class HeatmapGpuRenderer {
         if (startRow === endRow) {
           const x = firstMask - startRow * width;
           const w = lastMask - firstMask + 1;
-          gl.texSubImage2D(gl.TEXTURE_2D, 0, x, startRow, w, 1, gl.RED, gl.UNSIGNED_BYTE, validity.subarray(firstMask, lastMask + 1));
+          const sub = validity.subarray(firstMask, lastMask + 1);
+          gl.texSubImage2D(gl.TEXTURE_2D, 0, x, startRow, w, 1, gl.RED, gl.UNSIGNED_BYTE, sub);
+          if (isPerformanceTelemetryEnabled()) {
+            incrementPerformanceCounter("chart.gpu.heatmap.upload.calls");
+            incrementPerformanceCounter("chart.gpu.heatmap.upload.texSubImage2D");
+            incrementPerformanceCounter("chart.gpu.heatmap.upload.bytes", sub.byteLength);
+          }
         } else {
           const sliceStart = startRow * width;
           const sliceEnd = (endRow + 1) * width;
-          gl.texSubImage2D(gl.TEXTURE_2D, 0, 0, startRow, width, endRow - startRow + 1, gl.RED, gl.UNSIGNED_BYTE, validity.subarray(sliceStart, sliceEnd));
+          const sub = validity.subarray(sliceStart, sliceEnd);
+          gl.texSubImage2D(gl.TEXTURE_2D, 0, 0, startRow, width, endRow - startRow + 1, gl.RED, gl.UNSIGNED_BYTE, sub);
+          if (isPerformanceTelemetryEnabled()) {
+            incrementPerformanceCounter("chart.gpu.heatmap.upload.calls");
+            incrementPerformanceCounter("chart.gpu.heatmap.upload.texSubImage2D");
+            incrementPerformanceCounter("chart.gpu.heatmap.upload.bytes", sub.byteLength);
+          }
         }
         gl.pixelStorei(gl.UNPACK_ALIGNMENT, 4);
         uploadedMask.set(validity.subarray(firstMask, lastMask + 1), firstMask);
@@ -731,6 +759,11 @@ export class HeatmapGpuRenderer {
     gl.texSubImage2D(gl.TEXTURE_2D, 0, 0, 0, this.gridWidth, this.gridHeight, gl.RED, gl.UNSIGNED_BYTE, validity);
     gl.pixelStorei(gl.UNPACK_ALIGNMENT, 4);
     gl.bindTexture(gl.TEXTURE_2D, null);
+    if (isPerformanceTelemetryEnabled()) {
+      incrementPerformanceCounter("chart.gpu.heatmap.upload.calls", 2);
+      incrementPerformanceCounter("chart.gpu.heatmap.upload.texSubImage2D", 2);
+      incrementPerformanceCounter("chart.gpu.heatmap.upload.bytes", staging.byteLength + validity.byteLength);
+    }
     const retainedNeeded = staging.length * 5; // retained copy of what the GPU holds
     if (this.retainedReservedBytes !== retainedNeeded) {
       // Full new reservation first (old copies still alive = replacement peak).
@@ -810,10 +843,21 @@ export class HeatmapGpuRenderer {
         }
       }
       if (firstDirty !== -1) {
-        gl.bufferSubData(gl.ARRAY_BUFFER, firstDirty * 4, view.subarray(firstDirty, lastDirty + 1));
+        const sub = view.subarray(firstDirty, lastDirty + 1);
+        gl.bufferSubData(gl.ARRAY_BUFFER, firstDirty * 4, sub);
+        if (isPerformanceTelemetryEnabled()) {
+          incrementPerformanceCounter("chart.gpu.heatmap.upload.calls");
+          incrementPerformanceCounter("chart.gpu.heatmap.upload.bufferSubData");
+          incrementPerformanceCounter("chart.gpu.heatmap.upload.bytes", sub.byteLength);
+        }
       }
     } else {
       gl.bufferSubData(gl.ARRAY_BUFFER, 0, view);
+      if (isPerformanceTelemetryEnabled()) {
+        incrementPerformanceCounter("chart.gpu.heatmap.upload.calls");
+        incrementPerformanceCounter("chart.gpu.heatmap.upload.bufferSubData");
+        incrementPerformanceCounter("chart.gpu.heatmap.upload.bytes", view.byteLength);
+      }
     }
     gl.bindBuffer(gl.ARRAY_BUFFER, null);
     if (view.byteLength > this.gpuInstanceCapacityBytes) {

@@ -1221,6 +1221,8 @@ export class OrderbookHeatmapOverlay {
     fillRectPaints: number;
     lastPaintedCells: number;
     lastFillRectCalls: number;
+    totalPaintedCells: number;
+    totalFillRectCalls: number;
     cacheHits: number;
     cacheMisses: number;
     motionReuses: number;
@@ -2467,6 +2469,14 @@ export class OrderbookHeatmapOverlay {
     );
     this.rasterStats.lastPaintedCells = paintedCount;
     this.rasterStats.lastFillRectCalls = fillRectCalls;
+    this.rasterStats.totalPaintedCells += paintedCount;
+    this.rasterStats.totalFillRectCalls += fillRectCalls;
+    if (paintedCount > 0) {
+      incrementPerformanceCounter("chart.cpu.heatmap.density.cells", paintedCount);
+    }
+    if (fillRectCalls > 0) {
+      incrementPerformanceCounter("chart.cpu.heatmap.density.fillRects", fillRectCalls);
+    }
     if (u32 && imgData) {
       if (paintedCount > 0) {
         if (clipRect) {
@@ -2475,6 +2485,7 @@ export class OrderbookHeatmapOverlay {
           targetCtx.putImageData(imgData, 0, 0);
         }
         this.rasterStats.imageDataPaints++;
+        incrementPerformanceCounter("chart.cpu.heatmap.density.imageDataPaints");
       }
     } else {
       targetCtx.restore();
@@ -3460,6 +3471,8 @@ export class OrderbookHeatmapOverlay {
     fillRectPaints: 0,
     lastPaintedCells: 0,
     lastFillRectCalls: 0,
+    totalPaintedCells: 0,
+    totalFillRectCalls: 0,
     cacheHits: 0,
     cacheMisses: 0,
     motionReuses: 0,
