@@ -677,7 +677,7 @@ export const liveTradeBubblesIndicatorDefinition: IndicatorDefinition<LiveTradeB
           labelKey: "indicator.liveTradeBubbles.opacity",
           min: 0.1,
           max: 1,
-          step: 0.05,
+          step: 0.01,
         },
         {
           kind: "boolean",

@@ -37,6 +37,10 @@ const CHART_LOCALE_FALLBACKS: Readonly<Record<string, { tr: string; en: string }
     tr: "{venue}: veri yok",
     en: "{venue}: unavailable",
   },
+  "indicator.whaleVsCrowd.venueDisabled": {
+    tr: "{venue}: devre dışı",
+    en: "{venue}: disabled",
+  },
   "indicator.whaleVsCrowd.noData": {
     tr: "Balina/Kalabalık verisi yok",
     en: "No Whale vs Crowd data",
