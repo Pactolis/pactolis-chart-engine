@@ -43,7 +43,7 @@ export const DEFAULT_DRAWING_TEMPLATE_STATE: DrawingTemplateState = {
 export const LEGACY_DRAWING_MARKET = "BINANCE_FUTURES:btcusdt";
 
 export const ORDER_FLOW_PROFILE_STYLE_KEYS = [
-  "profileMetric", "profileSide", "profilePlacement", "valueAreaPercent", "profileWidth", "pocMode", "vahMode", "valMode",
+  "profileMetric", "profileSide", "profilePlacement", "oiVenues", "oiDeltaDisplay", "valueAreaPercent", "profileWidth", "pocMode", "vahMode", "valMode",
   "pocStaticColor", "pocStaticWidth", "pocStaticStyle",
   "pocDevelopingColor", "pocDevelopingWidth", "pocDevelopingStyle",
   "vahStaticColor", "vahStaticWidth", "vahStaticStyle",
@@ -56,7 +56,7 @@ export const DRAWING_STYLE_PRESET_KEYS = [
   "color", "lineWidth", "lineStyle", "showLabel", "showPriceLabel", "showTimeLabel",
   "opacity", "fillOpacity", "extendLeft", "extendRight", "text", "valueAreaPercent",
   "showPoc", "showVah", "showVal", "profileWidth", "profileMetric", "profileSide",
-  "profilePlacement",
+  "profilePlacement", "oiVenues", "oiDeltaDisplay",
   "pocMode", "vahMode", "valMode",
   "pocStaticColor", "pocStaticWidth", "pocStaticStyle",
   "pocDevelopingColor", "pocDevelopingWidth", "pocDevelopingStyle",

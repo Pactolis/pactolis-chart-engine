@@ -1,9 +1,13 @@
 import { calculateAnchoredVwap } from "../analysis/anchoredVwap.js";
-import { calculateOrderFlowRangeProfile } from "../analysis/rangeProfile.js";
-import type { OrderFlowRangeProfileResult } from "../analysis/rangeProfile.js";
+import {
+  calculateOiDeltaRangeProfile,
+  calculateOrderFlowRangeProfile,
+  type OiDeltaRangeMeta,
+  type OrderFlowRangeProfileResult,
+} from "../analysis/rangeProfile.js";
 import type { Drawing, DrawingContext } from "../drawingTypes.js";
 import type { View } from "../engine/view.js";
-import { t } from "../chartLocale.js";
+import { chartLocale, t } from "../chartLocale.js";
 import { tOr } from "../chartLocaleFallbacks.js";
 import type { FootprintSeries } from "../model/footprint.js";
 import {
@@ -11,19 +15,46 @@ import {
   levelModeHasStatic,
   normalizeFixedRangeOrderFlowProfileSettings,
   profileSupportsValueArea,
+  selectedOiVenues,
+  type OiDeltaDisplay,
   type ProfileLevelDisplay,
   type ProfileLineStyle,
 } from "../orderFlowProfileSettings.js";
 import { incrementPerformanceCounter, measurePerformance } from "../performanceTelemetry.js";
+import { bucketEnd, bucketStart } from "../time.js";
 import { lineDash, profileHistogramParts, stepSegments } from "./orderFlowProfile.js";
 import type { FootprintBar } from "../types.js";
 import { uiColor } from "../ui/seriesPalette.js";
+import {
+  buildOiRevisionKey,
+  formatOiDeltaBadge,
+  parseOiResolutionMs,
+} from "../../features/indicators/builtins/oiDeltaProfile.js";
+import { indicatorDataSource } from "../../features/indicators/indicatorDataSource.js";
+import type {
+  OpenInterestRequestInput,
+  OpenInterestSeriesResponse,
+  OpenInterestSeriesState,
+  OpenInterestVenue,
+} from "../../features/indicators/metricContracts.js";
+
+export interface AnalysisDrawingsOptions {
+  timeframe?: string;
+  requestOpenInterestSeries?: (input: OpenInterestRequestInput) => OpenInterestSeriesState;
+  createOiUpdateCallback?: (drawingId: string, requestKey: string) => () => void;
+}
+
+interface SharedOiRequestEntry {
+  state: OpenInterestSeriesState;
+  callbacks: Set<() => void>;
+}
 
 type AnchoredVwapResult = ReturnType<typeof calculateAnchoredVwap>;
 
 interface CachedRangeProfileResult {
   profile: OrderFlowRangeProfileResult;
   maxMagnitude: number;
+  oiMeta?: OiDeltaRangeMeta;
 }
 
 interface RangeProfileBarSnapshot {
@@ -238,20 +269,39 @@ function cachedRangeProfile(
   drawing: Drawing,
   from: number,
   to: number,
+  oiContext?: {
+    market: string;
+    timeframe: string;
+    response: OpenInterestSeriesResponse;
+    venues: OpenInterestVenue[];
+    oiDeltaDisplay: OiDeltaDisplay;
+  },
 ): CachedRangeProfileResult {
   const settings = normalizeFixedRangeOrderFlowProfileSettings(drawing as unknown as Record<string, unknown>);
   const developing = profileSupportsValueArea(settings.profileMetric)
     && [settings.pocMode, settings.vahMode, settings.valMode].some(levelModeHasDeveloping);
   const valueAreaPercent = settings.valueAreaPercent ?? 0.7;
-  const configKey = [
-    series.config.priceStep,
-    from,
-    to,
-    valueAreaPercent,
-    settings.profileMetric,
-    settings.profileSide,
-    developing ? 1 : 0,
-  ].join(":");
+  const configKey = oiContext
+    ? [
+      series.config.priceStep,
+      from,
+      to,
+      "oi-delta",
+      oiContext.oiDeltaDisplay,
+      oiContext.venues.join(","),
+      oiContext.market,
+      oiContext.timeframe,
+      buildOiRevisionKey(oiContext.response, oiContext.venues, oiContext.oiDeltaDisplay),
+    ].join(":")
+    : [
+      series.config.priceStep,
+      from,
+      to,
+      valueAreaPercent,
+      settings.profileMetric,
+      settings.profileSide,
+      developing ? 1 : 0,
+    ].join(":");
   const bars = series.listReadonly();
   const cached = rangeProfileCache.get(drawing);
 
@@ -292,8 +342,13 @@ function cachedRangeProfile(
 
   const start = Math.min(from, to);
   const end = Math.max(from, to);
-  const firstIndex = lowerBoundBarTime(bars, start);
-  const afterLastIndex = lowerBoundBarTime(bars, end + 1);
+  const intervalMs = series.config.intervalMs;
+  const resolutionMs = oiContext ? parseOiResolutionMs(oiContext.response.resolution, intervalMs) : intervalMs;
+  const expandSlots = oiContext !== undefined && intervalMs < resolutionMs;
+  const sliceStart = expandSlots ? bucketStart(start, resolutionMs) : start;
+  const sliceEndExclusive = expandSlots ? bucketEnd(end, resolutionMs) : end + 1;
+  const firstIndex = lowerBoundBarTime(bars, sliceStart);
+  const afterLastIndex = lowerBoundBarTime(bars, sliceEndExclusive);
   if (
     cached
     && cached.series === series
@@ -306,7 +361,7 @@ function cachedRangeProfile(
     cached.revision = series.revision;
     cached.firstIndex = firstIndex;
     cached.afterLastIndex = afterLastIndex;
-    cached.rangeEndTime = end;
+    cached.rangeEndTime = sliceEndExclusive - 1;
     incrementPerformanceCounter("analysis.drawings.frvp.cache.hit");
     return cached.result;
   }
@@ -314,18 +369,41 @@ function cachedRangeProfile(
   incrementPerformanceCounter("analysis.drawings.frvp.cache.miss");
   const selectedBars = bars.slice(firstIndex, afterLastIndex);
   const sourceMode = rangeProfileSourceMode(selectedBars);
-  const profile = measurePerformance("analysis.drawings.frvp.calculate.ms", () =>
-    calculateOrderFlowRangeProfile(selectedBars, from, to, {
-      profileMetric: settings.profileMetric,
-      profileSide: settings.profileSide,
-      valueAreaPercent,
-      developing,
-      priceStep: series.config.priceStep,
-      allowOhlcvEstimate: true,
-    }));
-  let maxMagnitude = 0;
-  for (const level of profile.levels) maxMagnitude = Math.max(maxMagnitude, level.magnitude ?? 0);
-  const result = { profile, maxMagnitude };
+  let result: CachedRangeProfileResult;
+  if (oiContext) {
+    const oiResult = measurePerformance("analysis.drawings.frvp.calculate.ms", () =>
+      calculateOiDeltaRangeProfile(
+        selectedBars,
+        from,
+        to,
+        intervalMs,
+        oiContext.response,
+        oiContext.venues,
+        {
+          profileMetric: "oi-delta",
+          profileSide: "total",
+          oiDeltaDisplay: oiContext.oiDeltaDisplay,
+          priceStep: series.config.priceStep,
+          allowOhlcvEstimate: true,
+        },
+      ));
+    let maxMagnitude = 0;
+    for (const level of oiResult.levels) maxMagnitude = Math.max(maxMagnitude, level.magnitude ?? 0);
+    result = { profile: oiResult, maxMagnitude, oiMeta: oiResult.oiMeta };
+  } else {
+    const profile = measurePerformance("analysis.drawings.frvp.calculate.ms", () =>
+      calculateOrderFlowRangeProfile(selectedBars, from, to, {
+        profileMetric: settings.profileMetric,
+        profileSide: settings.profileSide,
+        valueAreaPercent,
+        developing,
+        priceStep: series.config.priceStep,
+        allowOhlcvEstimate: true,
+      }));
+    let maxMagnitude = 0;
+    for (const level of profile.levels) maxMagnitude = Math.max(maxMagnitude, level.magnitude ?? 0);
+    result = { profile, maxMagnitude };
+  }
   rangeProfileCache.set(drawing, {
     series,
     configKey,
@@ -336,7 +414,7 @@ function cachedRangeProfile(
     revision: series.revision,
     firstIndex,
     afterLastIndex,
-    rangeEndTime: end,
+    rangeEndTime: sliceEndExclusive - 1,
     bars: snapshotRangeProfileBars(selectedBars),
     result,
   });
@@ -350,8 +428,10 @@ export function drawAnalysisDrawings(
   time: DrawingContext,
   drawings: readonly Drawing[],
   market: string,
-  onLineObject?: (price: number, text: string, color: string) => void
+  onLineObject?: (price: number, text: string, color: string) => void,
+  analysisOptions?: AnalysisDrawingsOptions,
 ): void {
+  const oiRequestCache = new Map<string, SharedOiRequestEntry>();
   for (const drawing of drawings) {
     if (!drawing.visible || drawing.market !== market) continue;
     if (drawing.type === "anchored-vwap") {
@@ -359,7 +439,7 @@ export function drawAnalysisDrawings(
         drawAnchoredVwap(ctx, view, series, time, drawing, onLineObject));
     } else if (drawing.type === "fixed-range-volume-profile") {
       measurePerformance("analysis.drawings.frvp.render.ms", () =>
-        drawRangeProfile(ctx, view, series, time, drawing));
+        drawRangeProfile(ctx, view, series, time, drawing, market, analysisOptions, oiRequestCache));
     }
   }
 }
@@ -406,26 +486,154 @@ function drawAnchoredVwap(
   ctx.restore();
 }
 
+function safeLocaleTag(): string {
+  try {
+    return chartLocale().locale();
+  } catch {
+    return "en";
+  }
+}
+
+function resolveOpenInterestRequester(
+  analysisOptions: AnalysisDrawingsOptions | undefined,
+): ((input: OpenInterestRequestInput) => OpenInterestSeriesState) | undefined {
+  if (analysisOptions?.requestOpenInterestSeries) return analysisOptions.requestOpenInterestSeries;
+  try {
+    return indicatorDataSource().requestOpenInterestSeries;
+  } catch {
+    return undefined;
+  }
+}
+
+function requestSharedOpenInterestSeries(
+  cache: Map<string, SharedOiRequestEntry>,
+  requestFn: (input: OpenInterestRequestInput) => OpenInterestSeriesState,
+  input: Omit<OpenInterestRequestInput, "onUpdate">,
+  drawingId: string,
+  createOiUpdateCallback: ((drawingId: string, requestKey: string) => () => void) | undefined,
+): OpenInterestSeriesState {
+  const key = `${input.market}|${input.timeframe}|${input.from ?? ""}|${input.to ?? ""}|${input.venues.join(",")}`;
+  const cb = createOiUpdateCallback?.(drawingId, key);
+  const existing = cache.get(key);
+  if (existing) {
+    if (cb) existing.callbacks.add(cb);
+    return existing.state;
+  }
+  const callbacks = new Set<() => void>();
+  if (cb) callbacks.add(cb);
+  const state = requestFn({
+    ...input,
+    onUpdate: () => {
+      for (const fn of callbacks) fn();
+    },
+  });
+  cache.set(key, { state, callbacks });
+  return state;
+}
+
+function drawStatusBadge(
+  ctx: CanvasRenderingContext2D,
+  view: View,
+  left: number,
+  right: number,
+  placement: "left" | "right",
+  text: string,
+  color: string,
+): void {
+  ctx.save();
+  ctx.beginPath();
+  ctx.rect(view.area.left, view.area.top, view.area.width, view.area.height);
+  ctx.clip();
+  ctx.fillStyle = color;
+  ctx.font = "10px ui-monospace, monospace";
+  ctx.textAlign = placement === "right" ? "right" : "left";
+  const badgeX = placement === "right" ? right - 4 : left + 4;
+  ctx.fillText(text, badgeX, view.area.top + 14, Math.max(0, right - left - 8));
+  ctx.restore();
+}
+
 function drawRangeProfile(
   ctx: CanvasRenderingContext2D,
   view: View,
   series: FootprintSeries,
   time: DrawingContext,
-  drawing: Drawing
+  drawing: Drawing,
+  market: string,
+  analysisOptions: AnalysisDrawingsOptions | undefined,
+  oiRequestCache: Map<string, SharedOiRequestEntry>,
 ): void {
   if (drawing.points.length < 2) return;
   const from = Math.min(drawing.points[0].time, drawing.points[1].time);
   const to = Math.max(drawing.points[0].time, drawing.points[1].time);
   const settings = normalizeFixedRangeOrderFlowProfileSettings(drawing as unknown as Record<string, unknown>);
-  const { profile: result, maxMagnitude } = cachedRangeProfile(series, drawing, from, to);
   const left = view.xOfIndex(time.indexForTime(from));
   const right = view.xOfIndex(time.indexForTime(to)) + view.colWidth;
+  const placement = settings.profilePlacement === "right" ? "right" : "left";
+
+  let cachedResult: CachedRangeProfileResult;
+  if (settings.profileMetric === "oi-delta") {
+    const areaLeft = view.area.left;
+    const areaRight = view.area.left + view.area.width;
+    if (!Number.isFinite(left) || !Number.isFinite(right) || right < areaLeft || left > areaRight) {
+      return;
+    }
+    const requestFn = resolveOpenInterestRequester(analysisOptions);
+    if (!requestFn) {
+      drawStatusBadge(ctx, view, left, right, placement, tOr("indicator.volumeProfile.oiNoData"), uiColor.warn);
+      return;
+    }
+    const intervalMs = series.config.intervalMs;
+    const timeframe = analysisOptions?.timeframe ?? "";
+    const venues = selectedOiVenues(settings.oiVenues) as OpenInterestVenue[];
+    const oiDeltaDisplay: OiDeltaDisplay = settings.oiDeltaDisplay === "split" ? "split" : "net";
+    const state = requestSharedOpenInterestSeries(
+      oiRequestCache,
+      requestFn,
+      {
+        market,
+        timeframe,
+        intervalMs,
+        venues,
+        from,
+        to: bucketEnd(to, intervalMs),
+      },
+      drawing.id,
+      analysisOptions?.createOiUpdateCallback,
+    );
+    if (state.status === "loading" || state.status === "idle") {
+      drawStatusBadge(ctx, view, left, right, placement, tOr("indicator.volumeProfile.oiLoading"), uiColor.warn);
+      return;
+    }
+    if (state.status === "error" || state.status === "unsupported") {
+      drawStatusBadge(ctx, view, left, right, placement, tOr("indicator.volumeProfile.oiNoData"), uiColor.warn);
+      return;
+    }
+    const response = state.data;
+    if (response.status === "unsupported" || response.status === "no-data" || response.venues.length === 0) {
+      drawStatusBadge(ctx, view, left, right, placement, tOr("indicator.volumeProfile.oiNoData"), uiColor.warn);
+      return;
+    }
+    cachedResult = cachedRangeProfile(series, drawing, from, to, {
+      market,
+      timeframe,
+      response,
+      venues,
+      oiDeltaDisplay,
+    });
+    if (!cachedResult.oiMeta || cachedResult.oiMeta.coveredBarCount === 0) {
+      drawStatusBadge(ctx, view, left, right, placement, tOr("indicator.volumeProfile.oiNoData"), uiColor.warn);
+      return;
+    }
+  } else {
+    cachedResult = cachedRangeProfile(series, drawing, from, to);
+  }
+
+  const { profile: result, maxMagnitude, oiMeta } = cachedResult;
   const maxWidth = Math.max(16, (right - left) * (settings.profileWidth ?? 0.3));
   const priceRange = view.priceRange();
   const priceStep = series.config.priceStep;
   const levelFrom = lowerBoundLevelPrice(result.levels, priceRange.minValue() - priceStep);
   const levelTo = lowerBoundLevelPrice(result.levels, priceRange.maxValue() + priceStep);
-  const placement = settings.profilePlacement === "right" ? "right" : "left";
   const deltaZeroX = placement === "right" ? right - maxWidth / 2 : left + maxWidth / 2;
 
   ctx.save();
@@ -439,13 +647,13 @@ function drawRangeProfile(
       const yTop = view.yOfPrice(level.priceBin + priceStep);
       const yBottom = view.yOfPrice(level.priceBin);
       const rowHeight = Math.max(1, yBottom - yTop - 1);
-      const parts = profileHistogramParts(level, result.profileMetric, result.profileSide);
-      if (result.profileMetric === "delta") {
-        const part = parts[0];
-        if (!part) continue;
-        const width = maxWidth / 2 * part.value / Math.max(maxMagnitude, Number.EPSILON);
-        ctx.fillStyle = part.signed >= 0 ? uiColor.buy : uiColor.sell;
-        ctx.fillRect(part.signed >= 0 ? deltaZeroX : deltaZeroX - width, yTop, width, rowHeight);
+      const parts = profileHistogramParts(level, result.profileMetric, result.profileSide, settings.oiDeltaDisplay);
+      if (result.profileMetric === "delta" || result.profileMetric === "oi-delta") {
+        for (const part of parts) {
+          const width = maxWidth / 2 * part.value / Math.max(maxMagnitude, Number.EPSILON);
+          ctx.fillStyle = part.signed >= 0 ? uiColor.buy : uiColor.sell;
+          ctx.fillRect(part.signed >= 0 ? deltaZeroX : deltaZeroX - width, yTop, width, rowHeight);
+        }
         continue;
       }
       let cursor = placement === "right" ? right : left;
@@ -473,38 +681,50 @@ function drawRangeProfile(
   let disclosureLines = 0;
   const badgeAlign = placement === "right" ? "right" : "left";
   const badgeX = placement === "right" ? right - 4 : left + 4;
-  if (result.isEstimated) {
-    ctx.fillStyle = uiColor.warn;
-    ctx.font = "10px ui-monospace, monospace";
-    ctx.textAlign = badgeAlign;
-    ctx.fillText(tOr("indicator.volumeProfile.estimated"), badgeX, estimatedLabelY);
-    disclosureLines += 1;
-  }
-  if (result.availability === "unavailable") {
-    ctx.fillStyle = uiColor.warn;
+  if (result.profileMetric === "oi-delta" && oiMeta) {
+    ctx.fillStyle = result.isEstimated || oiMeta.coveragePercent < 100 ? uiColor.warn : uiColor.info;
     ctx.font = "10px ui-monospace, monospace";
     ctx.textAlign = badgeAlign;
     ctx.fillText(
-      tOr("indicator.volumeProfile.estimatedMetricUnsupported"),
+      formatOiDeltaBadge(oiMeta, result.isEstimated, series.config.intervalMs, safeLocaleTag()),
       badgeX,
-      estimatedLabelY + disclosureLines * 12,
+      estimatedLabelY,
       Math.max(0, right - left - 8),
     );
-    disclosureLines += 1;
-  }
-  if (!result.complete || !result.dataComplete) {
-    ctx.fillStyle = uiColor.warn;
-    ctx.font = "10px ui-monospace, monospace";
-    ctx.textAlign = badgeAlign;
-    const percent = Math.round(result.coverage * 100);
-    ctx.fillText(
-      drawing.dataState === "loading"
-        ? t("indicator.volumeProfile.coverageLoading", { percent })
-        : t("indicator.volumeProfile.coverageIncomplete", { percent }),
-      badgeX,
-      estimatedLabelY + disclosureLines * 12,
-      Math.max(0, right - left - 8),
-    );
+  } else {
+    if (result.isEstimated) {
+      ctx.fillStyle = uiColor.warn;
+      ctx.font = "10px ui-monospace, monospace";
+      ctx.textAlign = badgeAlign;
+      ctx.fillText(tOr("indicator.volumeProfile.estimated"), badgeX, estimatedLabelY);
+      disclosureLines += 1;
+    }
+    if (result.availability === "unavailable") {
+      ctx.fillStyle = uiColor.warn;
+      ctx.font = "10px ui-monospace, monospace";
+      ctx.textAlign = badgeAlign;
+      ctx.fillText(
+        tOr("indicator.volumeProfile.estimatedMetricUnsupported"),
+        badgeX,
+        estimatedLabelY + disclosureLines * 12,
+        Math.max(0, right - left - 8),
+      );
+      disclosureLines += 1;
+    }
+    if (!result.complete || !result.dataComplete) {
+      ctx.fillStyle = uiColor.warn;
+      ctx.font = "10px ui-monospace, monospace";
+      ctx.textAlign = badgeAlign;
+      const percent = Math.round(result.coverage * 100);
+      ctx.fillText(
+        drawing.dataState === "loading"
+          ? t("indicator.volumeProfile.coverageLoading", { percent })
+          : t("indicator.volumeProfile.coverageIncomplete", { percent }),
+        badgeX,
+        estimatedLabelY + disclosureLines * 12,
+        Math.max(0, right - left - 8),
+      );
+    }
   }
   ctx.restore();
 }

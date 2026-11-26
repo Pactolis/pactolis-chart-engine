@@ -1,5 +1,5 @@
 import type { ProfileMetric, ProfileSide } from "./analysis/orderFlowProfile.js";
-import type { OrderFlowProfilePlacement, ProfileLevelDisplay, ProfileLineStyle } from "./orderFlowProfileSettings.js";
+import type { OiDeltaDisplay, OiProfileVenue, OrderFlowProfilePlacement, ProfileLevelDisplay, ProfileLineStyle } from "./orderFlowProfileSettings.js";
 
 export type DrawingType =
   | "horizontal" | "horizontal-ray" | "vertical"
@@ -61,6 +61,8 @@ export type DrawingStylePreset = Partial<Pick<
   | "profileMetric"
   | "profileSide"
   | "profilePlacement"
+  | "oiVenues"
+  | "oiDeltaDisplay"
   | "pocMode"
   | "vahMode"
   | "valMode"
@@ -162,6 +164,8 @@ export interface Drawing {
   profileMetric?: ProfileMetric;
   profileSide?: ProfileSide;
   profilePlacement?: OrderFlowProfilePlacement;
+  oiVenues?: Record<OiProfileVenue, boolean>;
+  oiDeltaDisplay?: OiDeltaDisplay;
   pocMode?: ProfileLevelDisplay;
   vahMode?: ProfileLevelDisplay;
   valMode?: ProfileLevelDisplay;

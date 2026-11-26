@@ -1,7 +1,7 @@
 /** Public compatibility facade and annotation rendering. Dependency direction is facade → gestures → selection → state → notifications. All domains share one state owner; rendering and exports retain the existing public API. */
 import type { View } from "../../core/engine/view.js";
 import type { FootprintSeries } from "../../core/model/footprint.js";
-import { drawAnalysisDrawings } from "../../core/render/analysisDrawings.js";
+import { drawAnalysisDrawings, type AnalysisDrawingsOptions } from "../../core/render/analysisDrawings.js";
 import { t } from "../../core/chartLocale.js";
 import { drawingIsAvailableAsOf, type Drawing, type DrawingContext, type DrawingType } from "../../core/drawingTypes.js";
 import { applyLineStyle, clamp01, drawLine, drawObjectName, drawingDisplayName, isAnnotationTool, isFibonacciTool, isMeasurementTool, isZoneTool, queuePriceAxisLabel, queueTimeAxisLabel, queueTrendPriceLabels, queueZonePriceLabels, queueZoneTimeLabels, renderAnnotationTool, renderBrush, renderEllipse, renderFibonacciTool, renderGannFan, renderGannGrid, renderMeasurementTool, renderParallelChannel, renderPitchfork, renderRegressionChannel, renderTriangle, screenPoint, trendRenderLine, zoneRenderBox } from "./drawingPrimitives.js";
@@ -51,6 +51,7 @@ export class DrawingManager extends DrawingGestures {
     time: DrawingContext,
     onLineObject?: (price: number, text: string, color: string) => void,
     market?: string,
+    analysisOptions?: AnalysisDrawingsOptions,
   ): void {
     drawAnalysisDrawings(
       ctx,
@@ -60,7 +61,12 @@ export class DrawingManager extends DrawingGestures {
       time.asOfTime === undefined ? this.drawings : this.drawings.filter((drawing) => drawingIsAvailableAsOf(drawing, time.asOfTime)),
       market ?? this.currentMarket,
       onLineObject,
+      analysisOptions,
     );
+  }
+
+  findDrawingById(id: string): Drawing | undefined {
+    return this.drawings.find((drawing) => drawing.id === id);
   }
 
   render(
