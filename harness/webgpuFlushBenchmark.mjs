@@ -19,6 +19,20 @@ export const WEBGPU_FLUSH_FIXTURE = Object.freeze({
   frozenNow: Date.UTC(2026, 0, 15, 12, 0, 0),
 });
 
+export function resolveWebGpuFlushFixture({ hardwareMode = true } = {}) {
+  if (hardwareMode) {
+    return Object.freeze({ ...WEBGPU_FLUSH_FIXTURE, hardwareMode: true });
+  }
+  return Object.freeze({
+    ...WEBGPU_FLUSH_FIXTURE,
+    hardwareMode: false,
+    liveFramesPerRepetition: 8,
+    panFramesPerRepetition: 8,
+    crosshairFramesPerRepetition: 8,
+    repetitions: 1,
+  });
+}
+
 export const WEBGPU_FLUSH_SCENARIOS = Object.freeze(["pan", "live", "crosshair"]);
 
 export const WEBGPU_FLUSH_METRICS = Object.freeze([

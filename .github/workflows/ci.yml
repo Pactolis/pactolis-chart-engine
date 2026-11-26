@@ -46,6 +46,7 @@ jobs:
       browser: ${{ steps.select.outputs.browser }}
       browser_specs: ${{ steps.select.outputs.browser_specs }}
       census: ${{ steps.select.outputs.census }}
+      lifecycle: ${{ steps.select.outputs.lifecycle }}
     steps:
       - uses: actions/checkout@v7
         with:
@@ -62,6 +63,10 @@ jobs:
     if: github.event_name == 'pull_request' && needs.changes.outputs.browser != 'none'
     runs-on: ubuntu-24.04
     timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: ["1/2", "2/2"]
     steps:
       - uses: actions/checkout@v7
         with:
@@ -74,11 +79,34 @@ jobs:
       - run: npx --no-install playwright install --with-deps chromium
       - env:
           SPECS: ${{ needs.changes.outputs.browser_specs }}
-        run: npm run test:browser -- --project=default $SPECS
+        run: npm run test:browser -- --project=default --shard=${{ matrix.shard }} --pass-with-no-tests $SPECS
       - if: failure()
         uses: actions/upload-artifact@v7
         with:
-          name: playwright-results
+          name: playwright-results-shard-${{ strategy.job-index }}
+          path: test-results/
+          retention-days: 3
+
+  lifecycle:
+    needs: changes
+    if: github.event_name == 'pull_request' && needs.changes.outputs.lifecycle == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24
+      - run: npm ci --no-audit --no-fund
+      - run: npm run check:browser
+      - run: npx --no-install playwright install --with-deps chromium
+      - run: npm run test:browser -- --project=lifecycle --workers=1
+      - if: failure()
+        uses: actions/upload-artifact@v7
+        with:
+          name: lifecycle-results
           path: test-results/
           retention-days: 3
 
@@ -115,7 +143,7 @@ jobs:
     # One status that is red when any job failed and green when every job either
     # passed or was skipped because the change could not reach it.
     name: CI result
-    needs: [test, changes, browser, census]
+    needs: [test, changes, browser, lifecycle, census]
     if: always()
     runs-on: ubuntu-24.04
     timeout-minutes: 5

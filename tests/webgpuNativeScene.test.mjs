@@ -1069,8 +1069,24 @@ test("webgpuNativeBenchmark supports large profile, bounded custom fixtures, and
 
   const defaultResolved = resolveWebGpuNativeFixture();
   assert.equal(defaultResolved.profile, "standard");
+  assert.equal(defaultResolved.hardwareMode, true);
   assert.equal(defaultResolved.barCount, 600);
   assert.equal(defaultResolved.cellsPerBar, 40);
+  assert.equal(defaultResolved.repetitions, 2);
+  assert.equal(defaultResolved.liveRolloverFramesPerRepetition, 40);
+
+  const swiftShaderResolved = resolveWebGpuNativeFixture({ hardwareMode: false });
+  assert.equal(swiftShaderResolved.profile, "standard");
+  assert.equal(swiftShaderResolved.hardwareMode, false);
+  assert.equal(swiftShaderResolved.barCount, 600);
+  assert.equal(swiftShaderResolved.cellsPerBar, 40);
+  assert.equal(swiftShaderResolved.fitColumns, 60);
+  assert.equal(swiftShaderResolved.repetitions, 1);
+  assert.equal(swiftShaderResolved.panFramesPerRepetition, 8);
+  assert.equal(swiftShaderResolved.zoomFramesPerRepetition, 8);
+  assert.equal(swiftShaderResolved.liveFramesPerRepetition, 8);
+  assert.equal(swiftShaderResolved.liveRolloverFramesPerRepetition, 10);
+  assert.equal(swiftShaderResolved.liveRolloverEveryFrames, 3);
 
   const largeResolved = resolveWebGpuNativeFixture({ profile: "large" });
   assert.equal(largeResolved.profile, "large");

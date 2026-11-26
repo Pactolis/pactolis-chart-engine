@@ -54,14 +54,26 @@ function parseBoundedFixtureInt(raw, fallback, min, max, label) {
   return parsed;
 }
 
-export function resolveWebGpuNativeFixture({ profile, barCount, cellsPerBar, fitColumns } = {}) {
+export function resolveWebGpuNativeFixture({ profile, barCount, cellsPerBar, fitColumns, hardwareMode = true } = {}) {
   const profileName = profile === undefined || profile === null || profile === "" ? "standard" : String(profile);
   const preset = WEBGPU_NATIVE_PROFILES[profileName];
   if (!preset) {
     throw new Error(`Unknown WebGPU native profile: ${profileName} (expected standard or large)`);
   }
+  const frameCounts = hardwareMode
+    ? {}
+    : {
+        liveFramesPerRepetition: 8,
+        panFramesPerRepetition: 8,
+        zoomFramesPerRepetition: 8,
+        liveRolloverFramesPerRepetition: 10,
+        liveRolloverEveryFrames: 3,
+        repetitions: 1,
+      };
   return Object.freeze({
     ...WEBGPU_NATIVE_FIXTURE,
+    ...frameCounts,
+    hardwareMode: Boolean(hardwareMode),
     profile: preset.name,
     barCount: parseBoundedFixtureInt(barCount, preset.barCount, 100, 10_000, "barCount"),
     cellsPerBar: parseBoundedFixtureInt(cellsPerBar, preset.cellsPerBar, 10, 500, "cellsPerBar"),

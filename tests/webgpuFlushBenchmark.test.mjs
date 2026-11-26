@@ -5,6 +5,7 @@ import {
   buildWebGpuFlushAssessment,
   classifyWebGpuAdapter,
   readWebGpuAdapterIdentity,
+  resolveWebGpuFlushFixture,
   selectWebGpuProbe,
   shouldTryWebGpuVulkan,
   WEBGPU_FLUSH_DECISION_RULE,
@@ -174,4 +175,26 @@ test("shared WebGPU flush fixture builder produces the browser workload shape", 
   assert.equal(bars.at(-1).cells.length, 40);
   assert.equal(bars[0].completeness, "complete");
   assert.equal(bars[0].updatedAt, WEBGPU_FLUSH_FIXTURE.frozenNow);
+});
+
+test("resolveWebGpuFlushFixture keeps full hardware defaults and shrinks SwiftShader frame counts (#395)", () => {
+  const hw = resolveWebGpuFlushFixture({ hardwareMode: true });
+  assert.equal(hw.hardwareMode, true);
+  assert.equal(hw.repetitions, 2);
+  assert.equal(hw.liveFramesPerRepetition, 30);
+  assert.equal(hw.panFramesPerRepetition, 35);
+  assert.equal(hw.crosshairFramesPerRepetition, 35);
+  assert.equal(hw.barCount, 600);
+  assert.equal(hw.cellsPerBar, 40);
+  assert.equal(hw.fitColumns, 60);
+
+  const sw = resolveWebGpuFlushFixture({ hardwareMode: false });
+  assert.equal(sw.hardwareMode, false);
+  assert.equal(sw.repetitions, 1);
+  assert.equal(sw.liveFramesPerRepetition, 8);
+  assert.equal(sw.panFramesPerRepetition, 8);
+  assert.equal(sw.crosshairFramesPerRepetition, 8);
+  assert.equal(sw.barCount, 600);
+  assert.equal(sw.cellsPerBar, 40);
+  assert.equal(sw.fitColumns, 60);
 });

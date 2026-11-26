@@ -14,9 +14,17 @@ export default defineConfig({
     launchOptions: process.env.CHROMIUM_PATH ? { executablePath: process.env.CHROMIUM_PATH } : undefined,
   },
   projects: [
-    // The multi-chart census and its endurance profile take most of the run; CI
-    // gives them their own job. PR CI runs the core census scenarios (#61).
-    { name: "default", testIgnore: ["**/chart-multi-market-census.spec.ts", "**/heatmap-pan-benchmark.spec.ts"] },
+    // The multi-chart census, hidden-tab lifecycle recovery, and pan benchmark
+    // take most of the run; CI gives them their own jobs. PR CI runs the core census scenarios (#61).
+    {
+      name: "default",
+      testIgnore: [
+        "**/chart-multi-market-census.spec.ts",
+        "**/heatmap-pan-benchmark.spec.ts",
+        "**/chart-hidden-tab-recovery.spec.ts",
+      ],
+    },
+    { name: "lifecycle", testMatch: ["**/chart-hidden-tab-recovery.spec.ts"] },
     { name: "heatmap-pan-benchmark", testMatch: ["**/heatmap-pan-benchmark.spec.ts"] },
     {
       name: "census",

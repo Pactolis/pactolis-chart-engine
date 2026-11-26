@@ -20,6 +20,7 @@ import { dirname, join, relative, resolve, sep } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
 export const CENSUS_SPEC = "tests/browser/chart-multi-market-census.spec.ts";
+export const LIFECYCLE_SPEC = "tests/browser/chart-hidden-tab-recovery.spec.ts";
 export const HEATMAP_PAN_SPEC = "tests/browser/heatmap-pan-benchmark.spec.ts";
 
 /** Files that every browser test depends on, or that decide what runs. */
@@ -110,10 +111,16 @@ export function specClosures(root) {
 /**
  * @param {readonly string[]} changed repository-relative paths
  * @param {Map<string, Set<string>>} closures
- * @returns {{ browser: "none" | "all" | "list", specs: string[], census: boolean, reasons: string[] }}
+ * @returns {{ browser: "none" | "all" | "list", specs: string[], census: boolean, lifecycle: boolean, reasons: string[] }}
  */
 export function selectTests(changed, closures) {
-  const all = (/** @type {string} */ reason) => ({ browser: /** @type {const} */ ("all"), specs: [], census: true, reasons: [reason] });
+  const all = (/** @type {string} */ reason) => ({
+    browser: /** @type {const} */ ("all"),
+    specs: [],
+    census: true,
+    lifecycle: true,
+    reasons: [reason],
+  });
   if (changed.length === 0) return all("empty diff: running everything");
   const selected = new Set();
   const reasons = [];
@@ -144,11 +151,14 @@ export function selectTests(changed, closures) {
     return all(`${file}: unclassified path`);
   }
   const census = selected.delete(CENSUS_SPEC);
+  const lifecycle = selected.delete(LIFECYCLE_SPEC);
   selected.delete(HEATMAP_PAN_SPEC);
   const specs = [...selected].sort();
-  const allDefault = [...closures.keys()].filter((spec) => spec !== CENSUS_SPEC && spec !== HEATMAP_PAN_SPEC);
+  const allDefault = [...closures.keys()].filter(
+    (spec) => spec !== CENSUS_SPEC && spec !== HEATMAP_PAN_SPEC && spec !== LIFECYCLE_SPEC,
+  );
   const browser = specs.length === 0 ? "none" : specs.length === allDefault.length ? "all" : "list";
-  return { browser, specs: browser === "list" ? specs : [], census, reasons };
+  return { browser, specs: browser === "list" ? specs : [], census, lifecycle, reasons };
 }
 
 function changedFiles() {
@@ -167,12 +177,13 @@ if (isMain()) {
   try {
     result = selectTests(changedFiles(), specClosures(root));
   } catch (error) {
-    result = { browser: "all", specs: [], census: true, reasons: [`selection failed (${String(error)}): running everything`] };
+    result = { browser: "all", specs: [], census: true, lifecycle: true, reasons: [`selection failed (${String(error)}): running everything`] };
   }
   const lines = [
     `browser=${result.browser}`,
     `browser_specs=${result.specs.join(" ")}`,
     `census=${result.census}`,
+    `lifecycle=${result.lifecycle}`,
   ];
   console.log(lines.join("\n"));
   if (process.env.GITHUB_OUTPUT) appendFileSync(process.env.GITHUB_OUTPUT, `${lines.join("\n")}\n`);
@@ -182,6 +193,7 @@ if (isMain()) {
       "",
       `- Default browser project: **${result.browser}**${result.specs.length ? ` (${result.specs.length} spec(s))` : ""}`,
       ...result.specs.map((spec) => `  - \`${spec}\``),
+      `- Lifecycle: **${result.lifecycle ? "run" : "skip"}**`,
       `- Census: **${result.census ? "run" : "skip"}**`,
       "",
       "<details><summary>Reasons</summary>",

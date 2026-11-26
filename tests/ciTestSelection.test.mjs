@@ -1,11 +1,13 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
-import { CENSUS_SPEC, HEATMAP_PAN_SPEC, selectTests, specClosures } from "../scripts/select-ci-tests.mjs";
+import { CENSUS_SPEC, HEATMAP_PAN_SPEC, LIFECYCLE_SPEC, selectTests, specClosures } from "../scripts/select-ci-tests.mjs";
 
 const root = fileURLToPath(new URL("..", import.meta.url));
 const closures = specClosures(root);
-const defaultSpecs = [...closures.keys()].filter((spec) => spec !== CENSUS_SPEC && spec !== HEATMAP_PAN_SPEC);
+const defaultSpecs = [...closures.keys()].filter(
+  (spec) => spec !== CENSUS_SPEC && spec !== HEATMAP_PAN_SPEC && spec !== LIFECYCLE_SPEC,
+);
 
 test("every browser spec reaches itself and the census spec reaches the harness", () => {
   assert.ok(closures.size > 1);
@@ -17,6 +19,7 @@ test("docs, Node unit tests and other workflows select no browser test", () => {
   const result = selectTests(["md/TESTING.md", "README.md", "tests/footprint.test.mjs", ".github/workflows/release.yml"], closures);
   assert.equal(result.browser, "none");
   assert.equal(result.census, false);
+  assert.equal(result.lifecycle, false);
 });
 
 test("a changed browser spec selects only that spec", () => {
@@ -25,12 +28,22 @@ test("a changed browser spec selects only that spec", () => {
   assert.equal(result.browser, "list");
   assert.deepEqual(result.specs, [spec]);
   assert.equal(result.census, false);
+  assert.equal(result.lifecycle, false);
 });
 
 test("a changed census spec runs census only", () => {
   const result = selectTests([CENSUS_SPEC], closures);
   assert.equal(result.browser, "none");
   assert.equal(result.census, true);
+  assert.equal(result.lifecycle, false);
+});
+
+test("a changed lifecycle spec runs lifecycle only", () => {
+  const result = selectTests([LIFECYCLE_SPEC], closures);
+  assert.equal(result.browser, "none");
+  assert.deepEqual(result.specs, []);
+  assert.equal(result.census, false);
+  assert.equal(result.lifecycle, true);
 });
 
 test("a changed heatmap pan benchmark spec stays excluded from the default browser project", () => {
@@ -38,6 +51,7 @@ test("a changed heatmap pan benchmark spec stays excluded from the default brows
   assert.equal(result.browser, "none");
   assert.deepEqual(result.specs, []);
   assert.equal(result.census, false);
+  assert.equal(result.lifecycle, false);
 });
 
 test("engine source runs every browser test, including harness-driven specs (ChartRuntime regression)", () => {
@@ -46,6 +60,7 @@ test("engine source runs every browser test, including harness-driven specs (Cha
     const result = selectTests([file], closures);
     assert.equal(result.browser, "all", file);
     assert.equal(result.census, true, file);
+    assert.equal(result.lifecycle, true, file);
   }
 });
 
@@ -54,6 +69,7 @@ test("shared browser test support runs every browser test", () => {
     const result = selectTests([file], closures);
     assert.equal(result.browser, "all", file);
     assert.equal(result.census, true, file);
+    assert.equal(result.lifecycle, true, file);
   }
 });
 
@@ -71,6 +87,7 @@ test("fail-safe: shared config, unreached sources, unknown paths and odd names r
     const result = selectTests(changed, closures);
     assert.equal(result.browser, "all", JSON.stringify(changed));
     assert.equal(result.census, true, JSON.stringify(changed));
+    assert.equal(result.lifecycle, true, JSON.stringify(changed));
   }
 });
 

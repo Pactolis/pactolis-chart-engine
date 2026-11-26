@@ -19,11 +19,14 @@ import {
   webGpuFlushLaunchArgs,
 } from "../../harness/webgpuNativeBenchmark.mjs";
 
+const HARDWARE_MODE = process.env.CHART_GPU_BENCHMARK_MODE === "hardware";
+
 const ACTIVE_FIXTURE = resolveWebGpuNativeFixture({
   profile: process.env.CHART_GPU_NATIVE_PROFILE,
   barCount: process.env.CHART_GPU_NATIVE_BARS,
   cellsPerBar: process.env.CHART_GPU_NATIVE_CELLS,
   fitColumns: process.env.CHART_GPU_NATIVE_FIT,
+  hardwareMode: HARDWARE_MODE,
 });
 
 const {
@@ -51,8 +54,6 @@ type NativeMode = "immediate" | "gpu-native";
 type WebGpuVariant = "no-vulkan-compositor" | "vulkan-compositor";
 type ScenarioKind = (typeof WEBGPU_NATIVE_SCENARIOS)[number];
 type MetricName = (typeof WEBGPU_NATIVE_METRICS)[number];
-
-const HARDWARE_MODE = process.env.CHART_GPU_BENCHMARK_MODE === "hardware";
 
 function launchArgsFor(variant: WebGpuVariant = "no-vulkan-compositor"): string[] {
   return webGpuFlushLaunchArgs({
