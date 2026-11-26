@@ -42,7 +42,9 @@ test("Liquidation Profile auto mode renders Hyperliquid badge on BTC and Model b
     return ["127.0.0.1", "localhost"].includes(url.hostname) ? route.continue() : route.abort("blockedbyclient");
   });
 
+  let historyHits = 0;
   await page.route(/\/history(?:\?|$)/, (route) => {
+    historyHits += 1;
     const url = new URL(route.request().url());
     const from = Number(url.searchParams.get("from"));
     const to = Number(url.searchParams.get("to"));
@@ -152,7 +154,7 @@ test("Liquidation Profile auto mode renders Hyperliquid badge on BTC and Model b
       lpInstance.settings.source = "auto";
 
       const services = createHarnessServices({ priceStep, priceStepResolved: true });
-      const panelId = `lp-${market}`;
+      const panelId = market.toLowerCase().includes("wif") ? "lp-wif-auto" : "lp-btc-auto";
       const handle = harness.mountChart(
         root,
         {
@@ -176,6 +178,7 @@ test("Liquidation Profile auto mode renders Hyperliquid badge on BTC and Model b
         await new Promise((r) => setTimeout(r, 25));
       }
       const rt = harness.getChartRuntime(panelId)!;
+      const seriesLen = rt?.pipeline?.series?.length ?? -1;
 
       const texts: string[] = [];
       const origCanvasFillText = CanvasRenderingContext2D.prototype.fillText;
@@ -220,7 +223,7 @@ test("Liquidation Profile auto mode renders Hyperliquid badge on BTC and Model b
         }
         const avgPanMs = (performance.now() - t0) / 5;
 
-        return { capturedTexts, avgPanMs };
+        return { capturedTexts, avgPanMs, seriesLen };
       } finally {
         CanvasRenderingContext2D.prototype.fillText = origCanvasFillText;
         if (OffscreenProto && origOffscreenFillText) {
@@ -237,7 +240,7 @@ test("Liquidation Profile auto mode renders Hyperliquid badge on BTC and Model b
   });
 
   console.log(
-    `[liquidation-profile-model] btcTexts=${JSON.stringify(result.btc.capturedTexts)} wifTexts=${JSON.stringify(result.wif.capturedTexts)} wifAvgPanMs=${result.wif.avgPanMs.toFixed(2)}`,
+    `[liquidation-profile-model] historyHits=${historyHits} btcSeries=${result.btc.seriesLen} wifSeries=${result.wif.seriesLen} btcTexts=${JSON.stringify(result.btc.capturedTexts)} wifTexts=${JSON.stringify(result.wif.capturedTexts)} wifAvgPanMs=${result.wif.avgPanMs.toFixed(2)}`,
   );
 
   expect(result.btc.capturedTexts.some((t) => t.includes("Hyperliquid"))).toBe(true);
