@@ -432,3 +432,45 @@ export interface VenueFundingRequestInput {
   venues: FundingVenue[];
   onUpdate?: () => void;
 }
+
+export type WhaleCrowdVenue = "binance" | "okx" | "hyperliquid";
+
+export interface WhaleCrowdPoint {
+  t: number;
+  whaleRatio: number | null;
+  crowdRatio: number | null;
+  spread?: number | null;
+  resolution?: string;
+  source?: string;
+}
+
+export interface WhaleCrowdVenueSeries {
+  venue: WhaleCrowdVenue;
+  status?: "ready" | "warming" | "unsupported" | "unavailable" | "disabled";
+  definition?: string;
+  thresholdUsd?: number;
+  historyStartedAt?: number | null;
+  gaps?: Array<{ from: number; to: number }>;
+  points: WhaleCrowdPoint[];
+}
+
+export interface WhaleCrowdResponse {
+  status: "ready" | "unsupported" | "unavailable" | "disabled";
+  venues: WhaleCrowdVenueSeries[];
+  source?: "backend" | "browser";
+}
+
+export type WhaleCrowdSeriesState =
+  | { status: "idle" }
+  | { status: "unsupported"; message: string }
+  | { status: "loading" }
+  | { status: "ready"; data: WhaleCrowdResponse }
+  | { status: "error"; message: string };
+
+export interface WhaleCrowdRequestInput {
+  market: string;
+  from: number;
+  to: number;
+  venues: WhaleCrowdVenue[];
+  onUpdate?: () => void;
+}

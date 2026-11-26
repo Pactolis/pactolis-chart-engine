@@ -12,6 +12,8 @@ import type {
   OpenInterestSeriesState,
   VenueFundingRequestInput,
   VenueFundingSeriesState,
+  WhaleCrowdRequestInput,
+  WhaleCrowdSeriesState,
 } from "./metricContracts.js";
 import type { GexWallSurface } from "./gexWall.js";
 
@@ -32,6 +34,7 @@ export interface IndicatorDataSource {
   requestFuturesPositioningSeries(input: FuturesPositioningRequestInput): FuturesPositioningSeriesState;
   requestOpenInterestSeries?(input: OpenInterestRequestInput): OpenInterestSeriesState;
   requestVenueFundingSeries?(input: VenueFundingRequestInput): VenueFundingSeriesState;
+  requestWhaleCrowdSeries?(input: WhaleCrowdRequestInput): WhaleCrowdSeriesState;
   fetchOptionsGexSurface(request: OptionsGexSurfaceRequest, signal?: AbortSignal): Promise<GexWallSurface>;
   requestLiquidationClusters?(input: LiquidationClustersRequestInput): LiquidationClustersState;
   requestLiquidationModel?(input: LiquidationModelRequestInput): LiquidationModelSeriesState;

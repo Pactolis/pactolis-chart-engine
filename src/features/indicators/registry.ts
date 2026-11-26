@@ -60,7 +60,8 @@ type HeavyIndicatorType =
   | "liquidations"
   | "liquidation-profile"
   | "live-trade-bubbles"
-  | "options-gex-wall";
+  | "options-gex-wall"
+  | "whale-vs-crowd";
 
 const heavyCatalog: Record<HeavyIndicatorType, IndicatorCatalogEntry> = {
   "cross-exchange-open-interest": { type: "cross-exchange-open-interest", name: "Cross-Exchange OI", category: "derivatives", defaultPane: "separate" },
@@ -70,6 +71,7 @@ const heavyCatalog: Record<HeavyIndicatorType, IndicatorCatalogEntry> = {
   "liquidation-profile": { type: "liquidation-profile", name: "Liquidation Profile", category: "derivatives", defaultPane: "overlay" },
   "live-trade-bubbles": { type: "live-trade-bubbles", name: "Live Trade Bubbles", category: "flow", defaultPane: "overlay" },
   "options-gex-wall": { type: "options-gex-wall", name: "Options GEX Wall", category: "derivatives", defaultPane: "overlay" },
+  "whale-vs-crowd": { type: "whale-vs-crowd", name: "Whale vs Crowd", category: "derivatives", defaultPane: "separate" },
 };
 
 const heavyLoaders: Record<HeavyIndicatorType, () => Promise<IndicatorDefinition>> = {
@@ -80,6 +82,7 @@ const heavyLoaders: Record<HeavyIndicatorType, () => Promise<IndicatorDefinition
   "liquidation-profile": () => import("./builtins/liquidationProfile.js").then((module) => module.liquidationProfileIndicatorDefinition as IndicatorDefinition),
   "live-trade-bubbles": () => import("./builtins/liveTradeBubbles.js").then((module) => module.liveTradeBubblesIndicatorDefinition as IndicatorDefinition),
   "options-gex-wall": () => import("./builtins/optionsGexWall.js").then((module) => module.optionsGexWallIndicatorDefinition as IndicatorDefinition),
+  "whale-vs-crowd": () => import("./builtins/whaleVsCrowd.js").then((module) => module.whaleVsCrowdIndicatorDefinition as IndicatorDefinition),
 };
 
 export const indicatorRegistry: Record<string, IndicatorDefinition> = Object.fromEntries(
