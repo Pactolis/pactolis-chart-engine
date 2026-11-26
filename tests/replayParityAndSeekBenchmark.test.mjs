@@ -688,6 +688,33 @@ test("replay as-of parity: external OI, Funding, Liquidations, and Futures Posit
         points: cutoffTime === null ? posPoints : posPoints.filter((p) => p.time < cutoffTime),
       },
     }),
+    requestVenueFundingSeries: ({ to, venues }) => {
+      const limit = cutoffTime ?? to;
+      const settled = (cutoffTime === null ? fundPoints : fundPoints.filter((p) => p.time < cutoffTime)).map((p) => ({
+        t: p.time,
+        rate: p.value,
+        intervalHours: 1,
+        rate8h: p.value,
+      }));
+      const predLast = predFundPoints.filter((p) => p.time < limit).at(-1);
+      return {
+        status: "ready",
+        data: {
+          market: "BTCUSDT",
+          from: T0,
+          to: limit,
+          venues,
+          series: [
+            {
+              venue: "binancef",
+              intervalHours: 1,
+              settled,
+              current: predLast ? { t: predLast.time, rate: predLast.value, rate8h: predLast.value } : null,
+            },
+          ],
+        },
+      };
+    },
     fetchOptionsGexSurface: async () => ({ spotPrice: 99_999, callWall: 120_000, putWall: 80_000, strikes: [], timestamp: T0 + 159 * MIN }),
   });
 
@@ -697,13 +724,14 @@ test("replay as-of parity: external OI, Funding, Liquidations, and Futures Posit
     liquidationsIndicatorDefinition,
     futuresPositioningIndicatorDefinition,
   ];
+  const extOpts = (def) => (def.type === "funding-regime" ? { settingsOverrides: { mode: "fundingRate" } } : {});
 
   coordinator.start();
   coordinator.seek(T0 + 120 * MIN);
   // Populate caches at T_120 first (in future window containing huge spikes), then seek backward to T_40.
   withMockedIndicatorSource(makeMockSource(null), () => {
     for (const def of extDefs) {
-      def.prepareData(makeIndicatorDrawContext(series, def, { asOfTime: T0 + 120 * MIN }));
+      def.prepareData(makeIndicatorDrawContext(series, def, { asOfTime: T0 + 120 * MIN, ...extOpts(def) }));
     }
   });
 
@@ -712,10 +740,10 @@ test("replay as-of parity: external OI, Funding, Liquidations, and Futures Posit
 
   for (const def of extDefs) {
     const replayPrepared = withMockedIndicatorSource(makeMockSource(null), () =>
-      def.prepareData(makeIndicatorDrawContext(series, def, { asOfTime: T0 + 40 * MIN })),
+      def.prepareData(makeIndicatorDrawContext(series, def, { asOfTime: T0 + 40 * MIN, ...extOpts(def) })),
     );
     const oraclePrepared = withMockedIndicatorSource(makeMockSource(T0 + 40 * MIN), () =>
-      def.prepareData(makeIndicatorDrawContext(oracle, def)),
+      def.prepareData(makeIndicatorDrawContext(oracle, def, extOpts(def))),
     );
     assert.equal(replayPrepared.status, "ok", `${def.type} should stay ok`);
     assert.deepStrictEqual(replayPrepared.points, oraclePrepared.points, `${def.type}: external replay points must ignore >T_40 future spikes`);
