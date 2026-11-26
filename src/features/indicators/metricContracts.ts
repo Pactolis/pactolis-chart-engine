@@ -174,6 +174,194 @@ export interface FuturesPositioningRequestInput {
   onUpdate?: () => void;
 }
 
+export interface LiquidationClusterLevel {
+  price: number;
+  longNotional: number;
+  shortNotional: number;
+  longCount: number;
+  shortCount: number;
+}
+
+export type LiquidationClustersStatus =
+  | "ready"
+  | "stale"
+  | "source-changed"
+  | "unsupported"
+  | "disabled"
+  | "unavailable";
+
+export interface LiquidationClustersResponse {
+  status: LiquidationClustersStatus;
+  source?: string;
+  hlCoin?: string | null;
+  snapshotId?: string | null;
+  takenAt?: number | null;
+  fetchedAt?: number | null;
+  stale?: boolean;
+  hlMarkPx?: number | null;
+  hlMarkAt?: number | null;
+  rangePct?: number | null;
+  clusters: LiquidationClusterLevel[];
+  totals?: { longNotional: number; shortNotional: number } | null;
+}
+
+export type LiquidationClustersState =
+  | { status: "idle" }
+  | { status: "loading" }
+  | { status: "unsupported"; message?: string }
+  | { status: "disabled"; message?: string }
+  | { status: "unavailable"; message?: string }
+  | { status: "ready"; data: LiquidationClustersResponse }
+  | { status: "error"; message: string };
+
+export interface LiquidationClustersRequestInput {
+  market: string;
+  rangePct?: number;
+  source?: string;
+  onUpdate?: () => void;
+}
+
+export interface LiquidationModelBar {
+  t: number;
+  h: number;
+  l: number;
+  c: number;
+  v: number;
+  tb: number;
+  oi: number;
+}
+
+export interface LiquidationModelStatePayload {
+  schemaVersion: number;
+  modelVersion: number;
+  symbol: string;
+  params: {
+    lev: number[];
+    lw: number[];
+    mmr: number;
+    bw: number;
+    p0: number;
+    nbk: number;
+  };
+  asOf: number;
+  lastOi: number;
+  longb: string | number[];
+  shortb: string | number[];
+  v1: {
+    passed: boolean;
+    tested: boolean;
+    fallingBp: number;
+    risingBp: number;
+    bestPlaceboBp: number;
+    days: number;
+  };
+  seam: LiquidationModelBar[];
+}
+
+export type LiquidationModelStatus =
+  | "ready"
+  | "warming"
+  | "unsupported"
+  | "stale"
+  | "seam-mismatch"
+  | "unavailable";
+
+export interface LiquidationModelResponse {
+  status: LiquidationModelStatus;
+  state?: LiquidationModelStatePayload;
+  bars?: LiquidationModelBar[];
+}
+
+export type LiquidationModelSeriesState =
+  | { status: "idle" }
+  | { status: "loading" }
+  | { status: "warming"; message?: string }
+  | { status: "unsupported"; message?: string }
+  | { status: "stale"; message?: string }
+  | { status: "seam-mismatch"; message?: string }
+  | { status: "unavailable"; message?: string }
+  | { status: "ready"; data: LiquidationModelResponse }
+  | { status: "error"; message: string };
+
+export interface LiquidationModelRequestInput {
+  market: string;
+  onUpdate?: () => void;
+}
+
+export type LiveTradeEventKind = "trade" | "liquidation";
+export type LiveTradeEventScope = "base" | "market";
+
+export interface LiveTradeEvent {
+  id: string;
+  kind: LiveTradeEventKind;
+  time: number;
+  price: number;
+  qty: number;
+  notionalUsd: number;
+  side: "buy" | "sell" | "long" | "short";
+  venue: string;
+  sampled?: boolean;
+}
+
+export interface LiveTradeEventsRequest {
+  market: string;
+  kinds: LiveTradeEventKind[];
+  scope: LiveTradeEventScope;
+  onEvents: (events: LiveTradeEvent[]) => void;
+}
+
+export type OpenInterestVenue = "binance" | "bybit" | "okx" | "hyperliquid";
+export type OpenInterestUnit = "usd" | "base";
+
+export interface OpenInterestPoint {
+  time: number;
+  value: number;
+}
+
+export interface OpenInterestGap {
+  from: number;
+  to: number;
+}
+
+export interface OpenInterestVenueSeries {
+  venue: OpenInterestVenue;
+  points: OpenInterestPoint[];
+  recordingStartedAt?: number | null;
+  historyStartedAt?: number | null;
+  gaps?: OpenInterestGap[];
+  source?: "backend" | "browser" | "instant-only";
+}
+
+export interface OpenInterestSeriesResponse {
+  status?: "ok" | "partial" | "no-data" | "unsupported";
+  unit: "base";
+  resolution: string;
+  venues: OpenInterestVenueSeries[];
+  recordingStartedAt?: number | null;
+  historyStartedAt?: number | null;
+  gaps?: OpenInterestGap[];
+  source?: "backend" | "browser" | "instant-only";
+  truncated?: boolean;
+  message?: string;
+}
+
+export type OpenInterestSeriesState =
+  | { status: "idle" }
+  | { status: "unsupported"; message: string }
+  | { status: "loading" }
+  | { status: "ready"; data: OpenInterestSeriesResponse }
+  | { status: "error"; message: string };
+
+export interface OpenInterestRequestInput {
+  market: string;
+  timeframe: string;
+  intervalMs: number;
+  venues: OpenInterestVenue[];
+  from?: number;
+  to?: number;
+  onUpdate?: () => void;
+}
+
 export type FundingVenue = "binancef" | "bybitf" | "okxf" | "hyperliquid";
 
 export interface VenueFundingSettledPoint {

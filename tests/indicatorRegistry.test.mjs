@@ -11,6 +11,8 @@ const heavyTypes = [
   "funding-regime",
   "futures-positioning",
   "liquidations",
+  "liquidation-profile",
+  "live-trade-bubbles",
   "options-gex-wall",
   "whale-vs-crowd",
 ];
@@ -27,11 +29,11 @@ test("indicator catalog exposes heavyweight entries without requiring definition
   for (const type of heavyTypes) assert.ok(catalog.some((entry) => entry.type === type));
 });
 
-test("indicator catalog keeps all 27 addable types with settings and serializable defaults", async () => {
+test("indicator catalog keeps all 29 addable types with settings and serializable defaults", async () => {
   const module = await registry();
   const catalog = module.listIndicatorDefinitions();
-  assert.equal(catalog.length, 27);
-  assert.equal(new Set(catalog.map((entry) => entry.type)).size, 27);
+  assert.equal(catalog.length, 29);
+  assert.equal(new Set(catalog.map((entry) => entry.type)).size, 29);
 
   for (const [order, entry] of catalog.entries()) {
     const definition = module.getIndicatorDefinition(entry.type);
@@ -197,10 +199,10 @@ test("built-in header labels include compact metadata", async () => {
       status: "ok",
       points: [],
       range: { min: -1, max: 1, baseline: 0 },
-      meta: { interval: "1hour", mode: "openInterestDeltaUsd", truncated: false, symbolCount: 18 },
+      meta: { interval: "5m", mode: "openInterestDeltaUsd", unit: "usd", truncated: false },
     },
   });
-  assert.equal(crossOiLabel, "Cross OI 1h | OI Delta | src 1hour | 9ex | USD+COIN | 18 sym");
+  assert.equal(crossOiLabel, "Cross OI 1h | OI Delta | USD | src 5m | 4ex");
 
   const fundingSettings = funding.defaultSettings();
   const fundingLabel = funding.getHeaderLabel({
