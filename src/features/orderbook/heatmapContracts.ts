@@ -6,7 +6,7 @@ export type OrderbookResolution = "auto" | "1m" | "5m" | "15m" | "30m" | "1h" | 
 /** Which book the chart heatmap reads: single venue, every book summed, or explicit custom sources. */
 export type OrderbookHeatmapSource = "single" | "aggregated" | "custom";
 
-export type OrderbookHeatmapBucketStep = 25 | 50 | 100 | 250;
+export type OrderbookHeatmapBucketStep = number;
 
 export interface OrderbookHeatmapRequest {
   source: OrderbookHeatmapSource;
@@ -33,7 +33,7 @@ export interface OrderbookHeatmapBar {
 export interface OrderbookHeatmapResponse {
   schemaVersion: number;
   generatedAt: number;
-  base: "BTC";
+  base: string;
   source: OrderbookHeatmapSource;
   resolution: Exclude<OrderbookResolution, "auto">;
   bucketStep: number;
@@ -92,4 +92,6 @@ export interface OrderbookHeatmapRuntimeStatus {
   readonly observedSources: readonly string[];
   readonly missingSources: readonly string[];
   readonly hasBars: boolean;
+  readonly sourceKind?: "history" | "browser";
+  readonly sourceLabel?: string;
 }

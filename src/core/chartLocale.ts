@@ -39,6 +39,10 @@ const CHART_LOCALE_FALLBACKS: Readonly<Record<string, { tr: string; en: string }
     tr: "Kullanılamıyor: gerçek footprint verisi gerekir",
     en: "Unavailable: exact footprint data required",
   },
+  "orderbook.heatmap.browserLiveSource": {
+    tr: "uygulama açıldığından beri",
+    en: "since app opened",
+  },
   "indicator.liveTradeBubbles.trade": {
     tr: "İşlem",
     en: "Trade",
