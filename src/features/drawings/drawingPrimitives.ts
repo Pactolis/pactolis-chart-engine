@@ -42,8 +42,8 @@ export const DEFAULT_DRAWING_TEMPLATE_STATE: DrawingTemplateState = {
 /** Eski (market alanı olmayan) çizimler tamamı BTC'de çizilmişti; normalize sırasında bu değere migrate edilir. */
 export const LEGACY_DRAWING_MARKET = "BINANCE_FUTURES:btcusdt";
 
-const ORDER_FLOW_PROFILE_STYLE_KEYS = [
-  "profileMetric", "profileSide", "valueAreaPercent", "profileWidth", "pocMode", "vahMode", "valMode",
+export const ORDER_FLOW_PROFILE_STYLE_KEYS = [
+  "profileMetric", "profileSide", "profilePlacement", "valueAreaPercent", "profileWidth", "pocMode", "vahMode", "valMode",
   "pocStaticColor", "pocStaticWidth", "pocStaticStyle",
   "pocDevelopingColor", "pocDevelopingWidth", "pocDevelopingStyle",
   "vahStaticColor", "vahStaticWidth", "vahStaticStyle",
@@ -52,10 +52,11 @@ const ORDER_FLOW_PROFILE_STYLE_KEYS = [
   "valDevelopingColor", "valDevelopingWidth", "valDevelopingStyle",
 ] as const satisfies readonly (keyof DrawingStylePreset)[];
 
-const DRAWING_STYLE_PRESET_KEYS = [
+export const DRAWING_STYLE_PRESET_KEYS = [
   "color", "lineWidth", "lineStyle", "showLabel", "showPriceLabel", "showTimeLabel",
   "opacity", "fillOpacity", "extendLeft", "extendRight", "text", "valueAreaPercent",
   "showPoc", "showVah", "showVal", "profileWidth", "profileMetric", "profileSide",
+  "profilePlacement",
   "pocMode", "vahMode", "valMode",
   "pocStaticColor", "pocStaticWidth", "pocStaticStyle",
   "pocDevelopingColor", "pocDevelopingWidth", "pocDevelopingStyle",

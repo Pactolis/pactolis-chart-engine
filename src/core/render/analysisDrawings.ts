@@ -424,7 +424,8 @@ function drawRangeProfile(
   const priceStep = series.config.priceStep;
   const levelFrom = lowerBoundLevelPrice(result.levels, priceRange.minValue() - priceStep);
   const levelTo = lowerBoundLevelPrice(result.levels, priceRange.maxValue() + priceStep);
-  const deltaZeroX = left + maxWidth / 2;
+  const placement = settings.profilePlacement === "right" ? "right" : "left";
+  const deltaZeroX = placement === "right" ? right - maxWidth / 2 : left + maxWidth / 2;
 
   ctx.save();
   ctx.beginPath();
@@ -446,12 +447,18 @@ function drawRangeProfile(
         ctx.fillRect(part.signed >= 0 ? deltaZeroX : deltaZeroX - width, yTop, width, rowHeight);
         continue;
       }
-      let cursor = left;
-      for (const part of parts) {
+      let cursor = placement === "right" ? right : left;
+      const orderedParts = placement === "right" ? [...parts].reverse() : parts;
+      for (const part of orderedParts) {
         const width = maxWidth * part.value / Math.max(maxMagnitude, Number.EPSILON);
         ctx.fillStyle = part.side === "sell" ? uiColor.sell : uiColor.buy;
-        ctx.fillRect(cursor, yTop, width, rowHeight);
-        cursor += width;
+        if (placement === "right") {
+          ctx.fillRect(cursor - width, yTop, width, rowHeight);
+          cursor -= width;
+        } else {
+          ctx.fillRect(cursor, yTop, width, rowHeight);
+          cursor += width;
+        }
       }
     }
   }
@@ -463,20 +470,22 @@ function drawRangeProfile(
   }
   const estimatedLabelY = view.area.top + 14;
   let disclosureLines = 0;
+  const badgeAlign = placement === "right" ? "right" : "left";
+  const badgeX = placement === "right" ? right - 4 : left + 4;
   if (result.isEstimated) {
     ctx.fillStyle = uiColor.warn;
     ctx.font = "10px ui-monospace, monospace";
-    ctx.textAlign = "left";
-    ctx.fillText(tOr("indicator.volumeProfile.estimated"), left + 4, estimatedLabelY);
+    ctx.textAlign = badgeAlign;
+    ctx.fillText(tOr("indicator.volumeProfile.estimated"), badgeX, estimatedLabelY);
     disclosureLines += 1;
   }
   if (result.availability === "unavailable") {
     ctx.fillStyle = uiColor.warn;
     ctx.font = "10px ui-monospace, monospace";
-    ctx.textAlign = "left";
+    ctx.textAlign = badgeAlign;
     ctx.fillText(
       tOr("indicator.volumeProfile.estimatedMetricUnsupported"),
-      left + 4,
+      badgeX,
       estimatedLabelY + disclosureLines * 12,
       Math.max(0, right - left - 8),
     );
@@ -485,13 +494,13 @@ function drawRangeProfile(
   if (!result.complete || !result.dataComplete) {
     ctx.fillStyle = uiColor.warn;
     ctx.font = "10px ui-monospace, monospace";
-    ctx.textAlign = "left";
+    ctx.textAlign = badgeAlign;
     const percent = Math.round(result.coverage * 100);
     ctx.fillText(
       drawing.dataState === "loading"
         ? t("indicator.volumeProfile.coverageLoading", { percent })
         : t("indicator.volumeProfile.coverageIncomplete", { percent }),
-      left + 4,
+      badgeX,
       estimatedLabelY + disclosureLines * 12,
       Math.max(0, right - left - 8),
     );
