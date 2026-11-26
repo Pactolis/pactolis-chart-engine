@@ -1,3 +1,4 @@
+import type { OiDeltaDisplay } from "../orderFlowProfileSettings.js";
 import type { ProfileMetric, ProfileSide } from "../analysis/orderFlowProfile.js";
 
 export type HistogramPartSide = "buy" | "sell" | "total" | "delta";
@@ -7,6 +8,8 @@ export interface HistogramLevelLike {
   buyValue: number | null;
   sellValue: number | null;
   magnitude: number | null;
+  oiOpen?: number;
+  oiClose?: number;
 }
 
 export interface HistogramPart {
@@ -19,10 +22,22 @@ export function profileHistogramParts(
   level: HistogramLevelLike,
   metric: ProfileMetric,
   side: ProfileSide,
+  oiDeltaDisplay: OiDeltaDisplay = "net",
 ): HistogramPart[] {
   if (level.value === null || level.magnitude === null || !Number.isFinite(level.value)) return [];
   if (metric === "delta") {
     return [{ side: "delta", value: level.magnitude, signed: level.value }];
+  }
+  if (metric === "oi-delta") {
+    if (oiDeltaDisplay === "split") {
+      const openVal = Math.max(0, level.oiOpen ?? level.buyValue ?? 0);
+      const closeVal = Math.max(0, Math.abs(level.oiClose ?? level.sellValue ?? 0));
+      const parts: HistogramPart[] = [];
+      if (closeVal > 0) parts.push({ side: "sell", value: closeVal, signed: -closeVal });
+      if (openVal > 0) parts.push({ side: "buy", value: openVal, signed: openVal });
+      return parts;
+    }
+    return [{ side: "delta", value: Math.abs(level.value), signed: level.value }];
   }
   if ((metric === "volume" || metric === "trade-count") && side === "total") {
     if (level.buyValue !== null && level.sellValue !== null) {

@@ -134,6 +134,47 @@ function migrateLegacyTypeSettings(type: string, settings: IndicatorSettings): v
     return;
   }
 
+  if (type === "cross-exchange-open-interest") {
+    delete settings.marketTypes;
+    if (settings.unit !== "usd" && settings.unit !== "base") {
+      settings.unit = "usd";
+    }
+    const rawExchanges = settings.exchanges;
+    if (rawExchanges && typeof rawExchanges === "object" && !Array.isArray(rawExchanges)) {
+      const legacy = rawExchanges as Record<string, unknown>;
+      const mapped: Record<string, boolean> = {
+        binance: false,
+        bybit: false,
+        okx: false,
+        hyperliquid: false,
+      };
+      const keyMap: Record<string, string> = {
+        binance: "binance",
+        binancef: "binance",
+        bybit: "bybit",
+        bybitf: "bybit",
+        okx: "okx",
+        okxf: "okx",
+        hyperliquid: "hyperliquid",
+      };
+      for (const [k, v] of Object.entries(legacy)) {
+        const target = keyMap[k];
+        if (!target || typeof v !== "boolean") continue;
+        if (k === target || !(target in legacy)) {
+          mapped[target] = v;
+        }
+      }
+      if (!Object.values(mapped).some(Boolean)) {
+        mapped.binance = true;
+        mapped.bybit = true;
+        mapped.okx = true;
+        mapped.hyperliquid = true;
+      }
+      settings.exchanges = mapped;
+    }
+    return;
+  }
+
   if (type === "moving-average" && !Array.isArray(settings.lines)) {
     const hasLegacy = ["periods", "method", "sourceTimeframe", "color1", "color2", "color3"]
       .some((key) => Object.prototype.hasOwnProperty.call(settings, key));

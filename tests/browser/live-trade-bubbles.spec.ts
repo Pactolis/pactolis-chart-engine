@@ -140,3 +140,58 @@ test("Live Trade Bubbles renders in light & dark themes and stays within frame b
   expect(report.avgFrameMs).toBeLessThan(16);
   expect(report.maxFrameMs).toBeLessThan(32);
 });
+
+test("Live Trade Bubbles market switch invokes handleMarketChange once and measures frame duration", async ({ page }) => {
+  await openHarness(page);
+
+  const measurement = await page.evaluate(async () => {
+    const { getChartRuntime } = await import("/harness/chart.ts");
+    const runtime = getChartRuntime("harness-chart") as unknown as {
+      getState(): { market: string; [key: string]: unknown };
+      setState(next: Record<string, unknown>): void;
+      indicatorController: {
+        handleMarketChange(market?: string): void;
+        manager: { handleMarketChange(market?: string): void };
+      };
+    } | undefined;
+    if (!runtime) throw new Error("harness-chart runtime not found");
+
+    let controllerCalls = 0;
+    let managerCalls = 0;
+    const origController = runtime.indicatorController.handleMarketChange.bind(runtime.indicatorController);
+    const origManager = runtime.indicatorController.manager.handleMarketChange.bind(runtime.indicatorController.manager);
+
+    runtime.indicatorController.handleMarketChange = (market?: string) => {
+      controllerCalls++;
+      return origController(market);
+    };
+    runtime.indicatorController.manager.handleMarketChange = (market?: string) => {
+      managerCalls++;
+      return origManager(market);
+    };
+
+    try {
+      const prev = runtime.getState();
+      const nextMarket = prev.market === "ETHUSDT" ? "BTCUSDT" : "ETHUSDT";
+      const t0 = performance.now();
+      runtime.setState({ ...prev, market: nextMarket });
+      await new Promise<void>((resolve) => requestAnimationFrame(() => resolve()));
+      const marketSwitchFrameMs = Number((performance.now() - t0).toFixed(2));
+      return {
+        fromMarket: prev.market,
+        toMarket: nextMarket,
+        controllerCalls,
+        managerCalls,
+        marketSwitchFrameMs,
+      };
+    } finally {
+      runtime.indicatorController.handleMarketChange = origController;
+      runtime.indicatorController.manager.handleMarketChange = origManager;
+    }
+  });
+
+  console.log("LIVE_TRADE_BUBBLES_MARKET_SWITCH", JSON.stringify(measurement));
+  expect(measurement.controllerCalls).toBe(1);
+  expect(measurement.managerCalls).toBe(1);
+  expect(measurement.marketSwitchFrameMs).toBeLessThan(250);
+});

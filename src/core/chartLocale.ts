@@ -59,6 +59,98 @@ const CHART_LOCALE_FALLBACKS: Readonly<Record<string, { tr: string; en: string }
     tr: "Canlı işlem/likidasyon akışı yapılandırılmadı",
     en: "Live trade/liquidation stream is not configured",
   },
+  "indicator.volumeProfile.placement": {
+    tr: "Yerleşim",
+    en: "Placement",
+  },
+  "indicator.volumeProfile.placement.left": {
+    tr: "Sol",
+    en: "Left",
+  },
+  "indicator.volumeProfile.placement.right": {
+    tr: "Sağ",
+    en: "Right",
+  },
+  "draw.fixedRangeVolumeProfile.placement": {
+    tr: "Profil Yerleşimi",
+    en: "Profile Placement",
+  },
+  "draw.fixedRangeVolumeProfile.placement.left": {
+    tr: "Aralık Başlangıcı (Sol)",
+    en: "Range Start (Left)",
+  },
+  "draw.fixedRangeVolumeProfile.placement.right": {
+    tr: "Aralık Sonu (Sağ)",
+    en: "Range End (Right)",
+  },
+  "indicator.common.unit": {
+    tr: "Birim",
+    en: "Unit",
+  },
+  "indicator.crossExchangeOpenInterest.unit.usd": {
+    tr: "USD",
+    en: "USD",
+  },
+  "indicator.crossExchangeOpenInterest.unit.base": {
+    tr: "Base (Coin)",
+    en: "Base (Coin)",
+  },
+  "indicator.crossExchangeOpenInterest.unrecorded": {
+    tr: "OI kaydı yok (bu market kaydedilmiyor)",
+    en: "No OI record (this market is not recorded)",
+  },
+  "indicator.crossExchangeOpenInterest.instantOnly": {
+    tr: "yalnız anlık",
+    en: "instant-only",
+  },
+  "indicator.crossExchangeOpenInterest.recordingStarted": {
+    tr: "Kayıt başlangıcı: {time}",
+    en: "Recording started: {time}",
+  },
+  "indicator.crossExchangeOpenInterest.historyStarted": {
+    tr: "Geçmiş başlangıcı: {time}",
+    en: "History started: {time}",
+  },
+  "indicator.volumeProfile.metric.oiDelta": {
+    tr: "OI Delta",
+    en: "OI Delta",
+  },
+  "indicator.volumeProfile.oiDeltaDisplay": {
+    tr: "OI Delta Görünümü",
+    en: "OI Delta Display",
+  },
+  "indicator.volumeProfile.oiDeltaDisplay.net": {
+    tr: "Net",
+    en: "Net",
+  },
+  "indicator.volumeProfile.oiDeltaDisplay.split": {
+    tr: "Açılış / Kapanış",
+    en: "Opened / Closed",
+  },
+  "indicator.volumeProfile.oiVenues": {
+    tr: "OI Borsaları",
+    en: "OI Venues",
+  },
+  "indicator.volumeProfile.oiNoData": {
+    tr: "OI verisi yok",
+    en: "No OI data",
+  },
+  "indicator.volumeProfile.oiLoading": {
+    tr: "OI yükleniyor...",
+    en: "Loading OI...",
+  },
+  "indicator.volumeProfile.oiEstimated": {
+    tr: "tahmini",
+    en: "estimated",
+  },
+  "indicator.volumeProfile.oiCoverage": {
+    tr: "kapsama %{percent}",
+    en: "coverage {percent}%",
+  },
+  "indicator.volumeProfile.oiRecordingSince": {
+    tr: "OI kaydı {time}'dan beri · kapsama %{percent}",
+    en: "OI recorded since {time} · coverage {percent}%",
+  },
 };
 
 let configured: ChartLocale | null = null;

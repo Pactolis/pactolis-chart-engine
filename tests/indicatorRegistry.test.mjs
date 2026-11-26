@@ -192,10 +192,10 @@ test("built-in header labels include compact metadata", async () => {
       status: "ok",
       points: [],
       range: { min: -1, max: 1, baseline: 0 },
-      meta: { interval: "1hour", mode: "openInterestDeltaUsd", truncated: false, symbolCount: 18 },
+      meta: { interval: "5m", mode: "openInterestDeltaUsd", unit: "usd", truncated: false },
     },
   });
-  assert.equal(crossOiLabel, "Cross OI 1h | OI Delta | src 1hour | 9ex | USD+COIN | 18 sym");
+  assert.equal(crossOiLabel, "Cross OI 1h | OI Delta | USD | src 5m | 4ex");
 
   const fundingSettings = funding.defaultSettings();
   const fundingLabel = funding.getHeaderLabel({
@@ -205,11 +205,19 @@ test("built-in header labels include compact metadata", async () => {
     prepared: {
       status: "ok",
       points: [],
-      range: { min: -0.01, max: 0.01, baseline: 0 },
-      meta: { interval: "1hour", mode: "fundingRate", truncated: true, symbolCount: 20 },
+      range: { min: -3, max: 3, baseline: 0 },
+      meta: {
+        interval: "1h",
+        mode: "zScore",
+        truncated: true,
+        activeVenues: ["binancef", "bybitf", "okxf", "hyperliquid"],
+        excludedVenues: ["okxf"],
+        source: "backend",
+        insufficientData: false,
+      },
     },
   });
-  assert.equal(fundingLabel, "Funding 1h | Funding | src 1hour | 9ex | USD+COIN | 20 sym | truncated");
+  assert.equal(fundingLabel, "Funding 1h | Z-Score | 30d | 4/4 borsa | haric:okxf | backend | truncated");
 
   const positioningSettings = positioning.defaultSettings();
   const positioningLabel = positioning.getHeaderLabel({
