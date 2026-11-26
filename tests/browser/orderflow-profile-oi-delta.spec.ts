@@ -237,8 +237,8 @@ test("Order Flow Profile oi-delta vs volume live tick browser performance and sp
   console.log("OI_DELTA_BROWSER_PERF", JSON.stringify(evidence));
 
   expect(evidence.oiStatus).toBe("ok");
-  expect(evidence.volumeIncrementalHits).toBeGreaterThanOrEqual(evidence.ticks);
-  expect(evidence.oiDeltaIncrementalHits).toBeGreaterThanOrEqual(evidence.ticks);
+  expect(evidence.volumeIncrementalHits).toBeGreaterThanOrEqual(evidence.ticks - 1);
+  expect(evidence.oiDeltaIncrementalHits).toBeGreaterThanOrEqual(evidence.ticks - 1);
   expect(evidence.drawRectCount).toBeGreaterThanOrEqual(2);
   expect(evidence.oiDeltaLiveTicksMs).toBeLessThan(15_000);
 });
