@@ -14,7 +14,7 @@ import {
   type IndicatorPrepareRevisionStamp,
   type IndicatorPrepareRunner,
 } from "./prepareScheduler.js";
-import { purgeIndicatorBuiltinState } from "./builtins/stateRegistry.js";
+import { purgeIndicatorBuiltinState, runIndicatorCleanup } from "./builtins/stateRegistry.js";
 import { buildIndicatorAnalysisSnapshot } from "./analysisSnapshot.js";
 import {
   createIndicatorPaneHeadersModel,
@@ -131,6 +131,47 @@ function migrateLegacyTypeSettings(type: string, settings: IndicatorSettings): v
     delete settings.tradeSizeFilter;
     delete settings.marketTypes;
     delete settings.exchanges;
+    return;
+  }
+
+  if (type === "cross-exchange-open-interest") {
+    delete settings.marketTypes;
+    if (settings.unit !== "usd" && settings.unit !== "base") {
+      settings.unit = "usd";
+    }
+    const rawExchanges = settings.exchanges;
+    if (rawExchanges && typeof rawExchanges === "object" && !Array.isArray(rawExchanges)) {
+      const legacy = rawExchanges as Record<string, unknown>;
+      const mapped: Record<string, boolean> = {
+        binance: false,
+        bybit: false,
+        okx: false,
+        hyperliquid: false,
+      };
+      const keyMap: Record<string, string> = {
+        binance: "binance",
+        binancef: "binance",
+        bybit: "bybit",
+        bybitf: "bybit",
+        okx: "okx",
+        okxf: "okx",
+        hyperliquid: "hyperliquid",
+      };
+      for (const [k, v] of Object.entries(legacy)) {
+        const target = keyMap[k];
+        if (!target || typeof v !== "boolean") continue;
+        if (k === target || !(target in legacy)) {
+          mapped[target] = v;
+        }
+      }
+      if (!Object.values(mapped).some(Boolean)) {
+        mapped.binance = true;
+        mapped.bybit = true;
+        mapped.okx = true;
+        mapped.hyperliquid = true;
+      }
+      settings.exchanges = mapped;
+    }
     return;
   }
 
@@ -384,6 +425,9 @@ export class IndicatorManager {
     for (const prevId of prevIds) {
       if (!nextIds.has(prevId)) purgeIndicatorBuiltinState(prevId);
     }
+    for (const instance of this.instances) {
+      if (!instance.visible) runIndicatorCleanup(instance.id);
+    }
     this.renderRevision++;
     this.renderHeaders();
     if (this.latestView) this.layout(this.latestView);
@@ -419,8 +463,20 @@ export class IndicatorManager {
     const current = this.instances.find((item) => item.id === id);
     if (!current || current.visible === visible) return;
     this.dismissRemoveUndo();
+    if (!visible) runIndicatorCleanup(id);
     this.instances = this.instances.map((item) => item.id === id ? { ...item, visible } : item);
     this.emit(true, ChartChange.Visibility);
+  }
+
+  handleMarketChange(market?: string): void {
+    void market;
+    this.managerGeneration++;
+    this.prepareScheduler.cancelAll();
+    this.preparedDataCache.clear();
+    for (const instance of this.instances) runIndicatorCleanup(instance.id);
+    this.renderRevision++;
+    this.renderHeaders();
+    this.onInvalidate(ChartChange.Style);
   }
 
   deleteIndicator(id: string): void {
@@ -955,7 +1011,14 @@ export class IndicatorManager {
 
   private toggleVisible(id: string): void {
     this.dismissRemoveUndo();
-    this.instances = this.instances.map((item) => item.id === id ? { ...item, visible: !item.visible } : item);
+    let becameHidden = false;
+    this.instances = this.instances.map((item) => {
+      if (item.id !== id) return item;
+      const nextVisible = !item.visible;
+      if (!nextVisible) becameHidden = true;
+      return { ...item, visible: nextVisible };
+    });
+    if (becameHidden) runIndicatorCleanup(id);
     this.emit(true, ChartChange.Visibility);
   }
 

@@ -39,6 +39,30 @@ const CHART_LOCALE_FALLBACKS: Readonly<Record<string, { tr: string; en: string }
     tr: "Kullanılamıyor: gerçek footprint verisi gerekir",
     en: "Unavailable: exact footprint data required",
   },
+  "orderbook.heatmap.browserLiveSource": {
+    tr: "uygulama açıldığından beri",
+    en: "since app opened",
+  },
+  "indicator.liveTradeBubbles.trade": {
+    tr: "İşlem",
+    en: "Trade",
+  },
+  "indicator.liveTradeBubbles.liquidation": {
+    tr: "Likidasyon",
+    en: "Liquidation",
+  },
+  "indicator.liveTradeBubbles.sampled": {
+    tr: "örneklenmiş",
+    en: "sampled",
+  },
+  "indicator.liveTradeBubbles.kindsDescription": {
+    tr: "Binance likidasyonları 1/sn örneklenir; Hyperliquid herkese açık likidasyon akışı sunmaz.",
+    en: "Binance liquidations are 1/s sampled; Hyperliquid lacks a public liquidation stream.",
+  },
+  "indicator.liveTradeBubbles.unsupported": {
+    tr: "Canlı işlem/likidasyon akışı yapılandırılmadı",
+    en: "Live trade/liquidation stream is not configured",
+  },
   "indicator.volumeProfile.placement": {
     tr: "Yerleşim",
     en: "Placement",
@@ -122,6 +146,74 @@ const CHART_LOCALE_FALLBACKS: Readonly<Record<string, { tr: string; en: string }
   "indicator.liquidationProfile.shortColor": {
     tr: "Short Likidasyon Rengi",
     en: "Short Liquidation Color",
+  },
+  "indicator.common.unit": {
+    tr: "Birim",
+    en: "Unit",
+  },
+  "indicator.crossExchangeOpenInterest.unit.usd": {
+    tr: "USD",
+    en: "USD",
+  },
+  "indicator.crossExchangeOpenInterest.unit.base": {
+    tr: "Base (Coin)",
+    en: "Base (Coin)",
+  },
+  "indicator.crossExchangeOpenInterest.unrecorded": {
+    tr: "OI kaydı yok (bu market kaydedilmiyor)",
+    en: "No OI record (this market is not recorded)",
+  },
+  "indicator.crossExchangeOpenInterest.instantOnly": {
+    tr: "yalnız anlık",
+    en: "instant-only",
+  },
+  "indicator.crossExchangeOpenInterest.recordingStarted": {
+    tr: "Kayıt başlangıcı: {time}",
+    en: "Recording started: {time}",
+  },
+  "indicator.crossExchangeOpenInterest.historyStarted": {
+    tr: "Geçmiş başlangıcı: {time}",
+    en: "History started: {time}",
+  },
+  "indicator.volumeProfile.metric.oiDelta": {
+    tr: "OI Delta",
+    en: "OI Delta",
+  },
+  "indicator.volumeProfile.oiDeltaDisplay": {
+    tr: "OI Delta Görünümü",
+    en: "OI Delta Display",
+  },
+  "indicator.volumeProfile.oiDeltaDisplay.net": {
+    tr: "Net",
+    en: "Net",
+  },
+  "indicator.volumeProfile.oiDeltaDisplay.split": {
+    tr: "Açılış / Kapanış",
+    en: "Opened / Closed",
+  },
+  "indicator.volumeProfile.oiVenues": {
+    tr: "OI Borsaları",
+    en: "OI Venues",
+  },
+  "indicator.volumeProfile.oiNoData": {
+    tr: "OI verisi yok",
+    en: "No OI data",
+  },
+  "indicator.volumeProfile.oiLoading": {
+    tr: "OI yükleniyor...",
+    en: "Loading OI...",
+  },
+  "indicator.volumeProfile.oiEstimated": {
+    tr: "tahmini",
+    en: "estimated",
+  },
+  "indicator.volumeProfile.oiCoverage": {
+    tr: "kapsama %{percent}",
+    en: "coverage {percent}%",
+  },
+  "indicator.volumeProfile.oiRecordingSince": {
+    tr: "OI kaydı {time}'dan beri · kapsama %{percent}",
+    en: "OI recorded since {time} · coverage {percent}%",
   },
 };
 
