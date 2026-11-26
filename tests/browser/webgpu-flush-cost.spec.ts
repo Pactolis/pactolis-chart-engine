@@ -5,15 +5,18 @@ import {
   buildDenseFootprintBars,
   buildWebGpuFlushAssessment,
   classifyWebGpuAdapter,
+  resolveWebGpuFlushFixture,
   selectWebGpuProbe,
   shouldTryWebGpuVulkan,
   WEBGPU_FLUSH_DECISION_RULE,
-  WEBGPU_FLUSH_FIXTURE,
   WEBGPU_FLUSH_METRICS,
   WEBGPU_FLUSH_SCENARIOS,
   webGpuFlushHardwareInvalidReasons,
   webGpuFlushLaunchArgs,
 } from "../../harness/webgpuFlushBenchmark.mjs";
+
+const HARDWARE_MODE = process.env.CHART_GPU_BENCHMARK_MODE === "hardware";
+const ACTIVE_FIXTURE = resolveWebGpuFlushFixture({ hardwareMode: HARDWARE_MODE });
 
 const { viewport: VIEWPORT, markets: MARKETS, barCount: BAR_COUNT, cellsPerBar: CELLS_PER_BAR,
   priceStep: PRICE_STEP, intervalMs: INTERVAL_MS, fitColumns: FIT_COLUMNS,
@@ -21,7 +24,7 @@ const { viewport: VIEWPORT, markets: MARKETS, barCount: BAR_COUNT, cellsPerBar: 
   liveFramesPerRepetition: LIVE_FRAMES_PER_REPETITION,
   panFramesPerRepetition: PAN_FRAMES_PER_REPETITION,
   crosshairFramesPerRepetition: CROSSHAIR_FRAMES_PER_REPETITION,
-  repetitions: REPETITIONS, frozenNow: FROZEN_NOW } = WEBGPU_FLUSH_FIXTURE;
+  repetitions: REPETITIONS, frozenNow: FROZEN_NOW } = ACTIVE_FIXTURE;
 const METRIC_NAMES = WEBGPU_FLUSH_METRICS;
 
 type BackendKind = "webgl2" | "webgpu";
@@ -68,8 +71,6 @@ interface BackendMeasurement {
     }
   >;
 }
-
-const HARDWARE_MODE = process.env.CHART_GPU_BENCHMARK_MODE === "hardware";
 
 function launchArgsFor(kind: BackendKind, variant: WebGpuVariant = "no-vulkan-compositor"): string[] {
   return webGpuFlushLaunchArgs({
@@ -771,7 +772,7 @@ test("four-chart WebGPU vs WebGL2 chart.gpu.flush.ms comparison across pan, live
     canvasPresentationProbe: webgpuProbe.canvasPresentation ?? null,
   };
   const fixture = {
-    ...WEBGPU_FLUSH_FIXTURE,
+    ...ACTIVE_FIXTURE,
     charts: MARKETS.length,
     layout: "2x2",
     panelSize: "800x450",

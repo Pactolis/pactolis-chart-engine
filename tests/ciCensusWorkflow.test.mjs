@@ -48,10 +48,14 @@ test('PR CI runs one census job without the Tam/L2-L9 load profiles', () => {
   assert.match(censusBlock, /if: failure\(\)/);
   assert.match(censusBlock, /needs:\s*\[changes,\s*browser\]$/m, 'census waits for changes and browser before running');
   assert.match(jobBlock('browser'), /if:\s*github\.event_name\s*==\s*'pull_request' && needs\.changes\.outputs\.browser != 'none'/);
-  assert.match(jobBlock('browser'), /--project=default \$SPECS/);
+  assert.match(jobBlock('browser'), /shard:\s*\["1\/2",\s*"2\/2"\]/);
+  assert.match(jobBlock('browser'), /--project=default --shard=\$\{\{ matrix\.shard \}\} --pass-with-no-tests \$SPECS/);
+  assert.match(jobBlock('lifecycle'), /if:\s*github\.event_name\s*==\s*'pull_request' && needs\.changes\.outputs\.lifecycle == 'true'/);
+  assert.match(jobBlock('lifecycle'), /needs:\s*changes$/m);
+  assert.match(jobBlock('lifecycle'), /--project=lifecycle --workers=1/);
   assert.match(jobBlock('changes'), /fetch-depth: 2/, 'selection diffs the merge commit against its base parent');
   assert.match(jobBlock('changes'), /node scripts\/select-ci-tests\.mjs/);
-  assert.match(jobBlock('ci-result'), /needs: \[test, changes, browser, census\]/);
+  assert.match(jobBlock('ci-result'), /needs: \[test, changes, browser, lifecycle, census\]/);
   assert.match(jobBlock('ci-result'), /if: always\(\)/);
 
   const all = listedTests('census');
