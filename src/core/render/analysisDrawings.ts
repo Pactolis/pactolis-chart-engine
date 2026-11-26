@@ -7,7 +7,8 @@ import {
 } from "../analysis/rangeProfile.js";
 import type { Drawing, DrawingContext } from "../drawingTypes.js";
 import type { View } from "../engine/view.js";
-import { chartLocale, t, tOr } from "../chartLocale.js";
+import { chartLocale, t } from "../chartLocale.js";
+import { tOr } from "../chartLocaleFallbacks.js";
 import type { FootprintSeries } from "../model/footprint.js";
 import {
   levelModeHasDeveloping,

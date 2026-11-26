@@ -133,6 +133,7 @@ test("Fixed-Range OI Delta: recordingStartedAt coverage, light/dark themes, anno
         return {
           status: "ready",
           data: {
+            status: "ok" as const,
             unit: "base",
             resolution: "15m",
             recordingStartedAt,
@@ -146,7 +147,7 @@ test("Fixed-Range OI Delta: recordingStartedAt coverage, light/dark themes, anno
       fetchOptionsGexSurface: async () => { throw new Error("unused"); },
     });
 
-    const drawings = (rt as any).analysisContextForChart().drawings;
+    const drawings = services.drawings;
     const drawingFrom = allBars[15].startTime;
     const drawingTo = allBars[45].startTime;
     const frvpDrawing = {
@@ -158,6 +159,7 @@ test("Fixed-Range OI Delta: recordingStartedAt coverage, light/dark themes, anno
       ],
       color: "#ffffff",
       lineWidth: 1,
+      opacity: 0.55,
       locked: false,
       visible: true,
       market,
@@ -166,7 +168,7 @@ test("Fixed-Range OI Delta: recordingStartedAt coverage, light/dark themes, anno
       oiDeltaDisplay: "split" as const,
       profilePlacement: "left" as const,
     };
-    drawings.setDrawings([frvpDrawing]);
+    drawings.replace([frvpDrawing]);
 
     // Track surface invalidations to verify annotation-only invalidation on async OI update
     const origInvalidateSurface = rt.session.invalidateSurface.bind(rt.session);
@@ -217,7 +219,7 @@ test("Fixed-Range OI Delta: recordingStartedAt coverage, light/dark themes, anno
 
     // 4. Side-by-side pan/zoom frame duration measurement: oi-delta vs volume
     const measurePanZoom = async (metric: "oi-delta" | "volume") => {
-      drawings.setDrawings([{ ...frvpDrawing, profileMetric: metric }]);
+      drawings.replace([{ ...frvpDrawing, profileMetric: metric }]);
       rt.invalidate();
       await rt.session.captureCompositePng();
 

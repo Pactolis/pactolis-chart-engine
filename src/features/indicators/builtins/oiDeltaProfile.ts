@@ -1,4 +1,4 @@
-import { tOr } from "../../../core/chartLocale.js";
+import { tOr } from "../../../core/chartLocaleFallbacks.js";
 import type { OiDeltaDisplay } from "../../../core/orderFlowProfileSettings.js";
 import { bucketEnd, bucketStart } from "../../../core/time.js";
 import type { FootprintBar } from "../../../core/types.js";

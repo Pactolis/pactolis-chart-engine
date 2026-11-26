@@ -19,7 +19,8 @@ import {
   configureOrderbookHeatmapSettingsSource,
   orderbookHeatmapSettingsSource,
 } from "../dist/features/orderbook/heatmapSettingsSource.js";
-import { chartLocale, configureChartLocale, tOr } from "../dist/core/chartLocale.js";
+import { chartLocale, configureChartLocale } from "../dist/core/chartLocale.js";
+import { tOr } from "../dist/core/chartLocaleFallbacks.js";
 import { View } from "../dist/core/engine/view.js";
 import { FootprintSeries } from "../dist/core/model/footprint.js";
 

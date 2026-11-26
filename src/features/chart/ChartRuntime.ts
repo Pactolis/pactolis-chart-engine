@@ -72,7 +72,7 @@ import { ChartLevelContextController } from "./ChartLevelContextController.js";
 import { buildChartAnalysisSnapshot, countClosedBars } from "./analysisSnapshot.js";
 import { decideLiveSameBarAutoFit, type LiveAutoFitSnapshot } from "./liveAutoFit.js";
 import { buildTpoProfileGroups, effectiveTpoBracketMs } from "../../core/analysis/tpoProfile.js";
-import { tOr } from "../../core/chartLocale.js";
+import { tOr } from "../../core/chartLocaleFallbacks.js";
 import { OrderbookHeatmapOverlay, type LiveHeatmapTailEvent } from "../orderbook/heatmapOverlay.js";
 import type { OrderbookHeatmapRuntimeStatus } from "../orderbook/heatmapContracts.js";
 import { orderbookHeatmapSettingsSource } from "../orderbook/heatmapSettingsSource.js";

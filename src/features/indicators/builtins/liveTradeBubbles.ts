@@ -1,4 +1,4 @@
-import { tOr } from "../../../core/chartLocale.js";
+import { tOr } from "../../../core/chartLocaleFallbacks.js";
 import { tzDateTimeHud } from "../../../core/tzFormat.js";
 import type { FootprintBar } from "../../../core/types.js";
 import {

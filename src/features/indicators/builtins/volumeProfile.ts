@@ -12,7 +12,8 @@ import {
   type ProfileSide,
 } from "../../../core/analysis/orderFlowProfile.js";
 import { sessionBars } from "../../../core/analysis/volumeProfile.js";
-import { chartLocale, t, tOr } from "../../../core/chartLocale.js";
+import { chartLocale, t } from "../../../core/chartLocale.js";
+import { tOr } from "../../../core/chartLocaleFallbacks.js";
 import {
   DEFAULT_OI_VENUES,
   levelModeHasDeveloping,
