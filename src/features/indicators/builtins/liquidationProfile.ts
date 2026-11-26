@@ -1,4 +1,4 @@
-import { tOr } from "../../../core/chartLocale.js";
+import { tOr } from "../../../core/chartLocaleFallbacks.js";
 import { checkSeamAndDetectShift, createLiquidationModel } from "../../../core/analysis/liquidationModel.js";
 import { uiColor } from "../../../core/ui/seriesPalette.js";
 import { indicatorDataSource } from "../indicatorDataSource.js";

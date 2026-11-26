@@ -3,7 +3,8 @@ import { calculateOrderFlowRangeProfile } from "../analysis/rangeProfile.js";
 import type { OrderFlowRangeProfileResult } from "../analysis/rangeProfile.js";
 import type { Drawing, DrawingContext } from "../drawingTypes.js";
 import type { View } from "../engine/view.js";
-import { t, tOr } from "../chartLocale.js";
+import { t } from "../chartLocale.js";
+import { tOr } from "../chartLocaleFallbacks.js";
 import type { FootprintSeries } from "../model/footprint.js";
 import {
   levelModeHasDeveloping,

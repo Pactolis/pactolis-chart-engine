@@ -1,6 +1,6 @@
 import { BoundedCache } from "../../../core/cache/boundedCache.js";
 import { DAY_MS, DEFAULT_ZSCORE_MIN_SPAN_MS, rollingZScore } from "../../../core/analysis/rollingZScore.js";
-import { tOr } from "../../../core/chartLocale.js";
+import { tOr } from "../../../core/chartLocaleFallbacks.js";
 import { bucketEnd } from "../../../core/time.js";
 import { tzDateTimeHud } from "../../../core/tzFormat.js";
 import type {
