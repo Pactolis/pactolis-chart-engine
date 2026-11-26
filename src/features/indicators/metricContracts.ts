@@ -174,6 +174,28 @@ export interface FuturesPositioningRequestInput {
   onUpdate?: () => void;
 }
 
+export type LiveTradeEventKind = "trade" | "liquidation";
+export type LiveTradeEventScope = "base" | "market";
+
+export interface LiveTradeEvent {
+  id: string;
+  kind: LiveTradeEventKind;
+  time: number;
+  price: number;
+  qty: number;
+  notionalUsd: number;
+  side: "buy" | "sell" | "long" | "short";
+  venue: string;
+  sampled?: boolean;
+}
+
+export interface LiveTradeEventsRequest {
+  market: string;
+  kinds: LiveTradeEventKind[];
+  scope: LiveTradeEventScope;
+  onEvents: (events: LiveTradeEvent[]) => void;
+}
+
 export type OpenInterestVenue = "binance" | "bybit" | "okx" | "hyperliquid";
 export type OpenInterestUnit = "usd" | "base";
 

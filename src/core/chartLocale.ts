@@ -39,6 +39,26 @@ const CHART_LOCALE_FALLBACKS: Readonly<Record<string, { tr: string; en: string }
     tr: "Kullanılamıyor: gerçek footprint verisi gerekir",
     en: "Unavailable: exact footprint data required",
   },
+  "indicator.liveTradeBubbles.trade": {
+    tr: "İşlem",
+    en: "Trade",
+  },
+  "indicator.liveTradeBubbles.liquidation": {
+    tr: "Likidasyon",
+    en: "Liquidation",
+  },
+  "indicator.liveTradeBubbles.sampled": {
+    tr: "örneklenmiş",
+    en: "sampled",
+  },
+  "indicator.liveTradeBubbles.kindsDescription": {
+    tr: "Binance likidasyonları 1/sn örneklenir; Hyperliquid herkese açık likidasyon akışı sunmaz.",
+    en: "Binance liquidations are 1/s sampled; Hyperliquid lacks a public liquidation stream.",
+  },
+  "indicator.liveTradeBubbles.unsupported": {
+    tr: "Canlı işlem/likidasyon akışı yapılandırılmadı",
+    en: "Live trade/liquidation stream is not configured",
+  },
   "indicator.volumeProfile.placement": {
     tr: "Yerleşim",
     en: "Placement",

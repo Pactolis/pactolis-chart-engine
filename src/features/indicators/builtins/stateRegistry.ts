@@ -19,6 +19,33 @@ interface RegisteredStore {
 }
 
 const allStores: RegisteredStore[] = [];
+const cleanupCallbacks = new Map<string, () => void>();
+
+/**
+ * Registers a per-instance cleanup callback invoked when `id` is hidden,
+ * removed, restored away, market-switched, or disposed.
+ */
+export function registerIndicatorCleanup(id: string, fn: () => void): void {
+  const prev = cleanupCallbacks.get(id);
+  if (prev && prev !== fn) {
+    cleanupCallbacks.delete(id);
+    prev();
+  }
+  cleanupCallbacks.set(id, fn);
+}
+
+/** Runs and removes any cleanup callback registered under `id`. */
+export function runIndicatorCleanup(id: string): void {
+  const fn = cleanupCallbacks.get(id);
+  if (!fn) return;
+  cleanupCallbacks.delete(id);
+  fn();
+}
+
+/** Returns whether a cleanup callback is currently registered for `id`. */
+export function hasIndicatorCleanup(id: string): boolean {
+  return cleanupCallbacks.has(id);
+}
 
 export function createIndicatorSeriesStateStore<S>(): IndicatorSeriesStateStore<S> {
   const bySeries = new WeakMap<object, Map<string, S>>();
@@ -64,6 +91,7 @@ export function createIndicatorSeriesStateStore<S>(): IndicatorSeriesStateStore<
 
 /** Removes any built-in indicator state cached under `id` across all live series. */
 export function purgeIndicatorBuiltinState(id: string): void {
+  runIndicatorCleanup(id);
   for (const store of allStores) {
     store.purgeId(id);
   }
