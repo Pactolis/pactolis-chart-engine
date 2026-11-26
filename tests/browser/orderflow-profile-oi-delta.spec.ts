@@ -220,7 +220,7 @@ test("Order Flow Profile oi-delta vs volume live tick browser performance and sp
     const finalPrepared = volumeProfileIndicatorDefinition.prepareData(makeCtx());
     volumeProfileIndicatorDefinition.drawPriceOverlay?.(makeCtx(), finalPrepared);
 
-    handle.destroy();
+    handle.dispose();
     root.remove();
 
     return {
