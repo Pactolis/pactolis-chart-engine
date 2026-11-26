@@ -92,6 +92,10 @@ export class ChartIndicatorController {
     this.clearInteractionCache();
     this.manager.restore(instances);
   }
+  handleMarketChange(market?: string): void {
+    this.clearInteractionCache();
+    this.manager.handleMarketChange(market);
+  }
   setVisible(id: string, visible: boolean): void { this.manager.setIndicatorVisible(id, visible); }
   remove(id: string): void {
     this.interactionPreparedCache.delete(id);

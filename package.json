@@ -54,6 +54,10 @@
       "types": "./dist/core/analysis/referenceLevels.d.ts",
       "default": "./dist/core/analysis/referenceLevels.js"
     },
+    "./core/analysis/rollingZScore": {
+      "types": "./dist/core/analysis/rollingZScore.d.ts",
+      "default": "./dist/core/analysis/rollingZScore.js"
+    },
     "./core/analysis/topTradingDays": {
       "types": "./dist/core/analysis/topTradingDays.d.ts",
       "default": "./dist/core/analysis/topTradingDays.js"

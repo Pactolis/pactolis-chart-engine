@@ -2,10 +2,30 @@ import type { ProfileMetric, ProfileSide } from "./analysis/orderFlowProfile.js"
 
 export type ProfileLevelDisplay = "off" | "static" | "developing" | "both";
 export type ProfileLineStyle = "solid" | "dashed" | "dotted";
+export type OrderFlowProfilePlacement = "right" | "left";
+export type OiDeltaDisplay = "net" | "split";
+export type OiProfileVenue = "binance" | "bybit" | "okx" | "hyperliquid";
+
+export const OI_PROFILE_VENUES: readonly OiProfileVenue[] = [
+  "binance",
+  "bybit",
+  "okx",
+  "hyperliquid",
+];
+
+export const DEFAULT_OI_VENUES: Readonly<Record<OiProfileVenue, boolean>> = {
+  binance: true,
+  bybit: true,
+  okx: true,
+  hyperliquid: true,
+};
 
 export interface CommonOrderFlowProfileSettings {
   profileMetric: ProfileMetric;
   profileSide: ProfileSide;
+  profilePlacement?: OrderFlowProfilePlacement;
+  oiVenues?: Record<OiProfileVenue, boolean>;
+  oiDeltaDisplay?: OiDeltaDisplay;
   pocMode: ProfileLevelDisplay;
   vahMode: ProfileLevelDisplay;
   valMode: ProfileLevelDisplay;
@@ -36,10 +56,11 @@ export interface FixedRangeOrderFlowProfileSettings extends CommonOrderFlowProfi
 
 export const DEFAULT_ORDER_FLOW_PROFILE_SETTINGS: Readonly<Pick<
   CommonOrderFlowProfileSettings,
-  "profileMetric" | "profileSide" | "pocMode" | "vahMode" | "valMode"
+  "profileMetric" | "profileSide" | "profilePlacement" | "pocMode" | "vahMode" | "valMode"
 >> = {
   profileMetric: "volume",
   profileSide: "total",
+  profilePlacement: "right",
   pocMode: "static",
   vahMode: "static",
   valMode: "static",
@@ -59,6 +80,9 @@ export function normalizeOrderFlowProfileSettings(
   const next: CommonOrderFlowProfileSettings & UnknownSettings = { ...source } as CommonOrderFlowProfileSettings & UnknownSettings;
   next.profileMetric = normalizeMetric(source.profileMetric);
   next.profileSide = normalizeSide(source.profileSide);
+  next.profilePlacement = normalizePlacement(source.profilePlacement, "right");
+  next.oiVenues = normalizeOiVenues(source.oiVenues);
+  next.oiDeltaDisplay = normalizeOiDeltaDisplay(source.oiDeltaDisplay);
   next.pocMode = normalizeLevelMode(source.pocMode, legacyMode(source.showPoc, true));
   const legacyVa = legacyMode(source.showValueArea, true);
   next.vahMode = normalizeLevelMode(source.vahMode, legacyVa);
@@ -86,6 +110,7 @@ export function normalizeFixedRangeOrderFlowProfileSettings(
     pocMode: source.pocMode ?? legacyMode(source.showPoc, true),
     vahMode: source.vahMode ?? legacyMode(source.showVah, true),
     valMode: source.valMode ?? legacyMode(source.showVal, true),
+    profilePlacement: normalizePlacement(source.profilePlacement, "left"),
   }) as FixedRangeOrderFlowProfileSettings & UnknownSettings;
   if (typeof source.valueAreaPercent === "number" && Number.isFinite(source.valueAreaPercent)) {
     next.valueAreaPercent = Math.max(0.01, Math.min(0.99, source.valueAreaPercent));
@@ -133,13 +158,53 @@ function legacyMode(value: unknown, defaultVisible: boolean): ProfileLevelDispla
 }
 
 function normalizeMetric(value: unknown): ProfileMetric {
-  return value === "delta" || value === "trade-count" || value === "average-trade-size"
+  return value === "delta" || value === "trade-count" || value === "average-trade-size" || value === "oi-delta"
     ? value
     : "volume";
 }
 
+function normalizeOiDeltaDisplay(value: unknown): OiDeltaDisplay {
+  return value === "split" ? "split" : "net";
+}
+
+export function normalizeOiVenues(value: unknown): Record<OiProfileVenue, boolean> {
+  const result: Record<OiProfileVenue, boolean> = {
+    binance: false,
+    bybit: false,
+    okx: false,
+    hyperliquid: false,
+  };
+  if (Array.isArray(value)) {
+    for (const item of value) {
+      if (typeof item === "string" && (OI_PROFILE_VENUES as readonly string[]).includes(item)) {
+        result[item as OiProfileVenue] = true;
+      }
+    }
+  } else if (value && typeof value === "object") {
+    const raw = value as Record<string, unknown>;
+    for (const venue of OI_PROFILE_VENUES) {
+      if (raw[venue] === true) result[venue] = true;
+    }
+  } else {
+    return { ...DEFAULT_OI_VENUES };
+  }
+  if (!OI_PROFILE_VENUES.some((venue) => result[venue])) {
+    return { ...DEFAULT_OI_VENUES };
+  }
+  return result;
+}
+
+export function selectedOiVenues(oiVenues: Record<OiProfileVenue, boolean> | undefined): OiProfileVenue[] {
+  const normalized = normalizeOiVenues(oiVenues);
+  return OI_PROFILE_VENUES.filter((venue) => normalized[venue]);
+}
+
 function normalizeSide(value: unknown): ProfileSide {
   return value === "buy" || value === "sell" ? value : "total";
+}
+
+function normalizePlacement(value: unknown, fallback: OrderFlowProfilePlacement): OrderFlowProfilePlacement {
+  return value === "left" || value === "right" ? value : fallback;
 }
 
 function normalizeLevelMode(value: unknown, fallback: ProfileLevelDisplay): ProfileLevelDisplay {
