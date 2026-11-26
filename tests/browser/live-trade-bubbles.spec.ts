@@ -1,5 +1,5 @@
 import { expect, test } from "@playwright/test";
-import { openHarness } from "./support/history.js";
+import { buildBars, installHistory, openHarness } from "./support/history.js";
 
 test("Live Trade Bubbles renders in light & dark themes and stays within frame budget at 50 events/s pan/zoom", async ({ page }) => {
   await openHarness(page);
@@ -142,7 +142,10 @@ test("Live Trade Bubbles renders in light & dark themes and stays within frame b
 });
 
 test("Live Trade Bubbles market switch invokes handleMarketChange once and measures frame duration", async ({ page }) => {
-  await openHarness(page);
+  const bars = buildBars(40);
+  await installHistory(page, { bars });
+  await openHarness(page, "?chart=BINANCE_FUTURES:btcusdt&timeframe=15m&priceStep=10");
+  await expect(page.getByTestId("chart-hook")).toHaveAttribute("data-series-len", String(bars.length));
 
   const measurement = await page.evaluate(async () => {
     const { getChartRuntime } = await import("/harness/chart.ts");
@@ -172,7 +175,7 @@ test("Live Trade Bubbles market switch invokes handleMarketChange once and measu
 
     try {
       const prev = runtime.getState();
-      const nextMarket = prev.market === "ETHUSDT" ? "BTCUSDT" : "ETHUSDT";
+      const nextMarket = prev.market === "BINANCE_FUTURES:ethusdt" ? "BINANCE_FUTURES:btcusdt" : "BINANCE_FUTURES:ethusdt";
       const t0 = performance.now();
       runtime.setState({ ...prev, market: nextMarket });
       await new Promise<void>((resolve) => requestAnimationFrame(() => resolve()));
