@@ -80,7 +80,8 @@ import { isOrderbookHeatmapMarket } from "../../core/orderbookHeatmap/settings.j
 import type { HeatmapGpuCellFrame } from "./heatmap/gpu/heatmapGpuRenderer.js";
 import type { FootprintSeries } from "../../core/model/footprint.js";
 import type { FootprintBar } from "../../core/types.js";
-import type { Drawing } from "../../core/drawingTypes.js";
+import { drawingIsAvailableAsOf, type Drawing } from "../../core/drawingTypes.js";
+import { normalizeFixedRangeOrderFlowProfileSettings } from "../../core/orderFlowProfileSettings.js";
 import { abortableDelay } from "./abortableDelay.js";
 import type { ChartSurfaceModel } from "./chartSurfaceModel.js";
 
@@ -292,8 +293,38 @@ class ChartRuntimeImpl implements ChartRuntime, ChartInputHost {
     asOfTime: number | undefined;
     anchors: Array<{ time: number; price: number; drawingId: string }>;
   } | null = null;
+  private readonly oiRequestStates = new Map<string, { key: string; gen: number }>();
 
   activeMagnetSnap: MagnetSnapTarget | null = null;
+
+  private createFrvpOiUpdateCallback(drawingId: string, requestKey: string): () => void {
+    const prev = this.oiRequestStates.get(drawingId);
+    const gen = prev && prev.key === requestKey ? prev.gen : (prev?.gen ?? 0) + 1;
+    if (!prev || prev.key !== requestKey) {
+      this.oiRequestStates.set(drawingId, { key: requestKey, gen });
+    }
+    const capturedMarket = this.state.market;
+    const capturedTimeframe = this.state.timeframe;
+    return () => {
+      if (this.disposed) return;
+      if (this.state.market !== capturedMarket || this.state.timeframe !== capturedTimeframe) return;
+      const currentState = this.oiRequestStates.get(drawingId);
+      if (!currentState || currentState.gen !== gen) return;
+      const drawing = this.analysisContextForChart().drawings?.findDrawingById?.(drawingId);
+      if (!drawing || !drawing.visible || drawing.market !== capturedMarket || drawing.points.length < 2) return;
+      const settings = normalizeFixedRangeOrderFlowProfileSettings(drawing as unknown as Record<string, unknown>);
+      if (settings.profileMetric !== "oi-delta") return;
+      const asOfTime = this.replayCoordinator?.getSnapshot()?.virtualTime;
+      if (!drawingIsAvailableAsOf(drawing, asOfTime)) return;
+      const from = Math.min(drawing.points[0].time, drawing.points[1].time);
+      const to = Math.max(drawing.points[0].time, drawing.points[1].time);
+      const left = this.view.xOfIndex(this.pipeline.series.indexOfTime(from));
+      const right = this.view.xOfIndex(this.pipeline.series.indexOfTime(to)) + this.view.colWidth;
+      if (!Number.isFinite(left) || !Number.isFinite(right)) return;
+      if (right < this.view.area.left || left > this.view.area.left + this.view.area.width) return;
+      this.session.invalidateSurface(ChartSurfaceDirty.Annotation);
+    };
+  }
 
   get heatmapTexturePrototypeEnabled(): boolean {
     return this.heatmapGpuCoordinator.isHeatmapTexturePrototypeEnabled();
@@ -477,6 +508,10 @@ class ChartRuntimeImpl implements ChartRuntime, ChartInputHost {
               drawingTime,
               (price, text, color) => this.overlay.queueLineObject(price, text, color),
               this.state.market,
+              {
+                timeframe: this.state.timeframe,
+                createOiUpdateCallback: (drawingId, requestKey) => this.createFrvpOiUpdateCallback(drawingId, requestKey),
+              },
             );
           });
           measurePerformance("chart.annotation.drawings.static.ms", () => {

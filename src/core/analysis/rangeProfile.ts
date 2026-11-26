@@ -1,6 +1,10 @@
 import type { FootprintBar } from "../types.js";
+import { bucketEnd, bucketStart } from "../time.js";
 import {
+  accumulateOrderFlowOiDeltaBar,
   calculateOrderFlowProfile,
+  createOrderFlowProfileAccumulator,
+  finishOrderFlowProfile,
   type OrderFlowProfileOptions,
   type OrderFlowProfileResult,
 } from "./orderFlowProfile.js";
@@ -8,6 +12,11 @@ import {
   calculateVolumeProfile,
   type VolumeProfileResult,
 } from "./volumeProfile.js";
+import {
+  computeBarOiDeltas,
+  parseOiResolutionMs,
+} from "../../features/indicators/builtins/oiDeltaProfile.js";
+import type { OpenInterestSeriesResponse, OpenInterestVenue } from "../../features/indicators/metricContracts.js";
 
 export interface RangeProfileResult extends VolumeProfileResult {
   requestedFrom: number;
@@ -31,6 +40,22 @@ export interface OrderFlowRangeProfileResult extends OrderFlowProfileResult {
   coverage: number;
   missingDays: number[];
   complete: boolean;
+}
+
+export interface OiDeltaRangeMeta {
+  resolution: string;
+  resolutionMs: number;
+  activeVenueCount: number;
+  coveragePercent: number;
+  coveredBarCount: number;
+  totalBarCount: number;
+  effectiveRecordingStartedAt: number | null;
+  firstBarTime: number | null;
+  source?: "backend" | "browser" | "instant-only";
+}
+
+export interface OiDeltaRangeProfileResult extends OrderFlowRangeProfileResult {
+  oiMeta: OiDeltaRangeMeta;
 }
 
 const DAY = 86_400_000;
@@ -69,6 +94,85 @@ export function calculateOrderFlowRangeProfile(
     : selection.selected.filter((bar) => bar.cells.size > 0);
   const profile = calculateOrderFlowProfile(profileBars, options);
   return { ...profile, ...selection.meta };
+}
+
+export function calculateOiDeltaRangeProfile(
+  bars: readonly FootprintBar[],
+  from: number,
+  to: number,
+  intervalMs: number,
+  response: OpenInterestSeriesResponse,
+  selectedVenues: readonly OpenInterestVenue[],
+  options: OrderFlowProfileOptions = {},
+): OiDeltaRangeProfileResult {
+  const selection = selectRangeBars(bars, from, to);
+  const oiOptions: OrderFlowProfileOptions = {
+    ...options,
+    profileMetric: "oi-delta",
+    profileSide: "total",
+    allowOhlcvEstimate: options.allowOhlcvEstimate ?? true,
+  };
+  const resolution = response.resolution || "";
+  const resolutionMs = parseOiResolutionMs(resolution, intervalMs);
+  if (selection.selected.length === 0) {
+    const empty = finishOrderFlowProfile(createOrderFlowProfileAccumulator(), oiOptions);
+    return {
+      ...empty,
+      ...selection.meta,
+      oiMeta: {
+        resolution,
+        resolutionMs,
+        activeVenueCount: 0,
+        coveragePercent: 0,
+        coveredBarCount: 0,
+        totalBarCount: 0,
+        effectiveRecordingStartedAt: null,
+        firstBarTime: null,
+        source: response.source,
+      },
+    };
+  }
+
+  const start = selection.meta.requestedFrom;
+  const end = selection.meta.requestedTo;
+  const compBars = intervalMs < resolutionMs
+    ? (() => {
+      const slotFrom = bucketStart(start, resolutionMs);
+      const slotTo = bucketEnd(end, resolutionMs);
+      return bars.filter((bar) => bar.startTime >= slotFrom && bar.startTime < slotTo);
+    })()
+    : selection.selected;
+
+  const comp = computeBarOiDeltas(compBars, intervalMs, response, selectedVenues);
+  const acc = createOrderFlowProfileAccumulator();
+  let coveredInRange = 0;
+  for (let i = 0; i < compBars.length; i += 1) {
+    const bar = compBars[i];
+    if (bar.startTime < start || bar.startTime > end) continue;
+    if (accumulateOrderFlowOiDeltaBar(acc, bar, comp.barDeltas[i], oiOptions)) {
+      coveredInRange += 1;
+    }
+  }
+
+  const profile = finishOrderFlowProfile(acc, oiOptions);
+  const totalInRange = selection.selected.length;
+  const coveragePercent = totalInRange > 0 ? Math.round((coveredInRange / totalInRange) * 100) : 0;
+
+  return {
+    ...profile,
+    ...selection.meta,
+    oiMeta: {
+      resolution: comp.resolution,
+      resolutionMs: comp.resolutionMs,
+      activeVenueCount: comp.activeVenueCount,
+      coveragePercent,
+      coveredBarCount: coveredInRange,
+      totalBarCount: totalInRange,
+      effectiveRecordingStartedAt: comp.effectiveRecordingStartedAt,
+      firstBarTime: selection.selected[0]?.startTime ?? null,
+      source: comp.source,
+    },
+  };
 }
 
 function selectRangeBars(
