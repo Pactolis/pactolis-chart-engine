@@ -237,6 +237,16 @@ export type IngressWorkerMessage =
   | WorkerEnvelopeBase<"ingress", "ingress:credit", { granted: number }>
   | WorkerEnvelopeBase<"ingress", "ingress:ack", { ackedSeq: number }>;
 
+export const HISTORY_PACKED_V1_BAR_STRIDE = 6; // [time, open, high, low, close, volume]
+export const HISTORY_PACKED_V2_BAR_STRIDE = 8; // [time, open, high, low, close, volume, delta, count]
+export const HISTORY_PACKED_V2_CELL_STRIDE = 4; // [barIndex, price, bidVolume, askVolume]
+
+export interface HistoryPackedSchema2 {
+  schema: 2;
+  bars: ArrayBuffer;
+  cells: ArrayBuffer;
+}
+
 export type HistoryWorkerMessage =
   | WorkerEnvelopeBase<
       "history",
@@ -253,7 +263,8 @@ export type HistoryWorkerMessage =
       "history:chunk",
       {
         timeframe: string;
-        bars: ReadonlyArray<WorkerHistoryBar> | ArrayBuffer;
+        bars?: ReadonlyArray<WorkerHistoryBar> | ArrayBuffer;
+        packed?: HistoryPackedSchema2;
         hasMore: boolean;
         chunkIndex: number;
       }

@@ -751,6 +751,20 @@ export class WorkerChartEndpoint {
     } satisfies MainWorkerMessage);
   }
 
+  sendHistoryAck(ackedSeq: number, generation = this.generation): void {
+    if (!this.historyPort || this.disposed || generation < this.generation) return;
+    this.historyPort.postMessage({
+      channel: "history",
+      kind: "history:ack",
+      panelId: this.panelId,
+      marketId: this.marketId,
+      generation,
+      seq: ++this.seq,
+      revision: this.revision,
+      payload: { ackedSeq },
+    } satisfies HistoryWorkerMessage);
+  }
+
   recycleBuffer(buffer: ArrayBuffer, bufferId?: string): void {
     if (!this.mainPort || this.disposed) return;
     this.mainPort.postMessage(
