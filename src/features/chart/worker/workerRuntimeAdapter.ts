@@ -63,6 +63,10 @@ export interface HostBridgeOptions {
   closePortsOnDispose?: boolean;
   onStatusChange?: (status: HostBridgeStatus, detail?: string) => void;
   onError?: (error: { code: string; message: string; fatal: boolean }) => void;
+  onDiagnostic?: (
+    payload: Extract<MainWorkerMessage, { kind: "main:diagnostic" }>["payload"],
+    envelope: MainWorkerMessage,
+  ) => void;
   onRecycleBuffer?: (payload: { bufferId?: string; buffer: ArrayBuffer }) => void;
 }
 
@@ -97,6 +101,7 @@ export class WorkerChartHostBridge {
   private readonly pendingRequests = new Map<string, PendingRequestEntry>();
   private readonly onStatusChange?: HostBridgeOptions["onStatusChange"];
   private readonly onError?: HostBridgeOptions["onError"];
+  private readonly onDiagnostic?: HostBridgeOptions["onDiagnostic"];
   private readonly onRecycleBuffer?: HostBridgeOptions["onRecycleBuffer"];
 
   private mainPort: MessagePortLike | null = null;
@@ -143,6 +148,11 @@ export class WorkerChartHostBridge {
       return;
     }
 
+    if (msg.kind === "main:diagnostic") {
+      this.onDiagnostic?.(msg.payload, msg);
+      return;
+    }
+
     if (msg.generation < this.generation) {
       return;
     }
@@ -172,6 +182,7 @@ export class WorkerChartHostBridge {
     this.closePortsOnDispose = options.closePortsOnDispose ?? false;
     this.onStatusChange = options.onStatusChange;
     this.onError = options.onError;
+    this.onDiagnostic = options.onDiagnostic;
     this.onRecycleBuffer = options.onRecycleBuffer;
     this.outboundQueue = new BoundedWorkerPortQueue<MainWorkerMessage>({
       maxSize: options.maxQueueSize ?? 256,
@@ -537,6 +548,10 @@ export interface WorkerEndpointHandlers {
     payload: Extract<IngressWorkerMessage, { kind: "ingress:tick" }>["payload"],
     envelope: IngressWorkerMessage,
   ) => void;
+  onTicks?: (
+    payload: Extract<IngressWorkerMessage, { kind: "ingress:ticks" }>["payload"],
+    envelope: IngressWorkerMessage,
+  ) => void;
   onBar?: (
     payload: Extract<IngressWorkerMessage, { kind: "ingress:bar" }>["payload"],
     envelope: IngressWorkerMessage,
@@ -765,6 +780,43 @@ export class WorkerChartEndpoint {
     } satisfies HistoryWorkerMessage);
   }
 
+  /**
+   * Emits `ingress:credit` on `ingressPort` after a batch is applied.
+   * Choice: `ingress:credit` (`{ granted: count }`) rather than `ingress:ack`
+   * so the ingress producer can enforce a tick-count in-flight budget.
+   */
+  grantIngressCredits(granted: number): void {
+    if (!this.ingressPort || this.disposed || granted <= 0 || !Number.isFinite(granted)) return;
+    const safeGranted = Math.floor(granted);
+    this.ingressPort.postMessage({
+      channel: "ingress",
+      kind: "ingress:credit",
+      panelId: this.panelId,
+      marketId: this.marketId,
+      generation: this.generation,
+      seq: ++this.seq,
+      revision: this.revision,
+      credit: safeGranted,
+      payload: { granted: safeGranted },
+    } satisfies IngressWorkerMessage);
+  }
+
+  emitDiagnostic(
+    payload: Extract<MainWorkerMessage, { kind: "main:diagnostic" }>["payload"],
+  ): void {
+    if (!this.mainPort || this.disposed) return;
+    this.mainPort.postMessage({
+      channel: "main",
+      kind: "main:diagnostic",
+      panelId: this.panelId,
+      marketId: this.marketId,
+      generation: this.generation,
+      seq: ++this.seq,
+      revision: this.revision,
+      payload,
+    } satisfies MainWorkerMessage);
+  }
+
   recycleBuffer(buffer: ArrayBuffer, bufferId?: string): void {
     if (!this.mainPort || this.disposed) return;
     this.mainPort.postMessage(
@@ -827,6 +879,12 @@ export class WorkerChartEndpoint {
       }
       this.processedIngress++;
       this.handlers.onTick?.(msg.payload, msg);
+      return;
+    }
+
+    if (msg.kind === "ingress:ticks") {
+      this.processedIngress++;
+      this.handlers.onTicks?.(msg.payload, msg);
       return;
     }
 
