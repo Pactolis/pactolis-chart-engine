@@ -36,7 +36,6 @@ import { ChartHeatmapGpuCoordinator } from "../ChartHeatmapGpuCoordinator.js";
 import type { HeatmapGpuCellFrame } from "../heatmap/gpu/heatmapGpuRenderer.js";
 import { IndicatorManager, drawIndicatorPaneBackground } from "../../indicators/IndicatorManager.js";
 import type {
-  OrderbookHeatmapBar,
   OrderbookHeatmapRequest,
   OrderbookHeatmapResponse,
 } from "../../orderbook/heatmapContracts.js";
