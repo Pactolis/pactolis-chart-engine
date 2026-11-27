@@ -1,7 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 
-import { configurePerformanceTelemetry, snapshotPerformanceTelemetry } from "../dist/core/performanceTelemetry.js";
+import { configurePerformanceTelemetry, resetPerformanceTelemetry, snapshotPerformanceTelemetry } from "../dist/core/performanceTelemetry.js";
 import { ChartChange, ChartSurfaceDirty } from "../dist/core/render/scene/chartScene.js";
 import { ChartSession } from "../dist/features/chart/ChartSession.js";
 
@@ -822,6 +822,78 @@ test("the GPU flush uses the canvas window's DPR, not the main window's", () => 
   } finally {
     if (previous === undefined) delete globalThis.window;
     else globalThis.window = previous;
+  }
+});
+
+test("CE #414: ChartSession splits matched live-update latency phases and visibility states", () => {
+  resetPerformanceTelemetry();
+  configurePerformanceTelemetry({ enabled: true });
+
+  const { session, win, ownerDocument } = makeSession();
+  try {
+    const completed = [];
+    session.setFrameCompletedObserver((info) => completed.push(info));
+
+    // Drain initial frame
+    win.runNextFrame();
+    assert.equal(completed.length, 1);
+    assert.equal(completed[0].liveUpdateTrace, null);
+
+    // Foreground coalesced live updates
+    ownerDocument.visibilityState = "visible";
+    const t0 = performance.now() - 12;
+    const t1 = performance.now() - 3;
+    session.markLiveUpdate(t0, { source: "pipeline-live", clockBase: "performance.now" });
+    session.markLiveUpdate(t1, { source: "pipeline-live", clockBase: "performance.now" });
+    session.invalidate(ChartChange.Data);
+    win.runNextFrame();
+
+    const fgTrace = session.getLastLiveUpdateFrameTrace();
+    assert.ok(fgTrace);
+    assert.equal(fgTrace.earliestMarkAt, t0);
+    assert.equal(fgTrace.latestMarkAt, t1);
+    assert.ok(fgTrace.invalidatedAt !== null);
+    assert.equal(fgTrace.coalescedCount, 1);
+    assert.equal(fgTrace.source, "pipeline-live");
+    assert.equal(fgTrace.clockBase, "performance.now");
+    assert.equal(fgTrace.renderer, "webgl2");
+    assert.equal(fgTrace.workerMode, "main-thread");
+    assert.equal(fgTrace.visibility, "foreground");
+    assert.ok(fgTrace.toRenderStartMs >= fgTrace.latestToRenderStartMs);
+    assert.ok(fgTrace.toRenderEndMs >= fgTrace.toRenderStartMs);
+    assert.ok(fgTrace.renderDurationMs >= 0);
+
+    // Background live update
+    ownerDocument.visibilityState = "hidden";
+    const tBg = performance.now() - 25;
+    session.markLiveUpdate(tBg, { source: "pipeline-live", clockBase: "performance.now" });
+    session.invalidate(ChartChange.Data);
+    win.runNextFrame();
+
+    const bgTrace = session.getLastLiveUpdateFrameTrace();
+    assert.ok(bgTrace);
+    assert.equal(bgTrace.visibility, "background");
+    assert.equal(bgTrace.coalescedCount, 0);
+
+    const snap = snapshotPerformanceTelemetry();
+    assert.equal(snap.metrics["chart.liveUpdate.toRenderStart.ms"].count, 2);
+    assert.equal(snap.metrics["chart.liveUpdate.latestToRenderStart.ms"].count, 2);
+    assert.equal(snap.metrics["chart.liveUpdate.invalidationToRenderStart.ms"].count, 2);
+    assert.equal(snap.metrics["chart.liveUpdate.renderDuration.ms"].count, 2);
+    assert.equal(snap.metrics["chart.liveUpdate.toRenderEnd.ms"].count, 2);
+    assert.equal(snap.metrics["chart.liveUpdate.coalescedPerFrame"].count, 2);
+    assert.equal(snap.metrics["chart.liveUpdate.foreground.toRenderEnd.ms"].count, 1);
+    assert.equal(snap.metrics["chart.liveUpdate.background.toRenderEnd.ms"].count, 1);
+    assert.equal(snap.counters["chart.liveUpdate.frame.foreground"], 1);
+    assert.equal(snap.counters["chart.liveUpdate.frame.background"], 1);
+    assert.equal(snap.counters["chart.liveUpdate.renderer.webgl2"], 1 * 2);
+    assert.equal(snap.counters["chart.liveUpdate.workerMode.main-thread"], 2);
+    assert.equal(snap.counters["chart.liveUpdate.source.pipeline-live"], 2);
+    assert.equal(snap.counters["chart.liveUpdate.clockBase.performance.now"], 2);
+  } finally {
+    session.destroy();
+    configurePerformanceTelemetry({ enabled: false });
+    resetPerformanceTelemetry();
   }
 });
 

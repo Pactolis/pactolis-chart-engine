@@ -10,7 +10,9 @@ const {
   alignVenueSeriesToHourEnd,
   buildHourlyFundingTimeline,
   fundingRegimeIndicatorDefinition,
+  getFundingRegimeNativeCacheStats,
   migrateFundingExchanges,
+  resetFundingRegimeCachesForTests,
 } = await import("../dist/features/indicators/builtins/fundingRegime.js");
 
 const HOUR_MS = 3_600_000;
@@ -451,4 +453,63 @@ test("fundingRegime keeps aggregate path when aggregate covers >= 7 days (CE #40
 
   assert.ok(timeline.length > 0);
   assert.ok(timeline.every((pt) => Math.abs(pt.fundingRate - 0.0005) < 1e-12));
+});
+
+test("CE #419: fundingRegime computes native hourly z-series only once across 100 revision/range changes", () => {
+  resetFundingRegimeCachesForTests();
+  const series = makeSeries(T0 + 30 * DAY_MS, 120, HOUR_MS);
+  const fromMs = T0;
+  const toMs = T0 + 35 * DAY_MS;
+  const aggPoints = [];
+  for (let t = fromMs + HOUR_MS; t <= toMs; t += HOUR_MS) {
+    aggPoints.push({
+      t,
+      rate8h: 0.0001 + Math.sin(t / HOUR_MS * 0.1) * 0.00005,
+      venues: ["binancef", "bybitf", "okxf", "hyperliquid"],
+    });
+  }
+
+  const response = {
+    market: "BTCUSDT",
+    from: fromMs,
+    to: toMs,
+    venues: ["binancef", "bybitf", "okxf", "hyperliquid"],
+    series: buildFourVenueSettledSeries(fromMs, toMs, (t) => 0.0001 + Math.sin(t / HOUR_MS * 0.1) * 0.00005),
+    aggregate: {
+      points: aggPoints,
+      current: { t: toMs, rate8h: 0.00012, venues: ["binancef", "bybitf", "okxf", "hyperliquid"] },
+      excludedVenues: [],
+      source: "backend-oi",
+    },
+  };
+
+  configureIndicatorDataSource({
+    requestVenueFundingSeries: () => ({ status: "ready", data: response }),
+  });
+
+  const baseline = fundingRegimeIndicatorDefinition.prepareData(
+    makeDrawContext(series, { mode: "zScore" }, [20, 100]),
+  );
+  assert.equal(baseline.status, "ok");
+  assert.equal(getFundingRegimeNativeCacheStats().computes, 1);
+
+  for (let i = 0; i < 100; i += 1) {
+    series.updateLastTrade(100 + (i % 5), 1);
+    const from = 10 + (i % 15);
+    const to = from + 60;
+    const prepared = fundingRegimeIndicatorDefinition.prepareData(
+      makeDrawContext(series, { mode: "zScore" }, [from, to]),
+    );
+    assert.equal(prepared.status, "ok");
+    if (from === 20 && to === 80) {
+      const baseByIdx = new Map(baseline.points.map((p) => [p.index, p.zScore]));
+      for (const pt of prepared.points) {
+        assert.equal(pt.zScore, baseByIdx.get(pt.index));
+      }
+    }
+  }
+
+  const stats = getFundingRegimeNativeCacheStats();
+  assert.equal(stats.computes, 1);
+  assert.equal(stats.hits, 100);
 });

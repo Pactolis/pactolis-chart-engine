@@ -84,6 +84,46 @@ export interface ChartSessionInteraction {
   render(view: View, series: FootprintSeries, crosshair: Crosshair, range: [number, number]): void;
 }
 
+export type ChartWorkerMode = "main-thread" | "worker";
+export type LiveUpdateClockBase = "performance.now" | "date.now";
+
+export interface LiveUpdateMarkOptions {
+  source?: string;
+  clockBase?: LiveUpdateClockBase;
+}
+
+export interface LiveUpdateFrameTrace {
+  earliestMarkAt: number;
+  latestMarkAt: number;
+  invalidatedAt: number | null;
+  scheduledAt: number | null;
+  renderStartAt: number;
+  renderEndAt: number;
+  toInvalidationMs: number | null;
+  invalidationToRenderStartMs: number | null;
+  toRenderStartMs: number;
+  latestToRenderStartMs: number;
+  queueWaitMs: number | null;
+  renderDurationMs: number;
+  toRenderEndMs: number;
+  latestToRenderEndMs: number;
+  coalescedCount: number;
+  source: string;
+  clockBase: LiveUpdateClockBase;
+  renderer: string;
+  workerMode: ChartWorkerMode;
+  visibility: "foreground" | "background";
+}
+
+interface PendingLiveUpdate {
+  earliestStartedAt: number;
+  latestStartedAt: number;
+  invalidatedAt: number | null;
+  coalescedCount: number;
+  source: string;
+  clockBase: LiveUpdateClockBase;
+}
+
 export interface ChartSessionOptions {
   /** Outer container element whose measured size drives canvas dimensions. */
   container: HTMLElement;
@@ -133,6 +173,8 @@ export interface ChartSessionOptions {
   useGlobalScheduler?: boolean;
   /** Initial render priority when using the global render scheduler. Defaults to "visible". */
   renderPriority?: ChartRenderPriority;
+  /** Execution mode for telemetry attribution ("main-thread" or "worker"). */
+  workerMode?: ChartWorkerMode;
 }
 
 export class ChartSession {
@@ -179,6 +221,7 @@ export class ChartSession {
     renderMs: number;
     rafLatencyMs: number | null;
     visible: boolean;
+    liveUpdateTrace?: LiveUpdateFrameTrace | null;
   }) => void) | null = null;
   private rafScheduledAt: number | null = null;
   private readonly onInvalidateCb?: (changes: ChartChange) => void;
@@ -187,6 +230,7 @@ export class ChartSession {
   private readonly webglOptions?: ChartWebGlOptions;
   private readonly useGlobalSchedulerOption?: boolean;
   private renderPriority: ChartRenderPriority;
+  private readonly workerMode: ChartWorkerMode;
   private scheduledOnWindow: Window | null = null;
 
   private dirtySurfaces = ChartSurfaceDirty.All;
@@ -207,8 +251,9 @@ export class ChartSession {
   private unfinishedResize: { w: number; h: number; dpr: number } | null = null;
   /** Whether at least one draw pass has completed; only a never-painted session may size eagerly. */
   private hasRenderedFrame = false;
-  /** Earliest telemetry-enabled live update waiting for the next drawable frame. */
-  private pendingLiveUpdateStartedAt: number | null = null;
+  /** Pending telemetry-enabled live update batch waiting for the next drawable frame. */
+  private pendingLiveUpdate: PendingLiveUpdate | null = null;
+  private lastLiveUpdateFrameTrace: LiveUpdateFrameTrace | null = null;
   private pendingCapture: {
     resolve: (frame: NativeCaptureFrame) => void;
     reject: (error: unknown) => void;
@@ -266,6 +311,7 @@ export class ChartSession {
     this.webglOptions = opts.webglOptions;
     this.useGlobalSchedulerOption = opts.useGlobalScheduler;
     this.renderPriority = opts.renderPriority ?? "visible";
+    this.workerMode = opts.workerMode ?? (typeof WorkerGlobalScope !== "undefined" && globalThis instanceof WorkerGlobalScope ? "worker" : "main-thread");
 
     this.lifecycle.start();
     this.setupContextLossHandling();
@@ -293,7 +339,7 @@ export class ChartSession {
 
   deactivate(): void {
     this.active = false;
-    this.pendingLiveUpdateStartedAt = null;
+    this.pendingLiveUpdate = null;
     this.interactionQualityController?.cancel();
     this.cancelRaf();
     this.rejectPendingCapture("chart session was deactivated during capture");
@@ -326,18 +372,39 @@ export class ChartSession {
     return this.interactionQualityController.endInteraction();
   }
 
+  /** Return the most recent matched live-update frame phase breakdown, if any. */
+  getLastLiveUpdateFrameTrace(): LiveUpdateFrameTrace | null {
+    return this.lastLiveUpdateFrameTrace;
+  }
+
   /** Correlate a live pipeline update with the next frame without changing scheduling. */
-  markLiveUpdate(startedAt: number): void {
+  markLiveUpdate(startedAt: number, options?: LiveUpdateMarkOptions): void {
     if (!this.active || !this.gpuValid || !isPerformanceTelemetryEnabled() || !Number.isFinite(startedAt)) return;
-    if (this.pendingLiveUpdateStartedAt !== null) {
+    const source = options?.source ?? "pipeline-live";
+    const clockBase: LiveUpdateClockBase = options?.clockBase ?? "performance.now";
+    if (this.pendingLiveUpdate !== null) {
       incrementPerformanceCounter("chart.liveUpdate.coalesced");
-      this.pendingLiveUpdateStartedAt = Math.min(this.pendingLiveUpdateStartedAt, startedAt);
+      this.pendingLiveUpdate.earliestStartedAt = Math.min(this.pendingLiveUpdate.earliestStartedAt, startedAt);
+      this.pendingLiveUpdate.latestStartedAt = Math.max(this.pendingLiveUpdate.latestStartedAt, startedAt);
+      this.pendingLiveUpdate.coalescedCount += 1;
+      this.pendingLiveUpdate.source = source;
+      this.pendingLiveUpdate.clockBase = clockBase;
       return;
     }
-    this.pendingLiveUpdateStartedAt = startedAt;
+    this.pendingLiveUpdate = {
+      earliestStartedAt: startedAt,
+      latestStartedAt: startedAt,
+      invalidatedAt: null,
+      coalescedCount: 0,
+      source,
+      clockBase,
+    };
   }
 
   invalidate(changes: ChartChange = ChartChange.All): void {
+    if (this.pendingLiveUpdate !== null && this.pendingLiveUpdate.invalidatedAt === null && isPerformanceTelemetryEnabled()) {
+      this.pendingLiveUpdate.invalidatedAt = performance.now();
+    }
     let dirty = surfaceDirtyForChanges(changes, this.renderer.getTailDependencyContext?.());
     if ((changes & ChartChange.Interaction) && (this.annotationRenderer.requiresInteractionRedraw?.() || this.renderer.interactionAffectsAnnotation?.())) {
       dirty |= ChartSurfaceDirty.Annotation;
@@ -351,7 +418,13 @@ export class ChartSession {
   }
 
   setFrameCompletedObserver(
-    cb: ((info: { dirty: number; renderMs: number; rafLatencyMs: number | null; visible: boolean }) => void) | null,
+    cb: ((info: {
+      dirty: number;
+      renderMs: number;
+      rafLatencyMs: number | null;
+      visible: boolean;
+      liveUpdateTrace?: LiveUpdateFrameTrace | null;
+    }) => void) | null,
   ): void {
     this.onFrameCompletedCb = cb;
   }
@@ -572,10 +645,18 @@ export class ChartSession {
     this.rafScheduledAt = null;
     const rafLatencyMs = scheduledAt !== null ? Math.max(0, wallStart - scheduledAt) : null;
     const frameStartedAt = telemetryEnabled ? wallStart : null;
-    const liveUpdateStartedAt = telemetryEnabled ? this.pendingLiveUpdateStartedAt : null;
-    this.pendingLiveUpdateStartedAt = null;
-    if (frameStartedAt !== null && liveUpdateStartedAt !== null) {
-      recordPerformanceDuration("chart.liveUpdate.toRenderStart.ms", frameStartedAt - liveUpdateStartedAt);
+    const pendingLive = telemetryEnabled ? this.pendingLiveUpdate : null;
+    this.pendingLiveUpdate = null;
+    if (frameStartedAt !== null && pendingLive !== null) {
+      recordPerformanceDuration("chart.liveUpdate.toRenderStart.ms", Math.max(0, frameStartedAt - pendingLive.earliestStartedAt));
+      recordPerformanceDuration("chart.liveUpdate.latestToRenderStart.ms", Math.max(0, frameStartedAt - pendingLive.latestStartedAt));
+      if (pendingLive.invalidatedAt !== null) {
+        recordPerformanceDuration("chart.liveUpdate.toInvalidation.ms", Math.max(0, pendingLive.invalidatedAt - pendingLive.earliestStartedAt));
+        recordPerformanceDuration("chart.liveUpdate.invalidationToRenderStart.ms", Math.max(0, frameStartedAt - pendingLive.invalidatedAt));
+      }
+      if (rafLatencyMs !== null) {
+        recordPerformanceDuration("chart.liveUpdate.queueWait.ms", rafLatencyMs);
+      }
     }
     const dirty = this.dirtySurfaces;
     const changes = this.pendingChanges;
@@ -650,10 +731,70 @@ export class ChartSession {
     this.onRenderedCb?.(dirty, changes);
     const frameEndedAt = performance.now();
     const renderMs = frameStartedAt !== null ? frameEndedAt - frameStartedAt : undefined;
+    const isVisible = this.ownerDocument.visibilityState !== "hidden";
+    const visibility: "foreground" | "background" = isVisible ? "foreground" : "background";
+    let liveUpdateTrace: LiveUpdateFrameTrace | null = null;
     if (frameStartedAt !== null) {
       recordPerformanceDuration("chart.frame.render.ms", frameEndedAt - frameStartedAt);
-      if (liveUpdateStartedAt !== null) {
-        recordPerformanceDuration("chart.liveUpdate.toRenderEnd.ms", frameEndedAt - liveUpdateStartedAt);
+      if (pendingLive !== null) {
+        const toInvalidationMs = pendingLive.invalidatedAt !== null
+          ? Math.max(0, pendingLive.invalidatedAt - pendingLive.earliestStartedAt)
+          : null;
+        const invalidationToRenderStartMs = pendingLive.invalidatedAt !== null
+          ? Math.max(0, frameStartedAt - pendingLive.invalidatedAt)
+          : null;
+        const toRenderStartMs = Math.max(0, frameStartedAt - pendingLive.earliestStartedAt);
+        const latestToRenderStartMs = Math.max(0, frameStartedAt - pendingLive.latestStartedAt);
+        const renderDurationMs = Math.max(0, frameEndedAt - frameStartedAt);
+        const toRenderEndMs = Math.max(0, frameEndedAt - pendingLive.earliestStartedAt);
+        const latestToRenderEndMs = Math.max(0, frameEndedAt - pendingLive.latestStartedAt);
+
+        recordPerformanceDuration("chart.liveUpdate.renderDuration.ms", renderDurationMs);
+        recordPerformanceDuration("chart.liveUpdate.toRenderEnd.ms", toRenderEndMs);
+        recordPerformanceDuration("chart.liveUpdate.latestToRenderEnd.ms", latestToRenderEndMs);
+        recordPerformanceDuration("chart.liveUpdate.coalescedPerFrame", pendingLive.coalescedCount);
+
+        recordPerformanceDuration(`chart.liveUpdate.${visibility}.toRenderStart.ms`, toRenderStartMs);
+        recordPerformanceDuration(`chart.liveUpdate.${visibility}.latestToRenderStart.ms`, latestToRenderStartMs);
+        if (invalidationToRenderStartMs !== null) {
+          recordPerformanceDuration(`chart.liveUpdate.${visibility}.invalidationToRenderStart.ms`, invalidationToRenderStartMs);
+        }
+        if (rafLatencyMs !== null) {
+          recordPerformanceDuration(`chart.liveUpdate.${visibility}.queueWait.ms`, rafLatencyMs);
+        }
+        recordPerformanceDuration(`chart.liveUpdate.${visibility}.renderDuration.ms`, renderDurationMs);
+        recordPerformanceDuration(`chart.liveUpdate.${visibility}.toRenderEnd.ms`, toRenderEndMs);
+        recordPerformanceDuration(`chart.liveUpdate.${visibility}.latestToRenderEnd.ms`, latestToRenderEndMs);
+
+        incrementPerformanceCounter(`chart.liveUpdate.frame.${visibility}`);
+        incrementPerformanceCounter(`chart.liveUpdate.renderer.${this.gpuSurface.kind}`);
+        incrementPerformanceCounter(`chart.liveUpdate.workerMode.${this.workerMode}`);
+        incrementPerformanceCounter(`chart.liveUpdate.source.${pendingLive.source}`);
+        incrementPerformanceCounter(`chart.liveUpdate.clockBase.${pendingLive.clockBase}`);
+
+        liveUpdateTrace = {
+          earliestMarkAt: pendingLive.earliestStartedAt,
+          latestMarkAt: pendingLive.latestStartedAt,
+          invalidatedAt: pendingLive.invalidatedAt,
+          scheduledAt,
+          renderStartAt: frameStartedAt,
+          renderEndAt: frameEndedAt,
+          toInvalidationMs,
+          invalidationToRenderStartMs,
+          toRenderStartMs,
+          latestToRenderStartMs,
+          queueWaitMs: rafLatencyMs,
+          renderDurationMs,
+          toRenderEndMs,
+          latestToRenderEndMs,
+          coalescedCount: pendingLive.coalescedCount,
+          source: pendingLive.source,
+          clockBase: pendingLive.clockBase,
+          renderer: this.gpuSurface.kind,
+          workerMode: this.workerMode,
+          visibility,
+        };
+        this.lastLiveUpdateFrameTrace = liveUpdateTrace;
       }
     }
     const intervalMs = this.lastRenderTimestamp !== null && frameEndedAt - this.lastRenderTimestamp < 100
@@ -665,7 +806,8 @@ export class ChartSession {
       dirty,
       renderMs: frameEndedAt - wallStart,
       rafLatencyMs,
-      visible: this.ownerDocument.visibilityState !== "hidden",
+      visible: isVisible,
+      liveUpdateTrace,
     });
 
     if (this.pendingCapture && (dirty & ChartSurfaceDirty.Annotation)) {

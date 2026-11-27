@@ -134,7 +134,53 @@ type WhaleCrowdPreparedData = IndicatorPreparedData<ChartWhaleCrowdVenuePoint, W
   meta: WhaleCrowdMeta;
 };
 
+type NativeVenueZSeriesResult = ReturnType<typeof computeVenueNativeZSeries>;
+
 const preparedCache = new BoundedCache<WhaleCrowdPreparedData>({ maxEntries: 64, ttlMs: 60 * 60_000 });
+const nativeZSeriesCache = new BoundedCache<NativeVenueZSeriesResult>({ maxEntries: 64, ttlMs: 60 * 60_000 });
+let nativeZSeriesComputeCount = 0;
+let nativeZSeriesCacheHitCount = 0;
+
+export function getWhaleCrowdNativeCacheStats(): { computes: number; hits: number } {
+  return { computes: nativeZSeriesComputeCount, hits: nativeZSeriesCacheHitCount };
+}
+
+export function resetWhaleCrowdCachesForTests(): void {
+  preparedCache.clear();
+  nativeZSeriesCache.clear();
+  nativeZSeriesComputeCount = 0;
+  nativeZSeriesCacheHitCount = 0;
+}
+
+function getOrComputeVenueNativeZSeries(
+  rawSeries: WhaleCrowdVenueSeries,
+  zWindowDays: number,
+  asOfTime: number | undefined,
+): NativeVenueZSeriesResult {
+  const firstT = rawSeries.points.length ? rawSeries.points[0].t : "empty";
+  const lastT = rawSeries.points.length ? rawSeries.points[rawSeries.points.length - 1].t : "empty";
+  const gapsKey = rawSeries.gaps?.map((g) => `${g.from}-${g.to}`).join(",") ?? "";
+  const nativeKey = [
+    rawSeries.venue,
+    rawSeries.status ?? "ready",
+    rawSeries.points.length,
+    firstT,
+    lastT,
+    gapsKey,
+    rawSeries.historyStartedAt ?? "",
+    zWindowDays,
+    asOfTime ?? "live",
+  ].join("|");
+  const cached = nativeZSeriesCache.get(nativeKey);
+  if (cached) {
+    nativeZSeriesCacheHitCount += 1;
+    return cached;
+  }
+  nativeZSeriesComputeCount += 1;
+  const computed = computeVenueNativeZSeries(rawSeries, zWindowDays, asOfTime);
+  nativeZSeriesCache.set(nativeKey, computed);
+  return computed;
+}
 
 function rememberPreparedData(key: string, value: WhaleCrowdPreparedData): WhaleCrowdPreparedData {
   preparedCache.set(key, value);
@@ -764,7 +810,7 @@ function prepareWhaleCrowdData(ctx: IndicatorDrawContext<WhaleCrowdSettings>): W
       continue;
     }
 
-    const native = computeVenueNativeZSeries(rawSeries, zWindowDays, chart.asOfTime);
+    const native = getOrComputeVenueNativeZSeries(rawSeries, zWindowDays, chart.asOfTime);
     const effectiveStatus: PreparedVenueData["status"] = native.isWarming ? "warming" : declaredStatus;
     const suppressZScore = ctx.settings.mode === "zScore" && native.isWarming;
     const chartPoints = mapVenueSeriesToChartCandles(

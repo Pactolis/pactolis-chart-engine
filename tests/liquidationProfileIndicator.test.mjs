@@ -216,3 +216,91 @@ test("status messages, warnings, and hover readout render in Turkish", () => {
   assert.ok(texts.some((t) => t.text.includes("HL 72,000 → Binance ≈ 74,430")));
   assert.ok(strokes.length >= 0);
 });
+
+test("CE #429: Hyperliquid ratio is pinned per response so live Binance ticks do not shift levels", () => {
+  setupTurkishLocale();
+
+  const baseClusters = [
+    { price: 59_000, longNotional: 10_000_000, shortNotional: 0, longCount: 5, shortCount: 0 },
+    { price: 59_450, longNotional: 153_000_000, shortNotional: 0, longCount: 25, shortCount: 0 },
+    { price: 60_000, longNotional: 0, shortNotional: 42_000_000, longCount: 0, shortCount: 14 },
+  ];
+
+  const response1 = {
+    status: "ready",
+    source: "hyperliquid",
+    hlCoin: "BTC",
+    takenAt: Date.now() - 10_000,
+    hlMarkPx: 59_453,
+    hlMarkAt: Date.now() - 5_000,
+    clusters: baseClusters,
+  };
+
+  configureIndicatorDataSource({
+    requestLiquidationSeries: () => ({ status: "idle" }),
+    requestCoinalyzeDerivativeSeries: () => ({ status: "idle" }),
+    requestFuturesPositioningSeries: () => ({ status: "idle" }),
+    fetchOptionsGexSurface: () => Promise.reject(new Error("unused")),
+    requestLiquidationClusters: () => ({ status: "ready", data: response1 }),
+  });
+
+  // Frame 0: initial Binance close = 59_460 -> ratio pinned to 59_460 / 59_453.
+  const firstRecorder = canvasRecorder();
+  const firstCtx = makeCtx(firstRecorder.canvas, { showPlotLabel: false, showReadout: false }, undefined, 59_460);
+  const firstPrepared = prepareLiquidationProfile(firstCtx);
+  drawLiquidationProfileOverlay(firstCtx, firstPrepared);
+
+  const expectedAlignedPrices = firstPrepared.meta.clusters.map((c) => c.alignedPrice);
+  const expectedBarYs = firstRecorder.fills.map((f) => f.y);
+  assert.equal(expectedAlignedPrices.length, 3);
+  assert.ok(expectedBarYs.length > 0);
+
+  // 240 frames with +/-0.3% random-walk live Binance price ticks while response1 stays active.
+  let walkPrice = 59_460;
+  for (let frame = 1; frame <= 240; frame += 1) {
+    const step = Math.sin(frame * 1.7) * 0.003;
+    walkPrice = 59_460 * (1 + step);
+    const rec = canvasRecorder();
+    const ctx = makeCtx(rec.canvas, { showPlotLabel: false, showReadout: false }, undefined, walkPrice);
+    const prepared = prepareLiquidationProfile(ctx);
+    drawLiquidationProfileOverlay(ctx, prepared);
+
+    assert.deepEqual(
+      prepared.meta.clusters.map((c) => c.alignedPrice),
+      expectedAlignedPrices,
+      `alignedPrice shifted on frame ${frame}`,
+    );
+    assert.deepEqual(
+      rec.fills.map((f) => f.y),
+      expectedBarYs,
+      `fillRect y shifted on frame ${frame}`,
+    );
+  }
+
+  // Simulate a >1.5% Binance move on the same response: divergence warning must still use pinned ratio.
+  const movedCtx = makeCtx(canvasRecorder().canvas, {}, undefined, 60_500);
+  const movedPrepared = prepareLiquidationProfile(movedCtx);
+  assert.equal(movedPrepared.meta.warnings.priceDivergence, false);
+
+  // New response object with updated hlMarkPx recomputes ratio once for the new response.
+  const response2 = {
+    status: "ready",
+    source: "hyperliquid",
+    hlCoin: "BTC",
+    takenAt: Date.now() - 1_000,
+    hlMarkPx: 60_000,
+    hlMarkAt: Date.now() - 1_000,
+    clusters: baseClusters,
+  };
+  configureIndicatorDataSource({
+    requestLiquidationSeries: () => ({ status: "idle" }),
+    requestCoinalyzeDerivativeSeries: () => ({ status: "idle" }),
+    requestFuturesPositioningSeries: () => ({ status: "idle" }),
+    fetchOptionsGexSurface: () => Promise.reject(new Error("unused")),
+    requestLiquidationClusters: () => ({ status: "ready", data: response2 }),
+  });
+
+  const nextPrepared = prepareLiquidationProfile(makeCtx(canvasRecorder().canvas, {}, undefined, 60_600));
+  const expectedNewPrice = 59_450 * (60_600 / 60_000);
+  assert.ok(Math.abs(nextPrepared.meta.clusters[1].alignedPrice - expectedNewPrice) < 1e-6);
+});

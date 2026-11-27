@@ -11,6 +11,8 @@ const { configureIndicatorDataSource } = await import("../dist/features/indicato
 const {
   computeWhaleCrowdSpread,
   computeVenueNativeZSeries,
+  getWhaleCrowdNativeCacheStats,
+  resetWhaleCrowdCachesForTests,
   whaleVsCrowdIndicatorDefinition,
 } = await import("../dist/features/indicators/builtins/whaleVsCrowd.js");
 const { fundingRegimeIndicatorDefinition } = await import("../dist/features/indicators/builtins/fundingRegime.js");
@@ -490,4 +492,59 @@ test("whaleVsCrowd renders localized TR/EN disabled venue badge (FE #1210)", () 
   } finally {
     if (prevLocale) configureChartLocale(prevLocale);
   }
+});
+
+test("CE #419: whaleVsCrowd computes native z-series only once across 100 revision/range changes", () => {
+  resetWhaleCrowdCachesForTests();
+  const series = makeSeries(T0, 120, HOUR_MS);
+  const points = buildVenuePoints({
+    startMs: T0 - 30 * DAY_MS,
+    count: 30 * 24 + 120,
+    stepMs: HOUR_MS,
+    whaleFn: (i) => 1.2 + Math.sin(i * 0.15) * 0.3,
+    crowdFn: (i) => 0.9 + Math.cos(i * 0.1) * 0.2,
+    resolution: "1h",
+  });
+  const response = {
+    status: "ready",
+    source: "coinalyze",
+    venues: [
+      { venue: "binance", status: "ready", points },
+      { venue: "okx", status: "ready", points },
+      { venue: "hyperliquid", status: "disabled", points: [] },
+    ],
+  };
+
+  configureIndicatorDataSource({
+    requestWhaleCrowdSeries: () => ({ status: "ready", data: response }),
+  });
+
+  const baseline = whaleVsCrowdIndicatorDefinition.prepareData(
+    makeDrawContext(series, { mode: "zScore", venueHyperliquid: false }, [20, 100]),
+  );
+  assert.equal(baseline.status, "ok");
+  const statsAfterFirst = getWhaleCrowdNativeCacheStats();
+  assert.equal(statsAfterFirst.computes, 2); // binance + okx computed once
+
+  // Run 100 prepareData calls with changing series.revision and changing visible range.
+  for (let i = 0; i < 100; i += 1) {
+    series.updateLastTrade(90_050 + (i % 7), 0.1);
+    const from = 10 + (i % 15);
+    const to = from + 60;
+    const prepared = whaleVsCrowdIndicatorDefinition.prepareData(
+      makeDrawContext(series, { mode: "zScore", venueHyperliquid: false }, [from, to]),
+    );
+    assert.equal(prepared.status, "ok");
+    if (from === 20 && to === 80) {
+      // Same visible bars must produce identical z-scores.
+      const baseByIdx = new Map(baseline.meta.venues.binance.points.map((p) => [p.index, p.zScore]));
+      for (const pt of prepared.meta.venues.binance.points) {
+        assert.equal(pt.zScore, baseByIdx.get(pt.index));
+      }
+    }
+  }
+
+  const statsAfter100 = getWhaleCrowdNativeCacheStats();
+  assert.equal(statsAfter100.computes, 2);
+  assert.equal(statsAfter100.hits, 200);
 });
