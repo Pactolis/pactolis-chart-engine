@@ -196,3 +196,37 @@ test("#322: single existing level update in footprint mode uploads only 16 B ins
 
   pipeline.dispose();
 });
+
+test("#408: canPatchInPlace coalesces contiguous dirty cells into one writeBuffer per run", () => {
+  const series = makeDenseSeries(20);
+  const device = makeFakeNativeWebGpuDevice();
+  const pipeline = new WebGpuNativeScenePipeline(device, "rgba8unorm");
+
+  // Initial full sync (prices 100..119)
+  pipeline.prepareFrame(makeScene(series, true), 400, 200);
+  device._writtenBuffers.length = 0;
+
+  // Mutate contiguous price bins 102, 103, 104 (indices 2..4) and non-contiguous bin 112 (index 12),
+  // leaving bar OHLC unchanged (high=120, low=100, close=105).
+  for (const price of [102, 103, 104, 112]) {
+    series.addTrade({
+      time: T0 + 15_000,
+      price,
+      qty: 5,
+      isBuy: true,
+      liquidation: false,
+      market: MARKET,
+      source: "live",
+    });
+  }
+  pipeline.prepareFrame(makeScene(series, true), 400, 200);
+
+  const cellWrites = device._writtenBuffers.filter((w) => w.label === "NativeSceneCellStorage");
+  assert.equal(cellWrites.length, 2, "3 contiguous cells + 1 isolated cell should flush in 2 writeBuffer calls");
+  assert.equal(cellWrites[0].dstOffset, 2 * CELL_RECORD_BYTES);
+  assert.equal(cellWrites[0].byteLength, 3 * CELL_RECORD_BYTES);
+  assert.equal(cellWrites[1].dstOffset, 12 * CELL_RECORD_BYTES);
+  assert.equal(cellWrites[1].byteLength, CELL_RECORD_BYTES);
+
+  pipeline.dispose();
+});

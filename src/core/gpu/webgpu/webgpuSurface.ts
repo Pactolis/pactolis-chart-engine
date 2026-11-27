@@ -13,7 +13,7 @@ import type {
 } from "../gpuBackend.js";
 import type { WebGpuDeviceHandle } from "./webgpuDevice.js";
 import { recordGpuFeatureFallback } from "../gpuDiagnostics.js";
-import { WebGpuGlyphSink, WebGpuNativeGlyphPipeline } from "./webgpuNativeGlyphPipeline.js";
+import { prewarmGlyphAtlasAsync, WebGpuGlyphSink, WebGpuNativeGlyphPipeline } from "./webgpuNativeGlyphPipeline.js";
 import { WebGpuNativeHeatmapPipeline } from "./webgpuNativeHeatmapPipeline.js";
 import { WebGpuNativeScenePipeline } from "./webgpuNativeScenePipeline.js";
 import { WebGpuQuadPipeline } from "./webgpuQuadPipeline.js";
@@ -76,6 +76,7 @@ export class WebGpuSurface implements GpuSurface {
   private readonly captureAbortListeners = new Set<() => void>();
   private readonly unbindDeviceLoss: () => void;
   private initVerificationPromise: Promise<void> | null = null;
+  private prewarmPromise: Promise<void> | null = null;
 
   constructor(
     public readonly canvas: CanvasTarget,
@@ -159,6 +160,105 @@ export class WebGpuSurface implements GpuSurface {
     if (this.initVerificationPromise) {
       await this.initVerificationPromise;
     }
+  }
+
+  /**
+   * Speculatively compiles native WebGPU scene, LOD, glyph and (optionally) resident heatmap
+   * pipelines and incrementally prepares the SDF glyph atlas off the first-render path.
+   */
+  async prewarmAsync(options?: { includeHeatmap?: boolean }): Promise<void> {
+    if (this.disposed || this.handle.isLost()) return;
+    if (this.prewarmPromise) return this.prewarmPromise;
+    const includeHeatmap = options?.includeHeatmap !== false;
+
+    const run = (async () => {
+      try {
+        await prewarmGlyphAtlasAsync();
+        if (this.disposed || this.handle.isLost()) return;
+        const device = this.handle.device;
+        if (!device) return;
+
+        if (this.supportsNativeScene()) {
+          if (!this.nativePipeline) {
+            try {
+              const pipeline = await WebGpuNativeScenePipeline.createAsync(device, this.handle.format, {
+                supportsTimestampQuery: this.handle.supportsTimestampQuery,
+                maxBufferSize: this.handle.limits?.maxBufferSize,
+              });
+              if (this.disposed || this.handle.isLost()) {
+                pipeline.dispose();
+                return;
+              }
+              if (!this.nativePipeline) {
+                this.nativePipeline = pipeline;
+              } else {
+                pipeline.dispose();
+              }
+            } catch {
+              // Keep demand-time init behavior intact if speculative async prewarm fails.
+            }
+          }
+          if (this.nativePipeline && !this.disposed && !this.handle.isLost()) {
+            await this.nativePipeline.prewarmLodPipelinesAsync();
+          }
+        }
+
+        if (
+          !this.disposed
+          && !this.handle.isLost()
+          && !this.nativeGlyphDisabled
+          && !this.nativeGlyphPipeline
+          && typeof device.createTexture === "function"
+          && typeof device.createSampler === "function"
+          && (typeof device.createRenderPipelineAsync === "function" || typeof device.createRenderPipeline === "function")
+        ) {
+          try {
+            const glyphPipeline = await WebGpuNativeGlyphPipeline.createAsync(device, this.handle.format);
+            if (this.disposed || this.handle.isLost()) {
+              glyphPipeline.dispose();
+              return;
+            }
+            if (!this.nativeGlyphPipeline) {
+              this.nativeGlyphPipeline = glyphPipeline;
+            } else {
+              glyphPipeline.dispose();
+            }
+          } catch {
+            // Keep demand-time init behavior intact if speculative async prewarm fails.
+          }
+        }
+
+        if (includeHeatmap && !this.disposed && !this.handle.isLost() && this.supportsNativeHeatmap()) {
+          if (!this.nativeHeatmapPipeline) {
+            try {
+              const heatmapPipeline = await WebGpuNativeHeatmapPipeline.createAsync(
+                device,
+                this.handle.format,
+                this.handle.limits?.maxBufferSize,
+              );
+              if (this.disposed || this.handle.isLost()) {
+                heatmapPipeline.dispose();
+                return;
+              }
+              if (!this.nativeHeatmapPipeline) {
+                this.nativeHeatmapPipeline = heatmapPipeline;
+              } else {
+                heatmapPipeline.dispose();
+              }
+            } catch {
+              // Keep demand-time init behavior intact if speculative async prewarm fails.
+            }
+          } else {
+            await this.nativeHeatmapPipeline.prewarmResidentPipelineAsync();
+          }
+        }
+      } catch {
+        // Speculative prewarm errors must never fail surface initialization.
+      }
+    })();
+
+    this.prewarmPromise = run;
+    return run;
   }
 
   getDeviceHandle(): WebGpuDeviceHandle {

@@ -507,6 +507,7 @@ export async function createGpuSurfaceAsync(
                 canvasLocked = true;
                 createdSurface = new WebGpuSurface(canvas, handle);
                 await (createdSurface as { verifyInit?: () => Promise<void> }).verifyInit?.();
+                void (createdSurface as { prewarmAsync?: (options?: { includeHeatmap?: boolean }) => Promise<void> }).prewarmAsync?.({ includeHeatmap: false });
                 commitSelectionDiagnostics(
                   preference,
                   "webgpu",

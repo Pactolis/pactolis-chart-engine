@@ -520,3 +520,134 @@ test("opt-in feature flag defaults to disabled and falls back to legacy per-sess
     resetAll();
   }
 });
+
+test("#411: urgent callbacks respect frameBudgetMs across 8+ panels without single-frame spike", () => {
+  resetAll();
+  try {
+    configurePerformanceTelemetry({ enabled: true });
+    configureGlobalRenderScheduler({ enabled: true, frameBudgetMs: 16, maxStalenessMs: 100 });
+    let nowMs = 1000;
+    const win = makeWindow();
+    const scheduler = new GlobalRenderScheduler(win, () => nowMs);
+
+    const executed = [];
+    for (let i = 0; i < 10; i++) {
+      const token = { id: `panel-urgent-${i}` };
+      scheduler.schedule(token, () => {
+        executed.push(i);
+        nowMs += 5;
+      }, { priority: "visible", urgent: true });
+    }
+
+    assert.equal(win.queuedRafs(), 1);
+    win.runNextFrame(nowMs);
+
+    // Budget is 16ms: panel 0 (5ms), 1 (10ms), 2 (15ms), 3 (20ms >= 16ms) -> stops after 4 callbacks.
+    assert.deepEqual(executed, [0, 1, 2, 3]);
+    assert.equal(scheduler.getPendingCount(), 6);
+    assert.equal(win.queuedRafs(), 1, "remaining urgent panels defer to next frame");
+
+    win.runNextFrame(nowMs);
+    assert.equal(executed.length, 8);
+    assert.equal(scheduler.getPendingCount(), 2);
+
+    win.runNextFrame(nowMs);
+    assert.deepEqual(executed, [0, 1, 2, 3, 4, 5, 6, 7, 8, 9]);
+    assert.equal(scheduler.getPendingCount(), 0);
+
+    const { counters } = snapshotPerformanceTelemetry();
+    assert.ok((counters["chart.scheduler.overbudgetFrames"] ?? 0) >= 2);
+  } finally {
+    resetAll();
+  }
+});
+
+test("#411: starved visible panels make bounded progress under continuous multi-panel urgent flood", () => {
+  resetAll();
+  try {
+    configurePerformanceTelemetry({ enabled: true });
+    configureGlobalRenderScheduler({ enabled: true, frameBudgetMs: 16, maxStalenessMs: 40 });
+    let nowMs = 0;
+    const win = makeWindow();
+    const scheduler = new GlobalRenderScheduler(win, () => nowMs);
+
+    let visibleRuns = 0;
+    let urgentRuns = 0;
+
+    // Schedule 1 visible panel that stays starved when urgent flood keeps budget busy.
+    scheduler.schedule({ id: "panel-visible" }, () => {
+      visibleRuns++;
+      nowMs += 4;
+    }, { priority: "visible", urgent: false });
+
+    for (let i = 0; i < 6; i++) {
+      const token = { id: `panel-flood-${i}` };
+      const reschedule = () => {
+        urgentRuns++;
+        nowMs += 6;
+        if (urgentRuns < 30) {
+          scheduler.schedule(token, reschedule, { priority: "active", urgent: true });
+        }
+      };
+      scheduler.schedule(token, reschedule, { priority: "active", urgent: true });
+    }
+
+    // Frame 1 at t=0: 3 urgent callbacks consume 18ms (>16ms), visible does not starve yet.
+    win.runNextFrame(0);
+    assert.equal(visibleRuns, 0);
+
+    // Advance past maxStalenessMs (40ms): starved visible entry must outrank urgent flood.
+    nowMs = 50;
+    win.runNextFrame(nowMs);
+    assert.equal(visibleRuns, 1, "starved visible panel must make progress ahead of continuous urgent flood");
+
+    const { counters } = snapshotPerformanceTelemetry();
+    assert.ok((counters["chart.scheduler.starvationBoost"] ?? 0) >= 1);
+  } finally {
+    resetAll();
+  }
+});
+
+test("#411: scheduler stays consistent across reentrant schedule, unregister during flush, and callback exception", () => {
+  resetAll();
+  try {
+    configureGlobalRenderScheduler({ enabled: true, frameBudgetMs: 32, maxStalenessMs: 100 });
+    let nowMs = 0;
+    const win = makeWindow();
+    const scheduler = new GlobalRenderScheduler(win, () => nowMs);
+
+    const firstToken = { id: "first" };
+    const victimToken = { id: "victim" };
+    const reentrantToken = { id: "reentrant" };
+    const throwerToken = { id: "thrower" };
+
+    const log = [];
+    scheduler.schedule(firstToken, () => {
+      log.push("first");
+      scheduler.unregister(victimToken);
+      scheduler.schedule(reentrantToken, () => {
+        log.push("reentrant");
+      }, { priority: "visible" });
+    }, { priority: "active", urgent: true });
+
+    scheduler.schedule(victimToken, () => {
+      log.push("victim-should-not-run");
+    }, { priority: "active", urgent: true });
+
+    scheduler.schedule(throwerToken, () => {
+      log.push("thrower");
+      throw new Error("synthetic render failure");
+    }, { priority: "visible" });
+
+    assert.throws(() => win.runNextFrame(nowMs), /synthetic render failure/);
+    assert.deepEqual(log, ["first", "thrower"]);
+    // Reentrant entry was queued while flushing and must remain scheduled for next frame.
+    assert.equal(scheduler.getPendingCount(), 1);
+    assert.equal(win.queuedRafs(), 1);
+    win.runNextFrame(nowMs + 16);
+    assert.deepEqual(log, ["first", "thrower", "reentrant"]);
+    assert.equal(scheduler.getPendingCount(), 0);
+  } finally {
+    resetAll();
+  }
+});

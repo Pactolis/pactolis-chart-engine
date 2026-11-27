@@ -66,7 +66,7 @@ function makeGl() {
 
 const COLOR = { r: 1, g: 0.5, b: 0.25, a: 1 };
 
-test("QuadBatch configures 20-byte UNORM8 instance layout and performs buffer orphaning on every flush", () => {
+test("QuadBatch configures 20-byte UNORM8 instance layout and reuses GPU buffer via bufferSubData on steady frames", () => {
   const gl = makeGl();
   const batch = new QuadBatch(gl, 4);
 
@@ -91,26 +91,38 @@ test("QuadBatch configures 20-byte UNORM8 instance layout and performs buffer or
   assert.equal(dynamicAllocations.length, 1);
   assert.equal(dynamicAllocations[0].dataOrSize, 4 * 20);
 
-  // 3. First flush orphans buffer and uploads 5 words (20 bytes) for 1 quad
+  // 3. Steady flush uploads via bufferSubData without re-allocating via bufferData
   batch.begin();
   batch.rect(0, 0, 10, 10, COLOR);
   batch.flush(100, 100);
 
-  // Buffer orphaning check: bufferData was called again on flush before bufferSubData
   const dynamicAfterFirstFlush = gl.bufferDataCalls.filter((call) => call.usage === gl.DYNAMIC_DRAW);
-  assert.equal(dynamicAfterFirstFlush.length, 2, "bufferData orphaning performed on flush");
+  assert.equal(dynamicAfterFirstFlush.length, 1, "steady flush does not call bufferData");
   assert.equal(gl.bufferSubDataCalls.length, 1);
   assert.equal(gl.bufferSubDataCalls[0].byteLength, 20, "20 bytes uploaded for 1 quad");
 
-  // 4. Second flush also orphans buffer (implicit driver stall prevention)
+  // 4. Second steady flush also reuses buffer via bufferSubData only
   batch.begin();
   batch.rect(10, 10, 20, 20, COLOR);
   batch.flush(100, 100);
 
   const dynamicAfterSecondFlush = gl.bufferDataCalls.filter((call) => call.usage === gl.DYNAMIC_DRAW);
-  assert.equal(dynamicAfterSecondFlush.length, 3, "bufferData orphaning performed on second flush");
+  assert.equal(dynamicAfterSecondFlush.length, 1, "second steady flush avoids bufferData reallocation");
   assert.equal(gl.bufferSubDataCalls.length, 2);
   assert.equal(gl.bufferSubDataCalls[1].byteLength, 20);
+
+  // 5. Capacity growth triggers bufferData only when CPU floatData exceeds GPU capacity
+  batch.begin();
+  for (let i = 0; i < 6; i++) {
+    batch.rect(i * 5, i * 5, 10, 10, COLOR);
+  }
+  batch.flush(100, 100);
+
+  const dynamicAfterGrowthFlush = gl.bufferDataCalls.filter((call) => call.usage === gl.DYNAMIC_DRAW);
+  assert.equal(dynamicAfterGrowthFlush.length, 2, "growth calls bufferData exactly once");
+  assert.equal(dynamicAfterGrowthFlush[1].dataOrSize, 8 * 20);
+  assert.equal(gl.bufferSubDataCalls.length, 3);
+  assert.equal(gl.bufferSubDataCalls[2].byteLength, 6 * 20);
 });
 
 test("QuadBatch delivers 37.5% upload byte savings tracked via gpu.upload.bytes telemetry", () => {
