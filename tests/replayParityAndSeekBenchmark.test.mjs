@@ -1010,7 +1010,7 @@ test("ReplayController follow and reconfigure advance sublinearly without rescan
   let appendedTotal = 0;
   for (let i = 9_901; i <= 10_000; i++) {
     const step = ctrl.follow(i * MIN, true);
-    appendedTotal += step.visibleBars.length;
+    appendedTotal += ("append" in step ? step.append.length : step.replace.length);
   }
 
   assert.equal(appendedTotal, 100);

@@ -981,6 +981,12 @@ test("WebGPU concurrent non-default powerPreference requests coalesce and isolat
               deviceCalls.push(pref);
               const { device } = makeFakeWebGpuDevice("rgba8unorm");
               device._pref = pref;
+              device._destroyedCount = 0;
+              const prevDestroy = device.destroy?.bind(device);
+              device.destroy = () => {
+                device._destroyedCount++;
+                prevDestroy?.();
+              };
               createdDevices.push(device);
               return device;
             },
@@ -1007,7 +1013,7 @@ test("WebGPU concurrent non-default powerPreference requests coalesce and isolat
       assert.equal(h, handles[0]);
     }
     resetSharedWebGpuDevice();
-    assert.equal(createdDevices.filter((d) => d.destroyed).length, 1);
+    assert.equal(createdDevices.filter((d) => d._destroyedCount > 0).length, 1);
 
     // 2. Concurrent low-power + high-performance resolving out of order must not overwrite or swap handles
     adapterCalls.length = 0;
@@ -1031,7 +1037,7 @@ test("WebGPU concurrent non-default powerPreference requests coalesce and isolat
     assert.equal(lowHandle.device._pref, "low-power");
 
     resetSharedWebGpuDevice();
-    assert.equal(createdDevices.filter((d) => d.destroyed).length, 3);
+    assert.equal(createdDevices.filter((d) => d._destroyedCount > 0).length, 3);
   } finally {
     restoreNavigator(originalDescriptor);
     resetSharedWebGpuDevice();

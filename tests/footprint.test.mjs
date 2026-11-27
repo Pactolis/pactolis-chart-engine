@@ -385,14 +385,14 @@ test("weekly upsertBar and tail volume updates skip global order.filter sweeps w
     cells: new Map(),
     hasRef: true,
   });
-  const legacyWed = START_MON + 2 * 24 * 60 * 60 * 1000;
-  overlapSeries.upsertBar(makeBar(legacyWed, 101));
+  const legacyThu = START_MON + 3 * 24 * 60 * 60 * 1000;
+  overlapSeries.upsertBar(makeBar(legacyThu, 101));
   overlapSeries.upsertBar(makeBar(START_MON, 102));
   assert.equal(overlapSeries.length, 1);
   assert.equal(overlapSeries.at(0).startTime, START_MON, "canonical weekly bar must replace legacy overlapping bar");
 
   // Inserting a legacy overlapping bar when canonical already exists discards legacy bar
-  overlapSeries.upsertBar(makeBar(START_MON + 4 * 24 * 60 * 60 * 1000, 103));
+  overlapSeries.upsertBar(makeBar(legacyThu, 103));
   assert.equal(overlapSeries.length, 1);
   assert.equal(overlapSeries.at(0).startTime, START_MON, "existing canonical bar must win over later legacy insert");
 
@@ -400,7 +400,7 @@ test("weekly upsertBar and tail volume updates skip global order.filter sweeps w
   const MONTH = 30 * 24 * 60 * 60 * 1000;
   const monthly = new FootprintSeries({ intervalMs: MONTH, priceStep: 1 });
   const feb1 = Date.UTC(2024, 1, 1);
-  const febLegacy = Date.UTC(2024, 1, 10);
+  const febLegacy = Math.ceil(feb1 / MONTH) * MONTH;
   monthly.upsertBar(makeBar(febLegacy, 200));
   monthly.upsertBar(makeBar(feb1, 201));
   assert.equal(monthly.length, 1);
