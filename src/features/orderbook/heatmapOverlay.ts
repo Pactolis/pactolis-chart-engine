@@ -407,7 +407,7 @@ export class OrderbookHeatmapOverlay {
 
     // Redraws pull the live tail; this keeps it moving on a quiet chart when live tail subscription is inactive/idle.
     this.liveTimer = setInterval(() => {
-      if (!this.active()) return;
+      if (!this.active() || this.isVisibilityHidden(this.visibilityObservedCanvas ?? undefined)) return;
       const now = this.now();
       // If live-tail push/invalidation is active and healthy, suppress unconditional timer redraws
       if (this.isLiveTailHealthy(now)) return;
@@ -2957,6 +2957,25 @@ export class OrderbookHeatmapOverlay {
             out.push({ priceStart, value, liveEligible: isLive });
           }
           return out;
+        },
+        forEachBarCell: (
+          barIndex: number,
+          visit: (priceStart: number, value: number, liveEligible: boolean) => void,
+        ): number => {
+          if (barIndex < 0 || barIndex >= series.length) return 0;
+          const isLive = barIndex === liveIndex;
+          const bar = (isLive ? liveHeatmapSubBar : lastHeatmapSubBar)(
+            bars, series.timeOfIndex(barIndex), series.timeOfIndex(barIndex + 1), tier, sortedTimes);
+          if (!bar || bar.cells.length === 0) return 0;
+          let count = 0;
+          for (const cell of bar.cells) {
+            const priceStart = cell[0];
+            const value = heatmapValueInUnit(heatmapCellUsd(cell), priceStart, step, unit);
+            if (value <= 0 || (uploadThreshold > 0 && value < uploadThreshold)) continue;
+            visit(priceStart, value, isLive);
+            count++;
+          }
+          return count;
         },
       };
     } finally {

@@ -602,6 +602,7 @@ export class WorkerChartEndpoint {
   private readonly panelId: string;
   private readonly marketId: string;
   private readonly maxSeenTradeIds: number;
+  private readonly maxTrackedBarRevisions: number;
   private readonly handlers: WorkerEndpointHandlers;
   private readonly inputQueue: BoundedWorkerPortQueue<MainWorkerMessage>;
   private readonly lastSeqByChannel = new Map<WorkerPortChannel, number>();
@@ -640,6 +641,7 @@ export class WorkerChartEndpoint {
     this.panelId = options.panelId;
     this.marketId = options.marketId;
     this.maxSeenTradeIds = Math.max(64, options.maxSeenTradeIds ?? 2048);
+    this.maxTrackedBarRevisions = Math.max(256, this.maxSeenTradeIds * 4);
     this.handlers = options.handlers ?? {};
     this.generation = Math.max(0, options.initialGeneration ?? 0);
     this.inputQueue = new BoundedWorkerPortQueue<MainWorkerMessage>({
@@ -684,6 +686,7 @@ export class WorkerChartEndpoint {
         this.generation = msg.generation;
         this.inputQueue.bumpGeneration(this.generation);
         this.lastSeqByChannel.clear();
+        this.lastBarRevisionByKey.clear();
         this.handlers.onLifecycle?.(msg.payload, msg);
       } else {
         this.droppedStale++;
@@ -819,6 +822,14 @@ export class WorkerChartEndpoint {
       if (prevRev !== undefined && msg.revision <= prevRev) {
         this.droppedDuplicate++;
         return;
+      }
+      if (prevRev !== undefined) {
+        this.lastBarRevisionByKey.delete(barKey);
+      } else if (this.lastBarRevisionByKey.size >= this.maxTrackedBarRevisions) {
+        const oldest = this.lastBarRevisionByKey.keys().next().value;
+        if (oldest !== undefined) {
+          this.lastBarRevisionByKey.delete(oldest);
+        }
       }
       this.lastBarRevisionByKey.set(barKey, msg.revision);
       this.processedIngress++;

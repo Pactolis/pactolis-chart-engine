@@ -343,6 +343,91 @@ function queryModelState(market: string, onUpdate: () => void): LiquidationModel
   }
 }
 
+interface CachedModelSimulation {
+  statusError: "seam-mismatch" | null;
+  replayedBars: number;
+  simLastClose: number;
+  rawClusters: LiquidationClusterLevel[];
+}
+
+interface CachedAlignedResult {
+  key: string;
+  aligned: AlignedLiquidationCluster[];
+}
+
+interface CachedMergedPixelRows {
+  priceTop: number;
+  pricePerPx: number;
+  priceScaleMode: unknown;
+  areaTop: number;
+  areaBottom: number;
+  rows: MergedLiquidationRow[];
+}
+
+const cachedModelSimulations = new WeakMap<object, CachedModelSimulation>();
+const cachedModelAligned = new WeakMap<object, CachedAlignedResult>();
+const cachedHyperliquidAligned = new WeakMap<LiquidationClustersResponse, CachedAlignedResult>();
+const cachedOverlayPixelRows = new WeakMap<readonly AlignedLiquidationCluster[], CachedMergedPixelRows>();
+
+function getOrRunModelSimulation(
+  response: object,
+  modelState: NonNullable<LiquidationModelSeriesState & { status: "ready" }>["data"]["state"] & object,
+  bars: LiquidationModelBar[] | undefined,
+): CachedModelSimulation {
+  const cached = cachedModelSimulations.get(response);
+  if (cached) return cached;
+
+  let replayBars: LiquidationModelBar[] = Array.isArray(bars) ? bars : [];
+  if (replayBars.length > 0 && Array.isArray(modelState.seam) && modelState.seam.length > 0) {
+    const seamCheck = checkSeamAndDetectShift(modelState.seam, replayBars);
+    if (seamCheck.status === "seam-mismatch") {
+      const mismatch: CachedModelSimulation = {
+        statusError: "seam-mismatch",
+        replayedBars: 0,
+        simLastClose: 0,
+        rawClusters: [],
+      };
+      cachedModelSimulations.set(response, mismatch);
+      return mismatch;
+    }
+    replayBars = seamCheck.correctedBars;
+  }
+
+  const sim = createLiquidationModel(modelState);
+  let replayedBars = 0;
+  for (const bar of replayBars) {
+    if (bar.t > modelState.asOf) {
+      sim.step(bar);
+      replayedBars += 1;
+    }
+  }
+
+  const book = sim.book();
+  const rawClusters: LiquidationClusterLevel[] = [];
+  for (let i = 0; i < book.centers.length; i += 1) {
+    const longNotional = book.longUsd[i] ?? 0;
+    const shortNotional = book.shortUsd[i] ?? 0;
+    if (longNotional > 0 || shortNotional > 0) {
+      rawClusters.push({
+        price: book.centers[i],
+        longNotional,
+        shortNotional,
+        longCount: 0,
+        shortCount: 0,
+      });
+    }
+  }
+
+  const result: CachedModelSimulation = {
+    statusError: null,
+    replayedBars,
+    simLastClose: sim.lastClose,
+    rawClusters,
+  };
+  cachedModelSimulations.set(response, result);
+  return result;
+}
+
 function prepareModelProfile(
   market: string,
   rangePct: number,
@@ -413,55 +498,34 @@ function prepareModelProfile(
     );
   }
 
-  let replayBars: LiquidationModelBar[] = Array.isArray(response.bars) ? response.bars : [];
-  if (replayBars.length > 0 && Array.isArray(modelState.seam) && modelState.seam.length > 0) {
-    const seamCheck = checkSeamAndDetectShift(modelState.seam, replayBars);
-    if (seamCheck.status === "seam-mismatch") {
-      return emptyPrepared(
-        "no-data",
-        "unavailable",
-        buildLiquidationModelStatusText("seam-mismatch"),
-        binanceLast,
-        "model",
-        "seam-mismatch",
-      );
-    }
-    replayBars = seamCheck.correctedBars;
+  const simResult = getOrRunModelSimulation(response, modelState, response.bars);
+  if (simResult.statusError === "seam-mismatch") {
+    return emptyPrepared(
+      "no-data",
+      "unavailable",
+      buildLiquidationModelStatusText("seam-mismatch"),
+      binanceLast,
+      "model",
+      "seam-mismatch",
+    );
   }
 
-  const sim = createLiquidationModel(modelState);
-  let replayedBars = 0;
-  for (const bar of replayBars) {
-    if (bar.t > modelState.asOf) {
-      sim.step(bar);
-      replayedBars += 1;
-    }
+  const refPrice = binanceLast ?? (simResult.simLastClose > 0 ? simResult.simLastClose : null);
+  const alignedKey = `${rangePct}|${minNotionalUsd}|${refPrice ?? "null"}`;
+  let aligned: AlignedLiquidationCluster[];
+  const cachedAligned = cachedModelAligned.get(response);
+  if (cachedAligned && cachedAligned.key === alignedKey) {
+    aligned = cachedAligned.aligned;
+  } else {
+    const filtered = filterLiquidationClusters(simResult.rawClusters, rangePct, minNotionalUsd, refPrice);
+    aligned = filtered.map((cluster) => ({
+      ...cluster,
+      hlPrice: cluster.price,
+      alignedPrice: cluster.price,
+    }));
+    aligned.sort((a, b) => a.alignedPrice - b.alignedPrice);
+    cachedModelAligned.set(response, { key: alignedKey, aligned });
   }
-
-  const book = sim.book();
-  const rawClusters: LiquidationClusterLevel[] = [];
-  for (let i = 0; i < book.centers.length; i += 1) {
-    const longNotional = book.longUsd[i] ?? 0;
-    const shortNotional = book.shortUsd[i] ?? 0;
-    if (longNotional > 0 || shortNotional > 0) {
-      rawClusters.push({
-        price: book.centers[i],
-        longNotional,
-        shortNotional,
-        longCount: 0,
-        shortCount: 0,
-      });
-    }
-  }
-
-  const refPrice = binanceLast ?? (sim.lastClose > 0 ? sim.lastClose : null);
-  const filtered = filterLiquidationClusters(rawClusters, rangePct, minNotionalUsd, refPrice);
-  const aligned: AlignedLiquidationCluster[] = filtered.map((cluster) => ({
-    ...cluster,
-    hlPrice: cluster.price,
-    alignedPrice: cluster.price,
-  }));
-  aligned.sort((a, b) => a.alignedPrice - b.alignedPrice);
 
   return {
     status: aligned.length > 0 ? "ok" : "no-data",
@@ -471,7 +535,7 @@ function prepareModelProfile(
       responseStatus: "ready",
       modelStatus: "ready",
       modelAsOf: modelState.asOf,
-      replayedBars,
+      replayedBars: simResult.replayedBars,
       binanceLast,
       hlMarkPx: null,
       hlMarkAt: null,
@@ -551,13 +615,21 @@ export function prepareLiquidationProfile(
   const hlMarkAt = response.hlMarkAt ?? null;
   const takenAt = response.takenAt ?? response.fetchedAt ?? null;
   const refPrice = hlMarkPx && hlMarkPx > 0 ? hlMarkPx : binanceLast;
-  const filtered = filterLiquidationClusters(response.clusters ?? [], rangePct, minNotionalUsd, refPrice);
-  const aligned: AlignedLiquidationCluster[] = filtered.map((cluster) => ({
-    ...cluster,
-    hlPrice: cluster.price,
-    alignedPrice: alignHlPriceToBinance(cluster.price, binanceLast, hlMarkPx),
-  }));
-  aligned.sort((a, b) => a.alignedPrice - b.alignedPrice);
+  const hlKey = `${rangePct}|${minNotionalUsd}|${binanceLast ?? "null"}|${hlMarkPx ?? "null"}`;
+  let aligned: AlignedLiquidationCluster[];
+  const cachedHl = cachedHyperliquidAligned.get(response);
+  if (cachedHl && cachedHl.key === hlKey) {
+    aligned = cachedHl.aligned;
+  } else {
+    const filtered = filterLiquidationClusters(response.clusters ?? [], rangePct, minNotionalUsd, refPrice);
+    aligned = filtered.map((cluster) => ({
+      ...cluster,
+      hlPrice: cluster.price,
+      alignedPrice: alignHlPriceToBinance(cluster.price, binanceLast, hlMarkPx),
+    }));
+    aligned.sort((a, b) => a.alignedPrice - b.alignedPrice);
+    cachedHyperliquidAligned.set(response, { key: hlKey, aligned });
+  }
 
   const warnings = computeAlignmentWarnings(binanceLast, hlMarkPx, hlMarkAt);
   const message = buildLiquidationProfileStatusText(responseStatus, takenAt);
@@ -740,7 +812,29 @@ export function drawLiquidationProfileOverlay(
   const longColor = stringSetting(settings, "longColor", uiColor.buy);
   const shortColor = stringSetting(settings, "shortColor", uiColor.sell);
 
-  const rows = mergeClustersByPixelRow(clusters, (p) => view.yOfPrice(p), areaTop, areaBottom);
+  const scaleMode = (view as { priceScaleMode?: unknown }).priceScaleMode ?? null;
+  const cachedRows = cachedOverlayPixelRows.get(clusters);
+  let rows: MergedLiquidationRow[];
+  if (
+    cachedRows
+    && cachedRows.priceTop === view.priceTop
+    && cachedRows.pricePerPx === view.pricePerPx
+    && cachedRows.priceScaleMode === scaleMode
+    && cachedRows.areaTop === areaTop
+    && cachedRows.areaBottom === areaBottom
+  ) {
+    rows = cachedRows.rows;
+  } else {
+    rows = mergeClustersByPixelRow(clusters, (p) => view.yOfPrice(p), areaTop, areaBottom);
+    cachedOverlayPixelRows.set(clusters, {
+      priceTop: view.priceTop,
+      pricePerPx: view.pricePerPx,
+      priceScaleMode: scaleMode,
+      areaTop,
+      areaBottom,
+      rows,
+    });
+  }
   let maxRowTotal = 0;
   for (const row of rows) {
     if (row.totalNotional > maxRowTotal) maxRowTotal = row.totalNotional;

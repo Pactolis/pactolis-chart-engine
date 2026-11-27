@@ -73,7 +73,7 @@ import { buildChartAnalysisSnapshot, countClosedBars } from "./analysisSnapshot.
 import { decideLiveSameBarAutoFit, type LiveAutoFitSnapshot } from "./liveAutoFit.js";
 import { buildTpoProfileGroups, effectiveTpoBracketMs } from "../../core/analysis/tpoProfile.js";
 import { tOr } from "../../core/chartLocaleFallbacks.js";
-import { OrderbookHeatmapOverlay, type LiveHeatmapTailEvent } from "../orderbook/heatmapOverlay.js";
+import type { OrderbookHeatmapOverlay, LiveHeatmapTailEvent } from "../orderbook/heatmapOverlay.js";
 import type { OrderbookHeatmapRuntimeStatus } from "../orderbook/heatmapContracts.js";
 import { orderbookHeatmapSettingsSource } from "../orderbook/heatmapSettingsSource.js";
 import { isOrderbookHeatmapMarket } from "../../core/orderbookHeatmap/settings.js";
@@ -228,7 +228,12 @@ class ChartRuntimeImpl implements ChartRuntime, ChartInputHost {
    * be saved nor outlive the server saying footprint is allowed.
    */
   private requestedChartType: ChartType;
-  private readonly orderbookHeatmap: OrderbookHeatmapOverlay | null;
+  private orderbookHeatmap: OrderbookHeatmapOverlay | null = null;
+  private orderbookHeatmapPromise: Promise<OrderbookHeatmapOverlay | null> | null = null;
+  private orderbookHeatmapFactory: (() => Promise<OrderbookHeatmapOverlay | null>) | null = null;
+  private readonly pendingHeatmapTailEvents: Array<LiveHeatmapTailEvent | undefined> = [];
+  private readonly heatmapStatusListeners = new Map<(status: OrderbookHeatmapRuntimeStatus) => void, () => void>();
+  private heatmapSettingsUnsub: (() => void) | null = null;
   private readonly tpoMergeLeftSessionStarts = new Set<number>();
   private lastAutoFitSnapshot: LiveAutoFitSnapshot | null = null;
   private lastAutoFitCache: {
@@ -454,27 +459,40 @@ class ChartRuntimeImpl implements ChartRuntime, ChartInputHost {
 
     const fetchOrderbookHeatmap = services.fetchOrderbookHeatmap?.bind(services);
     const subscribeHeatmapLiveTail = services.subscribeOrderbookHeatmapLiveTail?.bind(services);
-    this.orderbookHeatmap = fetchOrderbookHeatmap || subscribeHeatmapLiveTail
-      ? new OrderbookHeatmapOverlay({
-        fetch: fetchOrderbookHeatmap,
-        invalidate: () => {
-          if (!this.disposed) this.session?.invalidate();
-        },
-        getMarket: () => this.state.market,
-        getPanelId: () => this.panelId,
-        isReplayActive: () => this.replayCoordinator.isActive(),
-        subscribeLiveTail: subscribeHeatmapLiveTail,
-      })
+    this.orderbookHeatmapFactory = fetchOrderbookHeatmap || subscribeHeatmapLiveTail
+      ? async () => {
+        const mod = await import("../orderbook/heatmapOverlay.js");
+        if (this.disposed) return null;
+        return new mod.OrderbookHeatmapOverlay({
+          fetch: fetchOrderbookHeatmap,
+          invalidate: () => {
+            if (this.disposed) return;
+            if (this.heatmapGpuCoordinator.getFrame() !== null) {
+              this.session?.invalidate(ChartChange.GpuContext);
+            } else {
+              this.session?.invalidate(ChartChange.Data);
+            }
+          },
+          getMarket: () => this.state.market,
+          getPanelId: () => this.panelId,
+          isReplayActive: () => this.replayCoordinator.isActive(),
+          subscribeLiveTail: subscribeHeatmapLiveTail,
+        });
+      }
       : null;
 
     const self = this;
     this.heatmapGpuCoordinator = new ChartHeatmapGpuCoordinator({
-      orderbookHeatmap: this.orderbookHeatmap,
+      get orderbookHeatmap() { return self.orderbookHeatmap; },
       get backendKind() { return self.currentGpuSurface?.kind ?? (gl ? "webgl2" : "canvas2d"); },
       get renderCoordinator() { return self.renderCoordinator; },
       renderer: this.renderer,
       invalidateSession: () => this.invalidateSession(),
     });
+    this.heatmapSettingsUnsub = orderbookHeatmapSettingsSource().onChange(() => {
+      this.ensureOrderbookHeatmap();
+    });
+    this.ensureOrderbookHeatmap();
     this.heatmapGpuCoordinator.setGl(gl);
     this.heatmapGpuCoordinator.setSurface(gpuSurface);
     this.setHookAttr("data-heatmap-path", this.heatmapGpuCoordinator.getDiagnostics().heatmapPath);
@@ -619,11 +637,16 @@ class ChartRuntimeImpl implements ChartRuntime, ChartInputHost {
               && isOrderbookHeatmapMarket(this.state.market)
               && orderbookHeatmapSettingsSource().settingsFor(this.state.market, this.panelId).mode !== "off";
             this.renderer.setAllowNativeFootprintText(!isOrderbookHeatmapActive);
-            this.renderer.renderLayers(v, s, this.renderCoordinator?.getGpuLayerIds() ?? new Set());
-            // Density paints above the flushed candle layers and strictly before
-            // this GPU callback returns, so the Session's immediate readPixels
-            // already owns it. Hover/axes/errors stay on the annotation canvas.
-            this.renderHeatmapGpuCells(heatmapFrame, v, s);
+            this.currentGpuSurface?.beginNativeComposite?.();
+            try {
+              this.renderer.renderLayers(v, s, this.renderCoordinator?.getGpuLayerIds() ?? new Set());
+              // Density paints above the flushed candle layers and strictly before
+              // this GPU callback returns, so the Session's immediate readPixels
+              // already owns it. Hover/axes/errors stay on the annotation canvas.
+              this.renderHeatmapGpuCells(heatmapFrame, v, s);
+            } finally {
+              this.currentGpuSurface?.flushNativeComposite?.();
+            }
             const heatmapDiag = this.heatmapGpuCoordinator.getDiagnostics();
             this.setHookAttr("data-heatmap-path", heatmapDiag.heatmapPath);
             this.setHookAttr("data-heatmap-fallback-reason", heatmapDiag.fallbackReason ?? "none");
@@ -943,6 +966,7 @@ class ChartRuntimeImpl implements ChartRuntime, ChartInputHost {
       this.analysisBridge.resetMarket(constrainedNext.market);
       this._beginNpocRequest(constrainedNext.market);
       this.orderbookHeatmap?.handleMarketChange();
+      this.ensureOrderbookHeatmap();
       this.indicatorController.handleMarketChange(constrainedNext.market);
     }
 
@@ -976,8 +1000,53 @@ class ChartRuntimeImpl implements ChartRuntime, ChartInputHost {
     this.onStateChange?.(this.getPersistableState());
   }
 
+  private ensureOrderbookHeatmap(): void {
+    if (this.disposed || this.orderbookHeatmap || this.orderbookHeatmapPromise || !this.orderbookHeatmapFactory) return;
+    if (!isOrderbookHeatmapMarket(this.state.market)) return;
+    const mode = orderbookHeatmapSettingsSource().settingsFor(this.state.market, this.panelId).mode;
+    if (mode === "off") return;
+    const promise = this.orderbookHeatmapFactory().then((overlay) => {
+      if (this.orderbookHeatmapPromise === promise) this.orderbookHeatmapPromise = null;
+      if (!overlay) return null;
+      if (this.disposed) {
+        overlay.dispose();
+        return null;
+      }
+      this.orderbookHeatmap = overlay;
+      for (const [listener, attached] of this.heatmapStatusListeners.entries()) {
+        attached();
+        this.heatmapStatusListeners.set(listener, overlay.subscribeStatus(listener));
+      }
+      for (const event of this.pendingHeatmapTailEvents.splice(0)) {
+        overlay.invalidateLiveTail(event);
+      }
+      if (this.heatmapGpuCoordinator.getFrame() !== null) {
+        this.session?.invalidate(ChartChange.GpuContext);
+      } else {
+        this.session?.invalidate(ChartChange.Data);
+      }
+      return overlay;
+    }).catch(() => {
+      if (this.orderbookHeatmapPromise === promise) this.orderbookHeatmapPromise = null;
+      return null;
+    });
+    this.orderbookHeatmapPromise = promise;
+  }
+
   invalidateOrderbookHeatmapLiveTail(event?: LiveHeatmapTailEvent): void {
-    this.orderbookHeatmap?.invalidateLiveTail(event);
+    if (this.orderbookHeatmap) {
+      this.orderbookHeatmap.invalidateLiveTail(event);
+      return;
+    }
+    if (
+      this.orderbookHeatmapFactory
+      && isOrderbookHeatmapMarket(this.state.market)
+      && orderbookHeatmapSettingsSource().settingsFor(this.state.market, this.panelId).mode !== "off"
+    ) {
+      if (this.pendingHeatmapTailEvents.length > 64) this.pendingHeatmapTailEvents.shift();
+      this.pendingHeatmapTailEvents.push(event);
+      this.ensureOrderbookHeatmap();
+    }
   }
 
   getOrderbookHeatmapStatus(): OrderbookHeatmapRuntimeStatus {
@@ -991,7 +1060,16 @@ class ChartRuntimeImpl implements ChartRuntime, ChartInputHost {
   }
 
   subscribeOrderbookHeatmapStatus(listener: (status: OrderbookHeatmapRuntimeStatus) => void): () => void {
-    return this.orderbookHeatmap?.subscribeStatus(listener) ?? (() => undefined);
+    if (this.orderbookHeatmap) {
+      return this.orderbookHeatmap.subscribeStatus(listener);
+    }
+    const noop = () => undefined;
+    this.heatmapStatusListeners.set(listener, noop);
+    return () => {
+      const unsub = this.heatmapStatusListeners.get(listener);
+      this.heatmapStatusListeners.delete(listener);
+      unsub?.();
+    };
   }
 
   getAnalysisSnapshot(options: AnalysisSnapshotOptions = {}): ChartAnalysisSnapshot {
@@ -1694,7 +1772,13 @@ class ChartRuntimeImpl implements ChartRuntime, ChartInputHost {
     this.disposeDebugGlobals = null;
     this.disposeFootprintSupport?.();
     this.disposeFootprintSupport = null;
+    this.heatmapSettingsUnsub?.();
+    this.heatmapSettingsUnsub = null;
+    for (const unsub of this.heatmapStatusListeners.values()) unsub();
+    this.heatmapStatusListeners.clear();
+    this.pendingHeatmapTailEvents.length = 0;
     this.orderbookHeatmap?.dispose();
+    this.orderbookHeatmap = null;
     chartHost().unregisterRuntime(this.panelId, this);
     this.analysisBridge.dispose();
     this.historyController.dispose();

@@ -66,6 +66,14 @@ export class WebGpuSurface implements GpuSurface {
   private nativeHeatmapPipeline: WebGpuNativeHeatmapPipeline | null = null;
   private nativeHeatmapDisabled = false;
   private lastHeatmapFailureRecoverable = false;
+  private composingNativeFrame = false;
+  private deferredNativeComposite: {
+    commandEncoder: any;
+    passEncoder: any;
+    targetTexture: any;
+    tsSlot: number | null;
+    ranCompute: boolean;
+  } | null = null;
   private readonly quadSink = new WebGpuQuadSink();
   private readonly glyphSink = new WebGpuGlyphSink();
   private lastNativeSceneRenderedText = false;
@@ -203,6 +211,29 @@ export class WebGpuSurface implements GpuSurface {
     return this.nativeGlyphPipeline;
   }
 
+  beginNativeComposite(): void {
+    if (this.deferredNativeComposite) {
+      this.flushNativeComposite();
+    }
+    this.composingNativeFrame = true;
+  }
+
+  flushNativeComposite(): void {
+    this.composingNativeFrame = false;
+    const deferred = this.deferredNativeComposite;
+    this.deferredNativeComposite = null;
+    if (!deferred) return;
+    const device = this.handle.device;
+    deferred.passEncoder.end();
+    if (deferred.tsSlot !== null) {
+      this.nativePipeline?.resolveTimestampPass(deferred.commandEncoder, deferred.tsSlot, deferred.ranCompute);
+    }
+    device?.queue?.submit?.([deferred.commandEncoder.finish()]);
+    if (deferred.tsSlot !== null) {
+      this.nativePipeline?.readbackTimestampPass(deferred.tsSlot, deferred.ranCompute);
+    }
+  }
+
   renderNativeScene(
     clear: RGBA,
     logicalWidth: number,
@@ -306,6 +337,17 @@ export class WebGpuSurface implements GpuSurface {
       this.nativeGlyphPipeline.recordPass(passEncoder, glyphCount);
     }
 
+    if (this.composingNativeFrame) {
+      this.deferredNativeComposite = {
+        commandEncoder,
+        passEncoder,
+        targetTexture: currentTexture,
+        tsSlot,
+        ranCompute,
+      };
+      return true;
+    }
+
     passEncoder.end();
     if (tsSlot !== null) {
       this.nativePipeline.resolveTimestampPass(commandEncoder, tsSlot, ranCompute);
@@ -372,14 +414,24 @@ export class WebGpuSurface implements GpuSurface {
       return false;
     }
 
-    const ok = pipeline.renderFrame(
-      targetTexture,
-      this.canvas.width,
-      this.canvas.height,
-      this.dpr,
-      frame,
-      plot,
-    );
+    const deferred = this.deferredNativeComposite;
+    const ok = deferred && deferred.targetTexture === targetTexture
+      ? pipeline.renderIntoPass(
+        deferred.passEncoder,
+        this.canvas.width,
+        this.canvas.height,
+        this.dpr,
+        frame,
+        plot,
+      )
+      : pipeline.renderFrame(
+        targetTexture,
+        this.canvas.width,
+        this.canvas.height,
+        this.dpr,
+        frame,
+        plot,
+      );
     if (!ok) {
       if (pipeline.isDisposed()) {
         this.disposeNativeHeatmap();
@@ -402,14 +454,24 @@ export class WebGpuSurface implements GpuSurface {
       return false;
     }
 
-    const ok = pipeline.renderResidentFrame(
-      targetTexture,
-      this.canvas.width,
-      this.canvas.height,
-      this.dpr,
-      frame,
-      plot,
-    );
+    const deferred = this.deferredNativeComposite;
+    const ok = deferred && deferred.targetTexture === targetTexture
+      ? pipeline.renderResidentIntoPass(
+        deferred.passEncoder,
+        this.canvas.width,
+        this.canvas.height,
+        this.dpr,
+        frame,
+        plot,
+      )
+      : pipeline.renderResidentFrame(
+        targetTexture,
+        this.canvas.width,
+        this.canvas.height,
+        this.dpr,
+        frame,
+        plot,
+      );
     if (!ok) {
       if (pipeline.isDisposed()) {
         this.disposeNativeHeatmap();
@@ -673,6 +735,8 @@ export class WebGpuSurface implements GpuSurface {
   dispose(): void {
     if (this.disposed) return;
     this.disposed = true;
+    this.composingNativeFrame = false;
+    this.deferredNativeComposite = null;
     for (const abort of [...this.captureAbortListeners]) {
       try { abort(); } catch {}
     }
@@ -687,8 +751,4 @@ export class WebGpuSurface implements GpuSurface {
     this.nativeHeatmapPipeline?.dispose();
     this.nativeHeatmapPipeline = null;
   }
-}
-
-if (typeof globalThis !== "undefined") {
-  (globalThis as any).__PactolisWebGpuSurface = WebGpuSurface;
 }

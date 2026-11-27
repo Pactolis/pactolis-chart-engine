@@ -271,9 +271,9 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
  * log-scale intensity, 4-stop palette ramp, RGB rounding and 3-decimal alpha quantization run in WGSL.
  */
 export class WebGpuNativeHeatmapPipeline {
-  readonly renderPipeline: any;
-  readonly uniformBuffer: any;
-  private readonly bindGroupLayout: any;
+  private renderPipeline: any = null;
+  private uniformBuffer: any = null;
+  private bindGroupLayout: any = null;
   private bindGroup: any = null;
   private cellBuffer: any = null;
   private cellCapacityBytes = 0;
@@ -306,6 +306,7 @@ export class WebGpuNativeHeatmapPipeline {
   }
 
   private residentRenderPipeline: any = null;
+  private residentPrewarmPromise: Promise<boolean> | null = null;
   private residentBindGroupLayout: any = null;
   private residentUniformBuffer: any = null;
   private residentBindGroup: any = null;
@@ -340,72 +341,88 @@ export class WebGpuNativeHeatmapPipeline {
     maxBufferSize?: number,
   ) {
     this.maxBufferSize = maxBufferSize ?? device.limits?.maxBufferSize ?? 268435456;
+  }
 
-    const module = device.createShaderModule({
-      label: "NativeHeatmapShader",
-      code: NATIVE_HEATMAP_WGSL,
-    });
+  private ensureImmediatePipelineResources(): boolean {
+    if (this.renderPipeline && this.uniformBuffer && this.cellBuffer && this.bindGroup) {
+      return true;
+    }
 
-    this.uniformBuffer = device.createBuffer({
-      label: "NativeHeatmapUniform",
-      size: HEATMAP_UNIFORM_BYTES,
-      usage: 0x0040 | 0x0008, // UNIFORM | COPY_DST
-    });
-    this.reserve(HEATMAP_UNIFORM_BYTES);
+    if (!this.uniformBuffer) {
+      this.uniformBuffer = this.device.createBuffer({
+        label: "NativeHeatmapUniform",
+        size: HEATMAP_UNIFORM_BYTES,
+        usage: 0x0040 | 0x0008, // UNIFORM | COPY_DST
+      });
+      this.reserve(HEATMAP_UNIFORM_BYTES);
+    }
 
-    this.bindGroupLayout = device.createBindGroupLayout({
-      label: "NativeHeatmapBindGroupLayout",
-      entries: [
-        { binding: 0, visibility: 0x1, buffer: { type: "uniform" } },
-        { binding: 1, visibility: 0x1, buffer: { type: "read-only-storage" } },
-      ],
-    });
+    if (!this.bindGroupLayout) {
+      this.bindGroupLayout = this.device.createBindGroupLayout({
+        label: "NativeHeatmapBindGroupLayout",
+        entries: [
+          { binding: 0, visibility: 0x1, buffer: { type: "uniform" } },
+          { binding: 1, visibility: 0x1, buffer: { type: "read-only-storage" } },
+        ],
+      });
+    }
 
-    const pipelineLayout = device.createPipelineLayout({
-      label: "NativeHeatmapPipelineLayout",
-      bindGroupLayouts: [this.bindGroupLayout],
-    });
+    if (!this.renderPipeline) {
+      const module = this.device.createShaderModule({
+        label: "NativeHeatmapShader",
+        code: NATIVE_HEATMAP_WGSL,
+      });
 
-    this.renderPipeline = device.createRenderPipeline({
-      label: "NativeHeatmapRenderPipeline",
-      layout: pipelineLayout,
-      vertex: {
-        module,
-        entryPoint: "vs_main",
-      },
-      fragment: {
-        module,
-        entryPoint: "fs_main",
-        targets: [
-          {
-            format,
-            blend: {
-              color: {
-                srcFactor: "src-alpha",
-                dstFactor: "one-minus-src-alpha",
-                operation: "add",
-              },
-              alpha: {
-                srcFactor: "one",
-                dstFactor: "one-minus-src-alpha",
-                operation: "add",
+      const pipelineLayout = this.device.createPipelineLayout({
+        label: "NativeHeatmapPipelineLayout",
+        bindGroupLayouts: [this.bindGroupLayout],
+      });
+
+      this.renderPipeline = this.device.createRenderPipeline({
+        label: "NativeHeatmapRenderPipeline",
+        layout: pipelineLayout,
+        vertex: {
+          module,
+          entryPoint: "vs_main",
+        },
+        fragment: {
+          module,
+          entryPoint: "fs_main",
+          targets: [
+            {
+              format: this.format,
+              blend: {
+                color: {
+                  srcFactor: "src-alpha",
+                  dstFactor: "one-minus-src-alpha",
+                  operation: "add",
+                },
+                alpha: {
+                  srcFactor: "one",
+                  dstFactor: "one-minus-src-alpha",
+                  operation: "add",
+                },
               },
             },
-          },
-        ],
-      },
-      primitive: { topology: "triangle-list" },
-    });
+          ],
+        },
+        primitive: { topology: "triangle-list" },
+      });
+    }
 
-    const initialBytes = Math.max(HEATMAP_CELL_RECORD_BYTES, 256 * HEATMAP_CELL_RECORD_BYTES);
-    this.reserve(initialBytes);
-    this.cellCapacityBytes = initialBytes;
-    this.cellBuffer = this.device.createBuffer({
-      label: "NativeHeatmapCellStorage",
-      size: initialBytes,
-      usage: 0x0080 | 0x0008, // STORAGE | COPY_DST
-    });
-    this.rebuildBindGroup();
+    if (!this.cellBuffer) {
+      const initialBytes = Math.max(HEATMAP_CELL_RECORD_BYTES, 256 * HEATMAP_CELL_RECORD_BYTES);
+      this.reserve(initialBytes);
+      this.cellCapacityBytes = initialBytes;
+      this.cellBuffer = this.device.createBuffer({
+        label: "NativeHeatmapCellStorage",
+        size: initialBytes,
+        usage: 0x0080 | 0x0008, // STORAGE | COPY_DST
+      });
+      this.rebuildBindGroup();
+    }
+
+    return true;
   }
 
   private rebuildBindGroup(): void {
@@ -479,6 +496,25 @@ export class WebGpuNativeHeatmapPipeline {
     }
   }
 
+  renderIntoPass(
+    passEncoder: any,
+    bitmapWidth: number,
+    bitmapHeight: number,
+    dpr: number,
+    frame: GpuNativeHeatmapFrame,
+    plot: GpuNativeHeatmapPlot,
+  ): boolean {
+    if (this.disposed || !passEncoder) return false;
+    const startedAt = isPerformanceTelemetryEnabled() ? performance.now() : null;
+    try {
+      return this.submitFrame(null, bitmapWidth, bitmapHeight, dpr, frame, plot, passEncoder);
+    } finally {
+      if (startedAt !== null) {
+        recordPerformanceDuration("chart.gpu.heatmap.render.ms", performance.now() - startedAt);
+      }
+    }
+  }
+
   private submitFrame(
     targetTexture: any,
     bitmapWidth: number,
@@ -486,10 +522,12 @@ export class WebGpuNativeHeatmapPipeline {
     dpr: number,
     frame: GpuNativeHeatmapFrame,
     plot: GpuNativeHeatmapPlot,
+    sharedPassEncoder?: any,
   ): boolean {
     const cells = frame.main.length + frame.extension.length;
     if (cells === 0) return true;
     if (!Number.isFinite(cells) || cells > MAX_CELLS) return false;
+    if (!this.ensureImmediatePipelineResources()) return false;
 
     const f32 = (n: number): boolean => Number.isFinite(n) && Number.isFinite(Math.fround(n));
     const pos = (n: number): boolean => f32(n) && n > 0 && Math.fround(n) > 0;
@@ -684,25 +722,32 @@ export class WebGpuNativeHeatmapPipeline {
         this.hasUploadedUniform = true;
       }
 
-      const commandEncoder = this.device.createCommandEncoder({
-        label: "WebGpuNativeHeatmapCommandEncoder",
-      });
-      const passEncoder = commandEncoder.beginRenderPass({
-        label: "WebGpuNativeHeatmapRenderPass",
-        colorAttachments: [
-          {
-            view: targetTexture.createView ? targetTexture.createView() : targetTexture,
-            loadOp: "load",
-            storeOp: "store",
-          },
-        ],
-      });
-      passEncoder.setScissorRect?.(scissorX, scissorY, scissorW, scissorH);
-      passEncoder.setPipeline(this.renderPipeline);
-      passEncoder.setBindGroup(0, this.bindGroup);
-      passEncoder.draw(6, cells, 0, 0);
-      passEncoder.end();
-      this.device.queue.submit([commandEncoder.finish()]);
+      if (sharedPassEncoder) {
+        sharedPassEncoder.setScissorRect?.(scissorX, scissorY, scissorW, scissorH);
+        sharedPassEncoder.setPipeline(this.renderPipeline);
+        sharedPassEncoder.setBindGroup(0, this.bindGroup);
+        sharedPassEncoder.draw(6, cells, 0, 0);
+      } else {
+        const commandEncoder = this.device.createCommandEncoder({
+          label: "WebGpuNativeHeatmapCommandEncoder",
+        });
+        const passEncoder = commandEncoder.beginRenderPass({
+          label: "WebGpuNativeHeatmapRenderPass",
+          colorAttachments: [
+            {
+              view: targetTexture.createView ? targetTexture.createView() : targetTexture,
+              loadOp: "load",
+              storeOp: "store",
+            },
+          ],
+        });
+        passEncoder.setScissorRect?.(scissorX, scissorY, scissorW, scissorH);
+        passEncoder.setPipeline(this.renderPipeline);
+        passEncoder.setBindGroup(0, this.bindGroup);
+        passEncoder.draw(6, cells, 0, 0);
+        passEncoder.end();
+        this.device.queue.submit([commandEncoder.finish()]);
+      }
       if (!canFastReuseUploaded) {
         if (
           frame.contentRevision !== undefined
@@ -756,6 +801,107 @@ export class WebGpuNativeHeatmapPipeline {
         recordPerformanceDuration("chart.gpu.heatmap.render.ms", performance.now() - startedAt);
       }
     }
+  }
+
+  renderResidentIntoPass(
+    passEncoder: any,
+    bitmapWidth: number,
+    bitmapHeight: number,
+    dpr: number,
+    frame: GpuNativeHeatmapResidentFrame,
+    plot: GpuNativeHeatmapPlot,
+  ): boolean {
+    if (this.disposed || !passEncoder) return false;
+    const startedAt = isPerformanceTelemetryEnabled() ? performance.now() : null;
+    try {
+      return this.submitResidentFrame(null, bitmapWidth, bitmapHeight, dpr, frame, plot, passEncoder);
+    } finally {
+      if (startedAt !== null) {
+        recordPerformanceDuration("chart.gpu.heatmap.render.ms", performance.now() - startedAt);
+      }
+    }
+  }
+
+  prewarmResidentPipelineAsync(): Promise<boolean> {
+    if (this.disposed) return Promise.resolve(false);
+    if (this.residentRenderPipeline && this.residentUniformBuffer && this.residentCellBuffer) {
+      return Promise.resolve(true);
+    }
+    if (this.residentPrewarmPromise) {
+      return this.residentPrewarmPromise;
+    }
+
+    const promise = (async (): Promise<boolean> => {
+      if (this.disposed) return false;
+      if (!this.residentUniformBuffer) {
+        this.reserve(RESIDENT_HEATMAP_UNIFORM_BYTES);
+        this.residentUniformBuffer = this.device.createBuffer({
+          label: "NativeResidentHeatmapUniform",
+          size: RESIDENT_HEATMAP_UNIFORM_BYTES,
+          usage: 0x0040 | 0x0008, // UNIFORM | COPY_DST
+        });
+      }
+      if (!this.residentRenderPipeline) {
+        const module = this.device.createShaderModule({
+          label: "NativeResidentHeatmapShader",
+          code: NATIVE_RESIDENT_HEATMAP_WGSL,
+        });
+        this.residentBindGroupLayout = this.device.createBindGroupLayout({
+          label: "NativeResidentHeatmapBindGroupLayout",
+          entries: [
+            { binding: 0, visibility: 0x1, buffer: { type: "uniform" } },
+            { binding: 1, visibility: 0x1, buffer: { type: "read-only-storage" } },
+          ],
+        });
+        const pipelineLayout = this.device.createPipelineLayout({
+          label: "NativeResidentHeatmapPipelineLayout",
+          bindGroupLayouts: [this.residentBindGroupLayout],
+        });
+        const descriptor = {
+          label: "NativeResidentHeatmapRenderPipeline",
+          layout: pipelineLayout,
+          vertex: { module, entryPoint: "vs_main" },
+          fragment: {
+            module,
+            entryPoint: "fs_main",
+            targets: [
+              {
+                format: this.format,
+                blend: {
+                  color: {
+                    srcFactor: "src-alpha",
+                    dstFactor: "one-minus-src-alpha",
+                    operation: "add",
+                  },
+                  alpha: {
+                    srcFactor: "one",
+                    dstFactor: "one-minus-src-alpha",
+                    operation: "add",
+                  },
+                },
+              },
+            ],
+          },
+          primitive: { topology: "triangle-list" },
+        };
+        if (typeof this.device.createRenderPipelineAsync === "function") {
+          const compiled = await this.device.createRenderPipelineAsync(descriptor);
+          if (this.disposed) return false;
+          this.residentRenderPipeline ??= compiled;
+        } else {
+          this.residentRenderPipeline = this.device.createRenderPipeline(descriptor);
+        }
+      }
+      return this.ensureResidentStorageCells(0);
+    })();
+
+    this.residentPrewarmPromise = promise;
+    void promise.finally(() => {
+      if (this.residentPrewarmPromise === promise) {
+        this.residentPrewarmPromise = null;
+      }
+    });
+    return promise;
   }
 
   private ensureResidentPipelineResources(): boolean {
@@ -985,6 +1131,43 @@ export class WebGpuNativeHeatmapPipeline {
     incrementPerformanceCounter("gpu.native.heatmap.dataBytes", uploadBytes);
   }
 
+  private syncResidentBar(
+    b: number,
+    stagingOffset: number,
+    priceRelOffset: number,
+    frame: GpuNativeHeatmapResidentFrame,
+  ): number {
+    const priceOrigin = frame.priceOrigin;
+    if (typeof frame.forEachBarCell === "function") {
+      let written = 0;
+      let sorted = 1;
+      let prevPrice = Number.NEGATIVE_INFINITY;
+      frame.forEachBarCell(b, (priceStart, value, liveEligible) => {
+        const stagingIdx = stagingOffset + written;
+        const priceIdx = priceRelOffset + written;
+        this.ensureResidentStagingCells(stagingIdx + 1);
+        this.ensureResidentPriceIndexCells(priceIdx + 1);
+        const word = stagingIdx * RESIDENT_HEATMAP_CELL_WORDS;
+        this.residentStagingU32![word] = b >>> 0;
+        this.residentStagingF32![word + 1] = priceStart - priceOrigin;
+        this.residentStagingF32![word + 2] = value;
+        this.residentStagingU32![word + 3] = liveEligible ? 1 : 0;
+        const rel = Math.fround(priceStart - priceOrigin);
+        this.residentCellPriceRel![priceIdx] = rel;
+        if (rel < prevPrice) sorted = 0;
+        prevPrice = rel;
+        written++;
+      });
+      this.residentBarSorted[b] = sorted;
+      return written;
+    }
+
+    const barCells = frame.readBarCells(b);
+    this.packResidentCellsIntoStaging(stagingOffset, b, priceOrigin, barCells);
+    this.recordResidentBarPrices(priceRelOffset, b, priceOrigin, barCells);
+    return barCells.length;
+  }
+
   private submitResidentFrame(
     targetTexture: any,
     bitmapWidth: number,
@@ -992,6 +1175,7 @@ export class WebGpuNativeHeatmapPipeline {
     dpr: number,
     frame: GpuNativeHeatmapResidentFrame,
     plot: GpuNativeHeatmapPlot,
+    sharedPassEncoder?: any,
   ): boolean {
     const f32Check = (n: number): boolean => Number.isFinite(n) && Number.isFinite(Math.fround(n));
     const posCheck = (n: number): boolean => f32Check(n) && n > 0 && Math.fround(n) > 0;
@@ -1063,13 +1247,11 @@ export class WebGpuNativeHeatmapPipeline {
           && (dirtyFrom === undefined || dirtyFrom >= frame.liveBarIndex)
         ) {
           const tailOffset = this.residentBarOffsets[frame.liveBarIndex];
-          const tailCells = frame.readBarCells(frame.liveBarIndex);
-          if (tailOffset >= 0 && tailOffset + tailCells.length <= this.residentCellCapacityCells) {
-            this.packResidentCellsIntoStaging(0, frame.liveBarIndex, frame.priceOrigin, tailCells);
-            this.recordResidentBarPrices(tailOffset, frame.liveBarIndex, frame.priceOrigin, tailCells);
-            this.uploadResidentDataSlice(tailOffset, tailCells.length);
-            this.residentBarCounts[frame.liveBarIndex] = tailCells.length;
-            this.residentTotalCells = tailOffset + tailCells.length;
+          const tailCount = this.syncResidentBar(frame.liveBarIndex, 0, tailOffset, frame);
+          if (tailOffset >= 0 && tailOffset + tailCount <= this.residentCellCapacityCells) {
+            this.uploadResidentDataSlice(tailOffset, tailCount);
+            this.residentBarCounts[frame.liveBarIndex] = tailCount;
+            this.residentTotalCells = tailOffset + tailCount;
             this.residentSyncedTailRevision = frame.tailSyncRevision;
             syncedBarsCount = 1;
             incrementalDone = true;
@@ -1084,12 +1266,10 @@ export class WebGpuNativeHeatmapPipeline {
           const startOffset = this.residentBarOffsets[startBar];
           let sliceCells = 0;
           for (let b = startBar; b < frame.barCount; b++) {
-            const barCells = frame.readBarCells(b);
+            const count = this.syncResidentBar(b, sliceCells, startOffset + sliceCells, frame);
             this.residentBarOffsets[b] = startOffset + sliceCells;
-            this.residentBarCounts[b] = barCells.length;
-            this.packResidentCellsIntoStaging(sliceCells, b, frame.priceOrigin, barCells);
-            this.recordResidentBarPrices(startOffset + sliceCells, b, frame.priceOrigin, barCells);
-            sliceCells += barCells.length;
+            this.residentBarCounts[b] = count;
+            sliceCells += count;
           }
           if (startOffset + sliceCells <= this.residentCellCapacityCells) {
             this.uploadResidentDataSlice(startOffset, sliceCells);
@@ -1113,12 +1293,10 @@ export class WebGpuNativeHeatmapPipeline {
             let sliceCells = 0;
             this.ensureResidentBarMetadata(frame.barCount, startBar);
             for (let b = startBar; b < frame.barCount; b++) {
-              const barCells = frame.readBarCells(b);
+              const count = this.syncResidentBar(b, sliceCells, prevOffset + sliceCells, frame);
               this.residentBarOffsets[b] = prevOffset + sliceCells;
-              this.residentBarCounts[b] = barCells.length;
-              this.packResidentCellsIntoStaging(sliceCells, b, frame.priceOrigin, barCells);
-              this.recordResidentBarPrices(prevOffset + sliceCells, b, frame.priceOrigin, barCells);
-              sliceCells += barCells.length;
+              this.residentBarCounts[b] = count;
+              sliceCells += count;
             }
             if (prevOffset + sliceCells <= this.residentCellCapacityCells) {
               this.uploadResidentDataSlice(prevOffset, sliceCells);
@@ -1139,12 +1317,10 @@ export class WebGpuNativeHeatmapPipeline {
           this.ensureResidentBarMetadata(frame.barCount, 0);
           let totalCells = 0;
           for (let b = 0; b < frame.barCount; b++) {
-            const barCells = frame.readBarCells(b);
+            const count = this.syncResidentBar(b, totalCells, totalCells, frame);
             this.residentBarOffsets[b] = totalCells;
-            this.residentBarCounts[b] = barCells.length;
-            this.packResidentCellsIntoStaging(totalCells, b, frame.priceOrigin, barCells);
-            this.recordResidentBarPrices(totalCells, b, frame.priceOrigin, barCells);
-            totalCells += barCells.length;
+            this.residentBarCounts[b] = count;
+            totalCells += count;
           }
           if (totalCells > MAX_CELLS) return false;
           if (!this.ensureResidentStorageCells(totalCells)) return false;
@@ -1269,31 +1445,44 @@ export class WebGpuNativeHeatmapPipeline {
         }
       }
 
-      const commandEncoder = this.device.createCommandEncoder({
-        label: "WebGpuNativeResidentHeatmapCommandEncoder",
-      });
-      const passEncoder = commandEncoder.beginRenderPass({
-        label: "WebGpuNativeResidentHeatmapRenderPass",
-        colorAttachments: [
-          {
-            view: targetTexture.createView ? targetTexture.createView() : targetTexture,
-            loadOp: "load",
-            storeOp: "store",
-          },
-        ],
-      });
-      passEncoder.setScissorRect?.(scissorX, scissorY, scissorW, scissorH);
-      passEncoder.setPipeline(this.residentRenderPipeline);
-      passEncoder.setBindGroup(0, this.residentBindGroup);
-      if (useVerticalSegments && culledTotalCells > 0) {
-        for (let s = 0; s < segCount; s++) {
-          passEncoder.draw(6, this.residentCullSegCounts[s], 0, this.residentCullSegStarts[s] - visibleCellOffset);
+      if (sharedPassEncoder) {
+        sharedPassEncoder.setScissorRect?.(scissorX, scissorY, scissorW, scissorH);
+        sharedPassEncoder.setPipeline(this.residentRenderPipeline);
+        sharedPassEncoder.setBindGroup(0, this.residentBindGroup);
+        if (useVerticalSegments && culledTotalCells > 0) {
+          for (let s = 0; s < segCount; s++) {
+            sharedPassEncoder.draw(6, this.residentCullSegCounts[s], 0, this.residentCullSegStarts[s] - visibleCellOffset);
+          }
+        } else {
+          sharedPassEncoder.draw(6, visibleCellCount, 0, 0);
         }
       } else {
-        passEncoder.draw(6, visibleCellCount, 0, 0);
+        const commandEncoder = this.device.createCommandEncoder({
+          label: "WebGpuNativeResidentHeatmapCommandEncoder",
+        });
+        const passEncoder = commandEncoder.beginRenderPass({
+          label: "WebGpuNativeResidentHeatmapRenderPass",
+          colorAttachments: [
+            {
+              view: targetTexture.createView ? targetTexture.createView() : targetTexture,
+              loadOp: "load",
+              storeOp: "store",
+            },
+          ],
+        });
+        passEncoder.setScissorRect?.(scissorX, scissorY, scissorW, scissorH);
+        passEncoder.setPipeline(this.residentRenderPipeline);
+        passEncoder.setBindGroup(0, this.residentBindGroup);
+        if (useVerticalSegments && culledTotalCells > 0) {
+          for (let s = 0; s < segCount; s++) {
+            passEncoder.draw(6, this.residentCullSegCounts[s], 0, this.residentCullSegStarts[s] - visibleCellOffset);
+          }
+        } else {
+          passEncoder.draw(6, visibleCellCount, 0, 0);
+        }
+        passEncoder.end();
+        this.device.queue.submit([commandEncoder.finish()]);
       }
-      passEncoder.end();
-      this.device.queue.submit([commandEncoder.finish()]);
       return true;
     } catch (error) {
       if (error instanceof Error && error.message === "Heatmap GPU prototype budget exceeded") {

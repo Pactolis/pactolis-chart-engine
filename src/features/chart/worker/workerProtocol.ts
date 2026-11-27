@@ -157,7 +157,7 @@ export type IngressWorkerMessage =
       {
         market?: string;
         timestamp?: number;
-        bars?: ReadonlyArray<{ t: number; cells: ReadonlyArray<readonly [number, number, number]> }>;
+        bars?: ReadonlyArray<{ t: number; cells: ReadonlyArray<readonly [number, number, number]> }> | ArrayBuffer;
       }
     >
   | WorkerEnvelopeBase<"ingress", "ingress:credit", { granted: number }>
@@ -209,7 +209,7 @@ export type HistoryWorkerMessage =
         bucketStep?: number;
         from?: number;
         to?: number;
-        bars: ReadonlyArray<{ t: number; cells: ReadonlyArray<readonly [number, number, number]> }>;
+        bars: ReadonlyArray<{ t: number; cells: ReadonlyArray<readonly [number, number, number]> }> | ArrayBuffer;
       }
     >
   | WorkerEnvelopeBase<"history", "history:credit", { granted: number }>
