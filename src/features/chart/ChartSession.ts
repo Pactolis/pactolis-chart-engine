@@ -311,7 +311,7 @@ export class ChartSession {
     this.webglOptions = opts.webglOptions;
     this.useGlobalSchedulerOption = opts.useGlobalScheduler;
     this.renderPriority = opts.renderPriority ?? "visible";
-    this.workerMode = opts.workerMode ?? (typeof WorkerGlobalScope !== "undefined" && globalThis instanceof WorkerGlobalScope ? "worker" : "main-thread");
+    this.workerMode = opts.workerMode ?? (typeof (globalThis as { importScripts?: unknown }).importScripts === "function" ? "worker" : "main-thread");
 
     this.lifecycle.start();
     this.setupContextLossHandling();
@@ -537,7 +537,7 @@ export class ChartSession {
 
   destroy(): void {
     this.active = false;
-    this.pendingLiveUpdateStartedAt = null;
+    this.pendingLiveUpdate = null;
     this.interactionQualityUnsubscribe?.();
     this.interactionQualityUnsubscribe = null;
     this.interactionQualityController?.dispose();
@@ -1127,7 +1127,7 @@ export class ChartSession {
           recordGpuContextEvent("lost");
         }
         this.cancelRaf();
-        this.pendingLiveUpdateStartedAt = null;
+        this.pendingLiveUpdate = null;
         this.gpuValid = false;
         this.dirtySurfaces = ChartSurfaceDirty.None;
         this.pendingChanges = ChartChange.None;
@@ -1177,7 +1177,7 @@ export class ChartSession {
         recordCanvas2dContextEvent("scene", "lost");
         (this.gpuSurface as { markContextLost?: () => void }).markContextLost?.();
         this.cancelRaf();
-        this.pendingLiveUpdateStartedAt = null;
+        this.pendingLiveUpdate = null;
         this.gpuValid = false;
         this.dirtySurfaces = ChartSurfaceDirty.None;
         this.pendingChanges = ChartChange.None;
@@ -1222,7 +1222,7 @@ export class ChartSession {
       e.preventDefault();
       recordGpuContextEvent("lost");
       this.cancelRaf();
-      this.pendingLiveUpdateStartedAt = null;
+      this.pendingLiveUpdate = null;
       this.gpuValid = false;
       this.dirtySurfaces = ChartSurfaceDirty.None;
       this.pendingChanges = ChartChange.None;
