@@ -47,8 +47,12 @@ import {
 } from "../../orderbook/heatmapSettingsSource.js";
 import {
   decodeHeatmapBarsFromBuffer,
+  HISTORY_PACKED_V1_BAR_STRIDE,
+  HISTORY_PACKED_V2_BAR_STRIDE,
+  HISTORY_PACKED_V2_CELL_STRIDE,
   INGRESS_TICKS_STRIDE,
   type HeatmapProtocolBar,
+  type HistoryPackedSchema2,
   type WorkerChartStatePatch,
   type WorkerHistoryBar,
   type WorkerInputEvent,
@@ -61,7 +65,7 @@ import {
   type WorkerEndpointStats,
 } from "./workerRuntimeAdapter.js";
 
-const PACKED_BAR_STRIDE = 6; // [time, open, high, low, close, volume]
+const PACKED_BAR_STRIDE = HISTORY_PACKED_V1_BAR_STRIDE; // [time, open, high, low, close, volume]
 const DEFAULT_TIME_AXIS_HEIGHT = 24;
 
 const workerHeatmapPanelModes = new Map<string, OrderbookHeatmapMode>();
@@ -199,6 +203,53 @@ function packedBufferToFootprintBars(buffer: ArrayBuffer, intervalMs: number): F
       sources: ["history"],
     };
   }
+  return bars;
+}
+
+function packedSchema2ToFootprintBars(
+  barsBuffer: ArrayBuffer,
+  cellsBuffer: ArrayBuffer,
+  intervalMs: number,
+): FootprintBar[] {
+  const safeInterval = intervalMs > 0 ? intervalMs : 60_000;
+  const barsView = new Float64Array(barsBuffer);
+  const barCount = Math.floor(barsView.length / HISTORY_PACKED_V2_BAR_STRIDE);
+  const bars: FootprintBar[] = new Array(barCount);
+  for (let i = 0; i < barCount; i++) {
+    const base = i * HISTORY_PACKED_V2_BAR_STRIDE;
+    bars[i] = {
+      startTime: Math.floor(barsView[base]! / safeInterval) * safeInterval,
+      open: barsView[base + 1]!,
+      high: barsView[base + 2]!,
+      low: barsView[base + 3]!,
+      close: barsView[base + 4]!,
+      volume: barsView[base + 5]!,
+      delta: barsView[base + 6]!,
+      count: barsView[base + 7]!,
+      cells: new Map<number, FootprintCell>(),
+      hasRef: true,
+      completeness: "complete",
+      sources: ["history"],
+    };
+  }
+
+  // cells stride-4: [barIndex, price, bidVolume (sellVol), askVolume (buyVol)], ordered by bar
+  const cellsView = new Float64Array(cellsBuffer);
+  const cellCount = Math.floor(cellsView.length / HISTORY_PACKED_V2_CELL_STRIDE);
+  for (let c = 0; c < cellCount; c++) {
+    const cBase = c * HISTORY_PACKED_V2_CELL_STRIDE;
+    const barIndex = Math.trunc(cellsView[cBase]!);
+    if (barIndex < 0 || barIndex >= barCount) continue;
+    const priceBin = cellsView[cBase + 1]!;
+    const bidVolume = cellsView[cBase + 2]!;
+    const askVolume = cellsView[cBase + 3]!;
+    bars[barIndex]!.cells.set(priceBin, {
+      priceBin,
+      buyVol: askVolume,
+      sellVol: bidVolume,
+    });
+  }
+
   return bars;
 }
 
@@ -375,8 +426,8 @@ export class ChartWorkerPanelRuntime {
         onHeatmapTail: (payload) => {
           this.handleHeatmapTail(payload);
         },
-        onHistoryChunk: (payload) => {
-          this.handleHistoryChunk(payload);
+        onHistoryChunk: (payload, envelope) => {
+          this.handleHistoryChunk(payload, envelope);
         },
         onHeatmapChunk: (payload) => {
           this.handleHeatmapChunk(payload);
@@ -1134,43 +1185,66 @@ export class ChartWorkerPanelRuntime {
     this.invalidate(ChartChange.Data | ChartChange.DataTail);
   }
 
-  private handleHistoryChunk(payload: {
-    timeframe: string;
-    bars: ReadonlyArray<WorkerHistoryBar> | ArrayBuffer;
-    hasMore: boolean;
-    chunkIndex: number;
-  }): void {
-    if (this.disposed) {
+  private handleHistoryChunk(
+    payload: {
+      timeframe: string;
+      bars?: ReadonlyArray<WorkerHistoryBar> | ArrayBuffer;
+      packed?: HistoryPackedSchema2;
+      hasMore: boolean;
+      chunkIndex: number;
+    },
+    envelope?: { generation: number; seq: number },
+  ): void {
+    try {
+      if (this.disposed) {
+        return;
+      }
+      const activeGeneration = this.endpoint.getStats().generation;
+      if (envelope && envelope.generation < activeGeneration) {
+        return;
+      }
+
+      const intervalMs = this.series.config.intervalMs;
+      let batch: FootprintBar[];
+      if (payload.packed && payload.packed.schema === 2) {
+        batch = packedSchema2ToFootprintBars(payload.packed.bars, payload.packed.cells, intervalMs);
+      } else if (payload.bars instanceof ArrayBuffer) {
+        batch = packedBufferToFootprintBars(payload.bars, intervalMs);
+      } else if (Array.isArray(payload.bars)) {
+        batch = payload.bars.map((bar) => toFootprintBar(bar, intervalMs));
+      } else {
+        batch = [];
+      }
+
+      if (batch.length > 0) {
+        if (this.series.length === 0) {
+          this.series.loadBars(batch);
+        } else {
+          this.series.upsertBars(batch);
+        }
+      }
+
+      if (this.series.length > 0) {
+        if (!this.hasInitialFit) {
+          this.fitViewToSeries();
+        } else if (this.view.isPriceAutoScale()) {
+          this.autoFitVisiblePrices();
+        }
+      }
+      this.invalidate(ChartChange.Data);
+
+      if (envelope) {
+        this.endpoint.sendHistoryAck(envelope.seq, envelope.generation);
+      }
+    } finally {
       if (payload.bars instanceof ArrayBuffer) {
         this.endpoint.recycleBuffer(payload.bars);
       }
-      return;
-    }
-    const intervalMs = this.series.config.intervalMs;
-    const batch = payload.bars instanceof ArrayBuffer
-      ? packedBufferToFootprintBars(payload.bars, intervalMs)
-      : payload.bars.map((bar) => toFootprintBar(bar, intervalMs));
-
-    if (batch.length > 0) {
-      if (this.series.length === 0) {
-        this.series.loadBars(batch);
-      } else {
-        this.series.upsertBars(batch);
+      if (payload.packed) {
+        this.endpoint.recycleBuffer(payload.packed.bars);
+        this.endpoint.recycleBuffer(payload.packed.cells);
       }
     }
-
-    if (payload.bars instanceof ArrayBuffer) {
-      this.endpoint.recycleBuffer(payload.bars);
-    }
-
-    if (this.series.length > 0) {
-      if (!this.hasInitialFit) {
-        this.fitViewToSeries();
-      } else if (this.view.isPriceAutoScale()) {
-        this.autoFitVisiblePrices();
-      }
-    }
-    this.invalidate(ChartChange.Data);
   }
 
   private fitViewToSeries(): void {

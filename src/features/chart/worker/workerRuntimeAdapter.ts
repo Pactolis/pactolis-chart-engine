@@ -766,6 +766,20 @@ export class WorkerChartEndpoint {
     } satisfies MainWorkerMessage);
   }
 
+  sendHistoryAck(ackedSeq: number, generation = this.generation): void {
+    if (!this.historyPort || this.disposed || generation < this.generation) return;
+    this.historyPort.postMessage({
+      channel: "history",
+      kind: "history:ack",
+      panelId: this.panelId,
+      marketId: this.marketId,
+      generation,
+      seq: ++this.seq,
+      revision: this.revision,
+      payload: { ackedSeq },
+    } satisfies HistoryWorkerMessage);
+  }
+
   /**
    * Emits `ingress:credit` on `ingressPort` after a batch is applied.
    * Choice: `ingress:credit` (`{ granted: count }`) rather than `ingress:ack`
