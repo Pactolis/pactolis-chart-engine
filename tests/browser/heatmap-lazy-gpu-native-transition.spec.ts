@@ -183,8 +183,8 @@ async function installFixture(page: Page): Promise<string> {
   await expect.poll(() => page.evaluate(async ({ id }) => {
     const { getChartRuntime } = await import("/harness/chart.ts");
     const r = getChartRuntime(id) as unknown as RuntimeProbe;
-    const s = r.pipeline.series, tail = r.orderbookHeatmap.bars.get(s.timeOfIndex(s.length - 1));
-    return !!tail && tail.cells.length === 3 && r.orderbookHeatmap.inFlight.size === 0
+    const s = r.pipeline.series, tail = r.orderbookHeatmap?.bars.get(s.timeOfIndex(s.length - 1));
+    return !!r.orderbookHeatmap && !!tail && tail.cells.length === 3 && r.orderbookHeatmap.inFlight.size === 0
       && r.orderbookHeatmap.chunks.size > 0
       && [...r.orderbookHeatmap.chunks.values()].every((chunk) => chunk.status === "ready");
   }, { id })).toBe(true);

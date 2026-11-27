@@ -302,6 +302,51 @@ export class FootprintSeries {
     this.nonTailRevisionValue++;
   }
 
+  /** Bulk upsert sorted/chunked bars with one merge and one overlap pass. */
+  upsertBars(bars: readonly FootprintBar[]): number {
+    if (!bars.length) return 0;
+    if (this.length === 0) {
+      this.loadBars([...bars]);
+      return this.length;
+    }
+    const prepared: FootprintBar[] = [];
+    const incomingStarts: number[] = [];
+    const seenIncoming = new Set<number>();
+    let tailOnlyUpdate = true;
+    const prevLast = this.order[this.order.length - 1];
+
+    for (const b of bars) {
+      const safeBar = enforceFootprintPolicy(b);
+      validateBar(safeBar, this.cfg.intervalMs);
+      if (this.repairOwnership.has(safeBar.startTime) || this.repairFences.has(safeBar.startTime)) continue;
+      if (prevLast === undefined || safeBar.startTime !== prevLast) tailOnlyUpdate = false;
+      if (!this.bars.has(safeBar.startTime) && !seenIncoming.has(safeBar.startTime)) {
+        seenIncoming.add(safeBar.startTime);
+        incomingStarts.push(safeBar.startTime);
+      }
+      this.bars.set(safeBar.startTime, safeBar);
+      this.refTradeBounds.delete(safeBar.startTime);
+      prepared.push(safeBar);
+    }
+    if (!prepared.length) return 0;
+    if (incomingStarts.length > 0) {
+      incomingStarts.sort((a, b) => a - b);
+      this.order = mergeSortedStarts(this.order, incomingStarts);
+    }
+    this.inferPricePrecision(prepared);
+    const prunedCalendar = incomingStarts.length > 0 ? this.pruneLegacyCalendarOverlaps() : false;
+    const prunedOldest = this.pruneOldestBars();
+    if (this.refPrice === undefined && this.order.length > 0) {
+      this.refPrice = this.bars.get(this.order[this.order.length - 1])!.close;
+    }
+    this.revisionValue++;
+    this.structureRevisionValue++;
+    if (!tailOnlyUpdate || prunedCalendar || prunedOldest) {
+      this.nonTailRevisionValue++;
+    }
+    return prepared.length;
+  }
+
   private visibleOrder(): readonly number[] {
     return this.order;
   }

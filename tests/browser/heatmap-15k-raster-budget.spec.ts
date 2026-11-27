@@ -154,8 +154,8 @@ test("15,000-cell SwiftShader benchmark and CPU raster cache budget / GPU takeov
       getHeatmapCpuRasterModuleReservedBytes,
     } = await import("/src/features/orderbook/heatmapOverlay.ts");
 
-    const r = getChartRuntime(id) as unknown as RuntimeProbe;
-    if (!r || !r.orderbookHeatmap || !r.session) throw new Error("Runtime/orderbookHeatmap unavailable");
+    const r = getChartRuntime(id) as unknown as RuntimeProbe & { whenOrderbookHeatmapReady?: () => Promise<void> };
+    if (!r || !r.session) throw new Error("Runtime/session unavailable");
 
     settings.grid = false;
     r.updateState({ ...r.getState(), chartType: "candlestick", scaleMode: "linear" });
@@ -207,6 +207,8 @@ test("15,000-cell SwiftShader benchmark and CPU raster cache budget / GPU takeov
       aggregated: { usd: 0, btc: 0.05 },
     });
     setOrderbookHeatmapModeFor("BINANCE_FUTURES:btcusdt", "single");
+    await r.whenOrderbookHeatmapReady?.();
+    if (!r.orderbookHeatmap) throw new Error("Runtime/orderbookHeatmap unavailable");
 
     // Wait until heatmap chunks covering the 250 bars finish loading.
     for (let attempt = 0; attempt < 80; attempt++) {

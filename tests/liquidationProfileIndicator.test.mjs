@@ -265,6 +265,11 @@ test("CE #429: Hyperliquid ratio is pinned per response so live Binance ticks do
     const prepared = prepareLiquidationProfile(ctx);
     drawLiquidationProfileOverlay(ctx, prepared);
 
+    assert.equal(
+      prepared.meta.clusters,
+      firstPrepared.meta.clusters,
+      `aligned clusters array reference changed on frame ${frame}`,
+    );
     assert.deepEqual(
       prepared.meta.clusters.map((c) => c.alignedPrice),
       expectedAlignedPrices,

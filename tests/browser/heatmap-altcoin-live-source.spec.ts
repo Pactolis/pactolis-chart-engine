@@ -88,6 +88,7 @@ test("renders browser-sourced heatmap for ETH and small-price altcoin without RE
       invalidate(): void;
       invalidateOrderbookHeatmapLiveTail(event: unknown): void;
       getOrderbookHeatmapStatus(): unknown;
+      whenOrderbookHeatmapReady?: () => Promise<void>;
       session: { captureCompositePng(): Promise<{ blob: Blob }> };
     };
     const step = computeRelativeHeatmapBucketStep({ lastPrice: 3000, priceStep: 0.1, multiplier: 1 });
@@ -98,6 +99,7 @@ test("renders browser-sourced heatmap for ETH and small-price altcoin without RE
       single: { usd: 1_000, btc: 1 },
     });
     harness.setOrderbookHeatmapModeFor("BINANCE_FUTURES:ethusdt", "single");
+    await r.whenOrderbookHeatmapReady?.();
     r.invalidate();
     await r.session.captureCompositePng();
     const lastTime = r.pipeline.series.timeOfIndex(r.pipeline.series.length - 1);
@@ -133,6 +135,7 @@ test("renders browser-sourced heatmap for ETH and small-price altcoin without RE
       invalidate(): void;
       invalidateOrderbookHeatmapLiveTail(event: unknown): void;
       getOrderbookHeatmapStatus(): unknown;
+      whenOrderbookHeatmapReady?: () => Promise<void>;
       session: { captureCompositePng(): Promise<{ blob: Blob }> };
     };
     const step = computeRelativeHeatmapBucketStep({ lastPrice: 0.0001, priceStep: 0.000001, multiplier: 1 });
@@ -143,6 +146,7 @@ test("renders browser-sourced heatmap for ETH and small-price altcoin without RE
       single: { usd: 500, btc: 1 },
     });
     harness.setOrderbookHeatmapModeFor("BINANCE_FUTURES:pepeusdt", "single");
+    await r.whenOrderbookHeatmapReady?.();
     r.invalidate();
     await r.session.captureCompositePng();
     const lastTime = r.pipeline.series.timeOfIndex(r.pipeline.series.length - 1);

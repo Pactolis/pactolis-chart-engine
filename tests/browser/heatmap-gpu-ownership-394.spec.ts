@@ -177,8 +177,8 @@ for (const theme of ["dark", "light"] as const) {
       } = await import("/harness/chart.ts");
       const telemetry = await import("/src/core/performanceTelemetry.ts");
 
-      const r = getChartRuntime(id) as unknown as RuntimeProbe;
-      if (!r || !r.orderbookHeatmap || !r.session) throw new Error("Runtime/orderbookHeatmap unavailable");
+      const r = getChartRuntime(id) as unknown as RuntimeProbe & { whenOrderbookHeatmapReady?: () => Promise<void> };
+      if (!r || !r.session) throw new Error("Runtime/session unavailable");
 
       r.updateState({ ...r.getState(), chartType: "candlestick", scaleMode: "linear" });
       updateOrderbookHeatmapSettings({
@@ -193,7 +193,8 @@ for (const theme of ["dark", "light"] as const) {
       });
       setOrderbookHeatmapModeFor("BINANCE_FUTURES:btcusdt", "single");
 
-      await r.whenHeatmapGpuRendererReady();
+      await Promise.all([r.whenOrderbookHeatmapReady?.(), r.whenHeatmapGpuRendererReady()]);
+      if (!r.orderbookHeatmap) throw new Error("Runtime/orderbookHeatmap unavailable");
 
       for (let attempt = 0; attempt < 80; attempt++) {
         r.invalidate();

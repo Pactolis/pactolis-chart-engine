@@ -330,11 +330,11 @@ function drawSeriesPath(
   canvas.strokeStyle = series.color;
   canvas.fillStyle = series.color;
   const style = series.style ?? "line";
-  const valid = series.points.filter((point) => point.value !== null) as Array<SeriesPoint & { value: number }>;
   if (style === "histogram") {
     const zeroY = scale.contains(0) ? scale.y(0) : bottom;
     canvas.globalAlpha = 0.72;
-    for (const point of valid) {
+    for (const point of series.points) {
+      if (point.value === null) continue;
       const x = view.xOfIndex(point.index) + view.colWidth * 0.18;
       const w = Math.max(1, view.colWidth * 0.64);
       const y = scale.y(point.value);
@@ -346,11 +346,16 @@ function drawSeriesPath(
   }
   canvas.beginPath();
   let started = false;
+  let firstValid: (SeriesPoint & { value: number }) | null = null;
+  let lastValid: (SeriesPoint & { value: number }) | null = null;
   for (const point of series.points) {
     if (point.value === null) {
       started = false;
       continue;
     }
+    const validPoint = point as SeriesPoint & { value: number };
+    if (firstValid === null) firstValid = validPoint;
+    lastValid = validPoint;
     const x = view.xOfIndex(point.index) + view.colWidth / 2;
     const y = scale.y(point.value);
     if (!started) {
@@ -360,9 +365,9 @@ function drawSeriesPath(
       canvas.lineTo(x, y);
     }
   }
-  if (style === "area" && valid.length) {
-    canvas.lineTo(view.xOfIndex(valid[valid.length - 1].index) + view.colWidth / 2, bottom);
-    canvas.lineTo(view.xOfIndex(valid[0].index) + view.colWidth / 2, bottom);
+  if (style === "area" && firstValid !== null && lastValid !== null) {
+    canvas.lineTo(view.xOfIndex(lastValid.index) + view.colWidth / 2, bottom);
+    canvas.lineTo(view.xOfIndex(firstValid.index) + view.colWidth / 2, bottom);
     canvas.closePath();
     canvas.globalAlpha = 0.16;
     canvas.fill();
@@ -389,17 +394,54 @@ function drawSeriesPath(
   void top;
 }
 
+function findSeriesPointAt(
+  points: readonly SeriesPoint[],
+  targetIndex: number,
+): (SeriesPoint & { value: number }) | null {
+  const len = points.length;
+  if (len === 0) return null;
+  const directOffset = targetIndex - points[0].index;
+  if (directOffset >= 0 && directOffset < len) {
+    const candidate = points[directOffset];
+    if (candidate.index === targetIndex) {
+      return candidate.value !== null ? (candidate as SeriesPoint & { value: number }) : null;
+    }
+  }
+  let lo = 0;
+  let hi = len - 1;
+  while (lo <= hi) {
+    const mid = (lo + hi) >>> 1;
+    const midIdx = points[mid].index;
+    if (midIdx === targetIndex) {
+      const candidate = points[mid];
+      return candidate.value !== null ? (candidate as SeriesPoint & { value: number }) : null;
+    }
+    if (midIdx < targetIndex) lo = mid + 1;
+    else hi = mid - 1;
+  }
+  for (let i = 0; i < len; i++) {
+    const candidate = points[i];
+    if (candidate.index === targetIndex && candidate.value !== null) {
+      return candidate as SeriesPoint & { value: number };
+    }
+  }
+  return null;
+}
+
 function focusIndex(ctx: IndicatorDrawContext<MultiSeriesIndicatorSettings>, data: MultiSeriesPreparedData): number | null {
   const crosshair = ctx.crosshair;
   if (!crosshair?.visible) return null;
   const hoverIndex = Math.floor(ctx.view.indexOfX(crosshair.x));
-  return data.meta.series.some((series) => series.points.some((point) => point.index === hoverIndex && point.value !== null)) ? hoverIndex : null;
+  for (const series of data.meta.series) {
+    if (findSeriesPointAt(series.points, hoverIndex) !== null) return hoverIndex;
+  }
+  return null;
 }
 
 function focusValues(data: MultiSeriesPreparedData, index: number | null): Array<{ label: string; value: number; time: number }> {
   const items: Array<{ label: string; value: number; time: number }> = [];
   for (const series of data.meta.readoutSeries ?? data.meta.series) {
-    const point = index === null ? lastVisibleValue(series) : series.points.find((candidate) => candidate.index === index && candidate.value !== null) as (SeriesPoint & { value: number }) | undefined;
+    const point = index === null ? lastVisibleValue(series) : findSeriesPointAt(series.points, index);
     if (point) items.push({ label: series.label, value: point.value, time: point.time });
   }
   return items;

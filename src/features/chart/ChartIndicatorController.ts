@@ -28,29 +28,12 @@ interface IndicatorControllerOptions {
   headers: IndicatorPaneHeadersModel;
 }
 
-interface InteractionPreparedCacheEntry {
-  definitionType: string;
-  settings: IndicatorSettings;
-  series: FootprintSeries;
-  resetEpoch: number;
-  revision: number;
-  structureRevision: number;
-  rangeFrom: number;
-  rangeTo: number;
-  market: string;
-  timeframe: string;
-  intervalMs: number;
-  timeBucket: number;
-  prepared: IndicatorPreparedData;
-}
-
 const LEGACY_CROSSHAIR_PANE_TYPES = new Set<string>();
 
 /** Thin ownership boundary around IndicatorManager and its pane/layout lifecycle. */
 export class ChartIndicatorController {
   private readonly manager: IndicatorManager;
   private readonly options: IndicatorControllerOptions;
-  private readonly interactionPreparedCache = new Map<string, InteractionPreparedCacheEntry>();
   private latestView: View | null = null;
 
   private cachedPaneRendersRevision = -1;
@@ -61,7 +44,6 @@ export class ChartIndicatorController {
   private cachedRequiresInteractionRedraw = false;
 
   clearInteractionCache(): void {
-    this.interactionPreparedCache.clear();
     this.cachedPaneRendersRevision = -1;
     this.cachedPaneRendersTimeframe = "";
     this.cachedPaneRendersMaximized = null;
@@ -98,7 +80,6 @@ export class ChartIndicatorController {
   }
   setVisible(id: string, visible: boolean): void { this.manager.setIndicatorVisible(id, visible); }
   remove(id: string): void {
-    this.interactionPreparedCache.delete(id);
     this.clearInteractionCache();
     this.manager.deleteIndicator(id);
   }
@@ -135,6 +116,7 @@ export class ChartIndicatorController {
       if (!instance || !drawInteraction || !definition?.prepareData || definition?.inputSource === "view") {
         return requiresInteractionRedraw ? { ...pane, requiresInteractionRedraw: true } : pane;
       }
+      const mergedSettings = { ...definition.defaultSettings(), ...instance.settings };
       return {
         ...pane,
         drawInteraction: (
@@ -146,7 +128,6 @@ export class ChartIndicatorController {
           crosshair: IndicatorCrosshair,
         ) => {
           if (definition.inputSource === "view") return;
-          const settings = { ...definition.defaultSettings(), ...instance.settings };
           const drawContext: IndicatorDrawContext<IndicatorSettings> = {
             ctx,
             view,
@@ -154,7 +135,7 @@ export class ChartIndicatorController {
             rect,
             range,
             instance: instance as IndicatorInstance<IndicatorSettings>,
-            settings,
+            settings: mergedSettings,
             chart: this.options.getChartContext(),
             crosshair,
             requestRefresh: () => this.options.onInvalidate(),
@@ -201,45 +182,8 @@ export class ChartIndicatorController {
     definition: NonNullable<ReturnType<typeof getIndicatorDefinition>>,
     drawContext: IndicatorDrawContext<IndicatorSettings>,
   ): IndicatorPreparedData {
-    const prepare = definition.prepareData!;
-    const cachePolicy = definition.prepareCache;
-    if (!cachePolicy) return prepare(drawContext);
-    const maxAgeMs = typeof cachePolicy === "string" ? 0 : Math.max(1, cachePolicy.maxAgeMs);
-    const timeBucket = maxAgeMs > 0 ? Math.floor(Date.now() / maxAgeMs) : 0;
-    const chart = drawContext.chart;
-    const cached = this.interactionPreparedCache.get(instance.id);
-    if (cached
-      && cached.definitionType === definition.type
-      && cached.settings === instance.settings
-      && cached.series === drawContext.series
-      && cached.resetEpoch === drawContext.series.resetEpoch
-      && cached.revision === drawContext.series.revision
-      && cached.structureRevision === drawContext.series.structureRevision
-      && cached.rangeFrom === drawContext.range[0]
-      && cached.rangeTo === drawContext.range[1]
-      && cached.market === (chart?.market ?? "")
-      && cached.timeframe === (chart?.timeframe ?? "")
-      && cached.intervalMs === (chart?.intervalMs ?? drawContext.series.config.intervalMs)
-      && cached.timeBucket === timeBucket) {
-      return cached.prepared;
-    }
-    const prepared = prepare(drawContext);
-    this.interactionPreparedCache.set(instance.id, {
-      definitionType: definition.type,
-      settings: instance.settings,
-      series: drawContext.series,
-      resetEpoch: drawContext.series.resetEpoch,
-      revision: drawContext.series.revision,
-      structureRevision: drawContext.series.structureRevision,
-      rangeFrom: drawContext.range[0],
-      rangeTo: drawContext.range[1],
-      market: chart?.market ?? "",
-      timeframe: chart?.timeframe ?? "",
-      intervalMs: chart?.intervalMs ?? drawContext.series.config.intervalMs,
-      timeBucket,
-      prepared,
-    });
-    return prepared;
+    return this.manager.getOrPrepareInteractionData(instance, definition, drawContext)
+      ?? { status: "no-data", points: [] };
   }
 
   scalePane(paneId: string, factorMultiplier: number, persist?: boolean): boolean {

@@ -278,12 +278,17 @@ async function measureHeatmapMode({
   if (!id) throw new Error("Missing chart panel id");
 
   await expect.poll(
-    () => page.evaluate(async ({ id }) => {
+    () => page.evaluate(async ({ id, minBars }) => {
       const { getChartRuntime } = await import("/harness/chart.ts");
-      return getChartRuntime(id)?.pipeline?.series?.length ?? 0;
-    }, { id }),
+      const r: any = getChartRuntime(id);
+      return Boolean(
+        r
+        && (r.pipeline?.series?.length ?? 0) >= minBars
+        && r.getCaptureReadiness?.().history?.status === "settled",
+      );
+    }, { id, minBars: fixture.barCount }),
     { timeout: 30_000 },
-  ).toBeGreaterThanOrEqual(fixture.barCount);
+  ).toBe(true);
 
   await page.evaluate(async ({ id, fitColumns }) => {
     const { getChartRuntime, updateOrderbookHeatmapSettings, setOrderbookHeatmapModeFor } =
@@ -292,6 +297,9 @@ async function measureHeatmapMode({
     settings.grid = false;
     const r: any = getChartRuntime(id);
     const s = r.pipeline.series;
+    if (s.length >= 2) {
+      r.setVisibleTimeRange({ from: s.timeOfIndex(0), to: s.timeOfIndex(s.length - 1) });
+    }
     r.updateState({ ...r.getState(), chartType: "candlestick", scaleMode: "linear" });
     r.invalidate();
     await r.session.captureCompositePng();
@@ -302,6 +310,7 @@ async function measureHeatmapMode({
     r.view.offsetX = Math.floor(r.view.area.width - (s.length + 2) * r.view.colWidth);
     updateOrderbookHeatmapSettings({ unit: "btc", bucketStep: 50, single: { usd: 0, btc: 10 } });
     setOrderbookHeatmapModeFor(r.getState().market, "single");
+    await r.whenOrderbookHeatmapReady?.();
     r.invalidate();
     await r.session.captureCompositePng();
   }, { id, fitColumns: fixture.fitColumns });

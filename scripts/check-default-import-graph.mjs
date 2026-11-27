@@ -5,7 +5,7 @@ import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), "../dist/features/chart/ChartRuntime.js");
-const forbidden = /(?:^|\/)features\/chart\/heatmap\/gpu\/heatmapGpu(?:Renderer|Shaders)|(?:^|\/)core\/gpu\/webgpu\/(?:webgpuDevice|webgpuSurface)(?:\.js)?$/;
+const forbidden = /(?:^|\/)features\/chart\/heatmap\/gpu\/heatmapGpu(?:Renderer|Shaders)|(?:^|\/)core\/gpu\/webgpu\/(?:webgpuDevice|webgpuSurface)(?:\.js)?$|(?:^|\/)features\/orderbook\/heatmapOverlay(?:\.js)?$/;
 const seen = new Set();
 const pending = [root];
 const importPattern = /(?:\bimport\s*(?:\([^)]*\)\s*|(?:[^"'()]*?\s+from\s*)?)|\bexport\s+[^"'()]*?\s+from\s*)["']([^"']+)["']/g;

@@ -261,9 +261,19 @@ test("replay prefix: at(2) undefined, length 2, SMA2 prefix literal [null,13]", 
 
 test("interaction cache: same settings/revision values but different series must not reuse stale prepared", async () => {
   const { ChartIndicatorController } = await import("../dist/features/chart/ChartIndicatorController.js");
+  const { IndicatorManager } = await import("../dist/features/indicators/IndicatorManager.js");
+  const { createIndicatorPaneHeadersModel } = await import("../dist/features/indicators/indicatorPaneHeaders.js");
   const definition = { ...movingAverageIndicatorDefinition, prepareCache: "series-range" }; // maxAgeMs 0
+  const settings = { lines: [{ id: "raw-sma2", method: "sma", period: 2, timeframe: "chart", enabled: true, color: "#44aaff" }] };
+  const instance = { id: "raw-sma2", type: definition.type, title: "MA", visible: true, paneId: "p", order: 0, settings, seq: 1 };
   const controller = Object.create(ChartIndicatorController.prototype); // no DOM/constructor claim
-  controller.interactionPreparedCache = new Map();
+  controller.manager = new IndicatorManager({
+    initial: [instance],
+    onChange() {},
+    onLayoutChange() {},
+    onInvalidate() {},
+    headers: createIndicatorPaneHeadersModel(),
+  });
   const shiftedBar = (b) => ({
     ...b, open: b.open + 90, high: b.high + 90, low: b.low + 90, close: b.close + 90,
     cells: new Map([...b.cells].map(([k, cell]) => [k + 90, { ...cell, priceBin: cell.priceBin + 90 }])),
@@ -279,18 +289,16 @@ test("interaction cache: same settings/revision values but different series must
   assert.equal(s2.revision, s1.revision); // equal revision/structure/epoch values...
   assert.equal(s2.structureRevision, s1.structureRevision); assert.equal(s2.resetEpoch, s1.resetEpoch);
   assert.notEqual(s1, s2); // ...but distinct series
-  const settings = { lines: [{ id: "raw-sma2", method: "sma", period: 2, timeframe: "chart", enabled: true, color: "#44aaff" }] };
-  const instance = { id: "raw-sma2", type: definition.type, title: "MA", visible: true, paneId: "p", order: 0, settings, seq: 1 };
   const mkContext = (series) => ({ ctx: {}, view: {}, series, rect: { top: 0, height: 100 },
     range: [0, 3], instance, settings, chart: CHART, requestRefresh() {} });
   const first = controller.prepareInteractionData(instance, definition, mkContext(s1));
   assert.equal(first.status, "ok"); assert.equal(first.meta.series.length, 1);
   assert.deepEqual(first.meta.series[0].points.map((p) => p.time), [BASE, BASE + MINUTE, BASE + 2 * MINUTE]);
   assert.deepEqual(first.meta.series[0].points.map((p) => p.value), [null, 13, 15]);
-  assert.ok(controller.interactionPreparedCache.has(instance.id)); // cache path actually active
-  // Same Map/instance/settings/range/chart/timeBucket; only the series differs. Expected fresh
-  // prepare over s2 -> [null,103,105]; actual bug returns stale cached s1 values.
+  assert.ok(controller.manager.preparedDataCache.entries.has(instance.id)); // shared cache path actually active
+  // Same manager/instance/settings/range/chart/timeBucket; only the series differs.
   const second = controller.prepareInteractionData(instance, definition, mkContext(s2));
   assert.equal(second.status, "ok"); assert.deepEqual(second.meta.series[0].points.map((p) => p.time), [BASE, BASE + MINUTE, BASE + 2 * MINUTE]);
-  assert.deepEqual(second.meta.series[0].points.map((p) => p.value), [null, 103, 105]); // correct-reason RED
+  assert.deepEqual(second.meta.series[0].points.map((p) => p.value), [null, 103, 105]);
+  controller.manager.dispose();
 });

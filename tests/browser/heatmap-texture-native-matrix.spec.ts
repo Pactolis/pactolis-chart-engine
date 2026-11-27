@@ -108,7 +108,7 @@ async function prepare(page: Page, empty: boolean, log = false): Promise<string>
     const { settings } = await import("/src/core/settings.ts");
     const r = getChartRuntime(id) as unknown as RuntimeProbe;
     if (!r || !r.session || typeof r.session.captureCompositePng !== "function"
-        || typeof r.invalidate !== "function" || !r.orderbookHeatmap
+        || typeof r.invalidate !== "function"
         || typeof r.getCaptureReadiness !== "function"
         || typeof r.subscribeCaptureReadiness !== "function") {
       throw new Error("Fixture: current runtime/capture contracts unavailable");
@@ -207,6 +207,7 @@ async function prepare(page: Page, empty: boolean, log = false): Promise<string>
     const { getChartRuntime } = await import("/harness/chart.ts");
     const r = getChartRuntime(id) as unknown as RuntimeProbe;
     const book = r.orderbookHeatmap, s = r.pipeline.series;
+    if (!book) return false;
     const tail = book.bars.get(s.timeOfIndex(s.length - 1));
     return !!tail && (empty ? tail.cells.length === 0 : tail.cells.length === 3)
       && book.inFlight.size === 0 && book.chunks.size > 0

@@ -133,6 +133,10 @@ export interface GpuNativeHeatmapResidentFrame {
   readonly dirtyFromBarIndex?: number;
   readonly visibleRange: readonly [number, number];
   readBarCells(barIndex: number): readonly GpuNativeHeatmapResidentCell[];
+  forEachBarCell?(
+    barIndex: number,
+    visit: (priceStart: number, value: number, liveEligible: boolean) => void,
+  ): number;
 }
 
 export interface GpuSurface {
@@ -142,6 +146,8 @@ export interface GpuSurface {
   resize(bitmapWidth: number, bitmapHeight: number, dpr?: number): void;
   beginFrame(clear: RGBA): GpuFrame;
   supportsNativeScene?(): boolean;
+  beginNativeComposite?(): void;
+  flushNativeComposite?(): void;
   renderNativeScene?(clear: RGBA, logicalWidth: number, logicalHeight: number, scene: GpuNativeSceneInput): boolean;
   didLastNativeSceneRenderText?(): boolean;
   supportsNativeHeatmap?(): boolean;

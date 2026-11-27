@@ -28,14 +28,22 @@ interface BollingerState extends IncrementalBase {
 
 /** Population stddev of the last `n` closes: the same arithmetic as the final step of rollingStdDev. */
 function tailStdDev(closes: readonly number[], n: number): number | null {
-  const last = closes.length - 1;
-  if (last + 1 < n) return null;
-  const window: number[] = [];
-  for (let k = last + 1 - n; k <= last; k++) window.push(Number.isFinite(closes[k]) ? closes[k] : NaN);
-  if (!window.every(Number.isFinite)) return null;
-  const mean = window.reduce((sum, item) => sum + item, 0) / n;
-  const variance = window.reduce((sum, item) => sum + (item - mean) ** 2, 0) / n;
-  return Math.sqrt(variance);
+  const end = closes.length;
+  if (end < n || n <= 0) return null;
+  const start = end - n;
+  let sum = 0;
+  for (let k = start; k < end; k++) {
+    const v = closes[k];
+    if (!Number.isFinite(v)) return null;
+    sum += v;
+  }
+  const mean = sum / n;
+  let varianceSum = 0;
+  for (let k = start; k < end; k++) {
+    const diff = closes[k] - mean;
+    varianceSum += diff * diff;
+  }
+  return Math.sqrt(varianceSum / n);
 }
 
 function prepareBollinger(ctx: IndicatorDrawContext<BollingerSettings>) {

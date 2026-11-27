@@ -21,6 +21,7 @@
     "orderflow"
   ],
   "type": "module",
+  "sideEffects": false,
   "exports": {
     "./core/analysis/anchoredVwap": {
       "types": "./dist/core/analysis/anchoredVwap.d.ts",

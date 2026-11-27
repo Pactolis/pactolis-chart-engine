@@ -333,6 +333,22 @@ export class IndicatorManager {
   private lastVisibilityTimeframe = "";
   private maximizedPane: "chart" | string | null = null;
   private readonly preparedDataCache = new IndicatorPrepareCache();
+  private readonly lastPreparedByInstance = new Map<string, {
+    generation: number;
+    definitionType: string;
+    settingsRevision: number;
+    settings: IndicatorSettings;
+    series: FootprintSeries;
+    resetEpoch: number;
+    revision: number;
+    structureRevision: number;
+    rangeFrom: number;
+    rangeTo: number;
+    market: string;
+    timeframe: string;
+    intervalMs: number;
+    prepared: IndicatorPreparedData;
+  }>();
   private readonly prepareScheduler = new IndicatorPrepareScheduler();
   private managerGeneration = 0;
   private readonly instanceSettingsRevisions = new Map<string, number>();
@@ -420,6 +436,7 @@ export class IndicatorManager {
     this.prepareScheduler.cancelAll();
     this.instanceSettingsRevisions.clear();
     this.preparedDataCache.clear();
+    this.lastPreparedByInstance.clear();
     this.instances = cloneInstances(instances);
     const nextIds = new Set(this.instances.map((item) => item.id));
     for (const prevId of prevIds) {
@@ -473,6 +490,7 @@ export class IndicatorManager {
     this.managerGeneration++;
     this.prepareScheduler.cancelAll();
     this.preparedDataCache.clear();
+    this.lastPreparedByInstance.clear();
     for (const instance of this.instances) runIndicatorCleanup(instance.id);
     this.renderRevision++;
     this.renderHeaders();
@@ -875,6 +893,7 @@ export class IndicatorManager {
   private bumpSettingsRevision(id: string): number {
     const next = this.getSettingsRevision(id) + 1;
     this.instanceSettingsRevisions.set(id, next);
+    this.lastPreparedByInstance.delete(id);
     return next;
   }
 
@@ -930,7 +949,27 @@ export class IndicatorManager {
       () => definition.prepareData!(drawContext),
     );
     const cachePolicy = definition.prepareCache;
-    if (!cachePolicy) return compute();
+    if (!cachePolicy) {
+      const prepared = compute();
+      const chart = drawContext.chart;
+      this.lastPreparedByInstance.set(instance.id, {
+        generation: this.managerGeneration,
+        definitionType: definition.type,
+        settingsRevision: this.getSettingsRevision(instance.id),
+        settings: instance.settings,
+        series: drawContext.series,
+        resetEpoch: drawContext.series.resetEpoch,
+        revision: drawContext.series.revision,
+        structureRevision: drawContext.series.structureRevision,
+        rangeFrom: drawContext.range[0],
+        rangeTo: drawContext.range[1],
+        market: chart?.market ?? "",
+        timeframe: chart?.timeframe ?? "",
+        intervalMs: chart?.intervalMs ?? drawContext.series.config.intervalMs,
+        prepared,
+      });
+      return prepared;
+    }
     const maxAgeMs = typeof cachePolicy === "string" ? 0 : Math.max(1, cachePolicy.maxAgeMs);
 
     const key = this.buildPrepareKey(
@@ -966,6 +1005,38 @@ export class IndicatorManager {
     }
     incrementPerformanceCounter(`indicator.prepare.cache.${computed ? "miss" : "hit"}.${instance.type}`);
     return resolution.value;
+  }
+
+  getOrPrepareInteractionData(
+    instance: IndicatorInstance,
+    definition: IndicatorDefinition,
+    drawContext: IndicatorDrawContext,
+  ): IndicatorPreparedData | undefined {
+    if (!definition.prepareData || definition.inputSource === "view") return undefined;
+    if (definition.prepareCache) {
+      return this.prepareData(instance, definition, drawContext);
+    }
+    const chart = drawContext.chart;
+    const cached = this.lastPreparedByInstance.get(instance.id);
+    if (
+      cached
+      && cached.generation === this.managerGeneration
+      && cached.definitionType === definition.type
+      && cached.settingsRevision === this.getSettingsRevision(instance.id)
+      && cached.settings === instance.settings
+      && cached.series === drawContext.series
+      && cached.resetEpoch === drawContext.series.resetEpoch
+      && cached.revision === drawContext.series.revision
+      && cached.structureRevision === drawContext.series.structureRevision
+      && cached.rangeFrom === drawContext.range[0]
+      && cached.rangeTo === drawContext.range[1]
+      && cached.market === (chart?.market ?? "")
+      && cached.timeframe === (chart?.timeframe ?? "")
+      && cached.intervalMs === (chart?.intervalMs ?? drawContext.series.config.intervalMs)
+    ) {
+      return cached.prepared;
+    }
+    return this.prepareData(instance, definition, drawContext);
   }
 
   private headerLabel(
@@ -1004,6 +1075,7 @@ export class IndicatorManager {
     this.prepareScheduler.cancel(id);
     this.instanceSettingsRevisions.delete(id);
     this.preparedDataCache.delete(id);
+    this.lastPreparedByInstance.delete(id);
     purgeIndicatorBuiltinState(id);
     this.instances = this.instances.filter((item) => item.id !== id).map((item, order) => ({ ...item, order }));
     this.emit(true);

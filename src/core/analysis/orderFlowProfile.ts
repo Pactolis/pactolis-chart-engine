@@ -356,7 +356,14 @@ export function calculateOrderFlowProfile(
   options: OrderFlowProfileOptions = {},
 ): OrderFlowProfileResult {
   const acc = createOrderFlowProfileAccumulator();
-  const orderedBars = [...bars].sort((a, b) => a.startTime - b.startTime);
+  let sorted = true;
+  for (let i = 1; i < bars.length; i++) {
+    if (bars[i].startTime < bars[i - 1].startTime) {
+      sorted = false;
+      break;
+    }
+  }
+  const orderedBars = sorted ? bars : [...bars].sort((a, b) => a.startTime - b.startTime);
   for (const bar of orderedBars) accumulateOrderFlowProfileBar(acc, bar, options);
   return finishOrderFlowProfile(acc, options);
 }
@@ -781,28 +788,36 @@ function calculateValueArea(
   levels: readonly OrderFlowProfileLevel[],
   valueAreaPercent: number,
 ): { poc: number | null; vah: number | null; val: number | null } {
-  const weights = levels.map((level) => level.value ?? 0);
-  const totalWeight = weights.reduce((sum, weight) => sum + Math.max(0, weight), 0);
-  if (!levels.length || totalWeight <= 0) return { poc: null, vah: null, val: null };
-
+  const len = levels.length;
+  if (!len) return { poc: null, vah: null, val: null };
+  let totalWeight = 0;
   let pocIndex = 0;
-  for (let i = 1; i < levels.length; i++) {
-    if (weights[i] > weights[pocIndex]) pocIndex = i;
+  let pocWeight = levels[0].value ?? 0;
+  if (pocWeight > 0) totalWeight += pocWeight;
+
+  for (let i = 1; i < len; i++) {
+    const w = levels[i].value ?? 0;
+    if (w > 0) totalWeight += w;
+    if (w > pocWeight) {
+      pocWeight = w;
+      pocIndex = i;
+    }
   }
+  if (totalWeight <= 0) return { poc: null, vah: null, val: null };
 
   const target = totalWeight * valueAreaPercent;
   let low = pocIndex;
   let high = pocIndex;
-  let included = weights[pocIndex];
-  while (included < target && (low > 0 || high < levels.length - 1)) {
-    const below = low > 0 ? weights[low - 1] : -1;
-    const above = high < levels.length - 1 ? weights[high + 1] : -1;
+  let included = pocWeight;
+  while (included < target && (low > 0 || high < len - 1)) {
+    const below = low > 0 ? (levels[low - 1].value ?? 0) : -1;
+    const above = high < len - 1 ? (levels[high + 1].value ?? 0) : -1;
     if (above > below) {
       high += 1;
-      included += weights[high];
+      included += above;
     } else {
       low -= 1;
-      included += weights[low];
+      included += below;
     }
   }
 

@@ -187,7 +187,8 @@ test("explicit ?residentHeatmap=1 override keeps GPU heatmap path open on SwiftS
           };
         };
         return (
-          runtime.orderbookHeatmap.inFlight.size === 0
+          Boolean(runtime?.orderbookHeatmap)
+          && runtime.orderbookHeatmap.inFlight.size === 0
           && runtime.orderbookHeatmap.chunks.size > 0
           && [...runtime.orderbookHeatmap.chunks.values()].every((chunk) => chunk.status === "ready")
         );

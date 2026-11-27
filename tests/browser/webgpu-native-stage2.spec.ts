@@ -190,6 +190,7 @@ async function waitForReadyWebGpuRuntime(page: Page, id: string, minBars: number
       const { getGpuDiagnostics } = await import("/src/core/gpu/gpuDiagnostics.ts");
       const r: any = getChartRuntime(id);
       if (!r || !r.pipeline?.series || r.pipeline.series.length < minBars) return false;
+      if (r.getCaptureReadiness?.().history?.status !== "settled") return false;
       return getGpuDiagnostics().active === "webgpu" || r.session?.getSurface?.()?.kind === "webgpu";
     }, { id, minBars }),
     { timeout: 20_000 },
@@ -255,6 +256,10 @@ test("Stage 2 SwiftShader WebGPU verifies pixel-bucket LOD, sub-pixel merged-cel
 
         // 1. pixel-bucket LOD (colWidth = 0.5)
         r.historyController?.cancelMaintenanceRefresh?.();
+        const series = r.pipeline.series;
+        if (series.length >= 2) {
+          r.setVisibleTimeRange({ from: series.timeOfIndex(0), to: series.timeOfIndex(series.length - 1) });
+        }
         r.updateState({ ...r.getState(), chartType: "candlestick", scaleMode: "linear" });
         r.invalidate();
         await r.session.captureCompositePng();
@@ -399,6 +404,9 @@ test("Stage 2 SwiftShader WebGPU verifies pixel-bucket LOD, sub-pixel merged-cel
       settings.grid = false;
       const r: any = getChartRuntime(id);
       const s = r.pipeline.series;
+      if (s.length >= 2) {
+        r.setVisibleTimeRange({ from: s.timeOfIndex(0), to: s.timeOfIndex(s.length - 1) });
+      }
       r.updateState({ ...r.getState(), chartType: "candlestick", scaleMode: "linear" });
       r.invalidate();
       await r.session.captureCompositePng();
@@ -409,6 +417,7 @@ test("Stage 2 SwiftShader WebGPU verifies pixel-bucket LOD, sub-pixel merged-cel
       await r.session.captureCompositePng();
       updateOrderbookHeatmapSettings({ unit: "btc", bucketStep: 50, single: { usd: 0, btc: 16 } });
       setOrderbookHeatmapModeFor(r.getState().market, "single");
+      await r.whenOrderbookHeatmapReady?.();
       r.invalidate();
     }, { id: hmId });
 
@@ -416,10 +425,10 @@ test("Stage 2 SwiftShader WebGPU verifies pixel-bucket LOD, sub-pixel merged-cel
     await expect.poll(() => hmPage.evaluate(async ({ id }) => {
       const { getChartRuntime } = await import("/harness/chart.ts");
       const r: any = getChartRuntime(id);
-      const book = r.orderbookHeatmap;
+      const book = r?.orderbookHeatmap;
       const s = r.pipeline.series;
       const tail = book?.bars.get(s.timeOfIndex(s.length - 1));
-      return Boolean(tail && tail.cells.length > 0 && book.inFlight.size === 0 && book.chunks.size > 0
+      return Boolean(book && tail && tail.cells.length > 0 && book.inFlight.size === 0 && book.chunks.size > 0
         && [...book.chunks.values()].every((c: any) => c.status === "ready"));
     }, { id: hmId })).toBe(true);
 
