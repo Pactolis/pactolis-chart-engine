@@ -53,6 +53,9 @@ export interface VolumeProfileCacheState {
   prefixCount?: number;
   nonTailRevision?: number;
   resetEpoch?: number;
+  prevTailStart?: number;
+  prevTailVolume?: number;
+  prevTailCellRev?: number;
   prefixAcc?: OrderFlowProfileAccumulator;
 }
 
@@ -264,16 +267,30 @@ export function drawVolumeProfile(
     };
 
     let prefixAcc: OrderFlowProfileAccumulator;
-    if (
+    const sameBarPrefixReuse = Boolean(
       prev?.prefixAcc
       && prev.prefixKey === prefixKey
       && prev.nonTailRevision === series.nonTailRevision
-      && (prev.prefixCount === closedCount || prev.prefixCount === closedCount - 1)
-    ) {
-      prefixAcc = prev.prefixAcc;
-      if (prev.prefixCount === closedCount - 1 && lastIdx > selFrom) {
-        accumulateOrderFlowProfileBar(prefixAcc, all[lastIdx - 1], accOptions);
-      }
+      && prev.prefixCount === closedCount
+    );
+    const prevClosedBar = lastIdx > selFrom ? all[lastIdx - 1] : undefined;
+    const rolloverPrefixReuse = Boolean(
+      prev?.prefixAcc
+      && prev.prefixKey === prefixKey
+      && prev.resetEpoch === series.resetEpoch
+      && (series.nonTailRevision === prev.nonTailRevision || series.nonTailRevision === (prev.nonTailRevision ?? -2) + 1)
+      && prev.prefixCount === closedCount - 1
+      && prevClosedBar !== undefined
+      && prevClosedBar.startTime === prev.prevTailStart
+      && prevClosedBar.volume === prev.prevTailVolume
+      && (prevClosedBar.cellRevision ?? 0) === prev.prevTailCellRev
+    );
+
+    if (sameBarPrefixReuse) {
+      prefixAcc = prev!.prefixAcc!;
+    } else if (rolloverPrefixReuse && prevClosedBar) {
+      prefixAcc = prev!.prefixAcc!;
+      accumulateOrderFlowProfileBar(prefixAcc, prevClosedBar, accOptions);
     } else {
       prefixAcc = createOrderFlowProfileAccumulator();
       for (let i = selFrom; i < lastIdx; i++) {
@@ -281,8 +298,9 @@ export function drawVolumeProfile(
       }
     }
 
+    const tailBar = all[lastIdx];
     const tailAcc = cloneOrderFlowProfileAccumulator(prefixAcc);
-    accumulateOrderFlowProfileBar(tailAcc, all[lastIdx], accOptions);
+    accumulateOrderFlowProfileBar(tailAcc, tailBar, accOptions);
     const { result, maxVolume } = buildVolumeProfileResultAndMax(tailAcc, cfg.valueAreaPercent);
     activeCache = {
       key,
@@ -292,6 +310,9 @@ export function drawVolumeProfile(
       prefixCount: closedCount,
       nonTailRevision: series.nonTailRevision,
       resetEpoch: series.resetEpoch,
+      prevTailStart: lastStart,
+      prevTailVolume: tailBar?.volume ?? 0,
+      prevTailCellRev: tailBar?.cellRevision ?? 0,
       prefixAcc,
     };
     host.profileCache = activeCache;

@@ -40,7 +40,7 @@ type VwapLineTailState =
   | { kind: "previous"; prefixTotals: Map<number, { pv: number; volume: number }>; lastStartTime: number; band: VwapBandState | null };
 
 interface VwapIncrementalState {
-  instance: object; seriesRevision: number; structureRevision: number; seriesLength: number; start: number; end: number; lines: VwapLineConfig[]; resultPoints: VwapPoint[][]; plotSeries: Array<PlotSeries & { chartLabel?: string }>; prepared: ReturnType<typeof prepareOverlayData>; tails: VwapLineTailState[];
+  instance: object; seriesRevision: number; structureRevision: number; resetEpoch: number; firstBarStartTime: number; lastBarStartTime: number; lastBarVolume: number; lastBarClose: number; seriesLength: number; start: number; end: number; lines: VwapLineConfig[]; resultPoints: VwapPoint[][]; plotSeries: Array<PlotSeries & { chartLabel?: string }>; prepared: ReturnType<typeof prepareOverlayData>; tails: VwapLineTailState[];
 }
 const vwapIncrementalStates = createIndicatorSeriesStateStore<VwapIncrementalState>();
 
@@ -253,9 +253,21 @@ function prepareVwap(ctx: IndicatorDrawContext<VwapIndicatorSettings>) {
     return cached.prepared;
   }
 
-  if (canReuse && mutation.kind === "tail" && mutation.tailIndex >= 0 && (bars.length === cached.seriesLength || mutation.tailIndex === cached.seriesLength)) {
-    const tail = bars[mutation.tailIndex];
-    if (tail && canApplyTailIncrementally(cached, bars, lines, mutation.tailIndex, tail)) {
+  const isTailUpdate = Boolean(canReuse) && mutation.kind === "tail" && mutation.tailIndex >= 0 && (bars.length === cached!.seriesLength || mutation.tailIndex === cached!.seriesLength);
+  const isTailAppend = Boolean(canReuse)
+    && mutation.kind === "structure"
+    && bars.length === cached!.seriesLength + 1
+    && cached!.resetEpoch === ctx.series.resetEpoch
+    && cached!.seriesLength > 0
+    && bars[0]?.startTime === cached!.firstBarStartTime
+    && bars[cached!.seriesLength - 1]?.startTime === cached!.lastBarStartTime
+    && bars[cached!.seriesLength - 1]?.volume === cached!.lastBarVolume
+    && bars[cached!.seriesLength - 1]?.close === cached!.lastBarClose;
+  const effectiveTailIndex = isTailAppend ? bars.length - 1 : mutation.tailIndex;
+
+  if (canReuse && (isTailUpdate || isTailAppend) && effectiveTailIndex >= 0) {
+    const tail = bars[effectiveTailIndex];
+    if (tail && canApplyTailIncrementally(cached, bars, lines, effectiveTailIndex, tail)) {
       return measurePerformance("indicator.prepare.incremental.vwap", () => {
         const appended = bars.length === cached.seriesLength + 1;
         const prevTailIdx = cached.seriesLength - 1;
@@ -307,7 +319,7 @@ function prepareVwap(ctx: IndicatorDrawContext<VwapIndicatorSettings>) {
             addCompensated(scratchPv, weighted.pv);
             addCompensated(scratchVolume, weighted.volume);
             const cutoff = tail.startTime - state.windowMs;
-            while (scratchLeft <= mutation.tailIndex && bars[scratchLeft].startTime < cutoff) {
+            while (scratchLeft <= effectiveTailIndex && bars[scratchLeft].startTime < cutoff) {
               const old = weightedBar(bars[scratchLeft++]);
               addCompensated(scratchPv, -old.pv);
               addCompensated(scratchVolume, -old.volume);
@@ -331,7 +343,7 @@ function prepareVwap(ctx: IndicatorDrawContext<VwapIndicatorSettings>) {
             value = previous && previous.volume > 0 ? previous.pv / previous.volume : null;
           }
 
-          cached.resultPoints[i][mutation.tailIndex] = { time: tail.startTime, value };
+          cached.resultPoints[i][effectiveTailIndex] = { time: tail.startTime, value };
 
           let upperVal: number | null = null;
           let lowerVal: number | null = null;
@@ -353,24 +365,24 @@ function prepareVwap(ctx: IndicatorDrawContext<VwapIndicatorSettings>) {
               upperVal = value + sd * line.bandSigma;
               lowerVal = value - sd * line.bandSigma;
             }
-            band.upperValues[mutation.tailIndex] = upperVal;
-            band.lowerValues[mutation.tailIndex] = lowerVal;
+            band.upperValues[effectiveTailIndex] = upperVal;
+            band.lowerValues[effectiveTailIndex] = lowerVal;
           }
 
           if (!rangeChanged) {
             const point = cached.plotSeries[plotIdx++]?.points.at(-1);
-            if (point?.index === mutation.tailIndex) {
+            if (point?.index === effectiveTailIndex) {
               point.time = tail.startTime;
               point.value = value;
             }
             if (line.showBands && band) {
               const upperPt = cached.plotSeries[plotIdx++]?.points.at(-1);
-              if (upperPt?.index === mutation.tailIndex) {
+              if (upperPt?.index === effectiveTailIndex) {
                 upperPt.time = tail.startTime;
                 upperPt.value = upperVal;
               }
               const lowerPt = cached.plotSeries[plotIdx++]?.points.at(-1);
-              if (lowerPt?.index === mutation.tailIndex) {
+              if (lowerPt?.index === effectiveTailIndex) {
                 lowerPt.time = tail.startTime;
                 lowerPt.value = lowerVal;
               }
@@ -385,6 +397,11 @@ function prepareVwap(ctx: IndicatorDrawContext<VwapIndicatorSettings>) {
         cached.prepared = prepareOverlayData(ctx, cached.plotSeries);
         cached.seriesRevision = ctx.series.revision;
         cached.structureRevision = ctx.series.structureRevision;
+        cached.resetEpoch = ctx.series.resetEpoch;
+        cached.firstBarStartTime = bars[0]?.startTime ?? 0;
+        cached.lastBarStartTime = tail.startTime;
+        cached.lastBarVolume = tail.volume;
+        cached.lastBarClose = tail.close;
         cached.seriesLength = bars.length;
         cached.start = start;
         cached.end = end;
@@ -434,10 +451,16 @@ function prepareVwap(ctx: IndicatorDrawContext<VwapIndicatorSettings>) {
 
     const prepared = prepareOverlayData(ctx, series);
     if (incrementalEligible) {
+      const lastBar = bars[bars.length - 1];
       vwapIncrementalStates.set(ctx.series, ctx.instance.id, {
         instance: ctx.instance,
         seriesRevision: ctx.series.revision,
         structureRevision: ctx.series.structureRevision,
+        resetEpoch: ctx.series.resetEpoch,
+        firstBarStartTime: bars[0]?.startTime ?? 0,
+        lastBarStartTime: lastBar?.startTime ?? 0,
+        lastBarVolume: lastBar?.volume ?? 0,
+        lastBarClose: lastBar?.close ?? 0,
         seriesLength: bars.length,
         start,
         end,
