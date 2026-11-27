@@ -80,7 +80,6 @@ export class ChartIndicatorController {
   }
   setVisible(id: string, visible: boolean): void { this.manager.setIndicatorVisible(id, visible); }
   remove(id: string): void {
-    this.interactionPreparedCache.delete(id);
     this.clearInteractionCache();
     this.manager.deleteIndicator(id);
   }
