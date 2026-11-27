@@ -255,6 +255,8 @@ export interface OrderbookHeatmapOverlayOptions {
   getMarket: () => string;
   /** Optional stable panel identifier for panel-scoped heatmap settings and live-tail routing. */
   getPanelId?: () => string | undefined;
+  /** Optional chart bar interval (ms) used to initialize tier before first frame draw. */
+  getIntervalMs?: () => number;
   /** Reads replay state from the owning chart coordinator so the live tail stays out of replay. */
   isReplayActive?: () => boolean;
   now?: () => number;
@@ -279,6 +281,7 @@ export class OrderbookHeatmapOverlay {
   private readonly now: () => number;
   private readonly getMarket: () => string;
   private readonly getPanelId?: () => string | undefined;
+  private readonly getIntervalMs?: () => number;
   private readonly isReplayActive: () => boolean;
   private readonly subscribeLiveTail?: (
     listener: (event?: LiveHeatmapTailEvent) => void,
@@ -355,6 +358,11 @@ export class OrderbookHeatmapOverlay {
     this.invalidate = options.invalidate;
     this.getMarket = options.getMarket;
     this.getPanelId = options.getPanelId;
+    this.getIntervalMs = options.getIntervalMs;
+    const initialIntervalMs = this.getIntervalMs?.();
+    if (typeof initialIntervalMs === "number" && Number.isFinite(initialIntervalMs) && initialIntervalMs > 0) {
+      this.currentTier = heatmapTierFor(initialIntervalMs);
+    }
     this.isReplayActive = options.isReplayActive ?? (() => false);
     this.now = options.now ?? Date.now;
     this.subscribeLiveTail = options.subscribeLiveTail;
@@ -679,7 +687,16 @@ export class OrderbookHeatmapOverlay {
 
     // Direct push: only the 1m tier accepts 1m live-tail bars so coarse tiers (>= 5m) stay uncontaminated.
     if (event?.bars !== undefined || event?.canonicalBars !== undefined) {
+      if (!this.currentTier && this.getIntervalMs) {
+        const intervalMs = this.getIntervalMs();
+        if (Number.isFinite(intervalMs) && intervalMs > 0) {
+          this.currentTier = heatmapTierFor(intervalMs);
+        }
+      }
       if (this.currentTier?.name !== "1m") return;
+      if (this.dataKey === "") {
+        this.dataKey = this.dataKeyFor(this.settings, this.currentTier);
+      }
       const now = this.now();
       this.lastLiveEventAt = now;
       if (this.liveDebounceTimer) {

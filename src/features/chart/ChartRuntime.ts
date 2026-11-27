@@ -475,6 +475,7 @@ class ChartRuntimeImpl implements ChartRuntime, ChartInputHost {
           },
           getMarket: () => this.state.market,
           getPanelId: () => this.panelId,
+          getIntervalMs: () => this.pipeline.intervalMs,
           isReplayActive: () => this.replayCoordinator.isActive(),
           subscribeLiveTail: subscribeHeatmapLiveTail,
         });
@@ -2281,6 +2282,16 @@ class ChartRuntimeImpl implements ChartRuntime, ChartInputHost {
 
   whenHeatmapGpuRendererReady(): Promise<void> {
     return this.heatmapGpuCoordinator.whenHeatmapGpuRendererReady();
+  }
+
+  whenOrderbookHeatmapReady(): Promise<void> {
+    if (this.orderbookHeatmap) return Promise.resolve();
+    if (!this.orderbookHeatmapPromise) {
+      this.ensureOrderbookHeatmap();
+    }
+    return this.orderbookHeatmapPromise
+      ? this.orderbookHeatmapPromise.then(() => undefined)
+      : Promise.resolve();
   }
 }
 

@@ -416,10 +416,10 @@ test("Stage 2 SwiftShader WebGPU verifies pixel-bucket LOD, sub-pixel merged-cel
     await expect.poll(() => hmPage.evaluate(async ({ id }) => {
       const { getChartRuntime } = await import("/harness/chart.ts");
       const r: any = getChartRuntime(id);
-      const book = r.orderbookHeatmap;
+      const book = r?.orderbookHeatmap;
       const s = r.pipeline.series;
       const tail = book?.bars.get(s.timeOfIndex(s.length - 1));
-      return Boolean(tail && tail.cells.length > 0 && book.inFlight.size === 0 && book.chunks.size > 0
+      return Boolean(book && tail && tail.cells.length > 0 && book.inFlight.size === 0 && book.chunks.size > 0
         && [...book.chunks.values()].every((c: any) => c.status === "ready"));
     }, { id: hmId })).toBe(true);
 

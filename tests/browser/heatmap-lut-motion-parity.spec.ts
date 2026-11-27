@@ -183,7 +183,7 @@ test("LUT 0.65/0.85 pixel parity, motion reuse + post-settle zoom parity, live-t
 
     await waitUntil(() => {
       const hm = r.orderbookHeatmap;
-      return hm.bars.size >= barsCount && hm.inFlight.size === 0
+      return !!hm && hm.bars.size >= barsCount && hm.inFlight.size === 0
         && hm.chunks.size > 0 && [...hm.chunks.values()].every((c) => c.status === "ready");
     }, "heatmap load");
 
