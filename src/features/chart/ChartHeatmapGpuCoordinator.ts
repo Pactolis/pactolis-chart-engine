@@ -520,7 +520,22 @@ export class ChartHeatmapGpuCoordinator {
         motionReuse,
       );
       this.lastPreparedCells = (prepared as { cellCount?: number } | null)?.cellCount ?? prepared?.main?.length ?? 0;
-      if (!prepared || cacheKey === null) return prepared;
+      if (!prepared) {
+        const rejectReason = (overlay as { getLastGpuPrepareRejectReason?: () => string | null }).getLastGpuPrepareRejectReason?.() ?? null;
+        if (rejectReason) {
+          this.lastFallbackReason = rejectReason;
+          this.lastHeatmapPath = "cpu";
+          setGpuFeaturePath(HEATMAP_GPU_FEATURE, "cpu");
+          setGpuFeaturePath("heatmap", "cpu");
+          incrementPerformanceCounter(
+            rejectReason === "cell-cap"
+              ? "chart.gpu.heatmap.skip.cellCap"
+              : "chart.gpu.heatmap.skip.budgetExceeded",
+          );
+        }
+        return null;
+      }
+      if (cacheKey === null) return prepared;
 
       const realLease = prepared.preparedLease ?? null;
       let handle: { release(): void } | undefined;

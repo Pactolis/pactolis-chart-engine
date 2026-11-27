@@ -221,6 +221,14 @@ const CHART_LOCALE_FALLBACKS: Readonly<Record<string, { tr: string; en: string }
     tr: "OI kaydı yok (bu market kaydedilmiyor)",
     en: "No OI record (this market is not recorded)",
   },
+  "indicator.crossExchangeOpenInterest.noDataInRange": {
+    tr: "Bu aralıkta OI verisi yok",
+    en: "No OI data in this range",
+  },
+  "indicator.crossExchangeOpenInterest.noDataInRangeSince": {
+    tr: "Bu aralıkta OI verisi yok · {started}",
+    en: "No OI data in this range · {started}",
+  },
   "indicator.crossExchangeOpenInterest.instantOnly": {
     tr: "yalnız anlık",
     en: "instant-only",

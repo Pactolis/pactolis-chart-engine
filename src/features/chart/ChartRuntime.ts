@@ -302,6 +302,20 @@ class ChartRuntimeImpl implements ChartRuntime, ChartInputHost {
 
   activeMagnetSnap: MagnetSnapTarget | null = null;
 
+  private pruneOiRequestStates(): void {
+    if (this.oiRequestStates.size === 0) return;
+    const drawings = this.analysisContextForChart().drawings;
+    if (!drawings) {
+      this.oiRequestStates.clear();
+      return;
+    }
+    for (const drawingId of this.oiRequestStates.keys()) {
+      if (!drawings.findDrawingById?.(drawingId)) {
+        this.oiRequestStates.delete(drawingId);
+      }
+    }
+  }
+
   private createFrvpOiUpdateCallback(drawingId: string, requestKey: string): () => void {
     const prev = this.oiRequestStates.get(drawingId);
     const gen = prev && prev.key === requestKey ? prev.gen : (prev?.gen ?? 0) + 1;
@@ -316,7 +330,11 @@ class ChartRuntimeImpl implements ChartRuntime, ChartInputHost {
       const currentState = this.oiRequestStates.get(drawingId);
       if (!currentState || currentState.gen !== gen) return;
       const drawing = this.analysisContextForChart().drawings?.findDrawingById?.(drawingId);
-      if (!drawing || !drawing.visible || drawing.market !== capturedMarket || drawing.points.length < 2) return;
+      if (!drawing) {
+        this.oiRequestStates.delete(drawingId);
+        return;
+      }
+      if (!drawing.visible || drawing.market !== capturedMarket || drawing.points.length < 2) return;
       const settings = normalizeFixedRangeOrderFlowProfileSettings(drawing as unknown as Record<string, unknown>);
       if (settings.profileMetric !== "oi-delta") return;
       const asOfTime = this.replayCoordinator?.getSnapshot()?.virtualTime;
@@ -536,6 +554,7 @@ class ChartRuntimeImpl implements ChartRuntime, ChartInputHost {
                 createOiUpdateCallback: (drawingId, requestKey) => this.createFrvpOiUpdateCallback(drawingId, requestKey),
               },
             );
+            this.pruneOiRequestStates();
           });
           measurePerformance("chart.annotation.drawings.static.ms", () => {
             analysisCtx.drawings.render(
@@ -962,6 +981,7 @@ class ChartRuntimeImpl implements ChartRuntime, ChartInputHost {
       this.analysisSelectionGeneration++;
     }
     if (marketChanged) {
+      this.oiRequestStates.clear();
       this.replayCoordinator.exitForMarketChange(constrainedNext.market);
       if (!this.hostActive) this.pipeline.setPaused(true);
       this.analysisBridge.resetMarket(constrainedNext.market);
@@ -1762,6 +1782,7 @@ class ChartRuntimeImpl implements ChartRuntime, ChartInputHost {
     this.magnetController.clearMagnetSnap();
     if (this.disposed) return;
     this.disposed = true;
+    this.oiRequestStates.clear();
     if (this.initialPlacementRafId !== null) {
       const win = this.panelRoot.ownerDocument.defaultView;
       if (win?.cancelAnimationFrame) win.cancelAnimationFrame(this.initialPlacementRafId);

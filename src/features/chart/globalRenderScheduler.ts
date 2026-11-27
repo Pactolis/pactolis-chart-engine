@@ -1,4 +1,4 @@
-import { incrementPerformanceCounter } from "../../core/performanceTelemetry.js";
+import { incrementPerformanceCounter, recordPerformanceDuration } from "../../core/performanceTelemetry.js";
 
 export type ChartRenderPriority = "active" | "visible" | "hidden";
 
@@ -96,6 +96,12 @@ export class GlobalRenderScheduler {
   private readonly now: () => number;
   private readonly pending = new Map<object, ScheduledEntry>();
   private readonly priorities = new WeakMap<object, ChartRenderPriority>();
+  private readonly starvedQueue: ScheduledEntry[] = [];
+  private readonly urgentQueue: ScheduledEntry[] = [];
+  private readonly activeQueue: ScheduledEntry[] = [];
+  private readonly visibleQueue: ScheduledEntry[] = [];
+  private readonly hiddenQueue: ScheduledEntry[] = [];
+  private readonly orderedQueue: ScheduledEntry[] = [];
   private rafId: number | null = null;
 
   constructor(win: SchedulerWindow, now: () => number = defaultNow) {
@@ -179,22 +185,31 @@ export class GlobalRenderScheduler {
     const frameStart = this.now();
     const { frameBudgetMs, maxStalenessMs } = globalConfig;
 
-    // Snapshot entries present at the start of this vsync turn; re-entrant schedules
-    // during callbacks will be picked up by the successor RAF.
-    const urgentQueue: ScheduledEntry[] = [];
-    const activeQueue: ScheduledEntry[] = [];
-    const visibleQueue: ScheduledEntry[] = [];
-    const hiddenQueue: ScheduledEntry[] = [];
+    // Snapshot entries present at the start of this vsync turn into reusable queues;
+    // re-entrant schedules during callbacks will be picked up by the successor RAF.
+    const starvedQueue = this.starvedQueue;
+    const urgentQueue = this.urgentQueue;
+    const activeQueue = this.activeQueue;
+    const visibleQueue = this.visibleQueue;
+    const hiddenQueue = this.hiddenQueue;
+    const ordered = this.orderedQueue;
+
+    starvedQueue.length = 0;
+    urgentQueue.length = 0;
+    activeQueue.length = 0;
+    visibleQueue.length = 0;
+    hiddenQueue.length = 0;
+    ordered.length = 0;
 
     for (const entry of this.pending.values()) {
-      if (entry.urgent) {
-        urgentQueue.push(entry);
-        continue;
-      }
       const age = frameStart - entry.enqueuedAt;
       if (entry.priority !== "active" && age >= maxStalenessMs) {
         incrementPerformanceCounter("chart.scheduler.starvationBoost");
-        activeQueue.push(entry);
+        starvedQueue.push(entry);
+        continue;
+      }
+      if (entry.urgent) {
+        urgentQueue.push(entry);
         continue;
       }
       if (entry.priority === "active") {
@@ -206,15 +221,23 @@ export class GlobalRenderScheduler {
       }
     }
 
-    const ordered = [...urgentQueue, ...activeQueue, ...visibleQueue, ...hiddenQueue];
+    for (let i = 0; i < starvedQueue.length; i++) ordered.push(starvedQueue[i]);
+    for (let i = 0; i < urgentQueue.length; i++) ordered.push(urgentQueue[i]);
+    for (let i = 0; i < activeQueue.length; i++) ordered.push(activeQueue[i]);
+    for (let i = 0; i < visibleQueue.length; i++) ordered.push(visibleQueue[i]);
+    for (let i = 0; i < hiddenQueue.length; i++) ordered.push(hiddenQueue[i]);
+
     let executedCount = 0;
 
     try {
-      for (const entry of ordered) {
+      for (let i = 0; i < ordered.length; i++) {
+        const entry = ordered[i];
         // Re-check membership in case an earlier callback unregistered this token.
         if (!this.pending.has(entry.token)) continue;
 
-        if (!entry.urgent && executedCount > 0 && this.now() - frameStart >= frameBudgetMs) {
+        // Bound every tier (including consecutive urgent callbacks) to the frame budget
+        // after at least one entry has made progress in this frame.
+        if (executedCount > 0 && this.now() - frameStart >= frameBudgetMs) {
           break;
         }
 
@@ -230,12 +253,23 @@ export class GlobalRenderScheduler {
         entry.callback();
       }
     } finally {
+      const frameElapsedMs = this.now() - frameStart;
+      recordPerformanceDuration("chart.scheduler.frame.ms", frameElapsedMs);
+      if (frameElapsedMs > frameBudgetMs) {
+        incrementPerformanceCounter("chart.scheduler.overbudgetFrames");
+      }
       // Count entries from this frame's snapshot that were deferred due to budget.
-      for (const entry of ordered) {
-        if (this.pending.has(entry.token)) {
+      for (let i = 0; i < ordered.length; i++) {
+        if (this.pending.has(ordered[i].token)) {
           incrementPerformanceCounter("chart.scheduler.deferred");
         }
       }
+      starvedQueue.length = 0;
+      urgentQueue.length = 0;
+      activeQueue.length = 0;
+      visibleQueue.length = 0;
+      hiddenQueue.length = 0;
+      ordered.length = 0;
       this.ensureRafScheduled();
     }
   }

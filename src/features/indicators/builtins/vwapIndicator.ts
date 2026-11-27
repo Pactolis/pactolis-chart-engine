@@ -3,11 +3,13 @@ import type { IndicatorDefinition, IndicatorDrawContext, IndicatorSettings } fro
 import {
   calculateVwapSeries,
   calendarPeriodStart,
+  previousPeriodStart,
   type CalendarPeriod,
   type VwapDefinition,
   type VwapFamily,
   type VwapPoint,
 } from "../../../core/analysis/vwap.js";
+import { addCompensated, createCompensatedSum, type CompensatedSum } from "../../../core/analysis/calc/ta.js";
 import { drawPriceOverlayLines, makeOverlayPoints, overlayAppearanceFields, prepareOverlayData } from "./priceOverlayShared.js";
 import { makeNumberPoints, visibleIndexRange, type PlotSeries } from "./taShared.js";
 import { vwapIndicatorLineColorDefault, vwapBandColorDefault } from "../../../core/ui/seriesPalette.js";
@@ -25,9 +27,20 @@ const DEFAULT_BAND_COLOR = vwapBandColorDefault;
 const FAMILIES: readonly VwapFamily[] = ["rolling", "current", "previous"];
 const PERIODS: readonly CalendarPeriod[] = ["daily", "weekly", "monthly", "quarterly", "half-yearly", "yearly"];
 
-interface CurrentVwapTailState { periodStart: number; prefixPv: number; prefixVolume: number; }
+interface VwapBandState {
+  prefixVariance: number;
+  prefixVolume: number;
+  upperValues: Array<number | null>;
+  lowerValues: Array<number | null>;
+}
+
+type VwapLineTailState =
+  | { kind: "current"; periodStart: number; prefixPv: number; prefixVolume: number; band: VwapBandState | null }
+  | { kind: "rolling"; windowMs: number; prefixLeft: number; prefixPv: CompensatedSum; prefixVolume: CompensatedSum; band: VwapBandState | null }
+  | { kind: "previous"; prefixTotals: Map<number, { pv: number; volume: number }>; lastStartTime: number; band: VwapBandState | null };
+
 interface VwapIncrementalState {
-  instance: object; seriesRevision: number; structureRevision: number; seriesLength: number; start: number; end: number; lines: VwapLineConfig[]; resultPoints: VwapPoint[][]; plotSeries: Array<PlotSeries & { chartLabel?: string }>; prepared: ReturnType<typeof prepareOverlayData>; tails: CurrentVwapTailState[];
+  instance: object; seriesRevision: number; structureRevision: number; resetEpoch: number; firstBarStartTime: number; lastBarStartTime: number; lastBarVolume: number; lastBarClose: number; seriesLength: number; start: number; end: number; lines: VwapLineConfig[]; resultPoints: VwapPoint[][]; plotSeries: Array<PlotSeries & { chartLabel?: string }>; prepared: ReturnType<typeof prepareOverlayData>; tails: VwapLineTailState[];
 }
 const vwapIncrementalStates = createIndicatorSeriesStateStore<VwapIncrementalState>();
 
@@ -54,41 +67,181 @@ function definitionForLine(line: VwapLineConfig): VwapDefinition { if (line.fami
 function labelForLine(line: VwapLineConfig): string { if (line.family === "rolling") return `Rolling ${line.rollingWindowDays}D VWAP`; return `${line.family === "current" ? "Current" : "Previous"} ${line.period[0].toUpperCase()}${line.period.slice(1)} VWAP`; }
 function shortLabelForLine(line: VwapLineConfig): string { if (line.family === "rolling") return `R ${line.rollingWindowDays}D`; return `${line.family === "current" ? "C" : "P"} ${line.period[0].toUpperCase()}${line.period.slice(1)}`; }
 function weightedBar(bar: FootprintBar): { pv: number; volume: number } { if (!(bar.volume > 0)) return { pv: 0, volume: 0 }; const typical = (bar.high + bar.low + bar.close) / 3; return { pv: typical * bar.volume, volume: bar.volume }; }
-function currentTailState(bars: readonly FootprintBar[], line: VwapLineConfig): CurrentVwapTailState {
-  const tailIndex = bars.length - 1; const tail = bars[tailIndex]; if (!tail) return { periodStart: NaN, prefixPv: 0, prefixVolume: 0 };
-  const periodStart = calendarPeriodStart(tail.startTime, line.period); let prefixPv = 0; let prefixVolume = 0;
-  for (let i = tailIndex - 1; i >= 0 && bars[i].startTime >= periodStart; i--) { const weighted = weightedBar(bars[i]); prefixPv += weighted.pv; prefixVolume += weighted.volume; }
-  return { periodStart, prefixPv, prefixVolume };
+
+function buildLineTailState(
+  bars: readonly FootprintBar[],
+  line: VwapLineConfig,
+  band: VwapBandState | null,
+): VwapLineTailState {
+  const closedEnd = Math.max(0, bars.length - 1);
+  if (line.family === "rolling") {
+    const windowMs = line.rollingWindowDays * 86_400_000;
+    const prefixPv = createCompensatedSum();
+    const prefixVolume = createCompensatedSum();
+    let prefixLeft = 0;
+    for (let i = 0; i < closedEnd; i++) {
+      const w = weightedBar(bars[i]);
+      addCompensated(prefixPv, w.pv);
+      addCompensated(prefixVolume, w.volume);
+      const cutoff = bars[i].startTime - windowMs;
+      while (prefixLeft <= i && bars[prefixLeft].startTime < cutoff) {
+        const old = weightedBar(bars[prefixLeft++]);
+        addCompensated(prefixPv, -old.pv);
+        addCompensated(prefixVolume, -old.volume);
+      }
+    }
+    return { kind: "rolling", windowMs, prefixLeft, prefixPv, prefixVolume, band };
+  }
+
+  if (line.family === "previous") {
+    const prefixTotals = new Map<number, { pv: number; volume: number }>();
+    for (let i = 0; i < closedEnd; i++) {
+      const start = calendarPeriodStart(bars[i].startTime, line.period);
+      const total = prefixTotals.get(start) ?? { pv: 0, volume: 0 };
+      const w = weightedBar(bars[i]);
+      total.pv += w.pv;
+      total.volume += w.volume;
+      prefixTotals.set(start, total);
+    }
+    const lastStartTime = closedEnd > 0 ? bars[closedEnd - 1].startTime : -Infinity;
+    return { kind: "previous", prefixTotals, lastStartTime, band };
+  }
+
+  const tailIndex = bars.length - 1;
+  const tail = bars[tailIndex];
+  if (!tail) return { kind: "current", periodStart: NaN, prefixPv: 0, prefixVolume: 0, band };
+  const periodStart = calendarPeriodStart(tail.startTime, line.period);
+  let prefixPv = 0;
+  let prefixVolume = 0;
+  for (let i = tailIndex - 1; i >= 0 && calendarPeriodStart(bars[i].startTime, line.period) === periodStart; i--) {
+    const weighted = weightedBar(bars[i]);
+    prefixPv += weighted.pv;
+    prefixVolume += weighted.volume;
+  }
+  return { kind: "current", periodStart, prefixPv, prefixVolume, band };
 }
+
 function sameIncrementalLines(previous: readonly VwapLineConfig[], next: readonly VwapLineConfig[]): boolean {
-  return previous.length === next.length && next.every((line, index) => { const cached = previous[index]; return cached.id === line.id && cached.family === line.family && cached.period === line.period && cached.rollingWindowDays === line.rollingWindowDays && cached.showBands === line.showBands; });
+  return previous.length === next.length && next.every((line, index) => {
+    const cached = previous[index];
+    return cached.id === line.id
+      && cached.family === line.family
+      && cached.period === line.period
+      && cached.rollingWindowDays === line.rollingWindowDays
+      && cached.showBands === line.showBands
+      && cached.bandSigma === line.bandSigma
+      && cached.color === line.color
+      && cached.bandColor === line.bandColor;
+  });
+}
+
+function rebuildVwapPlotSlice(
+  cached: VwapIncrementalState,
+  lines: readonly VwapLineConfig[],
+  bars: readonly FootprintBar[],
+  start: number,
+  end: number,
+): void {
+  let plotIdx = 0;
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i];
+    const label = shortLabelForLine(line);
+    cached.plotSeries[plotIdx++] = {
+      key: `vwap-${line.id}`,
+      label,
+      color: line.color,
+      chartLabel: labelForLine(line),
+      points: makeNumberPoints(cached.resultPoints[i], bars, start, end),
+    };
+    const band = cached.tails[i].band;
+    if (line.showBands && band) {
+      cached.plotSeries[plotIdx++] = {
+        key: `vwap-${line.id}-upper`,
+        label: `${label} +${line.bandSigma}σ`,
+        color: line.bandColor,
+        points: makeOverlayPoints(band.upperValues, bars, start, end),
+      };
+      cached.plotSeries[plotIdx++] = {
+        key: `vwap-${line.id}-lower`,
+        label: `${label} -${line.bandSigma}σ`,
+        color: line.bandColor,
+        points: makeOverlayPoints(band.lowerValues, bars, start, end),
+      };
+    }
+  }
+}
+
+function canApplyTailIncrementally(
+  cached: VwapIncrementalState,
+  bars: readonly FootprintBar[],
+  lines: readonly VwapLineConfig[],
+  tailIndex: number,
+  tail: FootprintBar,
+): boolean {
+  const appended = bars.length === cached.seriesLength + 1;
+  for (let i = 0; i < lines.length; i++) {
+    const state = cached.tails[i];
+    const line = lines[i];
+    if (state.kind === "current") {
+      const nextPeriod = calendarPeriodStart(tail.startTime, line.period);
+      if (state.periodStart !== nextPeriod && !appended) return false;
+      if (state.periodStart !== nextPeriod && appended && state.prefixVolume === 0 && !Number.isFinite(state.periodStart)) {
+        return false;
+      }
+      // On append across period rollover, current line simply starts a fresh accumulator cleanly!
+    } else if (state.kind === "previous") {
+      // Chronological tail guarantees prior period points never reference tail's period.
+      const compareStart = appended && tailIndex > 0 ? bars[tailIndex - 1].startTime : state.lastStartTime;
+      if (tail.startTime < compareStart) return false;
+    }
+  }
+  return true;
+}
+
+function computeExpectedPlotCount(lines: readonly VwapLineConfig[]): number {
+  let count = 0;
+  for (let i = 0; i < lines.length; i++) {
+    count += lines[i].showBands ? 3 : 1;
+  }
+  return count;
 }
 
 function prepareVwap(ctx: IndicatorDrawContext<VwapIndicatorSettings>) {
-  const { start, end } = visibleIndexRange(ctx); const bars = ctx.series.listReadonly(); const lines = normalizeVwapLines(ctx.settings).filter((line) => line.enabled);
-  const incrementalEligible = lines.length > 0 && lines.every((line) => line.family === "current" && !line.showBands);
+  const { start, end } = visibleIndexRange(ctx);
+  const bars = ctx.series.listReadonly();
+  const lines = normalizeVwapLines(ctx.settings).filter((line) => line.enabled);
+  const incrementalEligible = lines.length > 0;
   const cached = vwapIncrementalStates.get(ctx.series, ctx.instance.id);
-  if (cached?.seriesRevision === ctx.series.revision && cached.instance === ctx.instance && cached.start === start && cached.end === end) return cached.prepared;
+  if (cached?.seriesRevision === ctx.series.revision && cached.instance === ctx.instance && cached.start === start && cached.end === end) {
+    return cached.prepared;
+  }
   const mutation = indicatorPriceSeriesMutation(ctx.series);
   const sameLines = Boolean(cached) && sameIncrementalLines(cached!.lines, lines);
-  const sameShape = Boolean(cached) && cached!.resultPoints.length === lines.length && cached!.plotSeries.length === lines.length;
+  const expectedPlotCount = computeExpectedPlotCount(lines);
+  const sameShape = Boolean(cached)
+    && cached!.resultPoints.length === lines.length
+    && cached!.plotSeries.length === expectedPlotCount;
+
   if (incrementalEligible && cached && cached.instance === ctx.instance && cached.seriesRevision === ctx.series.revision && sameLines && sameShape) {
-    // Only the visible range moved (a pan, or an analysis read of another
-    // range): the VWAP values still hold, so rebuild just the plotted slice.
-    lines.forEach((line, index) => {
-      cached.plotSeries[index] = { key: `vwap-${line.id}`, label: shortLabelForLine(line), color: line.color, chartLabel: labelForLine(line), points: makeNumberPoints(cached.resultPoints[index], bars, start, end) };
-    });
-    cached.start = start; cached.end = end; cached.lines = lines;
+    rebuildVwapPlotSlice(cached, lines, bars, start, end);
+    cached.start = start;
+    cached.end = end;
+    cached.lines = lines;
     cached.prepared = prepareOverlayData(ctx, cached.plotSeries);
     incrementPerformanceCounter("indicator.incremental.hit.vwap");
     return cached.prepared;
   }
-  const canReuse = incrementalEligible && cached && cached.instance === ctx.instance && sameLines && sameShape && (bars.length === cached.seriesLength || bars.length === cached.seriesLength + 1);
+
+  const canReuse = incrementalEligible
+    && cached
+    && cached.instance === ctx.instance
+    && sameLines
+    && sameShape
+    && (bars.length === cached.seriesLength || bars.length === cached.seriesLength + 1);
+
   if (canReuse && mutation.kind === "metadata" && bars.length === cached.seriesLength) {
     if (cached.start !== start || cached.end !== end) {
-      lines.forEach((line, index) => {
-        cached.plotSeries[index] = { key: `vwap-${line.id}`, label: shortLabelForLine(line), color: line.color, chartLabel: labelForLine(line), points: makeNumberPoints(cached.resultPoints[index], bars, start, end) };
-      });
+      rebuildVwapPlotSlice(cached, lines, bars, start, end);
       cached.start = start;
       cached.end = end;
       cached.lines = lines;
@@ -99,35 +252,156 @@ function prepareVwap(ctx: IndicatorDrawContext<VwapIndicatorSettings>) {
     incrementPerformanceCounter("indicator.incremental.hit.vwap");
     return cached.prepared;
   }
-  if (canReuse && mutation.kind === "tail" && mutation.tailIndex >= 0 && (bars.length === cached.seriesLength || mutation.tailIndex === cached.seriesLength)) {
-    const tail = bars[mutation.tailIndex];
-    const periodStartsMatch = tail && cached.tails.every((state, index) => state.periodStart === calendarPeriodStart(tail.startTime, lines[index].period));
-    if (periodStartsMatch) {
+
+  const isTailUpdate = Boolean(canReuse) && mutation.kind === "tail" && mutation.tailIndex >= 0 && (bars.length === cached!.seriesLength || mutation.tailIndex === cached!.seriesLength);
+  const isTailAppend = Boolean(canReuse)
+    && mutation.kind === "structure"
+    && bars.length === cached!.seriesLength + 1
+    && cached!.resetEpoch === ctx.series.resetEpoch
+    && cached!.seriesLength > 0
+    && bars[0]?.startTime === cached!.firstBarStartTime
+    && bars[cached!.seriesLength - 1]?.startTime === cached!.lastBarStartTime
+    && bars[cached!.seriesLength - 1]?.volume === cached!.lastBarVolume
+    && bars[cached!.seriesLength - 1]?.close === cached!.lastBarClose;
+  const effectiveTailIndex = isTailAppend ? bars.length - 1 : mutation.tailIndex;
+
+  if (canReuse && (isTailUpdate || isTailAppend) && effectiveTailIndex >= 0) {
+    const tail = bars[effectiveTailIndex];
+    if (tail && canApplyTailIncrementally(cached, bars, lines, effectiveTailIndex, tail)) {
       return measurePerformance("indicator.prepare.incremental.vwap", () => {
         const appended = bars.length === cached.seriesLength + 1;
-        const prevTailWeighted = appended && cached.seriesLength > 0 ? weightedBar(bars[cached.seriesLength - 1]) : null;
+        const prevTailIdx = cached.seriesLength - 1;
+        const prevTail = appended && prevTailIdx >= 0 ? bars[prevTailIdx] : null;
+        const prevTailWeighted = prevTail ? weightedBar(prevTail) : null;
         const weighted = weightedBar(tail);
         const rangeChanged = cached.start !== start || cached.end !== end || appended;
+        let plotIdx = 0;
+
         for (let i = 0; i < lines.length; i++) {
+          const line = lines[i];
           const state = cached.tails[i];
-          if (prevTailWeighted) {
-            state.prefixPv += prevTailWeighted.pv;
-            state.prefixVolume += prevTailWeighted.volume;
-          }
-          const volume = state.prefixVolume + weighted.volume;
-          const value = volume > 0 ? (state.prefixPv + weighted.pv) / volume : null;
-          cached.resultPoints[i][mutation.tailIndex] = { time: tail.startTime, value };
-          if (rangeChanged) {
-            const line = lines[i];
-            cached.plotSeries[i] = { key: `vwap-${line.id}`, label: shortLabelForLine(line), color: line.color, chartLabel: labelForLine(line), points: makeNumberPoints(cached.resultPoints[i], bars, start, end) };
+          let value: number | null = null;
+
+          if (state.kind === "current") {
+            const tailPeriod = calendarPeriodStart(tail.startTime, line.period);
+            if (appended) {
+              if (prevTail && prevTailWeighted) {
+                if (state.periodStart !== tailPeriod) {
+                  state.periodStart = tailPeriod;
+                  state.prefixPv = 0;
+                  state.prefixVolume = 0;
+                } else {
+                  state.prefixPv += prevTailWeighted.pv;
+                  state.prefixVolume += prevTailWeighted.volume;
+                }
+              } else {
+                state.periodStart = tailPeriod;
+              }
+            }
+            const volume = state.prefixVolume + weighted.volume;
+            value = volume > 0 ? (state.prefixPv + weighted.pv) / volume : null;
+          } else if (state.kind === "rolling") {
+            if (prevTail && prevTailWeighted) {
+              addCompensated(state.prefixPv, prevTailWeighted.pv);
+              addCompensated(state.prefixVolume, prevTailWeighted.volume);
+              const prevCutoff = prevTail.startTime - state.windowMs;
+              while (state.prefixLeft <= prevTailIdx && bars[state.prefixLeft].startTime < prevCutoff) {
+                const old = weightedBar(bars[state.prefixLeft++]);
+                addCompensated(state.prefixPv, -old.pv);
+                addCompensated(state.prefixVolume, -old.volume);
+              }
+            }
+            // Apply current tail on a tiny scratch copy of the closed prefix state so
+            // intra-bar volume/high/low/close ticks remain bit-identical to rollingSeries.
+            const scratchPv: CompensatedSum = { sum: state.prefixPv.sum, correction: state.prefixPv.correction };
+            const scratchVolume: CompensatedSum = { sum: state.prefixVolume.sum, correction: state.prefixVolume.correction };
+            let scratchLeft = state.prefixLeft;
+            addCompensated(scratchPv, weighted.pv);
+            addCompensated(scratchVolume, weighted.volume);
+            const cutoff = tail.startTime - state.windowMs;
+            while (scratchLeft <= effectiveTailIndex && bars[scratchLeft].startTime < cutoff) {
+              const old = weightedBar(bars[scratchLeft++]);
+              addCompensated(scratchPv, -old.pv);
+              addCompensated(scratchVolume, -old.volume);
+            }
+            const complete = bars[0]?.startTime <= cutoff;
+            value = complete && scratchVolume.sum > 0 ? scratchPv.sum / scratchVolume.sum : null;
           } else {
-            const point = cached.plotSeries[i].points.at(-1);
-            if (point?.index === mutation.tailIndex) { point.time = tail.startTime; point.value = value; }
+            if (prevTail && prevTailWeighted) {
+              const prevPeriod = calendarPeriodStart(prevTail.startTime, line.period);
+              const existing = state.prefixTotals.get(prevPeriod);
+              if (existing) {
+                existing.pv += prevTailWeighted.pv;
+                existing.volume += prevTailWeighted.volume;
+              } else {
+                state.prefixTotals.set(prevPeriod, { pv: prevTailWeighted.pv, volume: prevTailWeighted.volume });
+              }
+              state.lastStartTime = prevTail.startTime;
+            }
+            const currentPeriod = calendarPeriodStart(tail.startTime, line.period);
+            const previous = state.prefixTotals.get(previousPeriodStart(currentPeriod, line.period));
+            value = previous && previous.volume > 0 ? previous.pv / previous.volume : null;
+          }
+
+          cached.resultPoints[i][effectiveTailIndex] = { time: tail.startTime, value };
+
+          let upperVal: number | null = null;
+          let lowerVal: number | null = null;
+          const band = state.band;
+          if (line.showBands && band) {
+            if (prevTail && prevTailIdx >= 0) {
+              const prevVwap = cached.resultPoints[i][prevTailIdx]?.value;
+              if (prevVwap !== null && prevVwap !== undefined && prevTail.volume > 0) {
+                const prevTypical = (prevTail.high + prevTail.low + prevTail.close) / 3;
+                band.prefixVariance += (prevTypical - prevVwap) ** 2 * prevTail.volume;
+                band.prefixVolume += prevTail.volume;
+              }
+            }
+            if (value !== null && tail.volume > 0) {
+              const tailTypical = (tail.high + tail.low + tail.close) / 3;
+              const totalVar = band.prefixVariance + (tailTypical - value) ** 2 * tail.volume;
+              const totalVol = band.prefixVolume + tail.volume;
+              const sd = totalVol > 0 ? Math.sqrt(totalVar / totalVol) : 0;
+              upperVal = value + sd * line.bandSigma;
+              lowerVal = value - sd * line.bandSigma;
+            }
+            band.upperValues[effectiveTailIndex] = upperVal;
+            band.lowerValues[effectiveTailIndex] = lowerVal;
+          }
+
+          if (!rangeChanged) {
+            const point = cached.plotSeries[plotIdx++]?.points.at(-1);
+            if (point?.index === effectiveTailIndex) {
+              point.time = tail.startTime;
+              point.value = value;
+            }
+            if (line.showBands && band) {
+              const upperPt = cached.plotSeries[plotIdx++]?.points.at(-1);
+              if (upperPt?.index === effectiveTailIndex) {
+                upperPt.time = tail.startTime;
+                upperPt.value = upperVal;
+              }
+              const lowerPt = cached.plotSeries[plotIdx++]?.points.at(-1);
+              if (lowerPt?.index === effectiveTailIndex) {
+                lowerPt.time = tail.startTime;
+                lowerPt.value = lowerVal;
+              }
+            }
           }
         }
+
+        if (rangeChanged) {
+          rebuildVwapPlotSlice(cached, lines, bars, start, end);
+        }
+
         cached.prepared = prepareOverlayData(ctx, cached.plotSeries);
         cached.seriesRevision = ctx.series.revision;
         cached.structureRevision = ctx.series.structureRevision;
+        cached.resetEpoch = ctx.series.resetEpoch;
+        cached.firstBarStartTime = bars[0]?.startTime ?? 0;
+        cached.lastBarStartTime = tail.startTime;
+        cached.lastBarVolume = tail.volume;
+        cached.lastBarClose = tail.close;
         cached.seriesLength = bars.length;
         cached.start = start;
         cached.end = end;
@@ -149,25 +423,92 @@ function prepareVwap(ctx: IndicatorDrawContext<VwapIndicatorSettings>) {
     else fallbackReason = `mutation-${mutation.kind}`;
     incrementPerformanceCounter(`indicator.incremental.fallback.vwap.${fallbackReason}`);
   }
+
   return measurePerformance("indicator.prepare.full.vwap", () => {
-    const results = calculateVwapSeries(bars, lines.map(definitionForLine)); const series: Array<PlotSeries & { chartLabel?: string }> = []; const resultPoints = results.map((result) => result.points);
+    const results = calculateVwapSeries(bars, lines.map(definitionForLine));
+    const series: Array<PlotSeries & { chartLabel?: string }> = [];
+    const resultPoints = results.map((result) => result.points);
+    const tails: VwapLineTailState[] = [];
+
     lines.forEach((line, index) => {
-      const linePoints = resultPoints[index] ?? []; const label = shortLabelForLine(line);
+      const linePoints = resultPoints[index] ?? [];
+      const label = shortLabelForLine(line);
       series.push({ key: `vwap-${line.id}`, label, color: line.color, chartLabel: labelForLine(line), points: makeNumberPoints(linePoints, bars, start, end) });
-      if (!line.showBands) return; const values = linePoints.map((point) => point.value); const bands = vwapBands(bars, values, line.bandSigma);
-      series.push({ key: `vwap-${line.id}-upper`, label: `${label} +${line.bandSigma}σ`, color: line.bandColor, points: makeOverlayPoints(bands.upper, bars, start, end) });
-      series.push({ key: `vwap-${line.id}-lower`, label: `${label} -${line.bandSigma}σ`, color: line.bandColor, points: makeOverlayPoints(bands.lower, bars, start, end) });
+      let bandState: VwapBandState | null = null;
+      if (line.showBands) {
+        const bands = vwapBandsWithPrefix(bars, linePoints, line.bandSigma);
+        bandState = {
+          prefixVariance: bands.prefixVariance,
+          prefixVolume: bands.prefixVolume,
+          upperValues: bands.upper,
+          lowerValues: bands.lower,
+        };
+        series.push({ key: `vwap-${line.id}-upper`, label: `${label} +${line.bandSigma}σ`, color: line.bandColor, points: makeOverlayPoints(bands.upper, bars, start, end) });
+        series.push({ key: `vwap-${line.id}-lower`, label: `${label} -${line.bandSigma}σ`, color: line.bandColor, points: makeOverlayPoints(bands.lower, bars, start, end) });
+      }
+      tails.push(buildLineTailState(bars, line, bandState));
     });
+
     const prepared = prepareOverlayData(ctx, series);
-    if (incrementalEligible) vwapIncrementalStates.set(ctx.series, ctx.instance.id, { instance: ctx.instance, seriesRevision: ctx.series.revision, structureRevision: ctx.series.structureRevision, seriesLength: bars.length, start, end, lines, resultPoints, plotSeries: series, prepared, tails: lines.map((line) => currentTailState(bars, line)) }); else vwapIncrementalStates.delete(ctx.series, ctx.instance.id);
-    incrementPerformanceCounter("indicator.incremental.full.vwap"); return prepared;
+    if (incrementalEligible) {
+      const lastBar = bars[bars.length - 1];
+      vwapIncrementalStates.set(ctx.series, ctx.instance.id, {
+        instance: ctx.instance,
+        seriesRevision: ctx.series.revision,
+        structureRevision: ctx.series.structureRevision,
+        resetEpoch: ctx.series.resetEpoch,
+        firstBarStartTime: bars[0]?.startTime ?? 0,
+        lastBarStartTime: lastBar?.startTime ?? 0,
+        lastBarVolume: lastBar?.volume ?? 0,
+        lastBarClose: lastBar?.close ?? 0,
+        seriesLength: bars.length,
+        start,
+        end,
+        lines,
+        resultPoints,
+        plotSeries: series,
+        prepared,
+        tails,
+      });
+    } else {
+      vwapIncrementalStates.delete(ctx.series, ctx.instance.id);
+    }
+    incrementPerformanceCounter("indicator.incremental.full.vwap");
+    return prepared;
   });
 }
 
-function vwapBands(bars: readonly FootprintBar[], vwapValues: readonly (number | null)[], sigma: number): { upper: Array<number | null>; lower: Array<number | null> } {
-  const upper: Array<number | null> = []; const lower: Array<number | null> = []; let weightedVariance = 0; let volume = 0;
-  for (let i = 0; i < bars.length; i++) { const vwap = vwapValues[i]; if (vwap === null || vwap === undefined || bars[i].volume <= 0) { upper.push(null); lower.push(null); continue; } const typical = (bars[i].high + bars[i].low + bars[i].close) / 3; weightedVariance += (typical - vwap) ** 2 * bars[i].volume; volume += bars[i].volume; const sd = volume > 0 ? Math.sqrt(weightedVariance / volume) : 0; upper.push(vwap + sd * sigma); lower.push(vwap - sd * sigma); }
-  return { upper, lower };
+function vwapBandsWithPrefix(
+  bars: readonly FootprintBar[],
+  vwapPoints: readonly VwapPoint[],
+  sigma: number,
+): { upper: Array<number | null>; lower: Array<number | null>; prefixVariance: number; prefixVolume: number } {
+  const upper: Array<number | null> = new Array(bars.length);
+  const lower: Array<number | null> = new Array(bars.length);
+  let weightedVariance = 0;
+  let volume = 0;
+  let prefixVariance = 0;
+  let prefixVolume = 0;
+  const lastIdx = bars.length - 1;
+  for (let i = 0; i < bars.length; i++) {
+    const vwap = vwapPoints[i]?.value;
+    if (vwap === null || vwap === undefined || bars[i].volume <= 0) {
+      upper[i] = null;
+      lower[i] = null;
+    } else {
+      const typical = (bars[i].high + bars[i].low + bars[i].close) / 3;
+      weightedVariance += (typical - vwap) ** 2 * bars[i].volume;
+      volume += bars[i].volume;
+      const sd = volume > 0 ? Math.sqrt(weightedVariance / volume) : 0;
+      upper[i] = vwap + sd * sigma;
+      lower[i] = vwap - sd * sigma;
+    }
+    if (i === lastIdx - 1) {
+      prefixVariance = weightedVariance;
+      prefixVolume = volume;
+    }
+  }
+  return { upper, lower, prefixVariance, prefixVolume };
 }
 
 export const vwapIndicatorDefinition: IndicatorDefinition<VwapIndicatorSettings> = {

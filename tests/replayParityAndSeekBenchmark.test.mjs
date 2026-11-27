@@ -979,3 +979,72 @@ test("benchmark: 1,000 and 100,000 bar replay seek p50/p95/p99, cloneFootprintBa
   console.log("REPLAY_PARITY_BENCHMARK_SUMMARY", JSON.stringify(benchmark));
   assert.ok(benchmark.clone1k60Cells.speedupX > 1, "cloneFootprintBarForReplay should stay faster than structuredClone");
 });
+
+test("ReplayController follow and reconfigure advance sublinearly without rescanning from zero (#416)", () => {
+  let startTimeReads = 0;
+  const bars = Array.from({ length: 10_000 }, (_, i) => {
+    const rawStart = (i + 1) * MIN;
+    return {
+      get startTime() {
+        startTimeReads++;
+        return rawStart;
+      },
+      open: 50_000,
+      high: 50_010,
+      low: 49_990,
+      close: 50_005,
+      volume: 10,
+      delta: 2,
+      count: 4,
+      cells: new Map(),
+      hasRef: true,
+    };
+  });
+
+  const emittedFollow = [];
+  const ctrl = new ReplayController((b) => emittedFollow.push(b.startTime), () => {});
+  ctrl.load(bars, 0, MIN);
+  ctrl.follow(9_900 * MIN, true);
+
+  startTimeReads = 0;
+  let appendedTotal = 0;
+  for (let i = 9_901; i <= 10_000; i++) {
+    const step = ctrl.follow(i * MIN, true);
+    appendedTotal += ("append" in step ? step.append.length : step.replace.length);
+  }
+
+  assert.equal(appendedTotal, 100);
+  assert.ok(
+    startTimeReads < 2_500,
+    `expected sublinear startTime reads over 100 follow steps on 10k bars (got ${startTimeReads}, baseline was 995450)`,
+  );
+
+  // Verify rewind, duplicate timestamps, out-of-range seek, and reconfigure parity.
+  const dupBars = [0, MIN, MIN, 2 * MIN, 5 * MIN].map((ts, idx) => ({
+    startTime: ts,
+    open: 100 + idx,
+    high: 101 + idx,
+    low: 99 + idx,
+    close: 100 + idx,
+    volume: 1,
+    delta: 0,
+    count: 1,
+    cells: new Map(),
+    hasRef: true,
+  }));
+  const parityCtrl = new ReplayController(() => {}, () => {});
+  parityCtrl.loadForSelection(dupBars, MIN);
+
+  assert.equal(parityCtrl.seek(-MIN).length, 0, "below-range seek clamps cleanly");
+  assert.equal(parityCtrl.seek(2 * MIN).length, 3, "duplicate timestamps at boundary share completion upper bound");
+  assert.equal(parityCtrl.seek(10 * MIN).length, 5, "above-range seek clamps cleanly");
+  assert.equal(parityCtrl.seek(MIN).length, 1, "rewind seek re-positions cursor cleanly");
+  assert.equal(parityCtrl.seek(MIN).length, 1, "repeated identical seek keeps exact visible bars");
+
+  const reconfigured = parityCtrl.reconfigure(dupBars, 2 * MIN);
+  assert.equal(reconfigured.visibleBars.length, 0);
+  assert.equal(parityCtrl.seek(3 * MIN).length, 3, "reconfigure updates interval boundary lookup");
+
+  ctrl.dispose();
+  parityCtrl.dispose();
+});

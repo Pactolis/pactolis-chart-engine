@@ -981,16 +981,30 @@ export class IndicatorManager {
       maxAgeMs > 0 ? Math.floor(Date.now() / maxAgeMs) : 0,
     );
     const invalidation = this.preparedDataCache.classifyInvalidation(instance.id, key);
-    let computed = false;
-    const prepared = this.preparedDataCache.resolve(instance.id, key, () => {
-      computed = true;
-      return compute();
-    });
+    const tailUpdater = definition.prepareDataTail
+      ? (candidate: { value: IndicatorPreparedData | undefined }) => {
+        if (!candidate.value) return undefined;
+        return measurePerformance(
+          `indicator.prepare.tail.${instance.type}`,
+          () => definition.prepareDataTail!(drawContext, candidate.value!),
+        );
+      }
+      : undefined;
+    const resolution = this.preparedDataCache.resolveWithTail(
+      instance.id,
+      key,
+      compute,
+      tailUpdater,
+    );
+    const computed = resolution.mode !== "hit";
     if (computed) {
       incrementPerformanceCounter(`indicator.prepare.invalidation.${invalidation}.${instance.type}`);
+      if (resolution.mode === "tail") {
+        incrementPerformanceCounter(`indicator.prepare.tail.${instance.type}`);
+      }
     }
     incrementPerformanceCounter(`indicator.prepare.cache.${computed ? "miss" : "hit"}.${instance.type}`);
-    return prepared;
+    return resolution.value;
   }
 
   getOrPrepareInteractionData(

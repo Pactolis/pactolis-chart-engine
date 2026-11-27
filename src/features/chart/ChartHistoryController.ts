@@ -652,7 +652,12 @@ export class ChartHistoryController {
         this.host.autoFit();
         viewportMoved = true;
       }
-      if (liveStartedAt !== null) this.host.session.markLiveUpdate(liveStartedAt);
+      if (liveStartedAt !== null) {
+        this.host.session.markLiveUpdate(liveStartedAt, {
+          source: `pipeline-${event.source}`,
+          clockBase: "performance.now",
+        });
+      }
       if (liveTelemetry) incrementPerformanceCounter("chart.liveUpdate.invalidate.request");
       const dataChange = chartChangeForDataUpdate(event.kind);
       this.host.session.invalidate(viewportMoved ? dataChange | ChartChange.Viewport : dataChange);

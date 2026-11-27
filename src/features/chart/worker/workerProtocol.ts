@@ -122,6 +122,80 @@ export interface WorkerEnvelopeBase<
   payload: P;
 }
 
+export interface HeatmapProtocolBar {
+  t: number;
+  cells: ReadonlyArray<readonly [number, number, number]>;
+}
+
+const HEATMAP_BUFFER_MAGIC = 0x50484d31; // "PHM1"
+
+/**
+ * Encodes heatmap bars into a compact transferable binary ArrayBuffer:
+ * [u32 magic, u32 barCount, (f64 timestamp, u32 cellCount, f64[3 * cellCount] (p, b, a))...]
+ */
+export function encodeHeatmapBarsToBuffer(bars: readonly HeatmapProtocolBar[]): ArrayBuffer {
+  let totalBytes = 8;
+  for (let i = 0; i < bars.length; i++) {
+    totalBytes += 12 + bars[i].cells.length * 24;
+  }
+  const buffer = new ArrayBuffer(totalBytes);
+  const view = new DataView(buffer);
+  view.setUint32(0, HEATMAP_BUFFER_MAGIC, true);
+  view.setUint32(4, bars.length, true);
+  let offset = 8;
+  for (let i = 0; i < bars.length; i++) {
+    const bar = bars[i];
+    const cells = bar.cells;
+    view.setFloat64(offset, bar.t, true);
+    view.setUint32(offset + 8, cells.length, true);
+    offset += 12;
+    for (let c = 0; c < cells.length; c++) {
+      const cell = cells[c];
+      view.setFloat64(offset, cell[0], true);
+      view.setFloat64(offset + 8, cell[1], true);
+      view.setFloat64(offset + 16, cell[2], true);
+      offset += 24;
+    }
+  }
+  return buffer;
+}
+
+export function decodeHeatmapBarsFromBuffer(buffer: ArrayBuffer): Array<{ t: number; cells: Array<[number, number, number]> }> {
+  if (buffer.byteLength < 8) {
+    throw new Error("Heatmap binary payload truncated: missing header");
+  }
+  const view = new DataView(buffer);
+  const magic = view.getUint32(0, true);
+  if (magic !== HEATMAP_BUFFER_MAGIC) {
+    throw new Error(`Heatmap binary payload invalid magic: 0x${magic.toString(16)}`);
+  }
+  const barCount = view.getUint32(4, true);
+  const bars: Array<{ t: number; cells: Array<[number, number, number]> }> = new Array(barCount);
+  let offset = 8;
+  for (let i = 0; i < barCount; i++) {
+    if (offset + 12 > buffer.byteLength) {
+      throw new Error("Heatmap binary payload truncated: bar header");
+    }
+    const t = view.getFloat64(offset, true);
+    const cellCount = view.getUint32(offset + 8, true);
+    offset += 12;
+    if (offset + cellCount * 24 > buffer.byteLength) {
+      throw new Error("Heatmap binary payload truncated: cells");
+    }
+    const cells: Array<[number, number, number]> = new Array(cellCount);
+    for (let c = 0; c < cellCount; c++) {
+      cells[c] = [
+        view.getFloat64(offset, true),
+        view.getFloat64(offset + 8, true),
+        view.getFloat64(offset + 16, true),
+      ];
+      offset += 24;
+    }
+    bars[i] = { t, cells };
+  }
+  return bars;
+}
+
 export type IngressWorkerMessage =
   | WorkerEnvelopeBase<
       "ingress",
@@ -157,7 +231,7 @@ export type IngressWorkerMessage =
       {
         market?: string;
         timestamp?: number;
-        bars?: ReadonlyArray<{ t: number; cells: ReadonlyArray<readonly [number, number, number]> }> | ArrayBuffer;
+        bars?: ReadonlyArray<HeatmapProtocolBar> | ArrayBuffer;
       }
     >
   | WorkerEnvelopeBase<"ingress", "ingress:credit", { granted: number }>
@@ -209,7 +283,7 @@ export type HistoryWorkerMessage =
         bucketStep?: number;
         from?: number;
         to?: number;
-        bars: ReadonlyArray<{ t: number; cells: ReadonlyArray<readonly [number, number, number]> }> | ArrayBuffer;
+        bars: ReadonlyArray<HeatmapProtocolBar> | ArrayBuffer;
       }
     >
   | WorkerEnvelopeBase<"history", "history:credit", { granted: number }>

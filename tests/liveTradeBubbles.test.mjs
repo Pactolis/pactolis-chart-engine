@@ -308,4 +308,169 @@ test("subscription lifecycle unsubscribes on hide, remove, market-change, kinds-
   assert.equal(activeSubs.size, 1);
   manager.dispose();
   assert.equal(activeSubs.size, 0);
+  bubbles.clearLiveTradeEvents();
+});
+
+test("two instances on the same market share stream subscription and never double-count nominal (#412)", async () => {
+  const {
+    bubbles,
+    FootprintSeries,
+    View,
+    createIndicatorInstanceAsync,
+    configureIndicatorDataSource,
+  } = await loadModules();
+  bubbles.clearLiveTradeEvents();
+
+  const listeners = new Map();
+  let subSeq = 0;
+  let subscribeCalls = 0;
+
+  configureIndicatorDataSource({
+    requestLiquidationSeries: () => ({ status: "idle" }),
+    requestCoinalyzeDerivativeSeries: () => ({ status: "idle" }),
+    requestFuturesPositioningSeries: () => ({ status: "idle" }),
+    fetchOptionsGexSurface: async () => { throw new Error("unused"); },
+    subscribeLiveTradeEvents(input) {
+      subscribeCalls++;
+      const token = ++subSeq;
+      listeners.set(token, input);
+      return () => {
+        listeners.delete(token);
+      };
+    },
+  });
+
+  const intervalMs = 60_000;
+  const bars = makeBars(5, intervalMs);
+  const series = new FootprintSeries({ intervalMs, priceStep: 10 });
+  series.loadBars(bars);
+
+  const view = new View();
+  view.area = { left: 0, top: 0, width: 600, height: 300 };
+  view.setVisibleIndexRange(0, bars.length);
+  view.fitPriceRange(49_800, 50_300, 0.1);
+
+  const instA = await createIndicatorInstanceAsync("live-trade-bubbles", 0);
+  const instB = await createIndicatorInstanceAsync("live-trade-bubbles", 1);
+  let refreshesA = 0;
+  let refreshesB = 0;
+
+  const makeCtx = (instance, onRefresh) => ({
+    instance,
+    settings: instance.settings,
+    chart: { market: "BTCUSDT", timeframe: "1m", intervalMs },
+    view,
+    series,
+    requestRefresh: onRefresh,
+    theme: {},
+  });
+
+  const def = bubbles.liveTradeBubblesIndicatorDefinition;
+  def.prepareData(makeCtx(instA, () => { refreshesA++; }));
+  def.prepareData(makeCtx(instB, () => { refreshesB++; }));
+
+  assert.equal(subscribeCalls, 1, "identical market/kinds/scope consumers must share a single subscription");
+  assert.equal(listeners.size, 1);
+
+  const event1 = {
+    id: "btc-140k",
+    kind: "trade",
+    time: bars[2].startTime + 10_000,
+    price: 50_020,
+    qty: 2.8,
+    notionalUsd: 140_000,
+    side: "buy",
+    venue: "binance",
+  };
+  for (const listener of listeners.values()) {
+    listener.onEvents([event1]);
+  }
+  assert.equal(refreshesA, 1);
+  assert.equal(refreshesB, 1);
+
+  const prepA = def.prepareData(makeCtx(instA, () => { refreshesA++; }));
+  const prepB = def.prepareData(makeCtx(instB, () => { refreshesB++; }));
+  assert.equal(prepA.meta.totalEvents, 1);
+  assert.equal(prepA.meta.bubbles.length, 1);
+  assert.equal(prepA.meta.bubbles[0].count, 1);
+  assert.equal(prepA.meta.bubbles[0].notionalUsd, 140_000);
+  assert.equal(prepB.meta.totalEvents, 1);
+  assert.equal(prepB.meta.bubbles[0].count, 1);
+  assert.equal(prepB.meta.bubbles[0].notionalUsd, 140_000);
+
+  // Disposing first instance keeps stream alive for second instance
+  const ctxAOff = makeCtx({ ...instA, visible: false }, () => {});
+  def.prepareData(ctxAOff);
+  assert.equal(listeners.size, 1, "stream stays open while one consumer remains");
+
+  const event2 = {
+    id: "btc-90k",
+    kind: "trade",
+    time: bars[3].startTime + 5_000,
+    price: 50_030,
+    qty: 1.8,
+    notionalUsd: 90_000,
+    side: "sell",
+    venue: "bybit",
+  };
+  for (const listener of listeners.values()) {
+    listener.onEvents([event2]);
+  }
+  assert.equal(refreshesB, 2);
+  const prepB2 = def.prepareData(makeCtx(instB, () => { refreshesB++; }));
+  assert.equal(prepB2.meta.totalEvents, 2);
+
+  // Overlapping subscriptions, bounded dedup, distinct venues/kinds, and base vs market scope isolation
+  bubbles.pushLiveTradeEvents("BTCUSDT", [
+    event1, // duplicate of existing binance trade
+    { ...event1, venue: "bybit" }, // distinct venue must be preserved
+    { ...event1, kind: "liquidation", side: "long" }, // distinct kind must be preserved
+  ], "base");
+  const baseEvents = bubbles.getLiveTradeEvents("BTCUSDT", "base");
+  assert.equal(baseEvents.length, 4);
+
+  bubbles.pushLiveTradeEvents("BTCUSDT", [
+    { ...event1, id: "market-scope-1", notionalUsd: 75_000 },
+  ], "market");
+  assert.equal(bubbles.getLiveTradeEvents("BTCUSDT", "market").length, 1);
+  assert.equal(bubbles.getLiveTradeEvents("BTCUSDT", "base").length, 4);
+
+  // Close remaining consumer -> active stream drops to 0
+  def.prepareData(makeCtx({ ...instB, visible: false }, () => {}));
+  assert.equal(listeners.size, 0);
+  bubbles.clearLiveTradeEvents();
+});
+
+test("marketBuffers enforces MAX_LIVE_TRADE_MARKETS with LRU eviction (#405)", async () => {
+  const { bubbles } = await loadModules();
+  bubbles.clearLiveTradeEvents();
+
+  const limit = bubbles.MAX_LIVE_TRADE_MARKETS;
+  assert.ok(limit >= 8);
+
+  const totalMarkets = limit + 4;
+  for (let i = 0; i < totalMarkets; i++) {
+    bubbles.pushLiveTradeEvents(`MKT${i}USDT`, [
+      { id: `ev-${i}`, kind: "trade", time: 1_700_000_000_000 + i, price: 100, qty: 1, notionalUsd: 50_000, side: "buy", venue: "binance" },
+    ]);
+  }
+
+  for (let i = 0; i < totalMarkets - limit; i++) {
+    assert.equal(bubbles.getLiveTradeEvents(`MKT${i}USDT`).length, 0, `oldest market MKT${i}USDT should be evicted`);
+  }
+
+  // Touching the oldest surviving market refreshes it in LRU order so the next eviction removes the following market.
+  const oldestSurviving = `MKT${totalMarkets - limit}USDT`;
+  const nextOldest = `MKT${totalMarkets - limit + 1}USDT`;
+  assert.equal(bubbles.getLiveTradeEvents(oldestSurviving).length, 1);
+
+  bubbles.pushLiveTradeEvents("NEWMKTUSDT", [
+    { id: "ev-new", kind: "trade", time: 1_700_000_100_000, price: 100, qty: 1, notionalUsd: 50_000, side: "buy", venue: "binance" },
+  ]);
+
+  assert.equal(bubbles.getLiveTradeEvents(oldestSurviving).length, 1);
+  assert.equal(bubbles.getLiveTradeEvents(nextOldest).length, 0);
+  assert.equal(bubbles.getLiveTradeEvents("NEWMKTUSDT").length, 1);
+
+  bubbles.clearLiveTradeEvents();
 });

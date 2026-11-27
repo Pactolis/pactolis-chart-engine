@@ -321,3 +321,89 @@ test("a price gap ends a stacked imbalance run", () => {
   assert.equal(rects.length, 3);
 });
 
+test("weekly upsertBar and tail volume updates skip global order.filter sweeps while reconciling local overlaps (#417)", () => {
+  const WEEK = 7 * 24 * 60 * 60 * 1000;
+  const START_MON = Date.UTC(2019, 0, 7);
+  const series = new FootprintSeries({ intervalMs: WEEK, priceStep: 1 });
+
+  let filterVisits = 0;
+  const origFilter = series.order.filter.bind(series.order);
+  series.order.filter = function (cb, thisArg) {
+    return origFilter((value, index, array) => {
+      filterVisits++;
+      return cb.call(thisArg, value, index, array);
+    });
+  };
+
+  for (let i = 0; i < 400; i++) {
+    series.upsertBar({
+      startTime: START_MON + i * WEEK,
+      open: 3_500 + i,
+      high: 3_550 + i,
+      low: 3_480 + i,
+      close: 3_520 + i,
+      volume: 100 + i,
+      delta: 10,
+      count: 50,
+      cells: new Map(),
+      hasRef: true,
+    });
+  }
+  assert.equal(series.length, 400);
+  assert.equal(filterVisits, 0, "400 conflict-free weekly inserts should invoke zero global order.filter scans");
+
+  const tailTime = START_MON + 399 * WEEK;
+  for (let v = 1; v <= 100; v++) {
+    series.upsertBar({
+      startTime: tailTime,
+      open: 3_900,
+      high: 3_950,
+      low: 3_880,
+      close: 3_920,
+      volume: 500 + v,
+      delta: v,
+      count: 60 + v,
+      cells: new Map(),
+      hasRef: true,
+    });
+  }
+  assert.equal(series.length, 400);
+  assert.equal(series.at(399).volume, 600);
+  assert.equal(filterVisits, 0, "100 tail updates at unchanged timestamp should invoke zero order.filter scans");
+
+  // Mixed canonical vs legacy overlap reconciliation across 1w and 1M boundaries
+  const overlapSeries = new FootprintSeries({ intervalMs: WEEK, priceStep: 1 });
+  const makeBar = (startTime, close) => ({
+    startTime,
+    open: close,
+    high: close + 1,
+    low: close - 1,
+    close,
+    volume: 10,
+    delta: 0,
+    count: 5,
+    cells: new Map(),
+    hasRef: true,
+  });
+  const legacyThu = START_MON + 3 * 24 * 60 * 60 * 1000;
+  overlapSeries.upsertBar(makeBar(legacyThu, 101));
+  overlapSeries.upsertBar(makeBar(START_MON, 102));
+  assert.equal(overlapSeries.length, 1);
+  assert.equal(overlapSeries.at(0).startTime, START_MON, "canonical weekly bar must replace legacy overlapping bar");
+
+  // Inserting a legacy overlapping bar when canonical already exists discards legacy bar
+  overlapSeries.upsertBar(makeBar(legacyThu, 103));
+  assert.equal(overlapSeries.length, 1);
+  assert.equal(overlapSeries.at(0).startTime, START_MON, "existing canonical bar must win over later legacy insert");
+
+  // Monthly boundary canonical vs legacy overlap
+  const MONTH = 30 * 24 * 60 * 60 * 1000;
+  const monthly = new FootprintSeries({ intervalMs: MONTH, priceStep: 1 });
+  const feb1 = Date.UTC(2024, 1, 1);
+  const febLegacy = Math.ceil(feb1 / MONTH) * MONTH;
+  monthly.upsertBar(makeBar(febLegacy, 200));
+  monthly.upsertBar(makeBar(feb1, 201));
+  assert.equal(monthly.length, 1);
+  assert.equal(monthly.at(0).startTime, feb1, "canonical monthly bar must replace legacy monthly bar");
+});
+

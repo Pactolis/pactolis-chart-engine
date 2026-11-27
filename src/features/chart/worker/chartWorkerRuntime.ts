@@ -36,6 +36,7 @@ import { ChartHeatmapGpuCoordinator } from "../ChartHeatmapGpuCoordinator.js";
 import type { HeatmapGpuCellFrame } from "../heatmap/gpu/heatmapGpuRenderer.js";
 import { IndicatorManager, drawIndicatorPaneBackground } from "../../indicators/IndicatorManager.js";
 import type {
+  OrderbookHeatmapBar,
   OrderbookHeatmapRequest,
   OrderbookHeatmapResponse,
 } from "../../orderbook/heatmapContracts.js";
@@ -46,6 +47,8 @@ import {
   type OrderbookHeatmapSettingsSource,
 } from "../../orderbook/heatmapSettingsSource.js";
 import {
+  decodeHeatmapBarsFromBuffer,
+  type HeatmapProtocolBar,
   type WorkerChartStatePatch,
   type WorkerHistoryBar,
   type WorkerInputEvent,
@@ -907,69 +910,71 @@ export class ChartWorkerPanelRuntime {
     bucketStep?: number;
     from?: number;
     to?: number;
-    bars: ReadonlyArray<{ t: number; cells: ReadonlyArray<readonly [number, number, number]> }> | ArrayBuffer;
+    bars: ReadonlyArray<HeatmapProtocolBar> | ArrayBuffer;
   }): void {
     const rawBars = payload.bars;
-    if (this.disposed) {
-      if (rawBars instanceof ArrayBuffer) this.endpoint.recycleBuffer(rawBars);
-      return;
-    }
-    if (rawBars instanceof ArrayBuffer) {
-      this.endpoint.recycleBuffer(rawBars);
-      return;
-    }
-    const normalized = {
-      resolution: payload.resolution,
-      bucketStep: payload.bucketStep,
-      from: payload.from,
-      to: payload.to,
-      bars: rawBars.map((bar) => ({
-        t: bar.t,
-        cells: bar.cells.map(([p, b, a]): [number, number, number] => [p, b, a]),
-      })),
-    };
-    if (!this.orderbookHeatmap) {
-      if (this.orderbookHeatmapMode !== "off") {
+    try {
+      if (this.disposed) return;
+      if (!this.orderbookHeatmap && this.orderbookHeatmapMode === "off") return;
+      const decodedBars = rawBars instanceof ArrayBuffer
+        ? decodeHeatmapBarsFromBuffer(rawBars)
+        : rawBars.map((bar) => ({
+            t: bar.t,
+            cells: bar.cells.map(([p, b, a]): [number, number, number] => [p, b, a]),
+          }));
+      const normalized = {
+        resolution: payload.resolution,
+        bucketStep: payload.bucketStep,
+        from: payload.from,
+        to: payload.to,
+        bars: decodedBars,
+      };
+      if (!this.orderbookHeatmap) {
         if (this.pendingHeatmapChunks.length > 32) this.pendingHeatmapChunks.shift();
         this.pendingHeatmapChunks.push(normalized);
         void this.ensureOrderbookHeatmap();
+        return;
       }
-      return;
+      this.orderbookHeatmap.ingestWorkerHeatmapChunk(normalized);
+    } finally {
+      if (rawBars instanceof ArrayBuffer) {
+        this.endpoint.recycleBuffer(rawBars);
+      }
     }
-    this.orderbookHeatmap.ingestWorkerHeatmapChunk(normalized);
   }
 
   private handleHeatmapTail(payload: {
     market?: string;
     timestamp?: number;
-    bars?: ReadonlyArray<{ t: number; cells: ReadonlyArray<readonly [number, number, number]> }> | ArrayBuffer;
+    bars?: ReadonlyArray<HeatmapProtocolBar> | ArrayBuffer;
   }): void {
     const rawBars = payload.bars;
-    if (this.disposed) {
-      if (rawBars instanceof ArrayBuffer) this.endpoint.recycleBuffer(rawBars);
-      return;
-    }
-    if (rawBars instanceof ArrayBuffer) {
-      this.endpoint.recycleBuffer(rawBars);
-      return;
-    }
-    const normalized = {
-      market: payload.market,
-      timestamp: payload.timestamp,
-      bars: rawBars?.map((bar) => ({
-        t: bar.t,
-        cells: bar.cells.map(([p, b, a]): [number, number, number] => [p, b, a]),
-      })),
-    };
-    if (!this.orderbookHeatmap) {
-      if (this.orderbookHeatmapMode !== "off") {
+    try {
+      if (this.disposed) return;
+      if (!this.orderbookHeatmap && this.orderbookHeatmapMode === "off") return;
+      const decodedBars = rawBars instanceof ArrayBuffer
+        ? decodeHeatmapBarsFromBuffer(rawBars)
+        : rawBars?.map((bar) => ({
+            t: bar.t,
+            cells: bar.cells.map(([p, b, a]): [number, number, number] => [p, b, a]),
+          }));
+      const normalized = {
+        market: payload.market,
+        timestamp: payload.timestamp,
+        bars: decodedBars,
+      };
+      if (!this.orderbookHeatmap) {
         if (this.pendingHeatmapTails.length > 32) this.pendingHeatmapTails.shift();
         this.pendingHeatmapTails.push(normalized);
         void this.ensureOrderbookHeatmap();
+        return;
       }
-      return;
+      this.orderbookHeatmap.ingestWorkerHeatmapTail(normalized);
+    } finally {
+      if (rawBars instanceof ArrayBuffer) {
+        this.endpoint.recycleBuffer(rawBars);
+      }
     }
-    this.orderbookHeatmap.ingestWorkerHeatmapTail(normalized);
   }
 
   private handleResize(width: number, height: number, dpr: number): void {

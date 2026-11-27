@@ -11,6 +11,8 @@ const { configureIndicatorDataSource } = await import("../dist/features/indicato
 const {
   computeWhaleCrowdSpread,
   computeVenueNativeZSeries,
+  getWhaleCrowdNativeCacheStats,
+  resetWhaleCrowdCachesForTests,
   whaleVsCrowdIndicatorDefinition,
 } = await import("../dist/features/indicators/builtins/whaleVsCrowd.js");
 const { fundingRegimeIndicatorDefinition } = await import("../dist/features/indicators/builtins/fundingRegime.js");
@@ -490,4 +492,131 @@ test("whaleVsCrowd renders localized TR/EN disabled venue badge (FE #1210)", () 
   } finally {
     if (prevLocale) configureChartLocale(prevLocale);
   }
+});
+
+test("CE #419: whaleVsCrowd computes native z-series only once across 100 revision/range changes", () => {
+  resetWhaleCrowdCachesForTests();
+  const series = makeSeries(T0, 120, HOUR_MS);
+  const points = buildVenuePoints({
+    startMs: T0 - 30 * DAY_MS,
+    count: 30 * 24 + 120,
+    stepMs: HOUR_MS,
+    whaleFn: (i) => 1.2 + Math.sin(i * 0.15) * 0.3,
+    crowdFn: (i) => 0.9 + Math.cos(i * 0.1) * 0.2,
+    resolution: "1h",
+  });
+  const response = {
+    status: "ready",
+    source: "coinalyze",
+    venues: [
+      { venue: "binance", status: "ready", points },
+      { venue: "okx", status: "ready", points },
+      { venue: "hyperliquid", status: "disabled", points: [] },
+    ],
+  };
+
+  configureIndicatorDataSource({
+    requestWhaleCrowdSeries: () => ({ status: "ready", data: response }),
+  });
+
+  const baseline = whaleVsCrowdIndicatorDefinition.prepareData(
+    makeDrawContext(series, { mode: "zScore", venueHyperliquid: false }, [20, 100]),
+  );
+  assert.equal(baseline.status, "ok");
+  const statsAfterFirst = getWhaleCrowdNativeCacheStats();
+  assert.equal(statsAfterFirst.computes, 2); // binance + okx computed once
+
+  // Run 100 prepareData calls with changing series.revision and changing visible range.
+  for (let i = 0; i < 100; i += 1) {
+    series.addTrade({
+      id: `wc-live-${i}`,
+      time: T0 + 119 * HOUR_MS + i * 1_000,
+      price: 90_050 + (i % 7),
+      qty: 0.1,
+      isBuy: i % 2 === 0,
+    });
+    const from = 10 + (i % 15);
+    const to = from + 60;
+    const prepared = whaleVsCrowdIndicatorDefinition.prepareData(
+      makeDrawContext(series, { mode: "zScore", venueHyperliquid: false }, [from, to]),
+    );
+    assert.equal(prepared.status, "ok");
+    if (from === 20 && to === 80) {
+      // Same visible bars must produce identical z-scores.
+      const baseByIdx = new Map(baseline.meta.venues.binance.points.map((p) => [p.index, p.zScore]));
+      for (const pt of prepared.meta.venues.binance.points) {
+        assert.equal(pt.zScore, baseByIdx.get(pt.index));
+      }
+    }
+  }
+
+  const statsAfter100 = getWhaleCrowdNativeCacheStats();
+  assert.equal(statsAfter100.computes, 2);
+  assert.equal(statsAfter100.hits, 200);
+});
+
+test("CE #419: whaleVsCrowd WeakMap cache never collides across different-market responses with identical t grids", () => {
+  resetWhaleCrowdCachesForTests();
+  const series = makeSeries(T0, 120, HOUR_MS);
+  const startMs = T0 - 30 * DAY_MS;
+  const count = 30 * 24 + 120;
+
+  const pointsA = buildVenuePoints({
+    startMs,
+    count,
+    stepMs: HOUR_MS,
+    whaleFn: (i) => 1.2 + Math.sin(i * 0.15) * 0.3,
+    crowdFn: (i) => 0.9 + Math.cos(i * 0.1) * 0.2,
+    resolution: "1h",
+  });
+  const pointsB = buildVenuePoints({
+    startMs,
+    count,
+    stepMs: HOUR_MS,
+    whaleFn: (i) => 2.5 + Math.cos(i * 0.22) * 0.6,
+    crowdFn: (i) => 0.4 + Math.sin(i * 0.18) * 0.15,
+    resolution: "1h",
+  });
+
+  const responseA = {
+    status: "ready",
+    source: "coinalyze",
+    venues: [
+      { venue: "binance", status: "ready", points: pointsA },
+      { venue: "okx", status: "disabled", points: [] },
+      { venue: "hyperliquid", status: "disabled", points: [] },
+    ],
+  };
+  const responseB = {
+    status: "ready",
+    source: "coinalyze",
+    venues: [
+      { venue: "binance", status: "ready", points: pointsB },
+      { venue: "okx", status: "disabled", points: [] },
+      { venue: "hyperliquid", status: "disabled", points: [] },
+    ],
+  };
+
+  let activeResponse = responseB;
+  configureIndicatorDataSource({
+    requestWhaleCrowdSeries: () => ({ status: "ready", data: activeResponse }),
+  });
+
+  const ctx = makeDrawContext(series, { mode: "zScore", venueOkx: false, venueHyperliquid: false }, [20, 100]);
+  const uncachedB = whaleVsCrowdIndicatorDefinition.prepareData(ctx);
+  assert.equal(uncachedB.status, "ok");
+
+  resetWhaleCrowdCachesForTests();
+  activeResponse = responseA;
+  const preparedA = whaleVsCrowdIndicatorDefinition.prepareData(ctx);
+  assert.equal(preparedA.status, "ok");
+
+  activeResponse = responseB;
+  const cachedPathB = whaleVsCrowdIndicatorDefinition.prepareData(ctx);
+  assert.equal(cachedPathB.status, "ok");
+  assert.deepEqual(
+    cachedPathB.meta.venues.binance.points.map((p) => p.zScore),
+    uncachedB.meta.venues.binance.points.map((p) => p.zScore),
+  );
+  assert.equal(getWhaleCrowdNativeCacheStats().computes, 2);
 });
