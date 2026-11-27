@@ -494,7 +494,13 @@ test("CE #419: fundingRegime computes native hourly z-series only once across 10
   assert.equal(getFundingRegimeNativeCacheStats().computes, 1);
 
   for (let i = 0; i < 100; i += 1) {
-    series.updateLastTrade(100 + (i % 5), 1);
+    series.addTrade({
+      id: `fr-live-${i}`,
+      time: T0 + 30 * DAY_MS + 119 * HOUR_MS + i * 1_000,
+      price: 100 + (i % 5),
+      qty: 1,
+      isBuy: i % 2 === 0,
+    });
     const from = 10 + (i % 15);
     const to = from + 60;
     const prepared = fundingRegimeIndicatorDefinition.prepareData(

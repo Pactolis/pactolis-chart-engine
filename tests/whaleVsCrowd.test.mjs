@@ -528,7 +528,13 @@ test("CE #419: whaleVsCrowd computes native z-series only once across 100 revisi
 
   // Run 100 prepareData calls with changing series.revision and changing visible range.
   for (let i = 0; i < 100; i += 1) {
-    series.updateLastTrade(90_050 + (i % 7), 0.1);
+    series.addTrade({
+      id: `wc-live-${i}`,
+      time: T0 + 119 * HOUR_MS + i * 1_000,
+      price: 90_050 + (i % 7),
+      qty: 0.1,
+      isBuy: i % 2 === 0,
+    });
     const from = 10 + (i % 15);
     const to = from + 60;
     const prepared = whaleVsCrowdIndicatorDefinition.prepareData(

@@ -221,9 +221,9 @@ test("CE #429: Hyperliquid ratio is pinned per response so live Binance ticks do
   setupTurkishLocale();
 
   const baseClusters = [
-    { price: 59_000, longNotional: 10_000_000, shortNotional: 0, longCount: 5, shortCount: 0 },
-    { price: 59_450, longNotional: 153_000_000, shortNotional: 0, longCount: 25, shortCount: 0 },
-    { price: 60_000, longNotional: 0, shortNotional: 42_000_000, longCount: 0, shortCount: 14 },
+    { price: 73_000, longNotional: 10_000_000, shortNotional: 0, longCount: 5, shortCount: 0 },
+    { price: 74_450, longNotional: 153_000_000, shortNotional: 0, longCount: 25, shortCount: 0 },
+    { price: 75_500, longNotional: 0, shortNotional: 42_000_000, longCount: 0, shortCount: 14 },
   ];
 
   const response1 = {
@@ -231,7 +231,7 @@ test("CE #429: Hyperliquid ratio is pinned per response so live Binance ticks do
     source: "hyperliquid",
     hlCoin: "BTC",
     takenAt: Date.now() - 10_000,
-    hlMarkPx: 59_453,
+    hlMarkPx: 74_453,
     hlMarkAt: Date.now() - 5_000,
     clusters: baseClusters,
   };
@@ -244,9 +244,9 @@ test("CE #429: Hyperliquid ratio is pinned per response so live Binance ticks do
     requestLiquidationClusters: () => ({ status: "ready", data: response1 }),
   });
 
-  // Frame 0: initial Binance close = 59_460 -> ratio pinned to 59_460 / 59_453.
+  // Frame 0: initial Binance close = 74_460 -> ratio pinned to 74_460 / 74_453.
   const firstRecorder = canvasRecorder();
-  const firstCtx = makeCtx(firstRecorder.canvas, { showPlotLabel: false, showReadout: false }, undefined, 59_460);
+  const firstCtx = makeCtx(firstRecorder.canvas, { showPlotLabel: false, showReadout: false }, undefined, 74_460);
   const firstPrepared = prepareLiquidationProfile(firstCtx);
   drawLiquidationProfileOverlay(firstCtx, firstPrepared);
 
@@ -256,10 +256,10 @@ test("CE #429: Hyperliquid ratio is pinned per response so live Binance ticks do
   assert.ok(expectedBarYs.length > 0);
 
   // 240 frames with +/-0.3% random-walk live Binance price ticks while response1 stays active.
-  let walkPrice = 59_460;
+  let walkPrice = 74_460;
   for (let frame = 1; frame <= 240; frame += 1) {
     const step = Math.sin(frame * 1.7) * 0.003;
-    walkPrice = 59_460 * (1 + step);
+    walkPrice = 74_460 * (1 + step);
     const rec = canvasRecorder();
     const ctx = makeCtx(rec.canvas, { showPlotLabel: false, showReadout: false }, undefined, walkPrice);
     const prepared = prepareLiquidationProfile(ctx);
@@ -278,7 +278,7 @@ test("CE #429: Hyperliquid ratio is pinned per response so live Binance ticks do
   }
 
   // Simulate a >1.5% Binance move on the same response: divergence warning must still use pinned ratio.
-  const movedCtx = makeCtx(canvasRecorder().canvas, {}, undefined, 60_500);
+  const movedCtx = makeCtx(canvasRecorder().canvas, {}, undefined, 76_000);
   const movedPrepared = prepareLiquidationProfile(movedCtx);
   assert.equal(movedPrepared.meta.warnings.priceDivergence, false);
 
@@ -288,7 +288,7 @@ test("CE #429: Hyperliquid ratio is pinned per response so live Binance ticks do
     source: "hyperliquid",
     hlCoin: "BTC",
     takenAt: Date.now() - 1_000,
-    hlMarkPx: 60_000,
+    hlMarkPx: 75_000,
     hlMarkAt: Date.now() - 1_000,
     clusters: baseClusters,
   };
@@ -300,7 +300,7 @@ test("CE #429: Hyperliquid ratio is pinned per response so live Binance ticks do
     requestLiquidationClusters: () => ({ status: "ready", data: response2 }),
   });
 
-  const nextPrepared = prepareLiquidationProfile(makeCtx(canvasRecorder().canvas, {}, undefined, 60_600));
-  const expectedNewPrice = 59_450 * (60_600 / 60_000);
+  const nextPrepared = prepareLiquidationProfile(makeCtx(canvasRecorder().canvas, {}, undefined, 75_600));
+  const expectedNewPrice = 74_450 * (75_600 / 75_000);
   assert.ok(Math.abs(nextPrepared.meta.clusters[1].alignedPrice - expectedNewPrice) < 1e-6);
 });
