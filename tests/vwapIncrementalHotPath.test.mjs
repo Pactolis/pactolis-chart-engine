@@ -103,7 +103,7 @@ test("#409: VWAP incremental tail updates match calculateVwapSeries for current,
 
   // 2. Append a new bar crossing into next day rollover
   const rolloverTime = BASE_TIME + 72 * INTERVAL;
-  series.appendOrUpdateBar({
+  series.upsertBar({
     startTime: rolloverTime,
     open: 110,
     high: 115,

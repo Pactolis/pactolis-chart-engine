@@ -7,7 +7,7 @@ import { FootprintSeries } from "../dist/core/model/footprint.js";
 import { settings } from "../dist/core/settings.js";
 import { resolveChartDisplayOptions } from "../dist/core/model/chartDisplayOptions.js";
 import { calculateVolumeProfile } from "../dist/core/analysis/volumeProfile.js";
-import { buildTpoBrackets } from "../dist/core/analysis/tpoProfile.js";
+import { aggregateTpoBrackets } from "../dist/core/analysis/tpoProfile.js";
 import { calculateNakedPocs } from "../dist/core/analysis/nakedPoc.js";
 import { drawVolumeProfile } from "../dist/core/render/overlay/annotationRenderer.js";
 import { drawHud } from "../dist/core/render/overlay/hudRenderer.js";
@@ -282,7 +282,7 @@ test("#409: drawVolumeProfile updates incrementally on tail tick/append and matc
     assert.equal(host.profileCache.prefixAcc, initialAcc, "tail tick must reuse closed-prefix accumulator");
 
     // Append new bar -> advances closed-prefix accumulator in place
-    series.appendOrUpdateBar({
+    series.upsertBar({
       startTime: BASE_TIME + 15 * INTERVAL,
       open: 102,
       high: 104,
@@ -343,7 +343,7 @@ test("#409: barStats visible-sum single-pass and tail cache produce exact totals
   assert.equal(p1Hit, p1);
 
   // Append bar to tail and expand visible range by 1
-  series.appendOrUpdateBar({
+  series.upsertBar({
     startTime: BASE_TIME + 10 * INTERVAL,
     open: 110,
     high: 125,
@@ -425,7 +425,7 @@ test("#410: priceAxisRenderer and timeAxisRenderer cache measureText widths per 
 test("#410: tpoProfile source dedup, nakedPoc calculation, and pass-key construction without per-frame JSON.stringify", async () => {
   const series = makeRichSeries(6);
   const bars = series.listReadonly();
-  const brackets = buildTpoBrackets(bars, 300_000, 1);
+  const brackets = aggregateTpoBrackets(bars, 0, bars.length, 300_000);
   assert.ok(brackets.length >= 2);
   assert.deepEqual(brackets[0].bar.sources, ["live", "history"]);
 

@@ -525,26 +525,18 @@ test("#411: urgent callbacks respect frameBudgetMs across 8+ panels without sing
   resetAll();
   try {
     configurePerformanceTelemetry({ enabled: true });
+    configureGlobalRenderScheduler({ enabled: true, frameBudgetMs: 16, maxStalenessMs: 100 });
     let nowMs = 1000;
     const win = makeWindow();
-    const scheduler = new GlobalRenderScheduler(win, {
-      enabled: true,
-      frameBudgetMs: 16,
-      maxStalenessMs: 100,
-      now: () => nowMs,
-    });
+    const scheduler = new GlobalRenderScheduler(win, () => nowMs);
 
     const executed = [];
     for (let i = 0; i < 10; i++) {
-      scheduler.schedule({
-        id: `panel-urgent-${i}`,
-        priority: "visible",
-        urgent: true,
-        callback: () => {
-          executed.push(i);
-          nowMs += 5;
-        },
-      });
+      const token = { id: `panel-urgent-${i}` };
+      scheduler.schedule(token, () => {
+        executed.push(i);
+        nowMs += 5;
+      }, { priority: "visible", urgent: true });
     }
 
     assert.equal(win.queuedRafs(), 1);
@@ -574,39 +566,30 @@ test("#411: starved visible panels make bounded progress under continuous multi-
   resetAll();
   try {
     configurePerformanceTelemetry({ enabled: true });
+    configureGlobalRenderScheduler({ enabled: true, frameBudgetMs: 16, maxStalenessMs: 40 });
     let nowMs = 0;
     const win = makeWindow();
-    const scheduler = new GlobalRenderScheduler(win, {
-      enabled: true,
-      frameBudgetMs: 16,
-      maxStalenessMs: 40,
-      now: () => nowMs,
-    });
+    const scheduler = new GlobalRenderScheduler(win, () => nowMs);
 
     let visibleRuns = 0;
     let urgentRuns = 0;
 
     // Schedule 1 visible panel that stays starved when urgent flood keeps budget busy.
-    scheduler.schedule({
-      id: "panel-visible",
-      priority: "visible",
-      urgent: false,
-      callback: () => {
-        visibleRuns++;
-        nowMs += 4;
-      },
-    });
+    scheduler.schedule({ id: "panel-visible" }, () => {
+      visibleRuns++;
+      nowMs += 4;
+    }, { priority: "visible", urgent: false });
 
     for (let i = 0; i < 6; i++) {
-      const id = `panel-flood-${i}`;
+      const token = { id: `panel-flood-${i}` };
       const reschedule = () => {
         urgentRuns++;
         nowMs += 6;
         if (urgentRuns < 30) {
-          scheduler.schedule({ id, priority: "active", urgent: true, callback: reschedule });
+          scheduler.schedule(token, reschedule, { priority: "active", urgent: true });
         }
       };
-      scheduler.schedule({ id, priority: "active", urgent: true, callback: reschedule });
+      scheduler.schedule(token, reschedule, { priority: "active", urgent: true });
     }
 
     // Frame 1 at t=0: 3 urgent callbacks consume 18ms (>16ms), visible does not starve yet.
@@ -628,48 +611,33 @@ test("#411: starved visible panels make bounded progress under continuous multi-
 test("#411: scheduler stays consistent across reentrant schedule, unregister during flush, and callback exception", () => {
   resetAll();
   try {
+    configureGlobalRenderScheduler({ enabled: true, frameBudgetMs: 32, maxStalenessMs: 100 });
     let nowMs = 0;
     const win = makeWindow();
-    const scheduler = new GlobalRenderScheduler(win, {
-      enabled: true,
-      frameBudgetMs: 32,
-      maxStalenessMs: 100,
-      now: () => nowMs,
-    });
+    const scheduler = new GlobalRenderScheduler(win, () => nowMs);
+
+    const firstToken = { id: "first" };
+    const victimToken = { id: "victim" };
+    const reentrantToken = { id: "reentrant" };
+    const throwerToken = { id: "thrower" };
 
     const log = [];
-    scheduler.schedule({
-      id: "first",
-      priority: "active",
-      urgent: true,
-      callback: () => {
-        log.push("first");
-        scheduler.unregister("victim");
-        scheduler.schedule({
-          id: "reentrant",
-          priority: "visible",
-          callback: () => {
-            log.push("reentrant");
-          },
-        });
-      },
-    });
-    scheduler.schedule({
-      id: "victim",
-      priority: "active",
-      urgent: true,
-      callback: () => {
-        log.push("victim-should-not-run");
-      },
-    });
-    scheduler.schedule({
-      id: "thrower",
-      priority: "visible",
-      callback: () => {
-        log.push("thrower");
-        throw new Error("synthetic render failure");
-      },
-    });
+    scheduler.schedule(firstToken, () => {
+      log.push("first");
+      scheduler.unregister(victimToken);
+      scheduler.schedule(reentrantToken, () => {
+        log.push("reentrant");
+      }, { priority: "visible" });
+    }, { priority: "active", urgent: true });
+
+    scheduler.schedule(victimToken, () => {
+      log.push("victim-should-not-run");
+    }, { priority: "active", urgent: true });
+
+    scheduler.schedule(throwerToken, () => {
+      log.push("thrower");
+      throw new Error("synthetic render failure");
+    }, { priority: "visible" });
 
     assert.throws(() => win.runNextFrame(nowMs), /synthetic render failure/);
     assert.deepEqual(log, ["first", "thrower"]);

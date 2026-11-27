@@ -163,12 +163,13 @@ export class WebGpuSurface implements GpuSurface {
   }
 
   /**
-   * Speculatively compiles native WebGPU scene, LOD, glyph and resident heatmap
+   * Speculatively compiles native WebGPU scene, LOD, glyph and (optionally) resident heatmap
    * pipelines and incrementally prepares the SDF glyph atlas off the first-render path.
    */
-  async prewarmAsync(): Promise<void> {
+  async prewarmAsync(options?: { includeHeatmap?: boolean }): Promise<void> {
     if (this.disposed || this.handle.isLost()) return;
     if (this.prewarmPromise) return this.prewarmPromise;
+    const includeHeatmap = options?.includeHeatmap !== false;
 
     const run = (async () => {
       try {
@@ -227,7 +228,7 @@ export class WebGpuSurface implements GpuSurface {
           }
         }
 
-        if (!this.disposed && !this.handle.isLost() && this.supportsNativeHeatmap()) {
+        if (includeHeatmap && !this.disposed && !this.handle.isLost() && this.supportsNativeHeatmap()) {
           const heatmapPipeline = this.ensureNativeHeatmapPipeline();
           if (heatmapPipeline) {
             await heatmapPipeline.prewarmResidentPipelineAsync();

@@ -399,18 +399,27 @@ test("#410: transferable ArrayBuffer heatmap protocol round-trips identically an
   assert.ok(encoded instanceof ArrayBuffer);
   assert.deepEqual(decodeHeatmapBarsFromBuffer(encoded), sampleBars);
 
-  const mainPorts = createMockMessageChannel();
-  const ingressPorts = createMockMessageChannel();
-  const historyPorts = createMockMessageChannel();
+  const mainPorts = makePortPair();
+  const ingressPorts = makePortPair();
+  const historyPorts = makePortPair();
 
   const runtime = new ChartWorkerPanelRuntime({
     panelId: "worker-panel-binary-hm",
     marketId: "BINANCE_FUTURES:btcusdt",
-    ports: {
-      mainPort: mainPorts.portB,
-      ingressPort: ingressPorts.portB,
-      historyPort: historyPorts.portB,
-    },
+    backendPreference: "canvas2d",
+    createScratchCanvas: () => makeMockCanvasAndCtx(640, 360, {
+      fillRect: 0,
+      putImageData: 0,
+      dirtyPutImageData: 0,
+      drawImage: 0,
+      lastDirtyRect: null,
+    }).canvas,
+  });
+
+  runtime.attachPorts({
+    mainPort: mainPorts.portB,
+    ingressPort: ingressPorts.portB,
+    historyPort: historyPorts.portB,
   });
 
   const bridge = new WorkerChartHostBridge({
@@ -418,15 +427,16 @@ test("#410: transferable ArrayBuffer heatmap protocol round-trips identically an
     marketId: "BINANCE_FUTURES:btcusdt",
   });
   bridge.attachPorts({ mainPort: mainPorts.portA });
-  bridge.init({
-    viewport: { width: 640, height: 360, dpr: 1 },
-    surfaces: [
+  bridge.sendInit(
+    [
       { role: "gpu-scene", zIndex: 0, width: 640, height: 360, dpr: 1 },
       { role: "annotation", zIndex: 1, width: 640, height: 360, dpr: 1 },
       { role: "interaction", zIndex: 2, width: 640, height: 360, dpr: 1 },
     ],
-    backendPreference: "canvas2d",
-  });
+    { width: 640, height: 360, dpr: 1 },
+    { backendPreference: "canvas2d" },
+  );
+  await runtime.waitUntilReady();
   bridge.sendStateUpdate({ orderbookHeatmapMode: "aggregated" });
   await new Promise((r) => setTimeout(r, 0));
 
