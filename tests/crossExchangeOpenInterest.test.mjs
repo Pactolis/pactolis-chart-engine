@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 
 globalThis.$state ??= (value) => value;
 
+const { chartLocale, configureChartLocale } = await import("../dist/core/chartLocale.js");
 const { FootprintSeries } = await import("../dist/core/model/footprint.js");
 const { View } = await import("../dist/core/engine/view.js");
 const { configureIndicatorDataSource, indicatorDataSource } = await import(
@@ -350,4 +351,143 @@ test("unrecorded / unsupported market shows clear explanatory message", () => {
 
   assert.equal(prepared.status, "no-data");
   assert.equal(prepared.message, "OI kaydı yok (bu market kaydedilmiyor)");
+});
+
+function withLocale(localeTag, fn) {
+  let prev = null;
+  try {
+    prev = chartLocale();
+  } catch {}
+  configureChartLocale({
+    locale: () => localeTag,
+    timeZone: () => "UTC",
+    translate: (key) => key,
+    onLocaleChange: () => () => {},
+  });
+  try {
+    return fn();
+  } finally {
+    if (prev) configureChartLocale(prev);
+  }
+}
+
+test("supported market with empty historical range shows range-empty message + start date and recovers on live range (#401)", () => {
+  const series = buildSeries([100, 100, 100, 100, 100, 100, 100]);
+  const recordingStart = T0 + 4 * MIN;
+  const response = {
+    status: "ok",
+    unit: "base",
+    resolution: "1m",
+    recordingStartedAt: recordingStart,
+    venues: [
+      {
+        venue: "binance",
+        recordingStartedAt: recordingStart,
+        points: [
+          { time: T0 + 4 * MIN, value: 1000 },
+          { time: T0 + 5 * MIN, value: 1020 },
+          { time: T0 + 6 * MIN, value: 1030 },
+        ],
+      },
+      {
+        venue: "bybit",
+        recordingStartedAt: recordingStart,
+        points: [
+          { time: T0 + 4 * MIN, value: 500 },
+          { time: T0 + 5 * MIN, value: 510 },
+          { time: T0 + 6 * MIN, value: 520 },
+        ],
+      },
+    ],
+  };
+
+  withLocale("tr-TR", () => {
+    const emptyCtx = makeCtx(series, { mode: "openInterestDeltaUsd", unit: "base" }, { id: "btc-empty-tr", range: [0, 3] });
+    const emptyPrepared = withMockDataSource(
+      { requestOpenInterestSeries: () => ({ status: "ready", data: response }) },
+      () => crossExchangeOpenInterestIndicatorDefinition.prepareData(emptyCtx),
+    );
+    assert.equal(emptyPrepared.status, "no-data");
+    assert.equal(emptyPrepared.points.length, 0);
+    assert.match(emptyPrepared.message ?? "", /Bu aralıkta OI verisi yok/);
+    assert.match(emptyPrepared.message ?? "", /Kayıt başlangıcı:/);
+    assert.equal(/kaydedilmiyor/i.test(emptyPrepared.message ?? ""), false);
+
+    // Returning to live bars restores all data without fabricating missing bars.
+    const liveCtx = makeCtx(series, { mode: "openInterestDeltaUsd", unit: "base" }, { id: "btc-empty-tr", range: [4, 7] });
+    const livePrepared = withMockDataSource(
+      { requestOpenInterestSeries: () => ({ status: "ready", data: response }) },
+      () => crossExchangeOpenInterestIndicatorDefinition.prepareData(liveCtx),
+    );
+    assert.equal(livePrepared.status, "ok");
+    assert.deepEqual(livePrepared.points.map((p) => p.index), [4, 5, 6]);
+  });
+
+  withLocale("en-US", () => {
+    const emptyCtx = makeCtx(series, { mode: "openInterestDeltaUsd", unit: "base" }, { id: "btc-empty-en", range: [0, 3] });
+    const emptyPrepared = withMockDataSource(
+      { requestOpenInterestSeries: () => ({ status: "ready", data: response }) },
+      () => crossExchangeOpenInterestIndicatorDefinition.prepareData(emptyCtx),
+    );
+    assert.equal(emptyPrepared.status, "no-data");
+    assert.match(emptyPrepared.message ?? "", /No OI data in this range/);
+    assert.match(emptyPrepared.message ?? "", /Recording started:/);
+    assert.equal(/not recorded/i.test(emptyPrepared.message ?? ""), false);
+  });
+});
+
+test("response no-data without unsupported flag does not claim market is unrecorded, while response.status=unsupported does (#401)", () => {
+  const series = buildSeries([100, 100]);
+
+  withLocale("tr-TR", () => {
+    const emptyNoData = withMockDataSource(
+      {
+        requestOpenInterestSeries: () => ({
+          status: "ready",
+          data: { status: "no-data", unit: "base", resolution: "15m", venues: [] },
+        }),
+      },
+      () => crossExchangeOpenInterestIndicatorDefinition.prepareData(makeCtx(series, {}, { id: "no-data-tr" })),
+    );
+    assert.equal(emptyNoData.status, "no-data");
+    assert.equal(emptyNoData.message, "Bu aralıkta OI verisi yok");
+
+    const unsupportedResp = withMockDataSource(
+      {
+        requestOpenInterestSeries: () => ({
+          status: "ready",
+          data: { status: "unsupported", unit: "base", resolution: "15m", venues: [] },
+        }),
+      },
+      () => crossExchangeOpenInterestIndicatorDefinition.prepareData(makeCtx(series, {}, { id: "unsupported-tr" })),
+    );
+    assert.equal(unsupportedResp.status, "no-data");
+    assert.equal(unsupportedResp.message, "OI kaydı yok (bu market kaydedilmiyor)");
+  });
+
+  withLocale("en-US", () => {
+    const emptyNoDataEn = withMockDataSource(
+      {
+        requestOpenInterestSeries: () => ({
+          status: "ready",
+          data: { status: "no-data", unit: "base", resolution: "15m", venues: [] },
+        }),
+      },
+      () => crossExchangeOpenInterestIndicatorDefinition.prepareData(makeCtx(series, {}, { id: "no-data-en" })),
+    );
+    assert.equal(emptyNoDataEn.status, "no-data");
+    assert.equal(emptyNoDataEn.message, "No OI data in this range");
+
+    const unsupportedEn = withMockDataSource(
+      {
+        requestOpenInterestSeries: () => ({
+          status: "ready",
+          data: { status: "unsupported", unit: "base", resolution: "15m", venues: [] },
+        }),
+      },
+      () => crossExchangeOpenInterestIndicatorDefinition.prepareData(makeCtx(series, {}, { id: "unsupported-en" })),
+    );
+    assert.equal(unsupportedEn.status, "no-data");
+    assert.equal(unsupportedEn.message, "No OI record (this market is not recorded)");
+  });
 });

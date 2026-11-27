@@ -134,6 +134,76 @@ function trText(key: string, fallback: string, params?: Record<string, string | 
   }
 }
 
+function safeFormatBoundaryTime(ms: number, intervalMs: number): string {
+  try {
+    return tzDateTimeHud(ms, intervalMs);
+  } catch {
+    const iso = new Date(ms).toISOString();
+    return intervalMs >= 24 * 60 * 60_000 ? iso.slice(0, 10) : `${iso.slice(0, 10)} ${iso.slice(11, 16)}`;
+  }
+}
+
+function resolveReliableStartBoundary(
+  response: OpenInterestSeriesResponse,
+  selected: readonly OpenInterestVenue[],
+): { time: number; kind: "history" | "recording" } | null {
+  const responseHist = finiteOrNull(response.historyStartedAt);
+  const responseRec = finiteOrNull(response.recordingStartedAt);
+  if (responseHist !== null || responseRec !== null) {
+    if (responseHist !== null && responseRec !== null) {
+      return responseHist <= responseRec
+        ? { time: responseHist, kind: "history" }
+        : { time: responseRec, kind: "recording" };
+    }
+    return responseHist !== null
+      ? { time: responseHist, kind: "history" }
+      : { time: responseRec!, kind: "recording" };
+  }
+
+  const selectedSet = new Set(selected);
+  let best: { time: number; kind: "history" | "recording" } | null = null;
+  for (const venueSeries of response.venues) {
+    if (selectedSet.size > 0 && !selectedSet.has(venueSeries.venue)) continue;
+    const hist = finiteOrNull(venueSeries.historyStartedAt);
+    const rec = finiteOrNull(venueSeries.recordingStartedAt);
+    const candidate = hist !== null && rec !== null
+      ? (hist <= rec ? { time: hist, kind: "history" as const } : { time: rec, kind: "recording" as const })
+      : hist !== null
+        ? { time: hist, kind: "history" as const }
+        : rec !== null
+          ? { time: rec, kind: "recording" as const }
+          : null;
+    if (candidate && (!best || candidate.time < best.time)) {
+      best = candidate;
+    }
+  }
+  return best;
+}
+
+function emptyRangeMessage(
+  response: OpenInterestSeriesResponse,
+  selected: readonly OpenInterestVenue[],
+  intervalMs: number,
+): string {
+  const boundary = resolveReliableStartBoundary(response, selected);
+  if (boundary) {
+    const timeText = safeFormatBoundaryTime(boundary.time, intervalMs);
+    const labelKey = boundary.kind === "history"
+      ? "indicator.crossExchangeOpenInterest.historyStarted"
+      : "indicator.crossExchangeOpenInterest.recordingStarted";
+    const fallbackLabel = boundary.kind === "history"
+      ? `Geçmiş başlangıcı: ${timeText}`
+      : `Kayıt başlangıcı: ${timeText}`;
+    const started = trText(labelKey, fallbackLabel, { time: timeText });
+    return trText(
+      "indicator.crossExchangeOpenInterest.noDataInRangeSince",
+      `Bu aralıkta OI verisi yok · ${started}`,
+      { started },
+    );
+  }
+  return trText("indicator.crossExchangeOpenInterest.noDataInRange", "Bu aralıkta OI verisi yok");
+}
+
 export function normalizeCrossExchangeOpenInterestSettings(
   raw: unknown,
 ): CrossExchangeOpenInterestSettings {
@@ -578,8 +648,21 @@ function prepareCrossExchangeOpenInterestData(
     hasInstantOnlyVenue,
   };
 
-  if (response.status === "unsupported" || response.status === "no-data" || response.venues.length === 0) {
+  const intervalMs = ctx.chart?.intervalMs ?? ctx.series.config.intervalMs;
+
+  if (response.status === "unsupported") {
     const msg = response.message || trText("indicator.crossExchangeOpenInterest.unrecorded", "OI kaydı yok (bu market kaydedilmiyor)");
+    return {
+      status: "no-data",
+      points: [],
+      range: { min: 0, max: 1 },
+      meta,
+      message: msg,
+    };
+  }
+
+  if (response.status === "no-data" || response.venues.length === 0) {
+    const msg = response.message || emptyRangeMessage(response, venues, intervalMs);
     return {
       status: "no-data",
       points: [],
@@ -619,7 +702,7 @@ function prepareCrossExchangeOpenInterestData(
       points: [],
       range: { min: 0, max: 1 },
       meta,
-      message: response.message || trText("indicator.crossExchangeOpenInterest.unrecorded", "OI kaydı yok (bu market kaydedilmiyor)"),
+      message: emptyRangeMessage(response, venues, intervalMs),
     });
   }
 
@@ -729,7 +812,7 @@ function drawStatus(ctx: IndicatorDrawContext<CrossExchangeOpenInterestSettings>
   if (data.status === "no-data") {
     drawIndicatorMessage(
       ctx,
-      data.message ?? trText("indicator.crossExchangeOpenInterest.unrecorded", "OI kaydı yok (bu market kaydedilmiyor)"),
+      data.message ?? trText("indicator.crossExchangeOpenInterest.noDataInRange", "Bu aralıkta OI verisi yok"),
       indicatorWarningMessageColor,
     );
     return true;

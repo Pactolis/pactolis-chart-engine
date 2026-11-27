@@ -5,6 +5,8 @@ import type { Drawing, DrawingContext, DrawingNamedPreset, DrawingPoint, Drawing
 import { DEFAULT_DRAWING_TEMPLATE_STATE, DEFAULT_POSITION_RISK_SETTINGS, applyStylePreset, drawingStylePresetFromDrawing, duplicateDrawing, lastOf, normalizeDrawing, normalizeDrawingPointsInPlace, normalizeDrawingStyleInPlace, normalizeDrawingTemplateState, normalizePositionRiskSettings, safeDrawingTypeLabel, summarizeMarketDrawings, type DrawingMarketSummary } from "./drawingPrimitives.js";
 import { DrawingNotifications } from "./drawingNotifications.js";
 
+const MAX_DRAWING_MARKET_CACHE_ENTRIES = 16;
+
 export abstract class DrawingState extends DrawingNotifications {
   abstract get selected(): Drawing | null;
   protected abstract setSelection(ids: string[], primary?: string | null, emit?: boolean): void;
@@ -60,9 +62,34 @@ export abstract class DrawingState extends DrawingNotifications {
     return cache;
   }
 
+  protected clearMarketCaches(): void {
+    this.summaryCache.clear();
+    this.readonlyListCache.clear();
+  }
+
+  private setBoundedMarketCache<V extends { revision: number }>(
+    cache: Map<string, V>,
+    market: string,
+    entry: V,
+  ): void {
+    for (const [key, value] of cache) {
+      if (value.revision !== this.summaryRevision) {
+        cache.delete(key);
+      }
+    }
+    cache.delete(market);
+    cache.set(market, entry);
+    while (cache.size > MAX_DRAWING_MARKET_CACHE_ENTRIES) {
+      const oldestKey = cache.keys().next().value as string | undefined;
+      if (oldestKey === undefined) break;
+      cache.delete(oldestKey);
+    }
+  }
+
   setMarket(market: string): void {
     if (market === this.currentMarket) return;
     this.currentMarket = market;
+    this.clearMarketCaches();
     this.changed();
   }
 
@@ -182,6 +209,7 @@ export abstract class DrawingState extends DrawingNotifications {
 
   replace(drawings: Drawing[]): void {
     this.displayNameCache = null;
+    this.clearMarketCaches();
     this.drawings = structuredClone(drawings).map(normalizeDrawing);
     this.pruneSelection();
     this.draggingSelection = null;
@@ -217,10 +245,12 @@ export abstract class DrawingState extends DrawingNotifications {
     const draftId = this.draft?.id ?? null;
     const cached = this.readonlyListCache.get(market);
     if (cached && cached.revision === this.summaryRevision && cached.draftId === draftId) {
+      this.readonlyListCache.delete(market);
+      this.readonlyListCache.set(market, cached);
       return cached.list;
     }
     const list = this.drawings.filter((drawing) => drawing.id !== draftId && drawing.market === market);
-    this.readonlyListCache.set(market, { revision: this.summaryRevision, draftId, list });
+    this.setBoundedMarketCache(this.readonlyListCache, market, { revision: this.summaryRevision, draftId, list });
     return list;
   }
 
@@ -228,10 +258,12 @@ export abstract class DrawingState extends DrawingNotifications {
   marketSummary(market: string): DrawingMarketSummary {
     const cached = this.summaryCache.get(market);
     if (cached && cached.revision === this.summaryRevision) {
+      this.summaryCache.delete(market);
+      this.summaryCache.set(market, cached);
       return cached.summary;
     }
     const summary = summarizeMarketDrawings(this.drawings, market, this.selectedId, this.selectedIds, this.draft?.id ?? null);
-    this.summaryCache.set(market, { revision: this.summaryRevision, summary });
+    this.setBoundedMarketCache(this.summaryCache, market, { revision: this.summaryRevision, summary });
     return summary;
   }
 

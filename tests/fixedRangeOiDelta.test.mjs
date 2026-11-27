@@ -1,5 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
+import { readFile } from "node:fs/promises";
 
 globalThis.$state ??= (value) => value;
 
@@ -473,4 +474,81 @@ test("presets, duplicateDrawing, and legacy drawing normalization carry oiVenues
   const copy = duplicateDrawing(custom, [custom]);
   assert.deepEqual(copy.oiVenues, { binance: true, bybit: false, okx: true, hyperliquid: false });
   assert.equal(copy.oiDeltaDisplay, "split");
+});
+
+test("ChartRuntime prunes deleted drawing IDs from oiRequestStates and clears on market change/dispose (#405)", async () => {
+  const [compiledSource, tsSource] = await Promise.all([
+    readFile(new URL("../dist/features/chart/ChartRuntime.js", import.meta.url), "utf8"),
+    readFile(new URL("../src/features/chart/ChartRuntime.ts", import.meta.url), "utf8"),
+  ]);
+
+  const extractMethod = (src, signature) => {
+    const start = src.indexOf(signature);
+    assert.notEqual(start, -1, `method signature not found: ${signature}`);
+    let depth = 0;
+    let opened = false;
+    for (let i = start; i < src.length; i++) {
+      if (src[i] === "{") {
+        depth++;
+        opened = true;
+      } else if (src[i] === "}" && opened) {
+        depth--;
+        if (depth === 0) return `function ${src.slice(start, i + 1)}`;
+      }
+    }
+    throw new Error(`unclosed method: ${signature}`);
+  };
+
+  const bindings = {
+    ChartSurfaceDirty: { Annotation: 1 },
+    normalizeFixedRangeOrderFlowProfileSettings: () => ({ profileMetric: "oi-delta" }),
+    drawingIsAvailableAsOf: () => true,
+  };
+  const pruneFn = new Function(`return ${extractMethod(compiledSource, "pruneOiRequestStates() {")};`)();
+  const createCbFn = new Function(
+    ...Object.keys(bindings),
+    `return ${extractMethod(compiledSource, "createFrvpOiUpdateCallback(drawingId, requestKey) {")};`,
+  )(...Object.values(bindings));
+
+  const liveDrawings = new Map([
+    ["d1", { id: "d1", visible: true, market: "BTCUSDT", points: [{ time: 1, price: 1 }, { time: 2, price: 2 }] }],
+    ["d2", { id: "d2", visible: true, market: "BTCUSDT", points: [{ time: 1, price: 1 }, { time: 2, price: 2 }] }],
+  ]);
+
+  const host = {
+    disposed: false,
+    state: { market: "BTCUSDT", timeframe: "1m" },
+    oiRequestStates: new Map(),
+    analysisContextForChart: () => ({
+      drawings: { findDrawingById: (id) => liveDrawings.get(id) },
+    }),
+    replayCoordinator: { getSnapshot: () => null },
+    view: { xOfIndex: () => 0, colWidth: 10, area: { left: 0, width: 100 } },
+    pipeline: { series: { indexOfTime: () => 0 } },
+    session: { invalidateSurface: () => {} },
+    pruneOiRequestStates: pruneFn,
+    createFrvpOiUpdateCallback: createCbFn,
+  };
+
+  const cb1 = host.createFrvpOiUpdateCallback("d1", "req-1");
+  const cb2 = host.createFrvpOiUpdateCallback("d2", "req-2");
+  assert.equal(host.oiRequestStates.size, 2);
+
+  // Deleting d1 -> pruneOiRequestStates removes d1 while keeping d2.
+  liveDrawings.delete("d1");
+  host.pruneOiRequestStates();
+  assert.equal(host.oiRequestStates.has("d1"), false);
+  assert.equal(host.oiRequestStates.has("d2"), true);
+  cb1();
+  assert.equal(host.oiRequestStates.has("d1"), false);
+
+  // Deleting d2 before its pending async callback fires -> callback removes d2.
+  liveDrawings.delete("d2");
+  cb2();
+  assert.equal(host.oiRequestStates.size, 0);
+
+  // Verify ChartRuntime wires pruneOiRequestStates after renderAnalysis and clears on marketChanged + dispose.
+  assert.match(tsSource, /renderAnalysis\([\s\S]*?this\.pruneOiRequestStates\(\)/);
+  assert.match(tsSource, /if\s*\(marketChanged\)\s*\{\s*this\.oiRequestStates\.clear\(\)/);
+  assert.match(tsSource, /this\.disposed = true;\s*this\.oiRequestStates\.clear\(\)/);
 });
