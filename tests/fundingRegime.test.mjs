@@ -331,3 +331,124 @@ test("fundingRegime settingsSchema exposes expected mode labels", () => {
   const labels = modeField.options.map((o) => o.label);
   assert.deepEqual(labels, ["Z-Score", "Ödenmiş", "Anlık tahmin", "Anlık − Son ödenen"]);
 });
+
+function buildFourVenueSettledSeries(fromMs, toMs, rateFn) {
+  const venues = [
+    { venue: "binancef", intervalHours: 8 },
+    { venue: "bybitf", intervalHours: 4 },
+    { venue: "okxf", intervalHours: 8 },
+    { venue: "hyperliquid", intervalHours: 1 },
+  ];
+  return venues.map(({ venue, intervalHours }) => {
+    const stepMs = intervalHours * HOUR_MS;
+    const settled = [];
+    for (let t = fromMs + stepMs; t <= toMs; t += stepMs) {
+      const hourIndex = Math.round((t - fromMs) / HOUR_MS);
+      const rate8h = rateFn(hourIndex, t);
+      settled.push({
+        t,
+        rate: rate8h * (intervalHours / 8),
+        intervalHours,
+        rate8h,
+      });
+    }
+    const lastRate8h = settled[settled.length - 1]?.rate8h ?? 0.0001;
+    return {
+      venue,
+      intervalHours,
+      settled,
+      current: { t: toMs, rate: lastRate8h * (intervalHours / 8), rate8h: lastRate8h },
+    };
+  });
+}
+
+test("fundingRegime falls back to 30-day 4-venue settled series when aggregate covers < 7 days (CE #402)", () => {
+  const visibleStart = T0 + 30 * DAY_MS;
+  const visibleBars = makeSeries(visibleStart, 24, HOUR_MS);
+
+  configureIndicatorDataSource({
+    requestLiquidationSeries: () => ({ status: "idle" }),
+    requestCoinalyzeDerivativeSeries: () => ({ status: "idle" }),
+    requestFuturesPositioningSeries: () => ({ status: "idle" }),
+    fetchOptionsGexSurface: async () => {
+      throw new Error("unused");
+    },
+    requestVenueFundingSeries: (input) => {
+      const aggPoints = [];
+      for (let t = input.to - 2 * HOUR_MS; t <= input.to; t += HOUR_MS) {
+        aggPoints.push({ t, rate8h: 0.0002, venues: input.venues });
+      }
+      return {
+        status: "ready",
+        data: {
+          market: input.market,
+          from: input.from,
+          to: input.to,
+          venues: input.venues,
+          series: buildFourVenueSettledSeries(
+            input.from,
+            input.to,
+            (hourIndex, t) => 0.0001 + Math.sin(hourIndex / 8) * 0.00004 + (t > visibleStart ? 0.00015 : 0),
+          ),
+          aggregate: {
+            points: aggPoints,
+            current: { t: input.to, rate8h: 0.00025, venues: input.venues },
+            excludedVenues: [],
+            source: "backend-oi",
+          },
+        },
+      };
+    },
+  });
+
+  const canvasMock = makeCanvasMock();
+  const ctx = makeDrawContext(
+    visibleBars,
+    { mode: "zScore", zSource: "aggregate", zWindowDays: 30, zThreshold: 2, showAxisTicks: false },
+    [0, 24],
+    canvasMock,
+  );
+  const prepared = fundingRegimeIndicatorDefinition.prepareData(ctx);
+
+  assert.equal(prepared.status, "ok");
+  assert.equal(prepared.meta.insufficientData, false);
+  assert.equal(prepared.points.length, 24);
+  assert.ok(prepared.points.every((p) => Number.isFinite(p.zScore) && !p.insufficientData));
+
+  fundingRegimeIndicatorDefinition.drawSubPane(ctx, prepared);
+  assert.equal(canvasMock.dashedLines.length, 2);
+});
+
+test("fundingRegime keeps aggregate path when aggregate covers >= 7 days (CE #402)", () => {
+  const fromMs = T0;
+  const toMs = T0 + 10 * DAY_MS;
+  const aggPoints = [];
+  for (let t = fromMs + HOUR_MS; t <= toMs; t += HOUR_MS) {
+    aggPoints.push({ t, rate8h: 0.0005, venues: ["binancef", "bybitf", "okxf", "hyperliquid"] });
+  }
+
+  const response = {
+    market: "BTCUSDT",
+    from: fromMs,
+    to: toMs,
+    venues: ["binancef", "bybitf", "okxf", "hyperliquid"],
+    series: buildFourVenueSettledSeries(fromMs, toMs, () => 0.0001),
+    aggregate: {
+      points: aggPoints,
+      current: { t: toMs, rate8h: 0.0005, venues: ["binancef", "bybitf", "okxf", "hyperliquid"] },
+      excludedVenues: [],
+      source: "backend-oi",
+    },
+  };
+
+  const timeline = buildHourlyFundingTimeline(
+    response,
+    ["binancef", "bybitf", "okxf", "hyperliquid"],
+    "aggregate",
+    fromMs,
+    toMs,
+  );
+
+  assert.ok(timeline.length > 0);
+  assert.ok(timeline.every((pt) => Math.abs(pt.fundingRate - 0.0005) < 1e-12));
+});

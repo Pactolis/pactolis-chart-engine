@@ -495,7 +495,7 @@ function buildVenueBadge(
     return {
       venue,
       kind: "disabled",
-      text: `${name}: disabled`,
+      text: translateOrFallback("indicator.whaleVsCrowd.venueDisabled", { venue: name }, `${name}: devre dışı`),
       color: indicatorWarningMessageColor,
     };
   }
@@ -1281,7 +1281,7 @@ export const whaleVsCrowdIndicatorDefinition: IndicatorDefinition<WhaleCrowdSett
         title: "Display",
         titleKey: "indicator.common.section.display",
         fields: [
-          { kind: "number", key: "lineWidth", label: "Line Thickness", labelKey: "indicator.common.lineWidth", min: 1, max: 8, step: 0.5 },
+          { kind: "number", key: "lineWidth", label: "Line Thickness", labelKey: "indicator.common.lineWidth", min: 1, max: 8, step: 0.25 },
           { kind: "boolean", key: "showLastValueLabel", label: "Show Last Value Label", labelKey: "indicator.common.showLastValueLabel" },
           { kind: "boolean", key: "showReadout", label: "Show Readout", labelKey: "indicator.common.showReadout" },
           { kind: "boolean", key: "showAxisTicks", label: "Show Axis Ticks", labelKey: "indicator.common.showAxisTicks" },

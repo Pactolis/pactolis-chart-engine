@@ -6,12 +6,16 @@ globalThis.$state ??= (value) => value;
 const { FootprintSeries } = await import("../dist/core/model/footprint.js");
 const { View } = await import("../dist/core/engine/view.js");
 const { rollingZScore, DAY_MS, DEFAULT_ZSCORE_MIN_SPAN_MS } = await import("../dist/core/analysis/rollingZScore.js");
+const { chartLocale, configureChartLocale } = await import("../dist/core/chartLocale.js");
 const { configureIndicatorDataSource } = await import("../dist/features/indicators/indicatorDataSource.js");
 const {
   computeWhaleCrowdSpread,
   computeVenueNativeZSeries,
   whaleVsCrowdIndicatorDefinition,
 } = await import("../dist/features/indicators/builtins/whaleVsCrowd.js");
+const { fundingRegimeIndicatorDefinition } = await import("../dist/features/indicators/builtins/fundingRegime.js");
+const { liquidationProfileIndicatorDefinition } = await import("../dist/features/indicators/builtins/liquidationProfile.js");
+const { liveTradeBubblesIndicatorDefinition } = await import("../dist/features/indicators/builtins/liveTradeBubbles.js");
 
 const MIN_MS = 60_000;
 const HOUR_MS = 3_600_000;
@@ -384,4 +388,106 @@ test("gaps break lines without interpolation and readout surfaces backend defini
   assert.ok(bnItem?.value.includes("Top 20% trader margin balance"));
   assert.ok(hlItem?.value.includes("Address equity >= $250k"));
   assert.ok(hlItem?.value.includes("$250.0K"));
+});
+
+test("all number schema fields in recent indicators match defaultSettings min/max/step constraints (FE #1213)", () => {
+  const definitions = [
+    whaleVsCrowdIndicatorDefinition,
+    fundingRegimeIndicatorDefinition,
+    liquidationProfileIndicatorDefinition,
+    liveTradeBubblesIndicatorDefinition,
+  ];
+
+  for (const def of definitions) {
+    const defaults = def.defaultSettings();
+    const numberFields = def.settingsSchema.sections
+      .flatMap((section) => section.fields)
+      .filter((field) => field.kind === "number");
+
+    for (const field of numberFields) {
+      const value = defaults[field.key];
+      assert.equal(
+        typeof value === "number" && Number.isFinite(value),
+        true,
+        `${def.type}.${field.key} default must be a finite number`,
+      );
+      if (field.min !== undefined) {
+        assert.ok(value >= field.min, `${def.type}.${field.key} default ${value} < min ${field.min}`);
+      }
+      if (field.max !== undefined) {
+        assert.ok(value <= field.max, `${def.type}.${field.key} default ${value} > max ${field.max}`);
+      }
+      if (field.step !== undefined && field.step > 0) {
+        const base = field.min ?? 0;
+        const steps = (value - base) / field.step;
+        assert.ok(
+          Math.abs(steps - Math.round(steps)) < 1e-9,
+          `${def.type}.${field.key} default ${value} is not aligned with min ${base} and step ${field.step}`,
+        );
+      }
+    }
+  }
+});
+
+test("whaleVsCrowd renders localized TR/EN disabled venue badge (FE #1210)", () => {
+  const startMs = T0;
+  const binancePoints = buildVenuePoints({
+    startMs,
+    count: (10 * DAY_MS) / HOUR_MS,
+    stepMs: HOUR_MS,
+    resolution: "1H",
+    whaleFn: (i) => 1.4 + 0.2 * Math.sin(i / 6),
+    crowdFn: () => 1.0,
+  });
+  const series = makeSeries(startMs + 9 * DAY_MS, 24, HOUR_MS);
+
+  configureIndicatorDataSource({
+    requestLiquidationSeries: () => ({ status: "idle" }),
+    requestCoinalyzeDerivativeSeries: () => ({ status: "idle" }),
+    requestFuturesPositioningSeries: () => ({ status: "idle" }),
+    fetchOptionsGexSurface: async () => { throw new Error("unused"); },
+    requestWhaleCrowdSeries: () => ({
+      status: "ready",
+      data: {
+        status: "ready",
+        source: "backend",
+        venues: [
+          { venue: "binance", status: "ready", points: binancePoints },
+          { venue: "okx", status: "ready", points: binancePoints },
+          { venue: "hyperliquid", status: "disabled", points: [] },
+        ],
+      },
+    }),
+  });
+
+  let prevLocale = null;
+  try {
+    prevLocale = chartLocale();
+  } catch {}
+
+  try {
+    configureChartLocale({
+      locale: () => "tr-TR",
+      timeZone: () => "UTC",
+      translate: (key) => key,
+      onLocaleChange: () => () => {},
+    });
+    const trPrepared = whaleVsCrowdIndicatorDefinition.prepareData(makeDrawContext(series, { showAxisTicks: false }));
+    assert.equal(trPrepared.status, "ok");
+    const trDisabled = trPrepared.meta.badges.find((b) => b.venue === "hyperliquid" && b.kind === "disabled");
+    assert.equal(trDisabled?.text, "Hyperliquid: devre dışı");
+
+    configureChartLocale({
+      locale: () => "en-US",
+      timeZone: () => "UTC",
+      translate: (key) => key,
+      onLocaleChange: () => () => {},
+    });
+    const enPrepared = whaleVsCrowdIndicatorDefinition.prepareData(makeDrawContext(series, { showAxisTicks: false }));
+    assert.equal(enPrepared.status, "ok");
+    const enDisabled = enPrepared.meta.badges.find((b) => b.venue === "hyperliquid" && b.kind === "disabled");
+    assert.equal(enDisabled?.text, "Hyperliquid: disabled");
+  } finally {
+    if (prevLocale) configureChartLocale(prevLocale);
+  }
 });

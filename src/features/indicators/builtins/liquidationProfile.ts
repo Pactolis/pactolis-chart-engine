@@ -1030,7 +1030,7 @@ export const liquidationProfileIndicatorDefinition: IndicatorDefinition<Liquidat
             labelKey: "indicator.liquidationProfile.opacity",
             min: 0.1,
             max: 1,
-            step: 0.05,
+            step: 0.01,
           },
           {
             kind: "boolean",

@@ -287,13 +287,35 @@ export function buildHourlyFundingTimeline(
   const endHourEnd = Math.ceil(toMs / HOUR_MS) * HOUR_MS;
   const out: HourlyAlignedFunding[] = [];
 
-  const useAggregate = zSource === "aggregate" && Boolean(response.aggregate?.points?.length);
+  const venueSet = new Set<FundingVenue>(selectedVenues);
+  const activeSeries = response.series.filter((s) => venueSet.has(s.venue));
+
+  const aggPoints = response.aggregate?.points?.length
+    ? response.aggregate.points.filter((p) => asOfAllowed(p.t, asOfTime))
+    : [];
+  const aggSpanMs = aggPoints.length >= 2 ? aggPoints[aggPoints.length - 1].t - aggPoints[0].t : 0;
+
+  let minSettledT = Infinity;
+  let maxSettledT = -Infinity;
+  for (const venueSeries of activeSeries) {
+    for (const pt of venueSeries.settled) {
+      if (!asOfAllowed(pt.t, asOfTime)) continue;
+      if (pt.t < minSettledT) minSettledT = pt.t;
+      if (pt.t > maxSettledT) maxSettledT = pt.t;
+    }
+  }
+  const seriesSpanMs = Number.isFinite(minSettledT) && Number.isFinite(maxSettledT)
+    ? maxSettledT - minSettledT
+    : 0;
+
+  const useAggregate = zSource === "aggregate"
+    && aggPoints.length > 0
+    && (aggSpanMs >= DEFAULT_ZSCORE_MIN_SPAN_MS || seriesSpanMs <= aggSpanMs);
   if (useAggregate && response.aggregate) {
-    const aggPoints = response.aggregate.points.filter((p) => asOfAllowed(p.t, asOfTime));
     const aggCurrent = response.aggregate.current && asOfAllowed(response.aggregate.current.t, asOfTime)
       ? response.aggregate.current
       : null;
-    const lastAgg = aggPoints.length ? aggPoints[aggPoints.length - 1] : null;
+    const lastAgg = aggPoints[aggPoints.length - 1];
     let cursor = 0;
 
     for (let hourEnd = startHourEnd; hourEnd <= endHourEnd; hourEnd += HOUR_MS) {
@@ -320,8 +342,6 @@ export function buildHourlyFundingTimeline(
     return out;
   }
 
-  const venueSet = new Set<FundingVenue>(selectedVenues);
-  const activeSeries = response.series.filter((s) => venueSet.has(s.venue));
   if (!activeSeries.length) return [];
 
   for (let hourEnd = startHourEnd; hourEnd <= endHourEnd; hourEnd += HOUR_MS) {
