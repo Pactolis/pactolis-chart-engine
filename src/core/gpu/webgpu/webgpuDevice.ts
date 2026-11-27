@@ -29,12 +29,25 @@ export interface WebGpuDeviceHandle {
   dispose(): void;
 }
 
-let sharedHandle: WebGpuDeviceHandle | null = null;
-let sharedDevicePromise: Promise<WebGpuDeviceHandle | null> | null = null;
-let sharedPowerPreference: ChartPowerPreference = "default";
+interface SharedWebGpuSlot {
+  handle: WebGpuDeviceHandle | null;
+  promise: Promise<WebGpuDeviceHandle | null> | null;
+}
+
+const sharedSlots = new Map<ChartPowerPreference, SharedWebGpuSlot>();
+let sharedSlotEpoch = 0;
 let fatalDeviceReason: string | null = null;
 let fatalErrorHandler: ((reason: string) => void) | null = null;
 let sessionResetHandler: (() => void) | null = null;
+
+function getOrCreateSharedSlot(preference: ChartPowerPreference): SharedWebGpuSlot {
+  let slot = sharedSlots.get(preference);
+  if (!slot) {
+    slot = { handle: null, promise: null };
+    sharedSlots.set(preference, slot);
+  }
+  return slot;
+}
 
 export function registerWebGpuSessionHandlers(handlers: {
   onFatal: (reason: string) => void;
@@ -157,14 +170,15 @@ export async function requestWebGpuDevice(options?: {
   }
 
   const requestedPref: ChartPowerPreference = options?.powerPreference ?? "default";
-  const prefChanged = options?.powerPreference !== undefined && options.powerPreference !== sharedPowerPreference;
+  const slot = !options?.forceNew ? getOrCreateSharedSlot(requestedPref) : null;
+  const slotEpoch = sharedSlotEpoch;
 
-  if (!options?.forceNew && !prefChanged && sharedHandle && !sharedHandle.isLost()) {
-    return sharedHandle;
+  if (slot?.handle && !slot.handle.isLost()) {
+    return slot.handle;
   }
 
-  if (!options?.forceNew && !prefChanged && sharedDevicePromise) {
-    return sharedDevicePromise;
+  if (slot?.promise) {
+    return slot.promise;
   }
 
   const emitFallback = (reason: string): void => {
@@ -218,12 +232,12 @@ export async function requestWebGpuDevice(options?: {
       const lostListeners = new Set<(reason: string) => void>();
 
       const clearSharedIfOwned = (): void => {
-        if (sharedHandle === handle) {
-          sharedHandle = null;
-          sharedPowerPreference = "default";
+        if (!slot) return;
+        if (slot.handle === handle) {
+          slot.handle = null;
         }
-        if (sharedDevicePromise === acquirePromise) {
-          sharedDevicePromise = null;
+        if (slot.promise === acquirePromise) {
+          slot.promise = null;
         }
       };
 
@@ -331,9 +345,12 @@ export async function requestWebGpuDevice(options?: {
         },
       };
 
-      if (!options?.forceNew) {
-        sharedHandle = handle;
-        sharedPowerPreference = requestedPref;
+      if (slot) {
+        if (sharedSlotEpoch !== slotEpoch) {
+          handle.dispose();
+          return null;
+        }
+        slot.handle = handle;
       }
       return handle;
     } catch {
@@ -344,13 +361,13 @@ export async function requestWebGpuDevice(options?: {
     }
   })();
 
-  if (!options?.forceNew) {
-    sharedDevicePromise = acquirePromise;
+  if (slot) {
+    slot.promise = acquirePromise;
   }
 
   void acquirePromise.finally(() => {
-    if (sharedDevicePromise === acquirePromise) {
-      sharedDevicePromise = null;
+    if (slot && slot.promise === acquirePromise) {
+      slot.promise = null;
     }
   });
 
@@ -358,12 +375,16 @@ export async function requestWebGpuDevice(options?: {
 }
 
 export function resetSharedWebGpuDevice(): void {
-  if (sharedHandle) {
-    sharedHandle.dispose();
-    sharedHandle = null;
+  sharedSlotEpoch++;
+  const slots = [...sharedSlots.values()];
+  sharedSlots.clear();
+  for (const slot of slots) {
+    if (slot.handle) {
+      slot.handle.dispose();
+      slot.handle = null;
+    }
+    slot.promise = null;
   }
-  sharedDevicePromise = null;
-  sharedPowerPreference = "default";
   fatalDeviceReason = null;
   sessionResetHandler?.();
 }

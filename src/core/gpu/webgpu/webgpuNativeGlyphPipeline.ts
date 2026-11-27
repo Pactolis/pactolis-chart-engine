@@ -515,120 +515,146 @@ export class WebGpuNativeGlyphPipeline {
     this.instanceCapacityGlyphs = Math.max(256, initialCapacityGlyphs);
     this.atlas = getOrCreateGlyphAtlas();
 
-    const shaderModule = device.createShaderModule({
-      label: "NativeGlyphSdfShader",
-      code: GLYPH_WGSL,
-    });
+    let uniformBuffer: any = null;
+    let atlasTexture: any = null;
+    let instanceBuffer: any = null;
 
-    this.uniformBuffer = device.createBuffer({
-      label: "NativeGlyphUniforms",
-      size: 32, // resolution vec2 + pad vec2 + clipArea vec4
-      usage: 0x0040 | 0x0008, // UNIFORM | COPY_DST
-    });
+    try {
+      const shaderModule = device.createShaderModule({
+        label: "NativeGlyphSdfShader",
+        code: GLYPH_WGSL,
+      });
 
-    this.atlasTexture = device.createTexture({
-      label: "NativeGlyphSdfAtlasTexture",
-      size: [this.atlas.width, this.atlas.height, 1],
-      format: "rgba8unorm",
-      usage: 0x0004 | 0x0002, // TEXTURE_BINDING | COPY_DST
-    });
+      uniformBuffer = device.createBuffer({
+        label: "NativeGlyphUniforms",
+        size: 32, // resolution vec2 + pad vec2 + clipArea vec4
+        usage: 0x0040 | 0x0008, // UNIFORM | COPY_DST
+      });
 
-    device.queue.writeTexture(
-      { texture: this.atlasTexture },
-      this.atlas.pixels,
-      { bytesPerRow: this.atlas.width * 4, rowsPerImage: this.atlas.height },
-      [this.atlas.width, this.atlas.height, 1],
-    );
+      atlasTexture = device.createTexture({
+        label: "NativeGlyphSdfAtlasTexture",
+        size: [this.atlas.width, this.atlas.height, 1],
+        format: "rgba8unorm",
+        usage: 0x0004 | 0x0002, // TEXTURE_BINDING | COPY_DST
+      });
 
-    this.sampler = device.createSampler({
-      label: "NativeGlyphSdfSampler",
-      magFilter: "linear",
-      minFilter: "linear",
-      addressModeU: "clamp-to-edge",
-      addressModeV: "clamp-to-edge",
-    });
+      device.queue.writeTexture(
+        { texture: atlasTexture },
+        this.atlas.pixels,
+        { bytesPerRow: this.atlas.width * 4, rowsPerImage: this.atlas.height },
+        [this.atlas.width, this.atlas.height, 1],
+      );
 
-    const bindGroupLayout = device.createBindGroupLayout({
-      label: "NativeGlyphBindGroupLayout",
-      entries: [
-        {
-          binding: 0,
-          visibility: 0x1 | 0x2, // VERTEX | FRAGMENT
-          buffer: { type: "uniform" },
-        },
-        {
-          binding: 1,
-          visibility: 0x2, // FRAGMENT
-          texture: { sampleType: "float" },
-        },
-        {
-          binding: 2,
-          visibility: 0x2, // FRAGMENT
-          sampler: { type: "filtering" },
-        },
-      ],
-    });
+      const sampler = device.createSampler({
+        label: "NativeGlyphSdfSampler",
+        magFilter: "linear",
+        minFilter: "linear",
+        addressModeU: "clamp-to-edge",
+        addressModeV: "clamp-to-edge",
+      });
 
-    this.bindGroup = device.createBindGroup({
-      label: "NativeGlyphBindGroup",
-      layout: bindGroupLayout,
-      entries: [
-        { binding: 0, resource: { buffer: this.uniformBuffer } },
-        { binding: 1, resource: this.atlasTexture.createView() },
-        { binding: 2, resource: this.sampler },
-      ],
-    });
-
-    const pipelineLayout = device.createPipelineLayout({
-      label: "NativeGlyphPipelineLayout",
-      bindGroupLayouts: [bindGroupLayout],
-    });
-
-    this.pipeline = device.createRenderPipeline({
-      label: "NativeGlyphSdfRenderPipeline",
-      layout: pipelineLayout,
-      vertex: {
-        module: shaderModule,
-        entryPoint: "vs_main",
-        buffers: [
+      const bindGroupLayout = device.createBindGroupLayout({
+        label: "NativeGlyphBindGroupLayout",
+        entries: [
           {
-            arrayStride: GLYPH_INSTANCE_BYTES,
-            stepMode: "instance",
-            attributes: [
-              { shaderLocation: 0, offset: 0, format: "float32x4" },
-              { shaderLocation: 1, offset: 16, format: "uint32" },
-              { shaderLocation: 2, offset: 20, format: "uint32" },
-            ],
+            binding: 0,
+            visibility: 0x1 | 0x2, // VERTEX | FRAGMENT
+            buffer: { type: "uniform" },
+          },
+          {
+            binding: 1,
+            visibility: 0x2, // FRAGMENT
+            texture: { sampleType: "float" },
+          },
+          {
+            binding: 2,
+            visibility: 0x2, // FRAGMENT
+            sampler: { type: "filtering" },
           },
         ],
-      },
-      fragment: {
-        module: shaderModule,
-        entryPoint: "fs_main",
-        targets: [
-          {
-            format,
-            blend: {
-              color: {
-                srcFactor: "src-alpha",
-                dstFactor: "one-minus-src-alpha",
-                operation: "add",
-              },
-              alpha: {
-                srcFactor: "one",
-                dstFactor: "one-minus-src-alpha",
-                operation: "add",
+      });
+
+      const bindGroup = device.createBindGroup({
+        label: "NativeGlyphBindGroup",
+        layout: bindGroupLayout,
+        entries: [
+          { binding: 0, resource: { buffer: uniformBuffer } },
+          { binding: 1, resource: atlasTexture.createView() },
+          { binding: 2, resource: sampler },
+        ],
+      });
+
+      const pipelineLayout = device.createPipelineLayout({
+        label: "NativeGlyphPipelineLayout",
+        bindGroupLayouts: [bindGroupLayout],
+      });
+
+      const pipeline = device.createRenderPipeline({
+        label: "NativeGlyphSdfRenderPipeline",
+        layout: pipelineLayout,
+        vertex: {
+          module: shaderModule,
+          entryPoint: "vs_main",
+          buffers: [
+            {
+              arrayStride: GLYPH_INSTANCE_BYTES,
+              stepMode: "instance",
+              attributes: [
+                { shaderLocation: 0, offset: 0, format: "float32x4" },
+                { shaderLocation: 1, offset: 16, format: "uint32" },
+                { shaderLocation: 2, offset: 20, format: "uint32" },
+              ],
+            },
+          ],
+        },
+        fragment: {
+          module: shaderModule,
+          entryPoint: "fs_main",
+          targets: [
+            {
+              format,
+              blend: {
+                color: {
+                  srcFactor: "src-alpha",
+                  dstFactor: "one-minus-src-alpha",
+                  operation: "add",
+                },
+                alpha: {
+                  srcFactor: "one",
+                  dstFactor: "one-minus-src-alpha",
+                  operation: "add",
+                },
               },
             },
-          },
-        ],
-      },
-      primitive: {
-        topology: "triangle-list",
-      },
-    });
+          ],
+        },
+        primitive: {
+          topology: "triangle-list",
+        },
+      });
 
-    this.instanceBuffer = this.allocateInstanceBuffer(this.instanceCapacityGlyphs);
+      instanceBuffer = this.allocateInstanceBuffer(this.instanceCapacityGlyphs);
+
+      this.uniformBuffer = uniformBuffer;
+      this.atlasTexture = atlasTexture;
+      this.sampler = sampler;
+      this.bindGroup = bindGroup;
+      this.pipeline = pipeline;
+      this.instanceBuffer = instanceBuffer;
+    } catch (err) {
+      const destroyOnce = (resource: any): void => {
+        if (!resource || typeof resource.destroy !== "function") return;
+        try {
+          resource.destroy();
+        } catch {
+          // Best-effort rollback on partial initialization failure.
+        }
+      };
+      destroyOnce(instanceBuffer);
+      destroyOnce(atlasTexture);
+      destroyOnce(uniformBuffer);
+      throw err;
+    }
   }
 
   private allocateInstanceBuffer(glyphCount: number): any {

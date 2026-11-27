@@ -349,3 +349,75 @@ test("CE-394: lazy renderer loading and budget-exceeded counters", async () => {
   resetGpuDiagnosticsForTest();
   resetSoftwareRendererProbeCacheForTest();
 });
+
+test("CE-394: explicit prepare rejection reasons (cell-cap / budget-exceeded) are attributed without silent fallback", async () => {
+  resetGpuDiagnosticsForTest();
+  resetSoftwareRendererProbeCacheForTest();
+  resetPerformanceTelemetry();
+  configurePerformanceTelemetry({ enabled: true });
+
+  let rejectReason = "cell-cap";
+  const view = new View();
+  view.area = { left: 0, top: 0, width: 640, height: 320 };
+  view.colWidth = 12;
+  view.priceTop = 110;
+  view.pricePerPx = 0.25;
+
+  const series = new FootprintSeries({ intervalMs: 60_000, priceStep: 1 });
+  series.upsertBar({
+    startTime: 1_699_999_980_000,
+    open: 100,
+    high: 105,
+    low: 95,
+    close: 102,
+    volume: 10,
+    delta: 2,
+    count: 2,
+    cells: new Map([[100, { priceBin: 100, buyVol: 6, sellVol: 4 }]]),
+    hasRef: true,
+    completeness: "complete",
+    sources: ["history"],
+  });
+
+  const coordinator = new ChartHeatmapGpuCoordinator({
+    backendKind: "webgl2",
+    orderbookHeatmap: {
+      currentDataKey: () => "key-394-reject",
+      getPrepareCacheKey: () => "cache-key-394-reject",
+      prepareGpuCells: () => null,
+      getLastGpuPrepareRejectReason: () => rejectReason,
+    },
+    renderCoordinator: {
+      getAnnotationLayerOrder: () => ["orderbook-heatmap"],
+    },
+    renderer: {
+      visibleRange: () => [0, 1],
+    },
+    invalidateSession: () => {},
+  });
+
+  try {
+    coordinator.setGl(makeMockGl("AMD Radeon AI Pro R9700"));
+    coordinator.setResidentHeatmapEnabled(true, false);
+    await coordinator.whenHeatmapGpuRendererReady();
+    attachMockGpuRenderer(coordinator);
+
+    coordinator.beginFrameAttempt();
+    assert.equal(coordinator.prepareHeatmapGpuCells(view, series), null);
+    assert.equal(coordinator.getDiagnostics().fallbackReason, "cell-cap");
+    assert.equal(coordinator.getDiagnostics().heatmapPath, "cpu");
+    assert.equal(coordinator.getDiagnostics().effectiveBackend, "cpu");
+    assert.ok((snapshotPerformanceTelemetry().counters["chart.gpu.heatmap.skip.cellCap"] ?? 0) >= 1);
+
+    rejectReason = "budget-exceeded";
+    coordinator.beginFrameAttempt();
+    assert.equal(coordinator.prepareHeatmapGpuCells(view, series), null);
+    assert.equal(coordinator.getDiagnostics().fallbackReason, "budget-exceeded");
+    assert.ok((snapshotPerformanceTelemetry().counters["chart.gpu.heatmap.skip.budgetExceeded"] ?? 0) >= 1);
+  } finally {
+    coordinator.dispose();
+    resetPerformanceTelemetry();
+    resetGpuDiagnosticsForTest();
+    resetSoftwareRendererProbeCacheForTest();
+  }
+});

@@ -484,11 +484,12 @@ export class FootprintSeries {
     if (this.repairOwnership.has(safeBar.startTime) || this.repairFences.has(safeBar.startTime)) return false;
     const lastStartBefore = this.order[this.order.length - 1];
     const isTail = lastStartBefore !== undefined && safeBar.startTime === lastStartBefore;
-    if (!this.bars.has(safeBar.startTime)) this.insertOrdered(safeBar.startTime);
+    const existed = this.bars.has(safeBar.startTime);
+    if (!existed) this.insertOrdered(safeBar.startTime);
     this.bars.set(safeBar.startTime, safeBar);
     this.refTradeBounds.delete(safeBar.startTime);
     this.inferPricePrecision([safeBar]);
-    const prunedCalendar = this.pruneLegacyCalendarOverlaps();
+    const prunedCalendar = existed ? false : this.reconcileCalendarOverlapForStart(safeBar.startTime);
     const prunedOldest = this.pruneOldestBars();
     if (this.refPrice === undefined) this.refPrice = safeBar.close;
     this.revisionValue++;
@@ -828,7 +829,7 @@ export class FootprintSeries {
       this.bars.set(start, bar);
       this.insertOrdered(start);
       structureChanged = true;
-      if (this.pruneLegacyCalendarOverlaps()) structureChanged = true;
+      if (this.reconcileCalendarOverlapForStart(start)) structureChanged = true;
       if (this.pruneOldestBars()) nonTailChanged = true;
     } else if (lastStartBefore === undefined || start !== lastStartBefore) {
       nonTailChanged = true;
@@ -1005,6 +1006,47 @@ export class FootprintSeries {
     if (this.cfg.pricePrecision === inferred) return;
     this.cfg.pricePrecision = inferred;
     this.revisionValue++;
+  }
+
+  private reconcileCalendarOverlapForStart(start: number): boolean {
+    const interval = this.cfg.intervalMs;
+    if (monthSpan(interval) === 0 && interval !== WEEK_MS && interval !== 2 * WEEK_MS) return false;
+    if (bucketStart(start, interval) === start) {
+      const canonicalEnd = bucketEnd(start, interval);
+      const fromIdx = lowerBound(this.order, start - interval + 1);
+      const toRemove: number[] = [];
+      for (let i = fromIdx; i < this.order.length; i++) {
+        const candidate = this.order[i];
+        if (candidate >= canonicalEnd) break;
+        if (candidate === start || bucketStart(candidate, interval) === candidate) continue;
+        this.bars.delete(candidate);
+        this.refTradeBounds.delete(candidate);
+        toRemove.push(i);
+      }
+      if (!toRemove.length) return false;
+      for (let k = toRemove.length - 1; k >= 0; k--) {
+        this.order.splice(toRemove[k], 1);
+      }
+      return true;
+    }
+
+    const fromIdx = lowerBound(this.order, bucketStart(start, interval));
+    const legacyEnd = start + interval;
+    for (let i = fromIdx; i < this.order.length; i++) {
+      const candidate = this.order[i];
+      if (candidate >= legacyEnd) break;
+      if (candidate === start || bucketStart(candidate, interval) !== candidate) continue;
+      if (bucketEnd(candidate, interval) > start) {
+        this.bars.delete(start);
+        this.refTradeBounds.delete(start);
+        const removeIdx = lowerBound(this.order, start);
+        if (this.order[removeIdx] === start) {
+          this.order.splice(removeIdx, 1);
+        }
+        return true;
+      }
+    }
+    return false;
   }
 
   private pruneLegacyCalendarOverlaps(): boolean {

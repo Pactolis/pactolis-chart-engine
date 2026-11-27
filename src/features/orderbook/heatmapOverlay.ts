@@ -328,6 +328,7 @@ export class OrderbookHeatmapOverlay {
   private explicitVisible = true;
   private needsRedrawOnVisible = false;
   private rasterCacheDisabledForTest = false;
+  private lastGpuPrepareRejectReason: "cell-cap" | "budget-exceeded" | null = null;
   private pointerDragging = false;
   private lastRasterViewportKey = "";
   private rasterViewportChangedAt = Number.NEGATIVE_INFINITY;
@@ -2641,9 +2642,14 @@ export class OrderbookHeatmapOverlay {
     reserve?: (logicalBytes: number) => { release(): void } | null,
     motionReuse = false,
   ): HeatmapGpuCellFrame | null {
+    this.lastGpuPrepareRejectReason = null;
     if (!reserve) {
       const visible = this.collectVisibleCells(view, series, range, GPU_MAX_PREPARED_CELLS);
-      if (!visible || visible.length >= GPU_MAX_PREPARED_CELLS) return null;
+      if (!visible) return null;
+      if (visible.length >= GPU_MAX_PREPARED_CELLS) {
+        this.lastGpuPrepareRejectReason = "cell-cap";
+        return null;
+      }
       return this.buildGpuFrame(visible, view);
     }
     const preamble = this.beginFrame(series, range);
@@ -2658,11 +2664,16 @@ export class OrderbookHeatmapOverlay {
         // Too many cells or no budget for the wider window: exact prepares until the motion settles.
         this.gpuMotionWindow = null;
         this.gpuMotionWindowDisabled = true;
+        this.lastGpuPrepareRejectReason = null;
       }
       return this.prepareReservedGpuCells(preamble, view, series, reserve);
     } finally {
       if (startedAt !== null) recordPerformanceDuration("chart.gpu.heatmap.prepare.ms", performance.now() - startedAt);
     }
+  }
+
+  getLastGpuPrepareRejectReason(): "cell-cap" | "budget-exceeded" | null {
+    return this.lastGpuPrepareRejectReason;
   }
 
   /** The production (reserved) prepare after the shared frame preamble; see `prepareGpuCells`. */
@@ -2771,12 +2782,21 @@ export class OrderbookHeatmapOverlay {
         anchorPricePerPx: view.pricePerPx,
       };
     }
-    if (mainCount >= GPU_MAX_PREPARED_CELLS) return null;
+    if (mainCount >= GPU_MAX_PREPARED_CELLS) {
+      this.lastGpuPrepareRejectReason = "cell-cap";
+      return null;
+    }
     const logicalBytes = mainCount * (PREPARED_ENTRY_PAYLOAD_BYTES + PREPARED_MAIN_RECT_PAYLOAD_BYTES
       + PREPARED_INSTANCE_PAYLOAD_BYTES);
-    if (!Number.isSafeInteger(logicalBytes) || logicalBytes <= 0) return null;
+    if (!Number.isSafeInteger(logicalBytes) || logicalBytes <= 0) {
+      this.lastGpuPrepareRejectReason = "budget-exceeded";
+      return null;
+    }
     const lease = reserve(logicalBytes);
-    if (!lease) return null;
+    if (!lease) {
+      this.lastGpuPrepareRejectReason = "budget-exceeded";
+      return null;
+    }
     try {
       const visible: Array<{ x: number; yTop: number; cellHeight: number; value: number; live: boolean }> = [];
       this.forEachVisibleCell(view, series, preamble, GPU_MAX_PREPARED_CELLS, (x, yTop, cellHeight, value, live) => {
@@ -2784,6 +2804,7 @@ export class OrderbookHeatmapOverlay {
       }, cellFirst, cellLast, top, height);
       if (visible.length !== mainCount || visible.length >= GPU_MAX_PREPARED_CELLS) {
         lease.release();
+        this.lastGpuPrepareRejectReason = "cell-cap";
         return null;
       }
       const frame = this.buildGpuFrame(visible, view);
