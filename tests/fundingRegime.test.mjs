@@ -10,7 +10,9 @@ const {
   alignVenueSeriesToHourEnd,
   buildHourlyFundingTimeline,
   fundingRegimeIndicatorDefinition,
+  getFundingRegimeNativeCacheStats,
   migrateFundingExchanges,
+  resetFundingRegimeCachesForTests,
 } = await import("../dist/features/indicators/builtins/fundingRegime.js");
 
 const HOUR_MS = 3_600_000;
@@ -451,4 +453,196 @@ test("fundingRegime keeps aggregate path when aggregate covers >= 7 days (CE #40
 
   assert.ok(timeline.length > 0);
   assert.ok(timeline.every((pt) => Math.abs(pt.fundingRate - 0.0005) < 1e-12));
+});
+
+test("CE #419: fundingRegime computes native hourly z-series only once across 100 revision/range changes", () => {
+  resetFundingRegimeCachesForTests();
+  const series = makeSeries(T0 + 30 * DAY_MS, 120, HOUR_MS);
+  const fromMs = T0;
+  const toMs = T0 + 35 * DAY_MS;
+  const aggPoints = [];
+  for (let t = fromMs + HOUR_MS; t <= toMs; t += HOUR_MS) {
+    aggPoints.push({
+      t,
+      rate8h: 0.0001 + Math.sin(t / HOUR_MS * 0.1) * 0.00005,
+      venues: ["binancef", "bybitf", "okxf", "hyperliquid"],
+    });
+  }
+
+  const response = {
+    market: "BTCUSDT",
+    from: fromMs,
+    to: toMs,
+    venues: ["binancef", "bybitf", "okxf", "hyperliquid"],
+    series: buildFourVenueSettledSeries(fromMs, toMs, (t) => 0.0001 + Math.sin(t / HOUR_MS * 0.1) * 0.00005),
+    aggregate: {
+      points: aggPoints,
+      current: { t: toMs, rate8h: 0.00012, venues: ["binancef", "bybitf", "okxf", "hyperliquid"] },
+      excludedVenues: [],
+      source: "backend-oi",
+    },
+  };
+
+  configureIndicatorDataSource({
+    requestVenueFundingSeries: () => ({ status: "ready", data: response }),
+  });
+
+  const baseline = fundingRegimeIndicatorDefinition.prepareData(
+    makeDrawContext(series, { mode: "zScore" }, [20, 100]),
+  );
+  assert.equal(baseline.status, "ok");
+  assert.equal(getFundingRegimeNativeCacheStats().computes, 1);
+
+  for (let i = 0; i < 100; i += 1) {
+    series.addTrade({
+      id: `fr-live-${i}`,
+      time: T0 + 30 * DAY_MS + 119 * HOUR_MS + i * 1_000,
+      price: 100 + (i % 5),
+      qty: 1,
+      isBuy: i % 2 === 0,
+    });
+    const from = 10 + (i % 15);
+    const to = from + 60;
+    const prepared = fundingRegimeIndicatorDefinition.prepareData(
+      makeDrawContext(series, { mode: "zScore" }, [from, to]),
+    );
+    assert.equal(prepared.status, "ok");
+    if (from === 20 && to === 80) {
+      const baseByIdx = new Map(baseline.points.map((p) => [p.index, p.zScore]));
+      for (const pt of prepared.points) {
+        assert.equal(pt.zScore, baseByIdx.get(pt.index));
+      }
+    }
+  }
+
+  const stats = getFundingRegimeNativeCacheStats();
+  assert.equal(stats.computes, 1);
+  assert.equal(stats.hits, 100);
+});
+
+test("CE #419: fundingRegime WeakMap cache never collides across different-market responses with identical t grids", () => {
+  resetFundingRegimeCachesForTests();
+  const series = makeSeries(T0 + 30 * DAY_MS, 120, HOUR_MS);
+  const fromMs = T0;
+  const toMs = T0 + 35 * DAY_MS;
+
+  const makeAgg = (rateFn) => {
+    const pts = [];
+    for (let t = fromMs + HOUR_MS; t <= toMs; t += HOUR_MS) {
+      pts.push({
+        t,
+        rate8h: rateFn(t),
+        venues: ["binancef", "bybitf", "okxf", "hyperliquid"],
+      });
+    }
+    return pts;
+  };
+
+  const rateA = (t) => 0.0001 + Math.sin(t / HOUR_MS * 0.1) * 0.00005;
+  const rateB = (t) => -0.0003 + Math.cos(t / HOUR_MS * 0.23) * 0.00018;
+
+  const responseA = {
+    market: "BTCUSDT",
+    from: fromMs,
+    to: toMs,
+    venues: ["binancef", "bybitf", "okxf", "hyperliquid"],
+    series: buildFourVenueSettledSeries(fromMs, toMs, rateA),
+    aggregate: {
+      points: makeAgg(rateA),
+      current: { t: toMs, rate8h: 0.00012, venues: ["binancef", "bybitf", "okxf", "hyperliquid"] },
+      excludedVenues: [],
+      source: "backend-oi",
+    },
+  };
+  const responseB = {
+    market: "ETHUSDT",
+    from: fromMs,
+    to: toMs,
+    venues: ["binancef", "bybitf", "okxf", "hyperliquid"],
+    series: buildFourVenueSettledSeries(fromMs, toMs, rateB),
+    aggregate: {
+      points: makeAgg(rateB),
+      current: { t: toMs, rate8h: -0.00045, venues: ["binancef", "bybitf", "okxf", "hyperliquid"] },
+      excludedVenues: [],
+      source: "backend-oi",
+    },
+  };
+
+  let activeResponse = responseB;
+  configureIndicatorDataSource({
+    requestVenueFundingSeries: () => ({ status: "ready", data: activeResponse }),
+  });
+
+  const ctx = makeDrawContext(series, { mode: "zScore" }, [20, 100]);
+  const uncachedB = fundingRegimeIndicatorDefinition.prepareData(ctx);
+  assert.equal(uncachedB.status, "ok");
+
+  resetFundingRegimeCachesForTests();
+  activeResponse = responseA;
+  const preparedA = fundingRegimeIndicatorDefinition.prepareData(ctx);
+  assert.equal(preparedA.status, "ok");
+
+  activeResponse = responseB;
+  const cachedPathB = fundingRegimeIndicatorDefinition.prepareData(ctx);
+  assert.equal(cachedPathB.status, "ok");
+  assert.deepEqual(
+    cachedPathB.points.map((p) => p.zScore),
+    uncachedB.points.map((p) => p.zScore),
+  );
+  assert.equal(getFundingRegimeNativeCacheStats().computes, 2);
+});
+
+test("CE #419: fundingRegime updates z-score immediately when current.rate8h changes with the same t", () => {
+  resetFundingRegimeCachesForTests();
+  const series = makeSeries(T0 + 30 * DAY_MS, 120, HOUR_MS);
+  const fromMs = T0;
+  const toMs = T0 + 35 * DAY_MS;
+  const settledToMs = toMs - 4 * HOUR_MS;
+  const aggPoints = [];
+  for (let t = fromMs + HOUR_MS; t <= settledToMs; t += HOUR_MS) {
+    aggPoints.push({
+      t,
+      rate8h: 0.0001 + Math.sin(t / HOUR_MS * 0.1) * 0.00005,
+      venues: ["binancef", "bybitf", "okxf", "hyperliquid"],
+    });
+  }
+
+  const venueSeries = buildFourVenueSettledSeries(fromMs, settledToMs, (t) => 0.0001 + Math.sin(t / HOUR_MS * 0.1) * 0.00005)
+    .map((s) => ({
+      ...s,
+      current: { t: toMs, rate8h: 0.0001 },
+    }));
+
+  const response = {
+    market: "BTCUSDT",
+    from: fromMs,
+    to: toMs,
+    venues: ["binancef", "bybitf", "okxf", "hyperliquid"],
+    series: venueSeries,
+    aggregate: {
+      points: aggPoints,
+      current: { t: toMs, rate8h: 0.0001, venues: ["binancef", "bybitf", "okxf", "hyperliquid"] },
+      excludedVenues: [],
+      source: "backend-oi",
+    },
+  };
+
+  configureIndicatorDataSource({
+    requestVenueFundingSeries: () => ({ status: "ready", data: response }),
+  });
+
+  const ctx = makeDrawContext(series, { mode: "zScore", zSource: "venues" }, [20, 120]);
+  const first = fundingRegimeIndicatorDefinition.prepareData(ctx);
+  assert.equal(first.status, "ok");
+  const lastFirst = first.points.filter((p) => Number.isFinite(p.zScore)).at(-1);
+  assert.ok(lastFirst);
+
+  // Mutate current.rate8h on binancef with the exact same timestamp t.
+  response.series[0].current = { t: response.series[0].current.t, rate8h: 0.0015 };
+  const updated = fundingRegimeIndicatorDefinition.prepareData(ctx);
+  assert.equal(updated.status, "ok");
+  const lastUpdated = updated.points.filter((p) => Number.isFinite(p.zScore)).at(-1);
+  assert.ok(lastUpdated);
+  assert.notEqual(lastUpdated.zScore, lastFirst.zScore);
+  assert.equal(getFundingRegimeNativeCacheStats().computes, 2);
 });

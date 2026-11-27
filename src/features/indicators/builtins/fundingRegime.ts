@@ -138,6 +138,20 @@ interface HourlyZFunding extends HourlyAlignedFunding {
 }
 
 const preparedCache = new BoundedCache<FundingRegimeData>({ maxEntries: 64, ttlMs: 60 * 60_000 });
+let nativeFundingZCache = new WeakMap<object, Map<string, HourlyZFunding[]>>();
+let nativeFundingComputeCount = 0;
+let nativeFundingCacheHitCount = 0;
+
+export function getFundingRegimeNativeCacheStats(): { computes: number; hits: number } {
+  return { computes: nativeFundingComputeCount, hits: nativeFundingCacheHitCount };
+}
+
+export function resetFundingRegimeCachesForTests(): void {
+  preparedCache.clear();
+  nativeFundingZCache = new WeakMap<object, Map<string, HourlyZFunding[]>>();
+  nativeFundingComputeCount = 0;
+  nativeFundingCacheHitCount = 0;
+}
 
 function rememberPreparedData(key: string, value: FundingRegimeData): FundingRegimeData {
   preparedCache.set(key, value);
@@ -604,6 +618,17 @@ function prepareFundingRegimeData(ctx: IndicatorDrawContext<FundingRegimeSetting
     zSource,
   };
 
+  const venueSignature = selectedVenues.map((venue) => {
+    const s = response.series.find((item) => item.venue === venue);
+    if (!s) return `${venue}:missing`;
+    const lastSettled = s.settled.length ? s.settled[s.settled.length - 1] : undefined;
+    return `${venue}:${s.settled.length}:${lastSettled ? `${lastSettled.t}:${lastSettled.rate8h}` : "ns"}:${s.current?.t ?? "nc"}:${s.current?.rate8h ?? "nr"}`;
+  }).join(";");
+  const lastAgg = response.aggregate?.points.length
+    ? response.aggregate.points[response.aggregate.points.length - 1]
+    : undefined;
+  const aggSignature = `${response.aggregate?.points.length ?? 0}:${lastAgg ? `${lastAgg.t}:${lastAgg.rate8h}` : "na"}:${response.aggregate?.current?.t ?? "na"}:${response.aggregate?.current?.rate8h ?? "nr"}`;
+
   const cacheKey = [
     ctx.instance.id,
     ctx.series.revision,
@@ -619,22 +644,52 @@ function prepareFundingRegimeData(ctx: IndicatorDrawContext<FundingRegimeSetting
     chart.asOfTime ?? "live",
     response.from,
     response.to,
-    response.series.map((s) => `${s.venue}:${s.settled.length}:${s.current?.t ?? "nc"}`).join(";"),
-    response.aggregate?.points.length ?? 0,
-    response.aggregate?.current?.t ?? "na",
+    venueSignature,
+    aggSignature,
   ].join("|");
   const cached = preparedCache.get(cacheKey);
   if (cached) return cached;
 
-  const hourly = buildHourlyFundingTimeline(
-    response,
-    selectedVenues,
+  // Bucket the timeline window so pan/live-tick bar shifts reuse the chart-independent hourly z-series.
+  const bucketedFromMs = Math.floor(requestFromMs / DAY_MS) * DAY_MS;
+  const bucketedToMs = Math.ceil(visibleToMs / DAY_MS) * DAY_MS;
+  const nativeFromMs = Number.isFinite(response.from) ? Math.min(response.from, bucketedFromMs) : bucketedFromMs;
+  const rawNativeToMs = Number.isFinite(response.to) ? Math.max(response.to, bucketedToMs) : bucketedToMs;
+  const nativeToMs = chart.asOfTime !== undefined ? Math.min(rawNativeToMs, chart.asOfTime) : rawNativeToMs;
+
+  const innerKey = [
+    zWindowDays,
     zSource,
-    requestFromMs,
-    visibleToMs,
-    chart.asOfTime,
-  );
-  const hourlyZ = attachRollingZScores(hourly, zWindowDays);
+    selectedVenues.join(","),
+    chart.asOfTime ?? "live",
+    nativeFromMs,
+    nativeToMs,
+    response.from,
+    response.to,
+    venueSignature,
+    aggSignature,
+  ].join("|");
+  let responseCache = nativeFundingZCache.get(response);
+  let hourlyZ = responseCache?.get(innerKey);
+  if (hourlyZ) {
+    nativeFundingCacheHitCount += 1;
+  } else {
+    nativeFundingComputeCount += 1;
+    const hourly = buildHourlyFundingTimeline(
+      response,
+      selectedVenues,
+      zSource,
+      nativeFromMs,
+      nativeToMs,
+      chart.asOfTime,
+    );
+    hourlyZ = attachRollingZScores(hourly, zWindowDays);
+    if (!responseCache) {
+      responseCache = new Map<string, HourlyZFunding[]>();
+      nativeFundingZCache.set(response, responseCache);
+    }
+    responseCache.set(innerKey, hourlyZ);
+  }
   const points = mapToVisibleChartCandles(ctx, hourlyZ);
 
   if (!points.length) {

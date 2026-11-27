@@ -87,6 +87,36 @@ const HL_MARK_STALE_MS = 60_000;
 const HL_DIVERGENCE_THRESHOLD = 0.01;
 const MODEL_STALE_MS = 30 * 86_400_000;
 
+interface PinnedBinanceRefEntry {
+  hlMarkPx: number;
+  binanceRef: number;
+}
+
+/**
+ * Pin the Binance/Hyperliquid basis reference once per fetched response object so
+ * live Binance price ticks do not shift static Hyperliquid liquidation levels.
+ */
+const responseBinanceRefCache = new WeakMap<LiquidationClustersResponse, PinnedBinanceRefEntry>();
+
+function resolvePinnedBinanceRef(
+  response: LiquidationClustersResponse,
+  binanceLast: number | null,
+  hlMarkPx: number | null,
+): number | null {
+  if (hlMarkPx == null || !Number.isFinite(hlMarkPx) || hlMarkPx <= 0) {
+    return binanceLast;
+  }
+  const cached = responseBinanceRefCache.get(response);
+  if (cached && cached.hlMarkPx === hlMarkPx) {
+    return cached.binanceRef;
+  }
+  if (binanceLast != null && Number.isFinite(binanceLast) && binanceLast > 0) {
+    responseBinanceRefCache.set(response, { hlMarkPx, binanceRef: binanceLast });
+    return binanceLast;
+  }
+  return binanceLast;
+}
+
 function safeTranslate(key: string, fallback: string, params?: Record<string, string | number>): string {
   try {
     const resolved = tOr(key, params);
@@ -550,16 +580,17 @@ export function prepareLiquidationProfile(
   const hlMarkPx = response.hlMarkPx ?? null;
   const hlMarkAt = response.hlMarkAt ?? null;
   const takenAt = response.takenAt ?? response.fetchedAt ?? null;
-  const refPrice = hlMarkPx && hlMarkPx > 0 ? hlMarkPx : binanceLast;
+  const pinnedBinanceRef = resolvePinnedBinanceRef(response, binanceLast, hlMarkPx);
+  const refPrice = hlMarkPx && hlMarkPx > 0 ? hlMarkPx : pinnedBinanceRef;
   const filtered = filterLiquidationClusters(response.clusters ?? [], rangePct, minNotionalUsd, refPrice);
   const aligned: AlignedLiquidationCluster[] = filtered.map((cluster) => ({
     ...cluster,
     hlPrice: cluster.price,
-    alignedPrice: alignHlPriceToBinance(cluster.price, binanceLast, hlMarkPx),
+    alignedPrice: alignHlPriceToBinance(cluster.price, pinnedBinanceRef, hlMarkPx),
   }));
   aligned.sort((a, b) => a.alignedPrice - b.alignedPrice);
 
-  const warnings = computeAlignmentWarnings(binanceLast, hlMarkPx, hlMarkAt);
+  const warnings = computeAlignmentWarnings(pinnedBinanceRef, hlMarkPx, hlMarkAt);
   const message = buildLiquidationProfileStatusText(responseStatus, takenAt);
 
   return {
