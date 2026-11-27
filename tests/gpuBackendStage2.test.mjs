@@ -951,3 +951,95 @@ test("ChartSession automatically falls back to WebGl2 or Canvas2d when WebGPU de
 
   session.destroy();
 });
+
+test("WebGPU concurrent non-default powerPreference requests coalesce and isolate out-of-order completions (#413)", async () => {
+  resetGpuDiagnosticsForTest();
+  resetSharedWebGpuDevice();
+
+  const originalDescriptor = Object.getOwnPropertyDescriptor(globalThis, "navigator");
+  try {
+    const adapterCalls = [];
+    const deviceCalls = [];
+    const deferredByPref = new Map();
+    const createdDevices = [];
+
+    const makeDeferred = () => {
+      let resolve;
+      const promise = new Promise((res) => { resolve = res; });
+      return { promise, resolve };
+    };
+
+    setMockNavigator({
+      gpu: {
+        requestAdapter(options) {
+          const pref = options?.powerPreference ?? "default";
+          adapterCalls.push(pref);
+          const deferred = makeDeferred();
+          deferredByPref.set(pref, deferred);
+          return deferred.promise.then(() => ({
+            async requestDevice() {
+              deviceCalls.push(pref);
+              const { device } = makeFakeWebGpuDevice("rgba8unorm");
+              device._pref = pref;
+              device._destroyedCount = 0;
+              const prevDestroy = device.destroy?.bind(device);
+              device.destroy = () => {
+                device._destroyedCount++;
+                prevDestroy?.();
+              };
+              createdDevices.push(device);
+              return device;
+            },
+          }));
+        },
+        getPreferredCanvasFormat() {
+          return "rgba8unorm";
+        },
+      },
+    });
+
+    // 1. Four concurrent high-performance requests share 1 adapter, 1 device, 1 handle
+    const p1 = requestWebGpuDevice({ powerPreference: "high-performance" });
+    const p2 = requestWebGpuDevice({ powerPreference: "high-performance" });
+    const p3 = requestWebGpuDevice({ powerPreference: "high-performance" });
+    const p4 = requestWebGpuDevice({ powerPreference: "high-performance" });
+    assert.equal(adapterCalls.length, 1, "4 concurrent high-performance requests must coalesce to 1 requestAdapter");
+    deferredByPref.get("high-performance").resolve();
+
+    const handles = await Promise.all([p1, p2, p3, p4]);
+    assert.equal(deviceCalls.length, 1, "4 concurrent high-performance requests must create 1 GPUDevice");
+    assert.ok(handles[0]);
+    for (const h of handles) {
+      assert.equal(h, handles[0]);
+    }
+    resetSharedWebGpuDevice();
+    assert.equal(createdDevices.filter((d) => d._destroyedCount > 0).length, 1);
+
+    // 2. Concurrent low-power + high-performance resolving out of order must not overwrite or swap handles
+    adapterCalls.length = 0;
+    deviceCalls.length = 0;
+    deferredByPref.clear();
+
+    const pLow = requestWebGpuDevice({ powerPreference: "low-power" });
+    const pHigh = requestWebGpuDevice({ powerPreference: "high-performance" });
+    const pLow2 = requestWebGpuDevice({ powerPreference: "low-power" });
+    assert.equal(adapterCalls.length, 2, "low-power and high-performance each coalesce within their own slot");
+
+    // Resolve high-performance BEFORE low-power
+    deferredByPref.get("high-performance").resolve();
+    const highHandle = await pHigh;
+    deferredByPref.get("low-power").resolve();
+    const [lowHandle, lowHandle2] = await Promise.all([pLow, pLow2]);
+
+    assert.equal(lowHandle, lowHandle2);
+    assert.notEqual(highHandle, lowHandle);
+    assert.equal(highHandle.device._pref, "high-performance");
+    assert.equal(lowHandle.device._pref, "low-power");
+
+    resetSharedWebGpuDevice();
+    assert.equal(createdDevices.filter((d) => d._destroyedCount > 0).length, 3);
+  } finally {
+    restoreNavigator(originalDescriptor);
+    resetSharedWebGpuDevice();
+  }
+});

@@ -7,7 +7,7 @@ import {
   indicatorReadoutTextColor,
   uiColor,
 } from "../../../core/ui/seriesPalette.js";
-import { indicatorDataSource } from "../indicatorDataSource.js";
+import { indicatorDataSource, type IndicatorDataSource } from "../indicatorDataSource.js";
 import type {
   LiveTradeEvent,
   LiveTradeEventKind,
@@ -71,10 +71,22 @@ export interface RenderedBubble extends ClusteredBubble {
   color: string;
 }
 
-interface ActiveSubscription {
-  key: string;
-  market: string;
+interface SharedStreamSubscription {
+  streamKey: string;
+  source: IndicatorDataSource;
+  consumers: Map<string, () => void>;
   unsubscribe: () => void;
+}
+
+interface ActiveSubscription {
+  streamKey: string;
+  source: IndicatorDataSource;
+}
+
+interface LiveTradeBuffer {
+  events: LiveTradeEvent[];
+  seenKeys: Set<string>;
+  ringKeys: string[];
 }
 
 type LiveTradeBubblesPreparedMeta = Record<string, unknown> & {
@@ -90,57 +102,102 @@ type LiveTradeBubblesPreparedData = IndicatorPreparedData<never, LiveTradeBubble
   meta: LiveTradeBubblesPreparedMeta;
 };
 
-const marketBuffers = new Map<string, LiveTradeEvent[]>();
+const marketBuffers = new Map<string, LiveTradeBuffer>();
+const sharedSubscriptions = new Map<string, SharedStreamSubscription>();
 const activeSubscriptions = new Map<string, ActiveSubscription>();
+const EMPTY_LIVE_TRADE_EVENTS: readonly LiveTradeEvent[] = [];
 
 function normalizeMarketKey(market: string | undefined): string {
   return (market ?? "").trim().toUpperCase();
 }
 
-export function pushLiveTradeEvents(market: string, events: readonly LiveTradeEvent[]): void {
+function bufferKeyFor(market: string, scope: LiveTradeEventScope): string {
+  return `${normalizeMarketKey(market)}|${normalizeScope(scope)}`;
+}
+
+function liveTradeEventDedupKey(event: LiveTradeEvent): string {
+  const kind = event.kind === "liquidation" ? "liquidation" : "trade";
+  const venue = typeof event.venue === "string" ? event.venue.trim().toLowerCase() : "";
+  const id = typeof event.id === "string" ? event.id.trim() : "";
+  if (id.length > 0) {
+    return `${kind}|${venue}|${id}`;
+  }
+  return `${kind}|${venue}|${event.time}|${event.price}|${event.qty}|${event.side}`;
+}
+
+export function pushLiveTradeEvents(
+  market: string,
+  events: readonly LiveTradeEvent[],
+  scope: LiveTradeEventScope = "base",
+): void {
   if (!events.length) return;
-  const key = normalizeMarketKey(market);
-  if (!key) return;
+  const normalizedMarket = normalizeMarketKey(market);
+  if (!normalizedMarket) return;
+  const key = bufferKeyFor(normalizedMarket, scope);
   let buffer = marketBuffers.get(key);
   if (buffer) {
-    // Refresh LRU order on write so active markets stay cached.
+    // Refresh LRU order on write so active buffers stay cached.
     marketBuffers.delete(key);
     marketBuffers.set(key, buffer);
   } else {
-    buffer = [];
+    buffer = { events: [], seenKeys: new Set(), ringKeys: [] };
     marketBuffers.set(key, buffer);
     while (marketBuffers.size > MAX_LIVE_TRADE_MARKETS) {
-      const oldestMarket = marketBuffers.keys().next().value;
-      if (oldestMarket === undefined) break;
-      marketBuffers.delete(oldestMarket);
+      const oldestKey = marketBuffers.keys().next().value;
+      if (oldestKey === undefined) break;
+      marketBuffers.delete(oldestKey);
     }
   }
   for (const event of events) {
     if (!event || !Number.isFinite(event.time) || !Number.isFinite(event.price) || !Number.isFinite(event.notionalUsd)) {
       continue;
     }
-    buffer.push(event);
+    const dedupKey = liveTradeEventDedupKey(event);
+    if (buffer.seenKeys.has(dedupKey)) {
+      continue;
+    }
+    buffer.seenKeys.add(dedupKey);
+    buffer.events.push(event);
+    buffer.ringKeys.push(dedupKey);
   }
-  if (buffer.length > MAX_LIVE_TRADE_EVENTS_PER_MARKET) {
-    buffer.splice(0, buffer.length - MAX_LIVE_TRADE_EVENTS_PER_MARKET);
+  if (buffer.events.length > MAX_LIVE_TRADE_EVENTS_PER_MARKET) {
+    const overflow = buffer.events.length - MAX_LIVE_TRADE_EVENTS_PER_MARKET;
+    buffer.events.splice(0, overflow);
+    const evictedKeys = buffer.ringKeys.splice(0, overflow);
+    for (const oldKey of evictedKeys) {
+      buffer.seenKeys.delete(oldKey);
+    }
   }
 }
 
-export function getLiveTradeEvents(market: string): readonly LiveTradeEvent[] {
-  const key = normalizeMarketKey(market);
+export function getLiveTradeEvents(
+  market: string,
+  scope: LiveTradeEventScope = "base",
+): readonly LiveTradeEvent[] {
+  const normalizedMarket = normalizeMarketKey(market);
+  if (!normalizedMarket) return EMPTY_LIVE_TRADE_EVENTS;
+  const key = bufferKeyFor(normalizedMarket, scope);
   const buffer = marketBuffers.get(key);
-  if (!buffer) return [];
+  if (!buffer) return EMPTY_LIVE_TRADE_EVENTS;
+  // Refresh LRU order on read so actively queried buffers stay cached.
   marketBuffers.delete(key);
   marketBuffers.set(key, buffer);
-  return buffer;
+  return buffer.events;
 }
 
-export function clearLiveTradeEvents(market?: string): void {
+export function clearLiveTradeEvents(market?: string, scope?: LiveTradeEventScope): void {
   if (market === undefined) {
     marketBuffers.clear();
     return;
   }
-  marketBuffers.delete(normalizeMarketKey(market));
+  const normalizedMarket = normalizeMarketKey(market);
+  if (!normalizedMarket) return;
+  if (scope !== undefined) {
+    marketBuffers.delete(bufferKeyFor(normalizedMarket, scope));
+    return;
+  }
+  marketBuffers.delete(bufferKeyFor(normalizedMarket, "base"));
+  marketBuffers.delete(bufferKeyFor(normalizedMarket, "market"));
 }
 
 export function resolveLiveTradeKinds(setting: LiveTradeBubblesKindsSetting | unknown): LiveTradeEventKind[] {
@@ -357,8 +414,13 @@ function unsubscribeInstance(id: string): void {
   const active = activeSubscriptions.get(id);
   if (!active) return;
   activeSubscriptions.delete(id);
+  const shared = sharedSubscriptions.get(active.streamKey);
+  if (!shared || shared.source !== active.source) return;
+  shared.consumers.delete(id);
+  if (shared.consumers.size > 0) return;
+  sharedSubscriptions.delete(active.streamKey);
   try {
-    active.unsubscribe();
+    shared.unsubscribe();
   } catch {
     // Host transport may already be disposed.
   }
@@ -380,23 +442,58 @@ function ensureSubscription(
     return "unsupported";
   }
 
-  const key = `${normalizeMarketKey(market)}|${kinds.join(",")}|${scope}`;
+  const normalizedScope = normalizeScope(scope);
+  const sortedKindsKey = [...kinds].sort().join(",");
+  const streamKey = `${normalizeMarketKey(market)}|${sortedKindsKey}|${normalizedScope}`;
   const current = activeSubscriptions.get(ctx.instance.id);
-  if (current?.key === key) return "ok";
+  if (current?.streamKey === streamKey && current.source === source) {
+    const existingShared = sharedSubscriptions.get(streamKey);
+    if (existingShared && existingShared.source === source) {
+      existingShared.consumers.set(ctx.instance.id, ctx.requestRefresh);
+      return "ok";
+    }
+  }
 
   runIndicatorCleanup(ctx.instance.id);
   unsubscribeInstance(ctx.instance.id);
-  const unsubscribe = source.subscribeLiveTradeEvents({
-    market,
-    kinds,
-    scope,
-    onEvents: (events) => {
-      pushLiveTradeEvents(market, events);
-      ctx.requestRefresh();
-    },
-  });
 
-  activeSubscriptions.set(ctx.instance.id, { key, market, unsubscribe });
+  let shared = sharedSubscriptions.get(streamKey);
+  if (shared && shared.source !== source) {
+    sharedSubscriptions.delete(streamKey);
+    try {
+      shared.unsubscribe();
+    } catch {
+      // Previous host/test data source replaced cleanly.
+    }
+    shared = undefined;
+  }
+
+  if (!shared) {
+    const consumers = new Map<string, () => void>();
+    const entry: SharedStreamSubscription = {
+      streamKey,
+      source,
+      consumers,
+      unsubscribe: () => {},
+    };
+    consumers.set(ctx.instance.id, ctx.requestRefresh);
+    entry.unsubscribe = source.subscribeLiveTradeEvents({
+      market,
+      kinds: [...kinds],
+      scope: normalizedScope,
+      onEvents: (events) => {
+        pushLiveTradeEvents(market, events, normalizedScope);
+        for (const refresh of [...entry.consumers.values()]) {
+          refresh();
+        }
+      },
+    });
+    sharedSubscriptions.set(streamKey, entry);
+  } else {
+    shared.consumers.set(ctx.instance.id, ctx.requestRefresh);
+  }
+
+  activeSubscriptions.set(ctx.instance.id, { streamKey, source });
   registerIndicatorCleanup(ctx.instance.id, () => unsubscribeInstance(ctx.instance.id));
   return "ok";
 }
@@ -425,7 +522,7 @@ function prepareLiveTradeBubbles(ctx: IndicatorDrawContext<LiveTradeBubblesSetti
     };
   }
 
-  const rawEvents = getLiveTradeEvents(market);
+  const rawEvents = getLiveTradeEvents(market, scope);
   const filtered = filterLiveTradeEvents(rawEvents, {
     kinds: (ctx.settings.kinds as LiveTradeBubblesKindsSetting) ?? "both",
     minTradeNotionalUsd: finiteNonNegative(ctx.settings.minTradeNotionalUsd, 50_000),

@@ -721,64 +721,91 @@ export class WebGpuNativeGlyphPipeline {
     this.instanceCapacityGlyphs = Math.max(256, initialCapacityGlyphs);
     this.atlas = precompiled?.atlas ?? getOrCreateGlyphAtlas();
 
-    const shaderModule = precompiled?.shaderModule ?? device.createShaderModule({
-      label: "NativeGlyphSdfShader",
-      code: GLYPH_WGSL,
-    });
+    let uniformBuffer: any = null;
+    let atlasTexture: any = null;
+    let instanceBuffer: any = null;
 
-    this.uniformBuffer = device.createBuffer({
-      label: "NativeGlyphUniforms",
-      size: 32, // resolution vec2 + pad vec2 + clipArea vec4
-      usage: 0x0040 | 0x0008, // UNIFORM | COPY_DST
-    });
-
-    this.atlasTexture = device.createTexture({
-      label: "NativeGlyphSdfAtlasTexture",
-      size: [this.atlas.width, this.atlas.height, 1],
-      format: "rgba8unorm",
-      usage: 0x0004 | 0x0002, // TEXTURE_BINDING | COPY_DST
-    });
-
-    device.queue.writeTexture(
-      { texture: this.atlasTexture },
-      this.atlas.pixels,
-      { bytesPerRow: this.atlas.width * 4, rowsPerImage: this.atlas.height },
-      [this.atlas.width, this.atlas.height, 1],
-    );
-
-    this.sampler = device.createSampler({
-      label: "NativeGlyphSdfSampler",
-      magFilter: "linear",
-      minFilter: "linear",
-      addressModeU: "clamp-to-edge",
-      addressModeV: "clamp-to-edge",
-    });
-
-    const bindGroupLayout = precompiled?.bindGroupLayout ?? WebGpuNativeGlyphPipeline.createBindGroupLayout(device);
-
-    this.bindGroup = device.createBindGroup({
-      label: "NativeGlyphBindGroup",
-      layout: bindGroupLayout,
-      entries: [
-        { binding: 0, resource: { buffer: this.uniformBuffer } },
-        { binding: 1, resource: this.atlasTexture.createView() },
-        { binding: 2, resource: this.sampler },
-      ],
-    });
-
-    if (precompiled?.pipeline) {
-      this.pipeline = precompiled.pipeline;
-    } else {
-      const pipelineLayout = device.createPipelineLayout({
-        label: "NativeGlyphPipelineLayout",
-        bindGroupLayouts: [bindGroupLayout],
+    try {
+      const shaderModule = precompiled?.shaderModule ?? device.createShaderModule({
+        label: "NativeGlyphSdfShader",
+        code: GLYPH_WGSL,
       });
-      this.pipeline = device.createRenderPipeline(
-        WebGpuNativeGlyphPipeline.createRenderPipelineDescriptor(format, shaderModule, pipelineLayout),
-      );
-    }
 
-    this.instanceBuffer = this.allocateInstanceBuffer(this.instanceCapacityGlyphs);
+      uniformBuffer = device.createBuffer({
+        label: "NativeGlyphUniforms",
+        size: 32, // resolution vec2 + pad vec2 + clipArea vec4
+        usage: 0x0040 | 0x0008, // UNIFORM | COPY_DST
+      });
+
+      atlasTexture = device.createTexture({
+        label: "NativeGlyphSdfAtlasTexture",
+        size: [this.atlas.width, this.atlas.height, 1],
+        format: "rgba8unorm",
+        usage: 0x0004 | 0x0002, // TEXTURE_BINDING | COPY_DST
+      });
+
+      device.queue.writeTexture(
+        { texture: atlasTexture },
+        this.atlas.pixels,
+        { bytesPerRow: this.atlas.width * 4, rowsPerImage: this.atlas.height },
+        [this.atlas.width, this.atlas.height, 1],
+      );
+
+      const sampler = device.createSampler({
+        label: "NativeGlyphSdfSampler",
+        magFilter: "linear",
+        minFilter: "linear",
+        addressModeU: "clamp-to-edge",
+        addressModeV: "clamp-to-edge",
+      });
+
+      const bindGroupLayout = precompiled?.bindGroupLayout ?? WebGpuNativeGlyphPipeline.createBindGroupLayout(device);
+
+      const bindGroup = device.createBindGroup({
+        label: "NativeGlyphBindGroup",
+        layout: bindGroupLayout,
+        entries: [
+          { binding: 0, resource: { buffer: uniformBuffer } },
+          { binding: 1, resource: atlasTexture.createView() },
+          { binding: 2, resource: sampler },
+        ],
+      });
+
+      let pipeline: any;
+      if (precompiled?.pipeline) {
+        pipeline = precompiled.pipeline;
+      } else {
+        const pipelineLayout = device.createPipelineLayout({
+          label: "NativeGlyphPipelineLayout",
+          bindGroupLayouts: [bindGroupLayout],
+        });
+        pipeline = device.createRenderPipeline(
+          WebGpuNativeGlyphPipeline.createRenderPipelineDescriptor(format, shaderModule, pipelineLayout),
+        );
+      }
+
+      instanceBuffer = this.allocateInstanceBuffer(this.instanceCapacityGlyphs);
+
+      this.uniformBuffer = uniformBuffer;
+      this.atlasTexture = atlasTexture;
+      this.sampler = sampler;
+      this.bindGroup = bindGroup;
+      this.pipeline = pipeline;
+      this.instanceBuffer = instanceBuffer;
+    } catch (err) {
+      const destroyOnce = (resource: any): void => {
+        if (!resource || typeof resource.destroy !== "function") return;
+        try {
+          resource.destroy();
+        } catch {
+          // Best-effort rollback on partial initialization failure.
+        }
+      };
+      destroyOnce(instanceBuffer);
+      destroyOnce(atlasTexture);
+      destroyOnce(uniformBuffer);
+      throw err;
+    }
   }
 
   private allocateInstanceBuffer(glyphCount: number): any {

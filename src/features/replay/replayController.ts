@@ -104,13 +104,7 @@ export class ReplayController {
       const lastEnd = this.rangeEnd();
       this.virtualTime = Math.max(firstStart, Math.min(this.virtualTime, lastEnd));
     }
-    this.cursor = 0;
-    while (
-      this.cursor < this.bars.length
-      && this.bars[this.cursor].startTime + this.intervalMs <= this.virtualTime
-    ) {
-      this.cursor++;
-    }
+    this.cursor = this.findCompletedCursor(this.virtualTime, 0);
     this.state = this.cursor >= this.bars.length ? "done" : "paused";
     this.emit();
     return { visibleBars: this.bars.slice(0, this.cursor), resume };
@@ -222,15 +216,42 @@ export class ReplayController {
     return last ? last.startTime + this.intervalMs : 0;
   }
 
+  private findCompletedCursor(targetTime: number, hintCursor = this.cursor): number {
+    const len = this.bars.length;
+    if (len === 0) return 0;
+    const intervalMs = this.intervalMs;
+    const clampedHint = Math.max(0, Math.min(hintCursor, len));
+    let lo = 0;
+    let hi = len;
+
+    if (clampedHint === 0 || this.bars[clampedHint - 1].startTime + intervalMs <= targetTime) {
+      let scan = clampedHint;
+      const limit = Math.min(len, clampedHint + 8);
+      while (scan < limit && this.bars[scan].startTime + intervalMs <= targetTime) {
+        scan++;
+      }
+      if (scan === len || this.bars[scan].startTime + intervalMs > targetTime) {
+        return scan;
+      }
+      lo = scan + 1;
+    } else {
+      hi = clampedHint - 1;
+    }
+
+    while (lo < hi) {
+      const mid = (lo + hi) >>> 1;
+      if (this.bars[mid].startTime + intervalMs <= targetTime) {
+        lo = mid + 1;
+      } else {
+        hi = mid;
+      }
+    }
+    return lo;
+  }
+
   private moveClock(time: number): void {
     this.virtualTime = Math.max(this.rangeStart(), Math.min(time, this.rangeEnd()));
-    this.cursor = 0;
-    while (
-      this.cursor < this.bars.length
-      && this.bars[this.cursor].startTime + this.intervalMs <= this.virtualTime
-    ) {
-      this.cursor++;
-    }
+    this.cursor = this.findCompletedCursor(this.virtualTime, this.cursor);
   }
 
   private tick(): void {
