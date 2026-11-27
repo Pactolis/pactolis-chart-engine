@@ -4,6 +4,7 @@ import { compactNumber, drawIndicatorMessage } from "../render/indicatorPaneUi.j
 import { boolSetting, numericSetting, stringSetting } from "./taShared.js";
 import { uiColor, barStatsTextColorDefault, barStatsLabelColor } from "../../../core/ui/seriesPalette.js";
 import { chartLocale, t } from "../../../core/chartLocale.js";
+import { createIndicatorSeriesStateStore } from "./stateRegistry.js";
 
 interface BarStatsSettings extends IndicatorSettings {
   mode: "latest" | "crosshair" | "visible-sum";

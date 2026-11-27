@@ -913,10 +913,6 @@ export class WebGpuNativeScenePipeline {
   private readonly tailBarF32 = new Float32Array(this.tailBarBuffer);
   private readonly tailBarU32 = new Uint32Array(this.tailBarBuffer);
 
-  private readonly tailCellBuffer = new ArrayBuffer(CELL_RECORD_BYTES);
-  private readonly tailCellF32 = new Float32Array(this.tailCellBuffer);
-  private readonly tailCellU32 = new Uint32Array(this.tailCellBuffer);
-
   private readonly viewUniformRaw = new ArrayBuffer(VIEW_UNIFORM_BYTES);
   private readonly viewUniformF32 = new Float32Array(this.viewUniformRaw);
   private readonly viewUniformU32 = new Uint32Array(this.viewUniformRaw);

@@ -253,7 +253,8 @@ export function drawVolumeProfile(
   const key = `${cfg.mode}|${cfg.valueAreaPercent}|${selCount}|${firstStart}|${lastStart}|${series.revision}`;
 
   const prev = host.profileCache;
-  if (prev?.key !== key) {
+  let activeCache = prev;
+  if (!activeCache || activeCache.key !== key) {
     const closedCount = selCount - 1;
     const prefixKey = `${cfg.mode}|${selFrom}|${closedCount > 0 ? firstStart : 0}|${series.resetEpoch}`;
     const accOptions = {
@@ -283,7 +284,7 @@ export function drawVolumeProfile(
     const tailAcc = cloneOrderFlowProfileAccumulator(prefixAcc);
     accumulateOrderFlowProfileBar(tailAcc, all[lastIdx], accOptions);
     const { result, maxVolume } = buildVolumeProfileResultAndMax(tailAcc, cfg.valueAreaPercent);
-    host.profileCache = {
+    activeCache = {
       key,
       result,
       maxVolume,
@@ -293,13 +294,14 @@ export function drawVolumeProfile(
       resetEpoch: series.resetEpoch,
       prefixAcc,
     };
+    host.profileCache = activeCache;
   }
-  const result = host.profileCache.result;
+  const result = activeCache.result;
   if (!result.levels.length) return;
 
   const ctx = host.ctx;
   const step = series.config.priceStep;
-  const maxVolume = host.profileCache.maxVolume;
+  const maxVolume = activeCache.maxVolume;
   const maxWidth = Math.min(180, Math.max(80, view.area.width * 0.22));
   const right = view.area.left + view.area.width - 4;
   ctx.save();

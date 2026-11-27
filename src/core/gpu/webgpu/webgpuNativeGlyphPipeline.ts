@@ -368,7 +368,8 @@ export async function prewarmGlyphAtlasAsync(glyphsPerSlice = 4): Promise<GlyphA
   const state = inProgressAtlasBuild ?? createGlyphAtlasBuildState();
   inProgressAtlasBuild = state;
 
-  const promise = (async () => {
+  let promise!: Promise<GlyphAtlasData>;
+  promise = (async () => {
     try {
       while (!cachedAtlas && inProgressAtlasBuild === state && state.nextIndex < GLYPH_COUNT) {
         processGlyphAtlasSlice(state, sliceSize);
