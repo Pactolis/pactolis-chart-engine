@@ -137,7 +137,7 @@ type WhaleCrowdPreparedData = IndicatorPreparedData<ChartWhaleCrowdVenuePoint, W
 type NativeVenueZSeriesResult = ReturnType<typeof computeVenueNativeZSeries>;
 
 const preparedCache = new BoundedCache<WhaleCrowdPreparedData>({ maxEntries: 64, ttlMs: 60 * 60_000 });
-const nativeZSeriesCache = new BoundedCache<NativeVenueZSeriesResult>({ maxEntries: 64, ttlMs: 60 * 60_000 });
+let nativeZSeriesCache = new WeakMap<object, Map<string, NativeVenueZSeriesResult>>();
 let nativeZSeriesComputeCount = 0;
 let nativeZSeriesCacheHitCount = 0;
 
@@ -147,7 +147,7 @@ export function getWhaleCrowdNativeCacheStats(): { computes: number; hits: numbe
 
 export function resetWhaleCrowdCachesForTests(): void {
   preparedCache.clear();
-  nativeZSeriesCache.clear();
+  nativeZSeriesCache = new WeakMap<object, Map<string, NativeVenueZSeriesResult>>();
   nativeZSeriesComputeCount = 0;
   nativeZSeriesCacheHitCount = 0;
 }
@@ -158,27 +158,37 @@ function getOrComputeVenueNativeZSeries(
   asOfTime: number | undefined,
 ): NativeVenueZSeriesResult {
   const firstT = rawSeries.points.length ? rawSeries.points[0].t : "empty";
-  const lastT = rawSeries.points.length ? rawSeries.points[rawSeries.points.length - 1].t : "empty";
+  const lastPoint = rawSeries.points.length ? rawSeries.points[rawSeries.points.length - 1] : undefined;
+  const lastT = lastPoint ? lastPoint.t : "empty";
+  const lastWhale = lastPoint ? lastPoint.whaleRatio : "empty";
+  const lastCrowd = lastPoint ? lastPoint.crowdRatio : "empty";
   const gapsKey = rawSeries.gaps?.map((g) => `${g.from}-${g.to}`).join(",") ?? "";
-  const nativeKey = [
+  const innerKey = [
     rawSeries.venue,
     rawSeries.status ?? "ready",
     rawSeries.points.length,
     firstT,
     lastT,
+    lastWhale,
+    lastCrowd,
     gapsKey,
     rawSeries.historyStartedAt ?? "",
     zWindowDays,
     asOfTime ?? "live",
   ].join("|");
-  const cached = nativeZSeriesCache.get(nativeKey);
+  let seriesCache = nativeZSeriesCache.get(rawSeries);
+  const cached = seriesCache?.get(innerKey);
   if (cached) {
     nativeZSeriesCacheHitCount += 1;
     return cached;
   }
   nativeZSeriesComputeCount += 1;
   const computed = computeVenueNativeZSeries(rawSeries, zWindowDays, asOfTime);
-  nativeZSeriesCache.set(nativeKey, computed);
+  if (!seriesCache) {
+    seriesCache = new Map<string, NativeVenueZSeriesResult>();
+    nativeZSeriesCache.set(rawSeries, seriesCache);
+  }
+  seriesCache.set(innerKey, computed);
   return computed;
 }
 
@@ -764,7 +774,10 @@ function prepareWhaleCrowdData(ctx: IndicatorDrawContext<WhaleCrowdSettings>): W
     chart.asOfTime ?? "live",
     response.status,
     response.source ?? "",
-    response.venues.map((v) => `${v.venue}:${v.status ?? "ready"}:${v.points.length}:${v.gaps?.length ?? 0}:${v.historyStartedAt ?? ""}`).join(";"),
+    response.venues.map((v) => {
+      const lastPt = v.points.length ? v.points[v.points.length - 1] : undefined;
+      return `${v.venue}:${v.status ?? "ready"}:${v.points.length}:${lastPt ? `${lastPt.t}:${lastPt.whaleRatio}:${lastPt.crowdRatio}` : "empty"}:${v.gaps?.length ?? 0}:${v.historyStartedAt ?? ""}`;
+    }).join(";"),
   ].join("|");
   const cached = preparedCache.get(cacheKey);
   if (cached) return cached;

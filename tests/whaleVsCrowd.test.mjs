@@ -554,3 +554,69 @@ test("CE #419: whaleVsCrowd computes native z-series only once across 100 revisi
   assert.equal(statsAfter100.computes, 2);
   assert.equal(statsAfter100.hits, 200);
 });
+
+test("CE #419: whaleVsCrowd WeakMap cache never collides across different-market responses with identical t grids", () => {
+  resetWhaleCrowdCachesForTests();
+  const series = makeSeries(T0, 120, HOUR_MS);
+  const startMs = T0 - 30 * DAY_MS;
+  const count = 30 * 24 + 120;
+
+  const pointsA = buildVenuePoints({
+    startMs,
+    count,
+    stepMs: HOUR_MS,
+    whaleFn: (i) => 1.2 + Math.sin(i * 0.15) * 0.3,
+    crowdFn: (i) => 0.9 + Math.cos(i * 0.1) * 0.2,
+    resolution: "1h",
+  });
+  const pointsB = buildVenuePoints({
+    startMs,
+    count,
+    stepMs: HOUR_MS,
+    whaleFn: (i) => 2.5 + Math.cos(i * 0.22) * 0.6,
+    crowdFn: (i) => 0.4 + Math.sin(i * 0.18) * 0.15,
+    resolution: "1h",
+  });
+
+  const responseA = {
+    status: "ready",
+    source: "coinalyze",
+    venues: [
+      { venue: "binance", status: "ready", points: pointsA },
+      { venue: "okx", status: "disabled", points: [] },
+      { venue: "hyperliquid", status: "disabled", points: [] },
+    ],
+  };
+  const responseB = {
+    status: "ready",
+    source: "coinalyze",
+    venues: [
+      { venue: "binance", status: "ready", points: pointsB },
+      { venue: "okx", status: "disabled", points: [] },
+      { venue: "hyperliquid", status: "disabled", points: [] },
+    ],
+  };
+
+  let activeResponse = responseB;
+  configureIndicatorDataSource({
+    requestWhaleCrowdSeries: () => ({ status: "ready", data: activeResponse }),
+  });
+
+  const ctx = makeDrawContext(series, { mode: "zScore", venueOkx: false, venueHyperliquid: false }, [20, 100]);
+  const uncachedB = whaleVsCrowdIndicatorDefinition.prepareData(ctx);
+  assert.equal(uncachedB.status, "ok");
+
+  resetWhaleCrowdCachesForTests();
+  activeResponse = responseA;
+  const preparedA = whaleVsCrowdIndicatorDefinition.prepareData(ctx);
+  assert.equal(preparedA.status, "ok");
+
+  activeResponse = responseB;
+  const cachedPathB = whaleVsCrowdIndicatorDefinition.prepareData(ctx);
+  assert.equal(cachedPathB.status, "ok");
+  assert.deepEqual(
+    cachedPathB.meta.venues.binance.points.map((p) => p.zScore),
+    uncachedB.meta.venues.binance.points.map((p) => p.zScore),
+  );
+  assert.equal(getWhaleCrowdNativeCacheStats().computes, 2);
+});

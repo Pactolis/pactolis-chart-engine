@@ -138,7 +138,7 @@ interface HourlyZFunding extends HourlyAlignedFunding {
 }
 
 const preparedCache = new BoundedCache<FundingRegimeData>({ maxEntries: 64, ttlMs: 60 * 60_000 });
-const nativeFundingZCache = new BoundedCache<HourlyZFunding[]>({ maxEntries: 64, ttlMs: 60 * 60_000 });
+let nativeFundingZCache = new WeakMap<object, Map<string, HourlyZFunding[]>>();
 let nativeFundingComputeCount = 0;
 let nativeFundingCacheHitCount = 0;
 
@@ -148,7 +148,7 @@ export function getFundingRegimeNativeCacheStats(): { computes: number; hits: nu
 
 export function resetFundingRegimeCachesForTests(): void {
   preparedCache.clear();
-  nativeFundingZCache.clear();
+  nativeFundingZCache = new WeakMap<object, Map<string, HourlyZFunding[]>>();
   nativeFundingComputeCount = 0;
   nativeFundingCacheHitCount = 0;
 }
@@ -618,6 +618,17 @@ function prepareFundingRegimeData(ctx: IndicatorDrawContext<FundingRegimeSetting
     zSource,
   };
 
+  const venueSignature = selectedVenues.map((venue) => {
+    const s = response.series.find((item) => item.venue === venue);
+    if (!s) return `${venue}:missing`;
+    const lastSettled = s.settled.length ? s.settled[s.settled.length - 1] : undefined;
+    return `${venue}:${s.settled.length}:${lastSettled ? `${lastSettled.t}:${lastSettled.rate8h}` : "ns"}:${s.current?.t ?? "nc"}:${s.current?.rate8h ?? "nr"}`;
+  }).join(";");
+  const lastAgg = response.aggregate?.points.length
+    ? response.aggregate.points[response.aggregate.points.length - 1]
+    : undefined;
+  const aggSignature = `${response.aggregate?.points.length ?? 0}:${lastAgg ? `${lastAgg.t}:${lastAgg.rate8h}` : "na"}:${response.aggregate?.current?.t ?? "na"}:${response.aggregate?.current?.rate8h ?? "nr"}`;
+
   const cacheKey = [
     ctx.instance.id,
     ctx.series.revision,
@@ -633,9 +644,8 @@ function prepareFundingRegimeData(ctx: IndicatorDrawContext<FundingRegimeSetting
     chart.asOfTime ?? "live",
     response.from,
     response.to,
-    response.series.map((s) => `${s.venue}:${s.settled.length}:${s.current?.t ?? "nc"}`).join(";"),
-    response.aggregate?.points.length ?? 0,
-    response.aggregate?.current?.t ?? "na",
+    venueSignature,
+    aggSignature,
   ].join("|");
   const cached = preparedCache.get(cacheKey);
   if (cached) return cached;
@@ -647,7 +657,7 @@ function prepareFundingRegimeData(ctx: IndicatorDrawContext<FundingRegimeSetting
   const rawNativeToMs = Number.isFinite(response.to) ? Math.max(response.to, bucketedToMs) : bucketedToMs;
   const nativeToMs = chart.asOfTime !== undefined ? Math.min(rawNativeToMs, chart.asOfTime) : rawNativeToMs;
 
-  const nativeKey = [
+  const innerKey = [
     zWindowDays,
     zSource,
     selectedVenues.join(","),
@@ -656,11 +666,11 @@ function prepareFundingRegimeData(ctx: IndicatorDrawContext<FundingRegimeSetting
     nativeToMs,
     response.from,
     response.to,
-    response.series.map((s) => `${s.venue}:${s.settled.length}:${s.current?.t ?? "nc"}`).join(";"),
-    response.aggregate?.points.length ?? 0,
-    response.aggregate?.current?.t ?? "na",
+    venueSignature,
+    aggSignature,
   ].join("|");
-  let hourlyZ = nativeFundingZCache.get(nativeKey);
+  let responseCache = nativeFundingZCache.get(response);
+  let hourlyZ = responseCache?.get(innerKey);
   if (hourlyZ) {
     nativeFundingCacheHitCount += 1;
   } else {
@@ -674,7 +684,11 @@ function prepareFundingRegimeData(ctx: IndicatorDrawContext<FundingRegimeSetting
       chart.asOfTime,
     );
     hourlyZ = attachRollingZScores(hourly, zWindowDays);
-    nativeFundingZCache.set(nativeKey, hourlyZ);
+    if (!responseCache) {
+      responseCache = new Map<string, HourlyZFunding[]>();
+      nativeFundingZCache.set(response, responseCache);
+    }
+    responseCache.set(innerKey, hourlyZ);
   }
   const points = mapToVisibleChartCandles(ctx, hourlyZ);
 
