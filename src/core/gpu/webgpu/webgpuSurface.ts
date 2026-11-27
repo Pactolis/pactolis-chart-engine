@@ -229,9 +229,27 @@ export class WebGpuSurface implements GpuSurface {
         }
 
         if (includeHeatmap && !this.disposed && !this.handle.isLost() && this.supportsNativeHeatmap()) {
-          const heatmapPipeline = this.ensureNativeHeatmapPipeline();
-          if (heatmapPipeline) {
-            await heatmapPipeline.prewarmResidentPipelineAsync();
+          if (!this.nativeHeatmapPipeline) {
+            try {
+              const heatmapPipeline = await WebGpuNativeHeatmapPipeline.createAsync(
+                device,
+                this.handle.format,
+                this.handle.limits?.maxBufferSize,
+              );
+              if (this.disposed || this.handle.isLost()) {
+                heatmapPipeline.dispose();
+                return;
+              }
+              if (!this.nativeHeatmapPipeline) {
+                this.nativeHeatmapPipeline = heatmapPipeline;
+              } else {
+                heatmapPipeline.dispose();
+              }
+            } catch {
+              // Keep demand-time init behavior intact if speculative async prewarm fails.
+            }
+          } else {
+            await this.nativeHeatmapPipeline.prewarmResidentPipelineAsync();
           }
         }
       } catch {

@@ -334,26 +334,16 @@ export class WebGpuNativeHeatmapPipeline {
   private readonly residentUploadedUniformU32 = new Uint32Array(RESIDENT_HEATMAP_UNIFORM_WORDS);
   private hasUploadedResidentUniform = false;
 
-  constructor(
-    private readonly device: any,
-    public readonly format: string,
-    maxBufferSize?: number,
-  ) {
-    this.maxBufferSize = maxBufferSize ?? device.limits?.maxBufferSize ?? 268435456;
-
+  private static createImmediateDescriptors(
+    device: any,
+    format: string,
+  ): { bindGroupLayout: any; descriptor: any } {
     const module = device.createShaderModule({
       label: "NativeHeatmapShader",
       code: NATIVE_HEATMAP_WGSL,
     });
 
-    this.uniformBuffer = device.createBuffer({
-      label: "NativeHeatmapUniform",
-      size: HEATMAP_UNIFORM_BYTES,
-      usage: 0x0040 | 0x0008, // UNIFORM | COPY_DST
-    });
-    this.reserve(HEATMAP_UNIFORM_BYTES);
-
-    this.bindGroupLayout = device.createBindGroupLayout({
+    const bindGroupLayout = device.createBindGroupLayout({
       label: "NativeHeatmapBindGroupLayout",
       entries: [
         { binding: 0, visibility: 0x1, buffer: { type: "uniform" } },
@@ -363,10 +353,10 @@ export class WebGpuNativeHeatmapPipeline {
 
     const pipelineLayout = device.createPipelineLayout({
       label: "NativeHeatmapPipelineLayout",
-      bindGroupLayouts: [this.bindGroupLayout],
+      bindGroupLayouts: [bindGroupLayout],
     });
 
-    this.renderPipeline = device.createRenderPipeline({
+    const descriptor = {
       label: "NativeHeatmapRenderPipeline",
       layout: pipelineLayout,
       vertex: {
@@ -395,7 +385,54 @@ export class WebGpuNativeHeatmapPipeline {
         ],
       },
       primitive: { topology: "triangle-list" },
+    };
+
+    return { bindGroupLayout, descriptor };
+  }
+
+  static async createAsync(
+    device: any,
+    format: string,
+    maxBufferSize?: number,
+  ): Promise<WebGpuNativeHeatmapPipeline> {
+    const { bindGroupLayout, descriptor } = WebGpuNativeHeatmapPipeline.createImmediateDescriptors(device, format);
+    const renderPipeline = typeof device.createRenderPipelineAsync === "function"
+      ? await device.createRenderPipelineAsync(descriptor)
+      : device.createRenderPipeline(descriptor);
+    const pipeline = new WebGpuNativeHeatmapPipeline(device, format, maxBufferSize, {
+      bindGroupLayout,
+      renderPipeline,
     });
+    await pipeline.prewarmResidentPipelineAsync();
+    return pipeline;
+  }
+
+  constructor(
+    private readonly device: any,
+    public readonly format: string,
+    maxBufferSize?: number,
+    precompiled?: {
+      bindGroupLayout?: any;
+      renderPipeline?: any;
+    },
+  ) {
+    this.maxBufferSize = maxBufferSize ?? device.limits?.maxBufferSize ?? 268435456;
+
+    this.uniformBuffer = device.createBuffer({
+      label: "NativeHeatmapUniform",
+      size: HEATMAP_UNIFORM_BYTES,
+      usage: 0x0040 | 0x0008, // UNIFORM | COPY_DST
+    });
+    this.reserve(HEATMAP_UNIFORM_BYTES);
+
+    if (precompiled?.bindGroupLayout && precompiled?.renderPipeline) {
+      this.bindGroupLayout = precompiled.bindGroupLayout;
+      this.renderPipeline = precompiled.renderPipeline;
+    } else {
+      const { bindGroupLayout, descriptor } = WebGpuNativeHeatmapPipeline.createImmediateDescriptors(device, format);
+      this.bindGroupLayout = bindGroupLayout;
+      this.renderPipeline = device.createRenderPipeline(descriptor);
+    }
 
     const initialBytes = Math.max(HEATMAP_CELL_RECORD_BYTES, 256 * HEATMAP_CELL_RECORD_BYTES);
     this.reserve(initialBytes);

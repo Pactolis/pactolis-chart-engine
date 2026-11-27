@@ -101,19 +101,15 @@ test("#409: VWAP incremental tail updates match calculateVwapSeries for current,
   series.addTrade({ time: lastTime + 5_000, price: 112, qty: 25, isBuy: true, liquidation: false, source: "live" });
   const afterTick = vwapIndicatorDefinition.prepareData(makeCtx(series, instance, [0, series.length]));
 
-  // 2. Append a new bar crossing into next day rollover
+  // 2. Append a new bar via live rollover trade crossing into next day
   const rolloverTime = BASE_TIME + 72 * INTERVAL;
-  series.upsertBar({
-    startTime: rolloverTime,
-    open: 110,
-    high: 115,
-    low: 108,
-    close: 114,
-    volume: 42,
-    delta: 6,
-    count: 5,
-    cells: new Map(),
-    completeness: "complete",
+  series.addTrade({
+    time: rolloverTime + 5_000,
+    price: 114,
+    qty: 42,
+    isBuy: true,
+    liquidation: false,
+    source: "live",
   });
   const afterAppend = vwapIndicatorDefinition.prepareData(makeCtx(series, instance, [0, series.length]));
 

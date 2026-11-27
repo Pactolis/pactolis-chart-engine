@@ -196,41 +196,43 @@ test("#408: WebGpuSurface.prewarmAsync compiles scene, LOD, glyph, and resident 
   resetGlyphAtlasForTest();
   const { canvas, handle, syncPipelineCalls, asyncPipelineCalls } = makeFakeWebGpuSurfaceEnv();
   const surface = new WebGpuSurface(canvas, handle);
-  // Clear initial WebGpuQuadPipeline construction call from constructor.
-  syncPipelineCalls.length = 0;
+  try {
+    // Clear initial WebGpuQuadPipeline construction call from constructor.
+    syncPipelineCalls.length = 0;
 
-  await surface.prewarmAsync();
+    await surface.prewarmAsync();
 
-  assert.equal(syncPipelineCalls.length, 0, "prewarmAsync should use async pipeline compilation APIs");
-  assert.ok(asyncPipelineCalls.some((x) => x.includes("NativeScene") || x.includes("NativeCell") || x.includes("NativeMerged")));
-  assert.ok(asyncPipelineCalls.some((x) => x.includes("NativeGlyphSdfRenderPipeline")));
-  assert.ok(asyncPipelineCalls.some((x) => x.includes("NativeResidentHeatmapRenderPipeline")));
+    assert.equal(syncPipelineCalls.length, 0, "prewarmAsync should use async pipeline compilation APIs");
+    assert.ok(asyncPipelineCalls.some((x) => x.includes("NativeScene") || x.includes("NativeCell") || x.includes("NativeMerged")));
+    assert.ok(asyncPipelineCalls.some((x) => x.includes("NativeGlyphSdfRenderPipeline")));
+    assert.ok(asyncPipelineCalls.some((x) => x.includes("NativeResidentHeatmapRenderPipeline")));
 
-  // First renderNativeScene frame must not synchronously compile any pipeline
-  const series = makeRichSeries(4);
-  const rendered = surface.renderNativeScene({ r: 0, g: 0, b: 0, a: 1 }, 800, 600, {
-    series,
-    view: {
-      area: { left: 0, top: 0, width: 800, height: 600 },
-      offsetX: 0,
-      colWidth: 20,
-      priceTop: 120,
-      pricePerPx: 0.5,
-      candleWidth: 10,
-    },
-    lodMode: "standard",
-    drawCandles: true,
-    drawFootprint: true,
-    drawHeat: false,
-    drawPoc: false,
-    drawFootprintText: false,
-    candleStyle: "strip",
-  });
-  assert.equal(rendered, true);
-  assert.equal(syncPipelineCalls.length, 0, "first render frame after prewarm must not compile synchronously");
-
-  surface.dispose();
-  resetGlyphAtlasForTest();
+    // First renderNativeScene frame must not synchronously compile any pipeline
+    const series = makeRichSeries(4);
+    const rendered = surface.renderNativeScene({ r: 0, g: 0, b: 0, a: 1 }, 800, 600, {
+      series,
+      view: {
+        area: { left: 0, top: 0, width: 800, height: 600 },
+        offsetX: 0,
+        colWidth: 20,
+        priceTop: 120,
+        pricePerPx: 0.5,
+        candleWidth: 10,
+      },
+      lodMode: "standard",
+      drawCandles: true,
+      drawFootprint: true,
+      drawHeat: false,
+      drawPoc: false,
+      drawFootprintText: false,
+      candleStyle: "strip",
+    });
+    assert.equal(rendered, true);
+    assert.equal(syncPipelineCalls.length, 0, "first render frame after prewarm must not compile synchronously");
+  } finally {
+    surface.dispose();
+    resetGlyphAtlasForTest();
+  }
 });
 
 test("#409: drawVolumeProfile updates incrementally on tail tick/append and matches calculateVolumeProfile", () => {
@@ -281,18 +283,15 @@ test("#409: drawVolumeProfile updates incrementally on tail tick/append and matc
     drawVolumeProfile(host, view, series, [0, series.length]);
     assert.equal(host.profileCache.prefixAcc, initialAcc, "tail tick must reuse closed-prefix accumulator");
 
-    // Append new bar -> advances closed-prefix accumulator in place
-    series.upsertBar({
-      startTime: BASE_TIME + 15 * INTERVAL,
-      open: 102,
-      high: 104,
-      low: 101,
-      close: 103,
-      volume: 20,
-      delta: 4,
-      count: 2,
-      cells: new Map([[102, { priceBin: 102, buyVol: 12, sellVol: 8, count: 2 }]]),
-      completeness: "complete",
+    // Live bar rollover via addTrade -> advances closed-prefix accumulator in place without nonTail bump
+    series.addTrade({
+      time: BASE_TIME + 15 * INTERVAL + 5_000,
+      price: 102,
+      qty: 20,
+      isBuy: true,
+      liquidation: false,
+      market: "BINANCE_FUTURES:btcusdt",
+      source: "live",
     });
     drawVolumeProfile(host, view, series, [0, series.length]);
     assert.equal(host.profileCache.prefixAcc, initialAcc, "tail bar append must reuse prefix accumulator");
@@ -403,7 +402,8 @@ test("#410: priceAxisRenderer and timeAxisRenderer cache measureText widths per 
   view.area = { left: 0, top: 0, width: 800, height: 400 };
   view.priceAxisW = 70;
   view.fitPriceRange(95, 115);
-  view.fitBarRange(0, 8);
+  view.offsetX = 0;
+  view.colWidth = 20;
 
   const p = makeCounting2dCtx();
   const displayOptions = resolveChartDisplayOptions({});
