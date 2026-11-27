@@ -160,6 +160,7 @@ test("#426: hot-path drawSeriesPath, ichimokuCloudSegments, orderFlowProfile, an
   const multiPrepared = {
     status: "ok",
     points: [],
+    range: { min: -5, max: 140 },
     meta: {
       startIndex: 0,
       endIndex: 40,
@@ -556,7 +557,7 @@ test("#423: WebGPU heatmap lazy immediate pipeline, deduplicated prewarm, zero-a
       { r: 0, g: 0, b: 0, a: 1 },
       800,
       600,
-      { view, generation: 1, tailRevision: 1, candleTotalCount: 0, cellTotalCount: 0, chartType: "candlestick", readCandle: () => null, readCell: () => null },
+      { view, series: new FootprintSeries({ intervalMs: 60_000, priceStep: 1 }), drawFootprint: false, generation: 1, tailRevision: 1, candleTotalCount: 0, cellTotalCount: 0, chartType: "candlestick", readCandle: () => null, readCell: () => null },
     );
     assert.equal(okScene, true);
     assert.equal(submitCalls, 0, "renderNativeScene defers submit during beginNativeComposite");
