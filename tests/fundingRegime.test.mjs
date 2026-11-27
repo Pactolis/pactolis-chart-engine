@@ -597,8 +597,9 @@ test("CE #419: fundingRegime updates z-score immediately when current.rate8h cha
   const series = makeSeries(T0 + 30 * DAY_MS, 120, HOUR_MS);
   const fromMs = T0;
   const toMs = T0 + 35 * DAY_MS;
+  const settledToMs = toMs - 4 * HOUR_MS;
   const aggPoints = [];
-  for (let t = fromMs + HOUR_MS; t <= toMs; t += HOUR_MS) {
+  for (let t = fromMs + HOUR_MS; t <= settledToMs; t += HOUR_MS) {
     aggPoints.push({
       t,
       rate8h: 0.0001 + Math.sin(t / HOUR_MS * 0.1) * 0.00005,
@@ -606,12 +607,18 @@ test("CE #419: fundingRegime updates z-score immediately when current.rate8h cha
     });
   }
 
+  const venueSeries = buildFourVenueSettledSeries(fromMs, settledToMs, (t) => 0.0001 + Math.sin(t / HOUR_MS * 0.1) * 0.00005)
+    .map((s) => ({
+      ...s,
+      current: { t: toMs, rate8h: 0.0001 },
+    }));
+
   const response = {
     market: "BTCUSDT",
     from: fromMs,
     to: toMs,
     venues: ["binancef", "bybitf", "okxf", "hyperliquid"],
-    series: buildFourVenueSettledSeries(fromMs, toMs, (t) => 0.0001 + Math.sin(t / HOUR_MS * 0.1) * 0.00005),
+    series: venueSeries,
     aggregate: {
       points: aggPoints,
       current: { t: toMs, rate8h: 0.0001, venues: ["binancef", "bybitf", "okxf", "hyperliquid"] },
