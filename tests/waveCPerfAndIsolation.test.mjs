@@ -212,7 +212,7 @@ test("#426: hot-path drawSeriesPath, ichimokuCloudSegments, orderFlowProfile, an
   const ptsA = [
     { index: 2, value: 12 },
     { index: 3, value: 14 },
-    { index: 4, value: 9 },
+    { index: 4, value: 7 },
     { index: 6, value: 15 },
   ];
   const ptsB = [
