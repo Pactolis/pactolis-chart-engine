@@ -115,11 +115,20 @@ test("Order Flow Profile oi-delta vs volume live tick browser performance and sp
     const deadline = performance.now() + 20_000;
     while (performance.now() < deadline) {
       const rt = harness.getChartRuntime(panelId);
-      if (rt && rt.pipeline.series.length >= 60) break;
+      if (
+        rt
+        && rt.pipeline.series.length >= 60
+        && rt.getCaptureReadiness().history.status === "settled"
+      ) {
+        break;
+      }
       await new Promise((r) => setTimeout(r, 25));
     }
     const rt = harness.getChartRuntime(panelId)!;
     const allBars = rt.pipeline.series.listReadonly();
+    if (allBars.length >= 2) {
+      rt.setVisibleTimeRange({ from: allBars[0].startTime, to: allBars[allBars.length - 1].startTime });
+    }
     const intervalMs = rt.pipeline.series.config.intervalMs;
     const oiPoints = allBars.map((b, i) => ({
       time: b.startTime,
