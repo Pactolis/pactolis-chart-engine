@@ -145,10 +145,10 @@ export class QuadBatch implements QuadSink {
     gl.useProgram(this.program);
     gl.bindVertexArray(this.vao);
     gl.bindBuffer(gl.ARRAY_BUFFER, this.instanceBuffer);
-    if (this.floatData.byteLength > this.gpuCapacityBytes) {
+    if (this.gpuCapacityBytes === 0 || this.floatData.byteLength > this.gpuCapacityBytes) {
       this.gpuCapacityBytes = this.floatData.byteLength;
+      gl.bufferData(gl.ARRAY_BUFFER, this.gpuCapacityBytes, gl.DYNAMIC_DRAW);
     }
-    gl.bufferData(gl.ARRAY_BUFFER, this.gpuCapacityBytes, gl.DYNAMIC_DRAW);
     const upload = this.floatData.subarray(0, this.count * WORDS_PER_INSTANCE);
     gl.bufferSubData(gl.ARRAY_BUFFER, 0, upload);
     incrementPerformanceCounter("gpu.upload.bytes", upload.byteLength);

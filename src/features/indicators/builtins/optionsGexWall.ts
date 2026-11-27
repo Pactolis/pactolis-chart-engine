@@ -47,6 +47,27 @@ interface AxisLevelTag {
 
 const cache = new Map<string, CacheEntry>();
 const CACHE_TTL_MS = 60_000;
+const MAX_CACHE_ENTRIES = 32;
+
+function pruneExpiredCache(now: number, keepKey?: string): void {
+  for (const [key, entry] of cache) {
+    if (key === keepKey) continue;
+    if (now - entry.requestedAt >= CACHE_TTL_MS) {
+      cache.delete(key);
+    }
+  }
+}
+
+function setCacheEntry(key: string, entry: CacheEntry, now = entry.requestedAt): void {
+  pruneExpiredCache(now, key);
+  cache.delete(key);
+  cache.set(key, entry);
+  while (cache.size > MAX_CACHE_ENTRIES) {
+    const oldestKey = cache.keys().next().value as string | undefined;
+    if (oldestKey === undefined) break;
+    cache.delete(oldestKey);
+  }
+}
 
 function inferBase(settings: OptionsGexWallSettings, market: string | undefined): OptionsGexBase {
   if (settings.base !== "auto") return settings.base;
@@ -74,29 +95,36 @@ function normalizeStrikeCount(value: number): number {
 
 function requestSurface(base: OptionsGexBase, maxExpiryDays: number, onUpdate: () => void): CacheEntry {
   const key = cacheKey(base, maxExpiryDays);
-  const existing = cache.get(key);
   const now = Date.now();
-  if (existing && now - existing.requestedAt < CACHE_TTL_MS) return existing;
+  const existing = cache.get(key);
+  if (existing && now - existing.requestedAt < CACHE_TTL_MS) {
+    cache.delete(key);
+    cache.set(key, existing);
+    pruneExpiredCache(now, key);
+    return existing;
+  }
+  const staleSurface = existing && "surface" in existing ? existing.surface : undefined;
+  pruneExpiredCache(now);
   const entry: CacheEntry = {
     status: "loading",
     requestedAt: now,
     promise: indicatorDataSource().fetchOptionsGexSurface({ base, maxExpiryDays })
       .then((surface) => {
-        cache.set(key, { status: "ok", surface, requestedAt: Date.now() });
+        setCacheEntry(key, { status: "ok", surface, requestedAt: Date.now() });
         onUpdate();
       })
       .catch((reason) => {
-        cache.set(key, {
+        setCacheEntry(key, {
           status: "error",
           error: reason instanceof Error ? reason.message : "options gex load failed",
           requestedAt: Date.now(),
-          surface: existing && "surface" in existing ? existing.surface : undefined,
+          surface: staleSurface,
         });
         onUpdate();
       }),
-    surface: existing && "surface" in existing ? existing.surface : undefined,
+    surface: staleSurface,
   };
-  cache.set(key, entry);
+  setCacheEntry(key, entry, now);
   return entry;
 }
 

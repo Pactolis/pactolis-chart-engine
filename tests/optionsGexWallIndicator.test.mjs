@@ -1,6 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { optionsGexWallIndicatorDefinition } from "../dist/features/indicators/builtins/optionsGexWall.js";
+import { configureIndicatorDataSource, indicatorDataSource } from "../dist/features/indicators/indicatorDataSource.js";
 
 function surface(withZones = true) {
   const value = {
@@ -105,4 +106,68 @@ test("Options GEX showPlotLabel hides in-chart tags without hiding levels or que
   assert.equal(hidden.texts.length, 0);
   assert.equal(hidden.labels.length, 4);
   assert.equal(hidden.fills.filter((fill) => fill.width === 500 && fill.alpha === 0.12).length, 3);
+});
+
+test("Options GEX surface cache evicts LRU entries past maxEntries and prunes expired TTL entries (#405)", async () => {
+  let prevDs = null;
+  try {
+    prevDs = indicatorDataSource();
+  } catch {}
+
+  const realNow = Date.now;
+  let fakeNow = 1_700_000_000_000;
+  Date.now = () => fakeNow;
+
+  const fetchCalls = [];
+  configureIndicatorDataSource({
+    requestLiquidationSeries: () => ({ status: "idle" }),
+    requestCoinalyzeDerivativeSeries: () => ({ status: "idle" }),
+    requestFuturesPositioningSeries: () => ({ status: "idle" }),
+    fetchOptionsGexSurface: async ({ base, maxExpiryDays }) => {
+      fetchCalls.push(`${base}:${maxExpiryDays}`);
+      return surface(true);
+    },
+  });
+
+  const makePrepareCtx = (market, maxExpiryDays) => ({
+    ctx: canvasRecorder().canvas,
+    settings: { ...optionsGexWallIndicatorDefinition.defaultSettings(), maxExpiryDays },
+    instance: { visible: true },
+    view: { area: { left: 0, top: 0, width: 500, height: 240 }, yOfPrice: () => 100 },
+    chart: { market, timeframe: "1h", intervalMs: 3_600_000 },
+    requestRefresh: () => {},
+  });
+
+  const flushMicrotasks = async () => {
+    await Promise.resolve();
+    await Promise.resolve();
+  };
+
+  try {
+    // 1. Fill cache beyond MAX_CACHE_ENTRIES (32) with distinct BTC expiry keys.
+    for (let d = 1; d <= 33; d++) {
+      optionsGexWallIndicatorDefinition.prepareData(makePrepareCtx("BINANCE:BTCUSDT", d));
+      await flushMicrotasks();
+    }
+    assert.equal(fetchCalls.length, 33);
+
+    // Key BTC:33 is still cached (no new fetch), while BTC:1 was evicted (triggers new fetch).
+    optionsGexWallIndicatorDefinition.prepareData(makePrepareCtx("BINANCE:BTCUSDT", 33));
+    assert.equal(fetchCalls.length, 33);
+    optionsGexWallIndicatorDefinition.prepareData(makePrepareCtx("BINANCE:BTCUSDT", 1));
+    await flushMicrotasks();
+    assert.equal(fetchCalls.length, 34);
+
+    // 2. Advance past CACHE_TTL_MS (60s) -> expired entries are pruned and re-fetched.
+    fakeNow += 61_000;
+    optionsGexWallIndicatorDefinition.prepareData(makePrepareCtx("BINANCE:ETHUSDT", 60));
+    await flushMicrotasks();
+    const beforeExpiryRefetch = fetchCalls.length;
+    optionsGexWallIndicatorDefinition.prepareData(makePrepareCtx("BINANCE:BTCUSDT", 33));
+    await flushMicrotasks();
+    assert.equal(fetchCalls.length, beforeExpiryRefetch + 1);
+  } finally {
+    Date.now = realNow;
+    if (prevDs) configureIndicatorDataSource(prevDs);
+  }
 });

@@ -334,26 +334,16 @@ export class WebGpuNativeHeatmapPipeline {
   private readonly residentUploadedUniformU32 = new Uint32Array(RESIDENT_HEATMAP_UNIFORM_WORDS);
   private hasUploadedResidentUniform = false;
 
-  constructor(
-    private readonly device: any,
-    public readonly format: string,
-    maxBufferSize?: number,
-  ) {
-    this.maxBufferSize = maxBufferSize ?? device.limits?.maxBufferSize ?? 268435456;
-
+  private static createImmediateDescriptors(
+    device: any,
+    format: string,
+  ): { bindGroupLayout: any; descriptor: any } {
     const module = device.createShaderModule({
       label: "NativeHeatmapShader",
       code: NATIVE_HEATMAP_WGSL,
     });
 
-    this.uniformBuffer = device.createBuffer({
-      label: "NativeHeatmapUniform",
-      size: HEATMAP_UNIFORM_BYTES,
-      usage: 0x0040 | 0x0008, // UNIFORM | COPY_DST
-    });
-    this.reserve(HEATMAP_UNIFORM_BYTES);
-
-    this.bindGroupLayout = device.createBindGroupLayout({
+    const bindGroupLayout = device.createBindGroupLayout({
       label: "NativeHeatmapBindGroupLayout",
       entries: [
         { binding: 0, visibility: 0x1, buffer: { type: "uniform" } },
@@ -363,10 +353,10 @@ export class WebGpuNativeHeatmapPipeline {
 
     const pipelineLayout = device.createPipelineLayout({
       label: "NativeHeatmapPipelineLayout",
-      bindGroupLayouts: [this.bindGroupLayout],
+      bindGroupLayouts: [bindGroupLayout],
     });
 
-    this.renderPipeline = device.createRenderPipeline({
+    const descriptor = {
       label: "NativeHeatmapRenderPipeline",
       layout: pipelineLayout,
       vertex: {
@@ -395,7 +385,54 @@ export class WebGpuNativeHeatmapPipeline {
         ],
       },
       primitive: { topology: "triangle-list" },
+    };
+
+    return { bindGroupLayout, descriptor };
+  }
+
+  static async createAsync(
+    device: any,
+    format: string,
+    maxBufferSize?: number,
+  ): Promise<WebGpuNativeHeatmapPipeline> {
+    const { bindGroupLayout, descriptor } = WebGpuNativeHeatmapPipeline.createImmediateDescriptors(device, format);
+    const renderPipeline = typeof device.createRenderPipelineAsync === "function"
+      ? await device.createRenderPipelineAsync(descriptor)
+      : device.createRenderPipeline(descriptor);
+    const pipeline = new WebGpuNativeHeatmapPipeline(device, format, maxBufferSize, {
+      bindGroupLayout,
+      renderPipeline,
     });
+    await pipeline.prewarmResidentPipelineAsync();
+    return pipeline;
+  }
+
+  constructor(
+    private readonly device: any,
+    public readonly format: string,
+    maxBufferSize?: number,
+    precompiled?: {
+      bindGroupLayout?: any;
+      renderPipeline?: any;
+    },
+  ) {
+    this.maxBufferSize = maxBufferSize ?? device.limits?.maxBufferSize ?? 268435456;
+
+    this.uniformBuffer = device.createBuffer({
+      label: "NativeHeatmapUniform",
+      size: HEATMAP_UNIFORM_BYTES,
+      usage: 0x0040 | 0x0008, // UNIFORM | COPY_DST
+    });
+    this.reserve(HEATMAP_UNIFORM_BYTES);
+
+    if (precompiled?.bindGroupLayout && precompiled?.renderPipeline) {
+      this.bindGroupLayout = precompiled.bindGroupLayout;
+      this.renderPipeline = precompiled.renderPipeline;
+    } else {
+      const { bindGroupLayout, descriptor } = WebGpuNativeHeatmapPipeline.createImmediateDescriptors(device, format);
+      this.bindGroupLayout = bindGroupLayout;
+      this.renderPipeline = device.createRenderPipeline(descriptor);
+    }
 
     const initialBytes = Math.max(HEATMAP_CELL_RECORD_BYTES, 256 * HEATMAP_CELL_RECORD_BYTES);
     this.reserve(initialBytes);
@@ -758,6 +795,87 @@ export class WebGpuNativeHeatmapPipeline {
     }
   }
 
+  private createResidentDescriptors(): { bindGroupLayout: any; descriptor: any } {
+    const module = this.device.createShaderModule({
+      label: "NativeResidentHeatmapShader",
+      code: NATIVE_RESIDENT_HEATMAP_WGSL,
+    });
+
+    const bindGroupLayout = this.device.createBindGroupLayout({
+      label: "NativeResidentHeatmapBindGroupLayout",
+      entries: [
+        { binding: 0, visibility: 0x1, buffer: { type: "uniform" } },
+        { binding: 1, visibility: 0x1, buffer: { type: "read-only-storage" } },
+      ],
+    });
+
+    const pipelineLayout = this.device.createPipelineLayout({
+      label: "NativeResidentHeatmapPipelineLayout",
+      bindGroupLayouts: [bindGroupLayout],
+    });
+
+    const descriptor = {
+      label: "NativeResidentHeatmapRenderPipeline",
+      layout: pipelineLayout,
+      vertex: {
+        module,
+        entryPoint: "vs_main",
+      },
+      fragment: {
+        module,
+        entryPoint: "fs_main",
+        targets: [
+          {
+            format: this.format,
+            blend: {
+              color: {
+                srcFactor: "src-alpha",
+                dstFactor: "one-minus-src-alpha",
+                operation: "add",
+              },
+              alpha: {
+                srcFactor: "one",
+                dstFactor: "one-minus-src-alpha",
+                operation: "add",
+              },
+            },
+          },
+        ],
+      },
+      primitive: { topology: "triangle-list" },
+    };
+
+    return { bindGroupLayout, descriptor };
+  }
+
+  /**
+   * Asynchronously pre-compiles the resident heatmap render pipeline so first-frame
+   * transitions into resident mode avoid synchronous shader compilation stalls.
+   */
+  async prewarmResidentPipelineAsync(): Promise<boolean> {
+    if (this.disposed) return false;
+    if (!this.residentUniformBuffer) {
+      this.reserve(RESIDENT_HEATMAP_UNIFORM_BYTES);
+      this.residentUniformBuffer = this.device.createBuffer({
+        label: "NativeResidentHeatmapUniform",
+        size: RESIDENT_HEATMAP_UNIFORM_BYTES,
+        usage: 0x0040 | 0x0008, // UNIFORM | COPY_DST
+      });
+    }
+    if (!this.residentRenderPipeline) {
+      const { bindGroupLayout, descriptor } = this.createResidentDescriptors();
+      const pipeline = typeof this.device.createRenderPipelineAsync === "function"
+        ? await this.device.createRenderPipelineAsync(descriptor)
+        : this.device.createRenderPipeline(descriptor);
+      if (this.disposed) return false;
+      if (!this.residentRenderPipeline) {
+        this.residentBindGroupLayout = bindGroupLayout;
+        this.residentRenderPipeline = pipeline;
+      }
+    }
+    return this.ensureResidentStorageCells(0);
+  }
+
   private ensureResidentPipelineResources(): boolean {
     if (this.residentRenderPipeline && this.residentUniformBuffer && this.residentCellBuffer) {
       return true;
@@ -773,54 +891,9 @@ export class WebGpuNativeHeatmapPipeline {
     }
 
     if (!this.residentRenderPipeline) {
-      const module = this.device.createShaderModule({
-        label: "NativeResidentHeatmapShader",
-        code: NATIVE_RESIDENT_HEATMAP_WGSL,
-      });
-
-      this.residentBindGroupLayout = this.device.createBindGroupLayout({
-        label: "NativeResidentHeatmapBindGroupLayout",
-        entries: [
-          { binding: 0, visibility: 0x1, buffer: { type: "uniform" } },
-          { binding: 1, visibility: 0x1, buffer: { type: "read-only-storage" } },
-        ],
-      });
-
-      const pipelineLayout = this.device.createPipelineLayout({
-        label: "NativeResidentHeatmapPipelineLayout",
-        bindGroupLayouts: [this.residentBindGroupLayout],
-      });
-
-      this.residentRenderPipeline = this.device.createRenderPipeline({
-        label: "NativeResidentHeatmapRenderPipeline",
-        layout: pipelineLayout,
-        vertex: {
-          module,
-          entryPoint: "vs_main",
-        },
-        fragment: {
-          module,
-          entryPoint: "fs_main",
-          targets: [
-            {
-              format: this.format,
-              blend: {
-                color: {
-                  srcFactor: "src-alpha",
-                  dstFactor: "one-minus-src-alpha",
-                  operation: "add",
-                },
-                alpha: {
-                  srcFactor: "one",
-                  dstFactor: "one-minus-src-alpha",
-                  operation: "add",
-                },
-              },
-            },
-          ],
-        },
-        primitive: { topology: "triangle-list" },
-      });
+      const { bindGroupLayout, descriptor } = this.createResidentDescriptors();
+      this.residentBindGroupLayout = bindGroupLayout;
+      this.residentRenderPipeline = this.device.createRenderPipeline(descriptor);
     }
 
     return this.ensureResidentStorageCells(0);

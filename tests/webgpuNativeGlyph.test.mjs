@@ -684,3 +684,75 @@ test("WebGpuNativeGlyphPipeline rolls back partial GPU resources once on constru
     }
   }
 });
+
+test("WebGpuNativeGlyphPipeline.createAsync rolls back partial GPU resources once on faults (#415 + #418)", async () => {
+  for (const faultStage of ["createRenderPipelineAsync", "createTexture", "secondCreateBuffer"]) {
+    const createdBuffers = [];
+    const createdTextures = [];
+    let bufferCalls = 0;
+
+    const faultDevice = {
+      features: new Set(),
+      limits: { maxBufferSize: 268435456, maxTextureDimension2D: 8192 },
+      createShaderModule(desc) {
+        return { label: desc.label, code: desc.code };
+      },
+      createBuffer(desc) {
+        bufferCalls++;
+        if (faultStage === "secondCreateBuffer" && bufferCalls === 2) {
+          throw new Error("Simulated instanceBuffer allocation failure");
+        }
+        const buf = {
+          label: desc.label,
+          destroyedCount: 0,
+          destroy() { this.destroyedCount++; },
+        };
+        createdBuffers.push(buf);
+        return buf;
+      },
+      createTexture(desc) {
+        if (faultStage === "createTexture") {
+          throw new Error("Simulated atlasTexture allocation failure");
+        }
+        const tex = {
+          label: desc.label,
+          destroyedCount: 0,
+          createView() { return { texture: tex }; },
+          destroy() { this.destroyedCount++; },
+        };
+        createdTextures.push(tex);
+        return tex;
+      },
+      createSampler(desc) {
+        return { label: desc.label };
+      },
+      createBindGroupLayout(desc) {
+        return { label: desc.label };
+      },
+      createBindGroup(desc) {
+        return { label: desc.label };
+      },
+      createPipelineLayout(desc) {
+        return { label: desc.label };
+      },
+      async createRenderPipelineAsync() {
+        if (faultStage === "createRenderPipelineAsync") {
+          throw new Error("Simulated async renderPipeline failure");
+        }
+        return { label: "async-pipeline" };
+      },
+      queue: {
+        writeTexture() {},
+        writeBuffer() {},
+      },
+    };
+
+    await assert.rejects(() => WebGpuNativeGlyphPipeline.createAsync(faultDevice, "rgba8unorm"));
+    for (const buf of createdBuffers) {
+      assert.equal(buf.destroyedCount, 1, `${faultStage}: every allocated buffer must be destroyed once`);
+    }
+    for (const tex of createdTextures) {
+      assert.equal(tex.destroyedCount, 1, `${faultStage}: every allocated texture must be destroyed once`);
+    }
+  }
+});

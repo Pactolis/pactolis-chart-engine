@@ -440,3 +440,37 @@ test("two instances on the same market share stream subscription and never doubl
   assert.equal(listeners.size, 0);
   bubbles.clearLiveTradeEvents();
 });
+
+test("marketBuffers enforces MAX_LIVE_TRADE_MARKETS with LRU eviction (#405)", async () => {
+  const { bubbles } = await loadModules();
+  bubbles.clearLiveTradeEvents();
+
+  const limit = bubbles.MAX_LIVE_TRADE_MARKETS;
+  assert.ok(limit >= 8);
+
+  const totalMarkets = limit + 4;
+  for (let i = 0; i < totalMarkets; i++) {
+    bubbles.pushLiveTradeEvents(`MKT${i}USDT`, [
+      { id: `ev-${i}`, kind: "trade", time: 1_700_000_000_000 + i, price: 100, qty: 1, notionalUsd: 50_000, side: "buy", venue: "binance" },
+    ]);
+  }
+
+  for (let i = 0; i < totalMarkets - limit; i++) {
+    assert.equal(bubbles.getLiveTradeEvents(`MKT${i}USDT`).length, 0, `oldest market MKT${i}USDT should be evicted`);
+  }
+
+  // Touching the oldest surviving market refreshes it in LRU order so the next eviction removes the following market.
+  const oldestSurviving = `MKT${totalMarkets - limit}USDT`;
+  const nextOldest = `MKT${totalMarkets - limit + 1}USDT`;
+  assert.equal(bubbles.getLiveTradeEvents(oldestSurviving).length, 1);
+
+  bubbles.pushLiveTradeEvents("NEWMKTUSDT", [
+    { id: "ev-new", kind: "trade", time: 1_700_000_100_000, price: 100, qty: 1, notionalUsd: 50_000, side: "buy", venue: "binance" },
+  ]);
+
+  assert.equal(bubbles.getLiveTradeEvents(oldestSurviving).length, 1);
+  assert.equal(bubbles.getLiveTradeEvents(nextOldest).length, 0);
+  assert.equal(bubbles.getLiveTradeEvents("NEWMKTUSDT").length, 1);
+
+  bubbles.clearLiveTradeEvents();
+});

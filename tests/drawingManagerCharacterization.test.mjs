@@ -91,3 +91,33 @@ test("DrawingManager characterization: text placement orders tool reset, persist
   manager.pointerDown(point);
   assert.deepEqual(events, [["tool", "text"], ["tool", null], ["change", ["text"], false], ["text", true]]);
 });
+
+test("DrawingState clears summaryCache and readonlyListCache on setMarket/replace and bounds cache size (#405)", () => {
+  const manager = new DrawingManager(() => {});
+  manager.setMarket("BINANCE_FUTURES:btcusdt");
+  manager.replace([line({ id: "d-btc", market: "BINANCE_FUTURES:btcusdt" })]);
+
+  // Query >16 markets and verify both caches stay bounded.
+  for (let i = 0; i < 20; i++) {
+    const mkt = `BINANCE_FUTURES:sym${i}usdt`;
+    manager.marketSummary(mkt);
+    manager.listForMarketReadonly(mkt);
+  }
+  assert.ok(manager.summaryCache.size <= 16, `expected summaryCache.size <= 16, got ${manager.summaryCache.size}`);
+  assert.ok(manager.readonlyListCache.size <= 16, `expected readonlyListCache.size <= 16, got ${manager.readonlyListCache.size}`);
+
+  // setMarket clears caches immediately.
+  manager.setMarket("BINANCE_FUTURES:ethusdt");
+  assert.equal(manager.summaryCache.size, 0);
+  assert.equal(manager.readonlyListCache.size, 0);
+
+  // Populate again and verify replace() (load/clear) clears caches.
+  manager.marketSummary("BINANCE_FUTURES:ethusdt");
+  manager.listForMarketReadonly("BINANCE_FUTURES:ethusdt");
+  assert.equal(manager.summaryCache.size, 1);
+  assert.equal(manager.readonlyListCache.size, 1);
+
+  manager.replace([]);
+  assert.equal(manager.summaryCache.size, 0);
+  assert.equal(manager.readonlyListCache.size, 0);
+});

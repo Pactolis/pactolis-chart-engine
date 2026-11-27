@@ -20,6 +20,14 @@ export interface IndicatorPrepareCacheKey {
 
 export type IndicatorPrepareCacheInvalidationKind = "hit" | "tail" | "non-tail" | "cold";
 
+export interface IndicatorPrepareTailCandidate<T> {
+  value: T;
+  seriesRevision: number;
+  nonTailRevision: number;
+  rangeFrom: number;
+  rangeTo: number;
+}
+
 interface CacheEntry<T> {
   definitionType: string;
   instance: object;
@@ -114,6 +122,41 @@ export class IndicatorPrepareCache {
     return "non-tail";
   }
 
+  peekTailCandidate<T>(instanceId: string, key: IndicatorPrepareCacheKey): IndicatorPrepareTailCandidate<T> | undefined {
+    const cached = this.entries.get(instanceId) as CacheEntry<T>[] | undefined;
+    if (!cached || cached.length === 0) return undefined;
+    if (cached.some((entry) => sameKey(entry, key))) return undefined;
+
+    const nextResetEpoch = resolveResetEpoch(key);
+    const nextGeneration = key.generation ?? 0;
+    const nextSettingsRevision = key.settingsRevision ?? 0;
+    const nextTimeBucket = key.timeBucket ?? 0;
+    const nextNonTailRevision = resolveNonTailRevision(key);
+
+    const compatible = cached.find((entry) =>
+      entry.definitionType === key.definitionType
+      && entry.instance === key.instance
+      && entry.series === key.series
+      && entry.resetEpoch === nextResetEpoch
+      && entry.generation === nextGeneration
+      && entry.settingsRevision === nextSettingsRevision
+      && entry.market === key.market
+      && entry.timeframe === key.timeframe
+      && entry.intervalMs === key.intervalMs
+      && entry.timeBucket === nextTimeBucket
+      && entry.nonTailRevision === nextNonTailRevision
+      && entry.seriesRevision !== key.series.revision,
+    );
+    if (!compatible) return undefined;
+    return {
+      value: compatible.value,
+      seriesRevision: compatible.seriesRevision,
+      nonTailRevision: compatible.nonTailRevision,
+      rangeFrom: compatible.rangeFrom,
+      rangeTo: compatible.rangeTo,
+    };
+  }
+
   resolve<T>(instanceId: string, key: IndicatorPrepareCacheKey, compute: () => T): T {
     const cached = (this.entries.get(instanceId) ?? []) as CacheEntry<T>[];
     const hit = cached.find((entry) => sameKey(entry, key));
@@ -121,6 +164,31 @@ export class IndicatorPrepareCache {
 
     const value = compute();
     return this.store(instanceId, key, value);
+  }
+
+  resolveWithTail<T>(
+    instanceId: string,
+    key: IndicatorPrepareCacheKey,
+    compute: () => T,
+    updateTail?: (candidate: IndicatorPrepareTailCandidate<T>) => T | undefined,
+  ): { value: T; mode: "hit" | "tail" | "full" } {
+    const cached = (this.entries.get(instanceId) ?? []) as CacheEntry<T>[];
+    const hit = cached.find((entry) => sameKey(entry, key));
+    if (hit) return { value: hit.value, mode: "hit" };
+
+    if (updateTail) {
+      const candidate = this.peekTailCandidate<T>(instanceId, key);
+      if (candidate) {
+        const updated = updateTail(candidate);
+        if (updated !== undefined) {
+          this.store(instanceId, key, updated);
+          return { value: updated, mode: "tail" };
+        }
+      }
+    }
+
+    const value = this.store(instanceId, key, compute());
+    return { value, mode: "full" };
   }
 
   delete(instanceId: string): void {

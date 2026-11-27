@@ -38,6 +38,22 @@ export interface GlyphAtlasData {
 }
 
 let cachedAtlas: GlyphAtlasData | null = null;
+let inProgressAtlasBuild: GlyphAtlasBuildState | null = null;
+let prewarmAtlasPromise: Promise<GlyphAtlasData> | null = null;
+
+interface GlyphAtlasBuildState {
+  pixels: Uint8Array;
+  advanceRatio: number;
+  ctx: Canvas2dContext | null;
+  mask: Uint8Array;
+  scratchF: Float32Array;
+  scratchD: Float32Array;
+  scratchV: Int32Array;
+  scratchZ: Float32Array;
+  outsideDistSq: Float32Array;
+  insideDistSq: Float32Array;
+  nextIndex: number;
+}
 
 /**
  * Separable 1D squared Euclidean Distance Transform (Felzenszwalb & Huttenlocher, 2012).
@@ -185,7 +201,7 @@ function fillSyntheticGlyphMask(charIndex: number, char: string, cellSize: numbe
   return mask;
 }
 
-function buildGlyphAtlasData(): GlyphAtlasData {
+function createGlyphAtlasBuildState(): GlyphAtlasBuildState {
   const pixels = new Uint8Array(GLYPH_ATLAS_WIDTH * GLYPH_ATLAS_HEIGHT * 4);
   let advanceRatio = DEFAULT_ADVANCE_RATIO;
 
@@ -207,16 +223,27 @@ function buildGlyphAtlasData(): GlyphAtlasData {
     }
   }
 
-  const mask = new Uint8Array(GLYPH_CELL_SIZE * GLYPH_CELL_SIZE);
-  const scratchF = new Float32Array(GLYPH_CELL_SIZE);
-  const scratchD = new Float32Array(GLYPH_CELL_SIZE);
-  const scratchV = new Int32Array(GLYPH_CELL_SIZE);
-  const scratchZ = new Float32Array(GLYPH_CELL_SIZE + 1);
-  const outsideDistSq = new Float32Array(GLYPH_CELL_SIZE * GLYPH_CELL_SIZE);
-  const insideDistSq = new Float32Array(GLYPH_CELL_SIZE * GLYPH_CELL_SIZE);
-  const twoSpread = 2 * GLYPH_SDF_SPREAD;
+  return {
+    pixels,
+    advanceRatio,
+    ctx,
+    mask: new Uint8Array(GLYPH_CELL_SIZE * GLYPH_CELL_SIZE),
+    scratchF: new Float32Array(GLYPH_CELL_SIZE),
+    scratchD: new Float32Array(GLYPH_CELL_SIZE),
+    scratchV: new Int32Array(GLYPH_CELL_SIZE),
+    scratchZ: new Float32Array(GLYPH_CELL_SIZE + 1),
+    outsideDistSq: new Float32Array(GLYPH_CELL_SIZE * GLYPH_CELL_SIZE),
+    insideDistSq: new Float32Array(GLYPH_CELL_SIZE * GLYPH_CELL_SIZE),
+    nextIndex: 0,
+  };
+}
 
-  for (let idx = 0; idx < GLYPH_COUNT; idx++) {
+function processGlyphAtlasSlice(state: GlyphAtlasBuildState, maxGlyphs: number): void {
+  const twoSpread = 2 * GLYPH_SDF_SPREAD;
+  const endIndex = Math.min(GLYPH_COUNT, state.nextIndex + Math.max(1, maxGlyphs));
+  const { ctx, mask, outsideDistSq, insideDistSq, scratchF, scratchD, scratchV, scratchZ, pixels } = state;
+
+  for (let idx = state.nextIndex; idx < endIndex; idx++) {
     const ch = GLYPH_CHARSET[idx];
     const col = idx % GLYPH_ATLAS_COLS;
     const row = Math.floor(idx / GLYPH_ATLAS_COLS);
@@ -293,26 +320,84 @@ function buildGlyphAtlasData(): GlyphAtlasData {
     }
   }
 
+  state.nextIndex = endIndex;
+}
+
+function finalizeGlyphAtlasBuild(state: GlyphAtlasBuildState): GlyphAtlasData {
   return {
     width: GLYPH_ATLAS_WIDTH,
     height: GLYPH_ATLAS_HEIGHT,
     cellSize: GLYPH_CELL_SIZE,
     fontPx: GLYPH_FONT_PX,
     spread: GLYPH_SDF_SPREAD,
-    advanceRatio,
-    pixels,
+    advanceRatio: state.advanceRatio,
+    pixels: state.pixels,
   };
+}
+
+function yieldAtlasSlice(): Promise<void> {
+  if (typeof setTimeout === "function") {
+    return new Promise((resolve) => {
+      setTimeout(resolve, 0);
+    });
+  }
+  return Promise.resolve();
 }
 
 export function getOrCreateGlyphAtlas(): GlyphAtlasData {
   if (!cachedAtlas) {
-    cachedAtlas = buildGlyphAtlasData();
+    const state = inProgressAtlasBuild ?? createGlyphAtlasBuildState();
+    inProgressAtlasBuild = null;
+    if (state.nextIndex < GLYPH_COUNT) {
+      processGlyphAtlasSlice(state, GLYPH_COUNT - state.nextIndex);
+    }
+    cachedAtlas = finalizeGlyphAtlasBuild(state);
   }
   return cachedAtlas;
 }
 
+/**
+ * Incrementally generates the SDF glyph atlas in small glyph slices so main-thread
+ * frame budgets are not stalled by synchronous startup EDT computation.
+ */
+export async function prewarmGlyphAtlasAsync(glyphsPerSlice = 4): Promise<GlyphAtlasData> {
+  if (cachedAtlas) return cachedAtlas;
+  if (prewarmAtlasPromise) return prewarmAtlasPromise;
+
+  const sliceSize = Math.max(1, Math.floor(glyphsPerSlice));
+  const state = inProgressAtlasBuild ?? createGlyphAtlasBuildState();
+  inProgressAtlasBuild = state;
+
+  let promise!: Promise<GlyphAtlasData>;
+  promise = (async () => {
+    try {
+      while (!cachedAtlas && inProgressAtlasBuild === state && state.nextIndex < GLYPH_COUNT) {
+        processGlyphAtlasSlice(state, sliceSize);
+        if (!cachedAtlas && state.nextIndex < GLYPH_COUNT) {
+          await yieldAtlasSlice();
+        }
+      }
+      if (cachedAtlas) return cachedAtlas;
+      cachedAtlas = finalizeGlyphAtlasBuild(state);
+      return cachedAtlas;
+    } finally {
+      if (inProgressAtlasBuild === state) {
+        inProgressAtlasBuild = null;
+      }
+      if (prewarmAtlasPromise === promise) {
+        prewarmAtlasPromise = null;
+      }
+    }
+  })();
+
+  prewarmAtlasPromise = promise;
+  return promise;
+}
+
 export function resetGlyphAtlasForTest(): void {
   cachedAtlas = null;
+  inProgressAtlasBuild = null;
+  prewarmAtlasPromise = null;
 }
 
 export const GLYPH_WGSL = `
@@ -497,10 +582,131 @@ export class WebGpuNativeGlyphPipeline {
   private lastClipB = Number.NaN;
   private disposed = false;
 
+  private static createBindGroupLayout(device: any): any {
+    return device.createBindGroupLayout({
+      label: "NativeGlyphBindGroupLayout",
+      entries: [
+        {
+          binding: 0,
+          visibility: 0x1 | 0x2, // VERTEX | FRAGMENT
+          buffer: { type: "uniform" },
+        },
+        {
+          binding: 1,
+          visibility: 0x2, // FRAGMENT
+          texture: { sampleType: "float" },
+        },
+        {
+          binding: 2,
+          visibility: 0x2, // FRAGMENT
+          sampler: { type: "filtering" },
+        },
+      ],
+    });
+  }
+
+  private static createRenderPipelineDescriptor(
+    format: string,
+    shaderModule: any,
+    pipelineLayout: any,
+  ): any {
+    return {
+      label: "NativeGlyphSdfRenderPipeline",
+      layout: pipelineLayout,
+      vertex: {
+        module: shaderModule,
+        entryPoint: "vs_main",
+        buffers: [
+          {
+            arrayStride: GLYPH_INSTANCE_BYTES,
+            stepMode: "instance",
+            attributes: [
+              { shaderLocation: 0, offset: 0, format: "float32x4" },
+              { shaderLocation: 1, offset: 16, format: "uint32" },
+              { shaderLocation: 2, offset: 20, format: "uint32" },
+            ],
+          },
+        ],
+      },
+      fragment: {
+        module: shaderModule,
+        entryPoint: "fs_main",
+        targets: [
+          {
+            format,
+            blend: {
+              color: {
+                srcFactor: "src-alpha",
+                dstFactor: "one-minus-src-alpha",
+                operation: "add",
+              },
+              alpha: {
+                srcFactor: "one",
+                dstFactor: "one-minus-src-alpha",
+                operation: "add",
+              },
+            },
+          },
+        ],
+      },
+      primitive: {
+        topology: "triangle-list",
+      },
+    };
+  }
+
+  static async createAsync(
+    device: any,
+    format: string,
+    initialCapacityGlyphs = 4096,
+  ): Promise<WebGpuNativeGlyphPipeline> {
+    if (
+      !device
+      || typeof device.createShaderModule !== "function"
+      || typeof device.createTexture !== "function"
+      || typeof device.createSampler !== "function"
+      || typeof device.queue?.writeTexture !== "function"
+    ) {
+      throw new Error("WebGpuNativeGlyphPipeline: device lacks required WebGPU texture/sampler APIs");
+    }
+
+    const atlas = await prewarmGlyphAtlasAsync();
+    const shaderModule = device.createShaderModule({
+      label: "NativeGlyphSdfShader",
+      code: GLYPH_WGSL,
+    });
+    const bindGroupLayout = WebGpuNativeGlyphPipeline.createBindGroupLayout(device);
+    const pipelineLayout = device.createPipelineLayout({
+      label: "NativeGlyphPipelineLayout",
+      bindGroupLayouts: [bindGroupLayout],
+    });
+    const descriptor = WebGpuNativeGlyphPipeline.createRenderPipelineDescriptor(
+      format,
+      shaderModule,
+      pipelineLayout,
+    );
+    const pipeline = typeof device.createRenderPipelineAsync === "function"
+      ? await device.createRenderPipelineAsync(descriptor)
+      : device.createRenderPipeline(descriptor);
+
+    return new WebGpuNativeGlyphPipeline(device, format, initialCapacityGlyphs, {
+      atlas,
+      shaderModule,
+      bindGroupLayout,
+      pipeline,
+    });
+  }
+
   constructor(
     private readonly device: any,
     public readonly format: string,
     initialCapacityGlyphs = 4096,
+    precompiled?: {
+      atlas?: GlyphAtlasData;
+      shaderModule?: any;
+      bindGroupLayout?: any;
+      pipeline?: any;
+    },
   ) {
     if (
       !device
@@ -513,14 +719,14 @@ export class WebGpuNativeGlyphPipeline {
     }
 
     this.instanceCapacityGlyphs = Math.max(256, initialCapacityGlyphs);
-    this.atlas = getOrCreateGlyphAtlas();
+    this.atlas = precompiled?.atlas ?? getOrCreateGlyphAtlas();
 
     let uniformBuffer: any = null;
     let atlasTexture: any = null;
     let instanceBuffer: any = null;
 
     try {
-      const shaderModule = device.createShaderModule({
+      const shaderModule = precompiled?.shaderModule ?? device.createShaderModule({
         label: "NativeGlyphSdfShader",
         code: GLYPH_WGSL,
       });
@@ -553,26 +759,7 @@ export class WebGpuNativeGlyphPipeline {
         addressModeV: "clamp-to-edge",
       });
 
-      const bindGroupLayout = device.createBindGroupLayout({
-        label: "NativeGlyphBindGroupLayout",
-        entries: [
-          {
-            binding: 0,
-            visibility: 0x1 | 0x2, // VERTEX | FRAGMENT
-            buffer: { type: "uniform" },
-          },
-          {
-            binding: 1,
-            visibility: 0x2, // FRAGMENT
-            texture: { sampleType: "float" },
-          },
-          {
-            binding: 2,
-            visibility: 0x2, // FRAGMENT
-            sampler: { type: "filtering" },
-          },
-        ],
-      });
+      const bindGroupLayout = precompiled?.bindGroupLayout ?? WebGpuNativeGlyphPipeline.createBindGroupLayout(device);
 
       const bindGroup = device.createBindGroup({
         label: "NativeGlyphBindGroup",
@@ -584,54 +771,18 @@ export class WebGpuNativeGlyphPipeline {
         ],
       });
 
-      const pipelineLayout = device.createPipelineLayout({
-        label: "NativeGlyphPipelineLayout",
-        bindGroupLayouts: [bindGroupLayout],
-      });
-
-      const pipeline = device.createRenderPipeline({
-        label: "NativeGlyphSdfRenderPipeline",
-        layout: pipelineLayout,
-        vertex: {
-          module: shaderModule,
-          entryPoint: "vs_main",
-          buffers: [
-            {
-              arrayStride: GLYPH_INSTANCE_BYTES,
-              stepMode: "instance",
-              attributes: [
-                { shaderLocation: 0, offset: 0, format: "float32x4" },
-                { shaderLocation: 1, offset: 16, format: "uint32" },
-                { shaderLocation: 2, offset: 20, format: "uint32" },
-              ],
-            },
-          ],
-        },
-        fragment: {
-          module: shaderModule,
-          entryPoint: "fs_main",
-          targets: [
-            {
-              format,
-              blend: {
-                color: {
-                  srcFactor: "src-alpha",
-                  dstFactor: "one-minus-src-alpha",
-                  operation: "add",
-                },
-                alpha: {
-                  srcFactor: "one",
-                  dstFactor: "one-minus-src-alpha",
-                  operation: "add",
-                },
-              },
-            },
-          ],
-        },
-        primitive: {
-          topology: "triangle-list",
-        },
-      });
+      let pipeline: any;
+      if (precompiled?.pipeline) {
+        pipeline = precompiled.pipeline;
+      } else {
+        const pipelineLayout = device.createPipelineLayout({
+          label: "NativeGlyphPipelineLayout",
+          bindGroupLayouts: [bindGroupLayout],
+        });
+        pipeline = device.createRenderPipeline(
+          WebGpuNativeGlyphPipeline.createRenderPipelineDescriptor(format, shaderModule, pipelineLayout),
+        );
+      }
 
       instanceBuffer = this.allocateInstanceBuffer(this.instanceCapacityGlyphs);
 

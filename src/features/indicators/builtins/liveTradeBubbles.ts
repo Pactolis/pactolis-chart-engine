@@ -24,6 +24,7 @@ import type {
 import { registerIndicatorCleanup, runIndicatorCleanup } from "./stateRegistry.js";
 
 export const MAX_LIVE_TRADE_EVENTS_PER_MARKET = 5_000;
+export const MAX_LIVE_TRADE_MARKETS = 16;
 export const MIN_BUBBLE_RADIUS_PX = 3;
 export const MAX_BUBBLE_RADIUS_PX = 28;
 export const DEFAULT_CLUSTER_CELL_PX = 8;
@@ -134,9 +135,18 @@ export function pushLiveTradeEvents(
   if (!normalizedMarket) return;
   const key = bufferKeyFor(normalizedMarket, scope);
   let buffer = marketBuffers.get(key);
-  if (!buffer) {
+  if (buffer) {
+    // Refresh LRU order on write so active buffers stay cached.
+    marketBuffers.delete(key);
+    marketBuffers.set(key, buffer);
+  } else {
     buffer = { events: [], seenKeys: new Set(), ringKeys: [] };
     marketBuffers.set(key, buffer);
+    while (marketBuffers.size > MAX_LIVE_TRADE_MARKETS) {
+      const oldestKey = marketBuffers.keys().next().value;
+      if (oldestKey === undefined) break;
+      marketBuffers.delete(oldestKey);
+    }
   }
   for (const event of events) {
     if (!event || !Number.isFinite(event.time) || !Number.isFinite(event.price) || !Number.isFinite(event.notionalUsd)) {
@@ -166,7 +176,13 @@ export function getLiveTradeEvents(
 ): readonly LiveTradeEvent[] {
   const normalizedMarket = normalizeMarketKey(market);
   if (!normalizedMarket) return EMPTY_LIVE_TRADE_EVENTS;
-  return marketBuffers.get(bufferKeyFor(normalizedMarket, scope))?.events ?? EMPTY_LIVE_TRADE_EVENTS;
+  const key = bufferKeyFor(normalizedMarket, scope);
+  const buffer = marketBuffers.get(key);
+  if (!buffer) return EMPTY_LIVE_TRADE_EVENTS;
+  // Refresh LRU order on read so actively queried buffers stay cached.
+  marketBuffers.delete(key);
+  marketBuffers.set(key, buffer);
+  return buffer.events;
 }
 
 export function clearLiveTradeEvents(market?: string, scope?: LiveTradeEventScope): void {

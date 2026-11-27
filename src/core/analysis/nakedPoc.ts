@@ -33,7 +33,14 @@ export function calculateNakedPocs(
 ): NakedPocLevel[] {
   const profiles = buildProfiles(bars, period, now, sourceIntervalMs);
   const levels: NakedPocLevel[] = [];
-  const prices = [...new Set(profiles.map((profile) => profile.poc))].sort((a, b) => a - b);
+  const prices: number[] = new Array(profiles.length);
+  for (let i = 0; i < profiles.length; i++) prices[i] = profiles[i].poc;
+  prices.sort((a, b) => a - b);
+  let uniqueCount = 0;
+  for (let i = 0; i < prices.length; i++) {
+    if (i === 0 || prices[i] !== prices[i - 1]) prices[uniqueCount++] = prices[i];
+  }
+  prices.length = uniqueCount;
   const coverage = new RangeCoverage(prices.length);
   for (let i = profiles.length - 1; i >= 0; i--) {
     const candidate = profiles[i];
@@ -125,7 +132,10 @@ function buildProfiles(
   }
 
   const profiles: PeriodProfile[] = [];
-  for (const [start, periodBars] of [...groups].sort((a, b) => a[0] - b[0])) {
+  const sortedStarts = Array.from(groups.keys()).sort((a, b) => a - b);
+  for (let s = 0; s < sortedStarts.length; s++) {
+    const start = sortedStarts[s];
+    const periodBars = groups.get(start)!;
     const end = bucketEnd(start, interval);
     if (start === currentStart || end > now || !hasCompleteFootprintCoverage(periodBars, start, end, sourceIntervalMs)) continue;
     const volumeByPrice = new Map<number, number>();

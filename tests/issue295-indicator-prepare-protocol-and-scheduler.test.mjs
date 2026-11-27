@@ -446,3 +446,93 @@ test("#295: removeIndicator, restore, and dispose cancel pending async prewarm j
   await prewarm2.completed;
   assert.equal(invalidations.filter((c) => c === ChartChange.Data).length, 0);
 });
+
+test("#409: IndicatorPrepareCache.resolveWithTail distinguishes tail-only vs non-tail updates cleanly", () => {
+  const cache = new IndicatorPrepareCache(1);
+  const series = { revision: 1, nonTailRevision: 1, resetEpoch: 0 };
+  const instance = { id: "tail-1", type: "custom-tail", settings: {} };
+  const baseKey = {
+    definitionType: "custom-tail",
+    instance,
+    series,
+    rangeFrom: 0,
+    rangeTo: 50,
+    market: "BINANCE_FUTURES:btcusdt",
+    timeframe: "1m",
+    intervalMs: INTERVAL,
+    generation: 0,
+    nonTailRevision: 1,
+    resetEpoch: 0,
+    settingsRevision: 0,
+    timeBucket: 0,
+  };
+
+  let fullCount = 0;
+  let tailCount = 0;
+  const r1 = cache.resolveWithTail(
+    "tail-1",
+    baseKey,
+    () => {
+      fullCount++;
+      return { values: [1, 2], mode: "full" };
+    },
+    () => {
+      tailCount++;
+      return { values: [1, 2], mode: "tail" };
+    },
+  );
+  assert.equal(r1.mode, "full");
+  assert.equal(fullCount, 1);
+  assert.equal(tailCount, 0);
+
+  // Exact hit: neither full nor tail callback invoked.
+  const r2 = cache.resolveWithTail("tail-1", { ...baseKey }, () => {
+    fullCount++;
+    return { values: [], mode: "full" };
+  }, () => {
+    tailCount++;
+    return { values: [], mode: "tail" };
+  });
+  assert.equal(r2.mode, "hit");
+  assert.equal(fullCount, 1);
+  assert.equal(tailCount, 0);
+
+  // Tail-only revision bump: updateTail runs while compute full is skipped.
+  series.revision = 2;
+  const r3 = cache.resolveWithTail(
+    "tail-1",
+    { ...baseKey },
+    () => {
+      fullCount++;
+      return { values: [], mode: "full" };
+    },
+    (candidate) => {
+      tailCount++;
+      return { values: [...candidate.value.values, 3], mode: "tail" };
+    },
+  );
+  assert.equal(r3.mode, "tail");
+  assert.deepEqual(r3.value.values, [1, 2, 3]);
+  assert.equal(fullCount, 1);
+  assert.equal(tailCount, 1);
+
+  // Non-tail revision bump: must bypass tail updater and compute full.
+  series.revision = 3;
+  series.nonTailRevision = 2;
+  const r4 = cache.resolveWithTail(
+    "tail-1",
+    { ...baseKey, nonTailRevision: 2 },
+    () => {
+      fullCount++;
+      return { values: [10, 20], mode: "full" };
+    },
+    () => {
+      tailCount++;
+      return { values: [], mode: "tail" };
+    },
+  );
+  assert.equal(r4.mode, "full");
+  assert.deepEqual(r4.value.values, [10, 20]);
+  assert.equal(fullCount, 2);
+  assert.equal(tailCount, 1);
+});

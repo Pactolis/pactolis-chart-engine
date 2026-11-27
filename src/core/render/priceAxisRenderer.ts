@@ -33,6 +33,27 @@ function formatPriceAxisMark(price: number, label: string, decimals: number, opt
 const PRICE_AXIS_FONT = "12px ui-monospace, monospace";
 const PRICE_LABEL_FONT = "11px ui-monospace, monospace";
 const PRICE_LABEL_HEIGHT = 16;
+const PRICE_AXIS_TEXT_WIDTH_CACHE_MAX = 512;
+const priceAxisTextWidthCacheByCtx = new WeakMap<CanvasRenderingContext2D, Map<string, number>>();
+
+function measurePriceAxisTextWidth(ctx: CanvasRenderingContext2D, font: string, text: string): number {
+  let cache = priceAxisTextWidthCacheByCtx.get(ctx);
+  if (!cache) {
+    cache = new Map();
+    priceAxisTextWidthCacheByCtx.set(ctx, cache);
+  }
+  const key = `${font}|${text}`;
+  let width = cache.get(key);
+  if (width === undefined) {
+    width = ctx.measureText(text).width;
+    if (cache.size >= PRICE_AXIS_TEXT_WIDTH_CACHE_MAX) {
+      const oldest = cache.keys().next().value;
+      if (oldest !== undefined) cache.delete(oldest);
+    }
+    cache.set(key, width);
+  }
+  return width;
+}
 
 export interface PriceMarker {
   price: number;
@@ -170,15 +191,32 @@ export function drawPriceMarkers(
   const dec = pricePrecision ?? priceDecimals(priceStep);
   const boxH = PRICE_LABEL_HEIGHT;
   const byKey = new Map<string, { price: number; color: string; priority: number; desiredY: number; boxH: number; text?: string }>();
-  for (const item of priceMarkers) {
+  for (let i = 0; i < priceMarkers.length; i++) {
+    const item = priceMarkers[i];
     const desiredY = view.yOfPrice(item.price);
     if (desiredY < view.area.top || desiredY > view.area.top + view.area.height) continue;
     const key = `${item.price.toFixed(dec)}|${item.color}|${item.text ?? ""}`;
-    const next = { ...item, desiredY, boxH };
     const prev = byKey.get(key);
-    if (!prev || next.priority > prev.priority) byKey.set(key, next);
+    if (!prev) {
+      byKey.set(key, {
+        price: item.price,
+        color: item.color,
+        priority: item.priority,
+        desiredY,
+        boxH,
+        text: item.text,
+      });
+    } else if (item.priority > prev.priority) {
+      prev.price = item.price;
+      prev.color = item.color;
+      prev.priority = item.priority;
+      prev.desiredY = desiredY;
+      prev.text = item.text;
+    }
   }
-  const labels = placeVerticalLabels([...byKey.values()], view.area.top, view.area.top + view.area.height, 2);
+  if (byKey.size === 0) return;
+  const deduped = Array.from(byKey.values());
+  const labels = placeVerticalLabels(deduped, view.area.top, view.area.top + view.area.height, 2);
   if (!labels.length) return;
   const axisX = view.area.left + view.area.width;
   const axisW = view.priceAxisW;
@@ -195,7 +233,7 @@ export function drawPriceMarkers(
     const maxBoxW = label.text || (livePrice && !compact) ? Math.max(axisW - 2, 180) : axisW - 2;
     // The compact live price spans the gutter, so a tick label at the same height is covered whole, not left peeking out.
     const minBoxW = livePrice && compact ? axisW - 2 : 0;
-    const boxW = Math.min(maxBoxW, Math.max(minBoxW, Math.ceil(ctx.measureText(text).width) + padX * 2));
+    const boxW = Math.min(maxBoxW, Math.max(minBoxW, Math.ceil(measurePriceAxisTextWidth(ctx, PRICE_LABEL_FONT, text)) + padX * 2));
     const boxX = axisX + axisW - boxW - 1;
     const boxY = label.y - boxH / 2;
     ctx.fillStyle = label.color;
@@ -233,7 +271,7 @@ export function drawCrosshairPriceLabel(
   ctx.font = PRICE_LABEL_FONT;
   const padX = 3;
   const axisW = view.priceAxisW;
-  const boxW = Math.min(axisW - 2, Math.ceil(ctx.measureText(text).width) + padX * 2);
+  const boxW = Math.min(axisW - 2, Math.ceil(measurePriceAxisTextWidth(ctx, PRICE_LABEL_FONT, text)) + padX * 2);
   const boxX = axisX + axisW - boxW - 1;
   const labelY = clampLabelY(view, ch.y, PRICE_LABEL_HEIGHT);
   const boxY = labelY - PRICE_LABEL_HEIGHT / 2;

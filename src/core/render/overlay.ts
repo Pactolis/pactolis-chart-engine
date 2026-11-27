@@ -390,7 +390,9 @@ export class Overlay {
     const transform = ctx.getTransform?.();
     const skipFootprintText =
       this.shouldSkipFootprintText?.() === true || this.isAdaptiveReducedQualityActive();
-    this.annotationPassCache.begin(changes, JSON.stringify([ctx.canvas.width, ctx.canvas.height, transform?.a, transform?.d, view.area, view.offsetX, view.colWidth, view.priceTop, view.pricePerPx, range, series.length, series.at(series.length - 1)?.startTime, series.config.priceStep, series.nonTailRevision, orderedLayers, asOfTime, skipFootprintText]));
+    const lastBarStart = series.at(series.length - 1)?.startTime ?? -1;
+    const passKey = `${ctx.canvas.width}|${ctx.canvas.height}|${transform?.a ?? 1}|${transform?.d ?? 1}|${view.area.left},${view.area.top},${view.area.width},${view.area.height}|${view.offsetX}|${view.colWidth}|${view.priceTop}|${view.pricePerPx}|${range[0]}:${range[1]}|${series.length}|${lastBarStart}|${series.config.priceStep}|${series.nonTailRevision}|${orderedLayers.join(",")}|${asOfTime ?? ""}|${skipFootprintText ? 1 : 0}`;
+    this.annotationPassCache.begin(changes, passKey);
     const telemetryEnabled = isPerformanceTelemetryEnabled();
     const setupStartedAt = telemetryEnabled ? performance.now() : null;
     const empty = series.length === 0;

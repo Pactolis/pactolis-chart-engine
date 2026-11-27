@@ -50,7 +50,7 @@ export function calendarPeriodStart(time: number, period: CalendarPeriod): numbe
   return day;
 }
 
-function previousPeriodStart(start: number, period: CalendarPeriod): number {
+export function previousPeriodStart(start: number, period: CalendarPeriod): number {
   const d = new Date(start);
   if (period === "yearly") return Date.UTC(d.getUTCFullYear() - 1, 0, 1);
   if (period === "half-yearly") return Date.UTC(d.getUTCFullYear(), d.getUTCMonth() - 6, 1);

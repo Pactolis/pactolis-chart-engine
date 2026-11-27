@@ -12,19 +12,24 @@ function labelInset(axis: { height: number }): number {
   return axis.height > DESIGNED_AXIS_HEIGHT + 2 ? Math.round((axis.height - DESIGNED_AXIS_HEIGHT) / 2) : 0;
 }
 
-const TIME_AXIS_LABEL_WIDTH_CACHE_MAX = 256;
-const timeAxisLabelWidthCache = new Map<string, number>();
+const TIME_AXIS_LABEL_WIDTH_CACHE_MAX = 512;
+const timeAxisLabelWidthCacheByCtx = new WeakMap<CanvasRenderingContext2D, Map<string, number>>();
 
 function measureTimeAxisLabelWidth(ctx: CanvasRenderingContext2D, font: string, label: string): number {
+  let cache = timeAxisLabelWidthCacheByCtx.get(ctx);
+  if (!cache) {
+    cache = new Map();
+    timeAxisLabelWidthCacheByCtx.set(ctx, cache);
+  }
   const key = `${font}|${label}`;
-  let width = timeAxisLabelWidthCache.get(key);
+  let width = cache.get(key);
   if (width === undefined) {
     width = ctx.measureText(label).width;
-    if (timeAxisLabelWidthCache.size >= TIME_AXIS_LABEL_WIDTH_CACHE_MAX) {
-      const oldest = timeAxisLabelWidthCache.keys().next().value;
-      if (oldest !== undefined) timeAxisLabelWidthCache.delete(oldest);
+    if (cache.size >= TIME_AXIS_LABEL_WIDTH_CACHE_MAX) {
+      const oldest = cache.keys().next().value;
+      if (oldest !== undefined) cache.delete(oldest);
     }
-    timeAxisLabelWidthCache.set(key, width);
+    cache.set(key, width);
   }
   return width;
 }
@@ -130,8 +135,9 @@ export function drawCrosshairTimeLabel(
   if (!timeLabel || hx < axis.left || hx > axis.left + axis.width) return;
 
   ctx.save();
-  ctx.font = `${view.timeScaleOptions.tickMarkFontSize}px ui-monospace, monospace`;
-  const labelW = ctx.measureText(timeLabel).width + 10;
+  const font = `${view.timeScaleOptions.tickMarkFontSize}px ui-monospace, monospace`;
+  ctx.font = font;
+  const labelW = measureTimeAxisLabelWidth(ctx, font, timeLabel) + 10;
   const labelX = alignLabelCenter(hx, labelW, axis);
   const labelY = axis.top + 1 + labelInset(axis);
   const boxLeft = labelX - labelW / 2;
@@ -167,12 +173,19 @@ function drawTimeMarkers(
   const intervalMs = series.config.intervalMs;
   const axisY = axis.top;
   const inset = labelInset(axis);
-  const sorted = [...markers]
-    .filter((marker) => Number.isFinite(marker.time))
-    .sort((a, b) => b.priority - a.priority);
+  const sorted: TimeMarker[] = [];
+  for (let i = 0; i < markers.length; i++) {
+    const marker = markers[i];
+    if (Number.isFinite(marker.time)) sorted.push(marker);
+  }
+  if (!sorted.length) return;
+  if (sorted.length > 1) {
+    sorted.sort((a, b) => b.priority - a.priority);
+  }
   const placed: Array<{ left: number; right: number }> = [];
   ctx.save();
-  ctx.font = `${view.timeScaleOptions.tickMarkFontSize}px ui-monospace, monospace`;
+  const font = `${view.timeScaleOptions.tickMarkFontSize}px ui-monospace, monospace`;
+  ctx.font = font;
   ctx.textBaseline = "top";
   ctx.textAlign = "center";
   for (const marker of sorted) {
@@ -181,7 +194,7 @@ function drawTimeMarkers(
     if (x < axis.left || x > axis.left + axis.width) continue;
     const timeText = formatTimeAxisTick(marker.time, TickMarkWeight.Minute1, intervalMs);
     const label = marker.text ? `${timeText}` : timeText;
-    const boxW = Math.min(120, Math.max(34, ctx.measureText(label).width + 10));
+    const boxW = Math.min(120, Math.max(34, measureTimeAxisLabelWidth(ctx, font, label) + 10));
     const labelX = alignLabelCenter(x, boxW, axis);
     const left = labelX - boxW / 2;
     const right = labelX + boxW / 2;

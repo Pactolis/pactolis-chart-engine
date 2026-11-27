@@ -4,6 +4,7 @@ import { compactNumber, drawIndicatorMessage } from "../render/indicatorPaneUi.j
 import { boolSetting, numericSetting, stringSetting } from "./taShared.js";
 import { uiColor, barStatsTextColorDefault, barStatsLabelColor } from "../../../core/ui/seriesPalette.js";
 import { chartLocale, t } from "../../../core/chartLocale.js";
+import { createIndicatorSeriesStateStore } from "./stateRegistry.js";
 
 interface BarStatsSettings extends IndicatorSettings {
   mode: "latest" | "crosshair" | "visible-sum";
@@ -39,6 +40,29 @@ interface BarStatsMeta extends Record<string, unknown> {
 
 type BarStatsPreparedData = IndicatorPreparedData<never, BarStatsMeta> & { meta: BarStatsMeta };
 
+interface BarStatsCacheEntry {
+  instance: object;
+  mode: string;
+  seriesRevision: number;
+  nonTailRevision: number;
+  resetEpoch: number;
+  from: number;
+  to: number;
+  index: number;
+  closedEnd: number;
+  closedVolume: number;
+  closedDelta: number;
+  closedCount: number;
+  closedHigh: number;
+  closedLow: number;
+  closedLiqBuy: number;
+  closedLiqSell: number;
+  closedLiqMeasured: boolean;
+  prepared: BarStatsPreparedData;
+}
+
+const barStatsCacheStore = createIndicatorSeriesStateStore<BarStatsCacheEntry>();
+
 function prepareBarStats(ctx: IndicatorDrawContext<BarStatsSettings>): BarStatsPreparedData {
   if (!ctx.instance.visible) return emptyPrepared("hidden", t("indicator.barStats.hidden"));
   const bars = ctx.series.listReadonly();
@@ -47,38 +71,242 @@ function prepareBarStats(ctx: IndicatorDrawContext<BarStatsSettings>): BarStatsP
   const mode = stringSetting(ctx.settings, "mode", "latest");
   const crosshairIndex = ctx.crosshair?.visible ? Math.round(ctx.view.indexOfX(ctx.crosshair.x)) : -1;
   const index = mode === "crosshair" && crosshairIndex >= 0 ? crosshairIndex : Math.min(bars.length - 1, Math.max(0, to - 1));
-  if (mode === "visible-sum") return preparedFromBars(t("indicator.barStats.visible"), bars.slice(Math.max(0, from), Math.min(bars.length, to)));
+
+  if (mode === "visible-sum") {
+    const start = Math.max(0, from);
+    const end = Math.min(bars.length, to);
+    if (start >= end) return emptyPrepared("no-data", t("indicator.barStats.noData"));
+    const cached = barStatsCacheStore.get(ctx.series, ctx.instance.id);
+    if (
+      cached
+      && cached.instance === ctx.instance
+      && cached.mode === mode
+      && cached.seriesRevision === ctx.series.revision
+      && cached.from === start
+      && cached.to === end
+    ) {
+      return cached.prepared;
+    }
+
+    const tailLabel = t("indicator.barStats.visible");
+    const lastClosedEnd = Math.max(start, end - 1);
+    if (
+      cached
+      && cached.instance === ctx.instance
+      && cached.mode === mode
+      && cached.resetEpoch === ctx.series.resetEpoch
+      && cached.nonTailRevision === ctx.series.nonTailRevision
+      && cached.from === start
+      && (cached.closedEnd === lastClosedEnd || cached.closedEnd + 1 === lastClosedEnd)
+    ) {
+      let volume = cached.closedVolume;
+      let delta = cached.closedDelta;
+      let count = cached.closedCount;
+      let high = cached.closedHigh;
+      let low = cached.closedLow;
+      let liqBuy = cached.closedLiqBuy;
+      let liqSell = cached.closedLiqSell;
+      let liqMeasured = cached.closedLiqMeasured;
+
+      if (cached.closedEnd + 1 === lastClosedEnd) {
+        const newlyClosed = bars[cached.closedEnd];
+        volume += newlyClosed.volume ?? 0;
+        delta += newlyClosed.delta ?? 0;
+        count += newlyClosed.count ?? 0;
+        if (newlyClosed.high > high) high = newlyClosed.high;
+        if (newlyClosed.low < low) low = newlyClosed.low;
+        liqBuy += newlyClosed.liquidationBuyVol ?? 0;
+        liqSell += newlyClosed.liquidationSellVol ?? 0;
+        if (newlyClosed.sources?.includes("live")) liqMeasured = true;
+      }
+
+      const tail = bars[end - 1];
+      const totalVolume = volume + (tail.volume ?? 0);
+      const totalDelta = delta + (tail.delta ?? 0);
+      const totalCount = count + (tail.count ?? 0);
+      const totalHigh = end - 1 === start ? tail.high : Math.max(high, tail.high);
+      const totalLow = end - 1 === start ? tail.low : Math.min(low, tail.low);
+      const totalLiqBuy = liqBuy + (tail.liquidationBuyVol ?? 0);
+      const totalLiqSell = liqSell + (tail.liquidationSellVol ?? 0);
+      const totalLiqMeasured = liqMeasured || (tail.sources?.includes("live") ?? false);
+
+      const prepared = buildBarStatsPrepared(
+        tailLabel,
+        bars[start].open,
+        totalHigh,
+        totalLow,
+        tail.close,
+        totalVolume,
+        totalDelta,
+        totalCount,
+        totalLiqBuy,
+        totalLiqSell,
+        totalLiqMeasured,
+      );
+      barStatsCacheStore.set(ctx.series, ctx.instance.id, {
+        instance: ctx.instance,
+        mode,
+        seriesRevision: ctx.series.revision,
+        nonTailRevision: ctx.series.nonTailRevision,
+        resetEpoch: ctx.series.resetEpoch,
+        from: start,
+        to: end,
+        index: -1,
+        closedEnd: lastClosedEnd,
+        closedVolume: volume,
+        closedDelta: delta,
+        closedCount: count,
+        closedHigh: high,
+        closedLow: low,
+        closedLiqBuy: liqBuy,
+        closedLiqSell: liqSell,
+        closedLiqMeasured: liqMeasured,
+        prepared,
+      });
+      return prepared;
+    }
+
+    const prefix = aggregateBarRange(bars, start, lastClosedEnd);
+    const tail = bars[end - 1];
+    const totalVolume = prefix.volume + (tail.volume ?? 0);
+    const totalDelta = prefix.delta + (tail.delta ?? 0);
+    const totalCount = prefix.count + (tail.count ?? 0);
+    const totalHigh = lastClosedEnd > start ? Math.max(prefix.high, tail.high) : tail.high;
+    const totalLow = lastClosedEnd > start ? Math.min(prefix.low, tail.low) : tail.low;
+    const totalLiqBuy = prefix.liqBuy + (tail.liquidationBuyVol ?? 0);
+    const totalLiqSell = prefix.liqSell + (tail.liquidationSellVol ?? 0);
+    const totalLiqMeasured = prefix.liqMeasured || (tail.sources?.includes("live") ?? false);
+    const prepared = buildBarStatsPrepared(
+      tailLabel,
+      bars[start].open,
+      totalHigh,
+      totalLow,
+      tail.close,
+      totalVolume,
+      totalDelta,
+      totalCount,
+      totalLiqBuy,
+      totalLiqSell,
+      totalLiqMeasured,
+    );
+    barStatsCacheStore.set(ctx.series, ctx.instance.id, {
+      instance: ctx.instance,
+      mode,
+      seriesRevision: ctx.series.revision,
+      nonTailRevision: ctx.series.nonTailRevision,
+      resetEpoch: ctx.series.resetEpoch,
+      from: start,
+      to: end,
+      index: -1,
+      closedEnd: lastClosedEnd,
+      closedVolume: prefix.volume,
+      closedDelta: prefix.delta,
+      closedCount: prefix.count,
+      closedHigh: prefix.high,
+      closedLow: prefix.low,
+      closedLiqBuy: prefix.liqBuy,
+      closedLiqSell: prefix.liqSell,
+      closedLiqMeasured: prefix.liqMeasured,
+      prepared,
+    });
+    return prepared;
+  }
+
   const bar = bars[index];
-  return bar ? preparedFromBars(new Date(bar.startTime).toLocaleString(chartLocale().locale()), [bar]) : emptyPrepared("no-data", t("indicator.barStats.noSelectedBar"));
+  return bar
+    ? preparedFromBarRange(new Date(bar.startTime).toLocaleString(chartLocale().locale()), bars, index, index + 1)
+    : emptyPrepared("no-data", t("indicator.barStats.noSelectedBar"));
 }
 
-function preparedFromBars(label: string, bars: readonly FootprintBar[]): BarStatsPreparedData {
-  if (!bars.length) return emptyPrepared("no-data", t("indicator.barStats.noData"));
-  const first = bars[0];
-  const last = bars[bars.length - 1];
-  const volume = bars.reduce((sum, bar) => sum + (bar.volume ?? 0), 0);
-  const delta = bars.reduce((sum, bar) => sum + (bar.delta ?? 0), 0);
-  const count = bars.reduce((sum, bar) => sum + (bar.count ?? 0), 0);
-  const high = Math.max(...bars.map((bar) => bar.high));
-  const low = Math.min(...bars.map((bar) => bar.low));
-  const liquidationBuyVol = bars.reduce((sum, bar) => sum + (bar.liquidationBuyVol ?? 0), 0);
-  const liquidationSellVol = bars.reduce((sum, bar) => sum + (bar.liquidationSellVol ?? 0), 0);
-  // `sources` distinguishes a store-loaded bar from one the live stream folded in.
-  const liquidationsMeasured = bars.some((bar) => bar.sources?.includes("live") ?? false);
-  return { status: "ok", points: [], range: { min: Math.min(0, delta), max: Math.max(1, delta) }, meta: {
+function aggregateBarRange(bars: readonly FootprintBar[], start: number, end: number): {
+  volume: number;
+  delta: number;
+  count: number;
+  high: number;
+  low: number;
+  liqBuy: number;
+  liqSell: number;
+  liqMeasured: boolean;
+} {
+  let volume = 0;
+  let delta = 0;
+  let count = 0;
+  let high = -Infinity;
+  let low = Infinity;
+  let liqBuy = 0;
+  let liqSell = 0;
+  let liqMeasured = false;
+  for (let i = start; i < end; i++) {
+    const bar = bars[i];
+    volume += bar.volume ?? 0;
+    delta += bar.delta ?? 0;
+    count += bar.count ?? 0;
+    if (bar.high > high) high = bar.high;
+    if (bar.low < low) low = bar.low;
+    liqBuy += bar.liquidationBuyVol ?? 0;
+    liqSell += bar.liquidationSellVol ?? 0;
+    if (!liqMeasured && bar.sources?.includes("live")) liqMeasured = true;
+  }
+  return { volume, delta, count, high, low, liqBuy, liqSell, liqMeasured };
+}
+
+function buildBarStatsPrepared(
+  label: string,
+  open: number,
+  high: number,
+  low: number,
+  close: number,
+  volume: number,
+  delta: number,
+  count: number,
+  liquidationBuyVol: number,
+  liquidationSellVol: number,
+  liquidationsMeasured: boolean,
+): BarStatsPreparedData {
+  return {
+    status: "ok",
+    points: [],
+    range: { min: Math.min(0, delta), max: Math.max(1, delta) },
+    meta: {
+      label,
+      open,
+      high,
+      low,
+      close,
+      volume,
+      delta,
+      deltaPercent: volume > 0 ? (delta / volume) * 100 : null,
+      count,
+      liquidationBuyVol,
+      liquidationSellVol,
+      liquidationsMeasured,
+    },
+  };
+}
+
+function preparedFromBarRange(
+  label: string,
+  bars: readonly FootprintBar[],
+  start: number,
+  end: number,
+): BarStatsPreparedData {
+  if (start >= end) return emptyPrepared("no-data", t("indicator.barStats.noData"));
+  const first = bars[start];
+  const last = bars[end - 1];
+  const agg = aggregateBarRange(bars, start, end);
+  return buildBarStatsPrepared(
     label,
-    open: first.open,
-    high,
-    low,
-    close: last.close,
-    volume,
-    delta,
-    deltaPercent: volume > 0 ? delta / volume * 100 : null,
-    count,
-    liquidationBuyVol,
-    liquidationSellVol,
-    liquidationsMeasured,
-  } };
+    first.open,
+    agg.high,
+    agg.low,
+    last.close,
+    agg.volume,
+    agg.delta,
+    agg.count,
+    agg.liqBuy,
+    agg.liqSell,
+    agg.liqMeasured,
+  );
 }
 
 function asBarStatsData(prepared?: IndicatorPreparedData): BarStatsPreparedData {
