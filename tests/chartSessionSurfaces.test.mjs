@@ -829,7 +829,8 @@ test("CE #414: ChartSession splits matched live-update latency phases and visibi
   resetPerformanceTelemetry();
   configurePerformanceTelemetry({ enabled: true });
 
-  const { session, win, ownerDocument } = makeSession();
+  const { session, win, gpuCanvas } = makeSession();
+  const ownerDocument = gpuCanvas.ownerDocument;
   try {
     const completed = [];
     session.setFrameCompletedObserver((info) => completed.push(info));
