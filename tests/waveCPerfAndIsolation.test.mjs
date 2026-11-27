@@ -205,7 +205,7 @@ test("#426: hot-path drawSeriesPath, ichimokuCloudSegments, orderFlowProfile, an
   drawMultiSeriesInteraction(drawCtx, multiPrepared);
   assert.ok(ctx2d.ops.some((op) => op[0] === "fill"), "area path filled");
   assert.ok(ctx2d.ops.some((op) => op[0] === "fillRect"), "histogram bars drawn");
-  assert.ok(ctx2d.ops.some((op) => op[0] === "fillText" && op[1].includes("Line:")), "readout resolved at hoverIndex=12");
+  assert.ok(ctx2d.ops.some((op) => op[0] === "fillText" && op[1].includes("Line 112")), "readout resolved at hoverIndex=12");
 
   // 2. ichimokuCloudSegments two-pointer + unordered fallback parity
   const ptsA = [
@@ -389,7 +389,10 @@ test("#424: hidden liveTimer suppresses invalidate and GPU-owned heatmap dirties
       getMarket: () => "BINANCE_FUTURES:btcusdt",
       now: () => 1_700_000_060_000,
     });
-    overlay.observeCanvasVisibility(fakeCanvas);
+    const hmView = new View();
+    hmView.area = { left: 0, top: 0, width: 400, height: 200 };
+    const hmSeries = new FootprintSeries({ intervalMs: 60_000, priceStep: 1 });
+    overlay.draw(makeMock2dCtx(fakeCanvas), hmView, hmSeries, [0, 0]);
     assert.ok(capturedTimerFn, "liveTimer registered");
     capturedTimerFn();
     assert.equal(invalidations, 0, "hidden document must suppress liveTimer invalidate()");
@@ -445,6 +448,7 @@ test("#423: WebGPU heatmap lazy immediate pipeline, deduplicated prewarm, zero-a
     createBindGroupLayout() { return {}; },
     createBindGroup() { return {}; },
     createPipelineLayout() { return {}; },
+    createComputePipeline(desc) { return { label: desc?.label }; },
     createRenderPipeline(desc) { return { label: desc.label }; },
     async createRenderPipelineAsync(desc) {
       asyncPipelineCalls++;
@@ -585,7 +589,7 @@ test("#422: LiquidationProfile caches model decode/replay across series revision
       schemaVersion: 1,
       modelVersion: 1,
       symbol: "BTCUSDT",
-      params: { lw: [0.25, 0.35, 0.25, 0.15], mmr: 0.004, bw: 0.002, p0: 65_000, nbk },
+      params: { lev: [10, 25, 50, 100], lw: [0.25, 0.35, 0.25, 0.15], mmr: 0.004, bw: 0.002, p0: 65_000, nbk },
       asOf: now - 300_000,
       lastOi: 1000,
       longb: encodeF32LeBase64(zeros),
@@ -870,11 +874,14 @@ test("#420: ChartWorkerPanelRuntime isolates Interaction frames, recycles buffer
     assert.equal(recycled.length, 3, "history, heatmap-chunk, and heatmap-tail buffers must recycle");
 
     assert.equal(runtime.renderNow(), true);
+    // Enter hover once so crosshair visibility transitions false -> true on annotation HUD
+    bridge.sendInput({ type: "pointermove", x: 120, y: 110, timestamp: 90 });
+    assert.equal(runtime.renderNow(), true);
     gpuRenderCalls = 0;
     annotationRenderCalls = 0;
     interactionRenderCalls = 0;
 
-    // Non-dragging pointermove -> ChartChange.Interaction ONLY
+    // Steady-state non-dragging pointermove -> ChartChange.Interaction ONLY
     bridge.sendInput({ type: "pointermove", x: 150, y: 120, timestamp: 100 });
     assert.equal(runtime.renderNow(), true);
     assert.equal(gpuRenderCalls, 0, "Interaction-only frame must not run gpuSurface render");
