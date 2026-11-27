@@ -196,6 +196,8 @@ export function decodeHeatmapBarsFromBuffer(buffer: ArrayBuffer): Array<{ t: num
   return bars;
 }
 
+export const INGRESS_TICKS_STRIDE = 4; // [timestamp, price, size, sideFlag]
+
 export type IngressWorkerMessage =
   | WorkerEnvelopeBase<
       "ingress",
@@ -206,6 +208,16 @@ export type IngressWorkerMessage =
         timestamp: number;
         side?: "buy" | "sell";
         tradeId?: string;
+      }
+    >
+  | WorkerEnvelopeBase<
+      "ingress",
+      "ingress:ticks",
+      {
+        buffer: ArrayBuffer;
+        count: number;
+        firstSeq: number;
+        schema: 1;
       }
     >
   | WorkerEnvelopeBase<
@@ -382,6 +394,16 @@ export type MainWorkerMessage =
     >
   | WorkerEnvelopeBase<"main", "main:credit", { granted: number }>
   | WorkerEnvelopeBase<"main", "main:ack", { ackedSeq: number }>
+  | WorkerEnvelopeBase<
+      "main",
+      "main:diagnostic",
+      {
+        type: "ingress-gap";
+        expectedSeq: number;
+        receivedSeq: number;
+        gap: number;
+      }
+    >
   | WorkerEnvelopeBase<
       "main",
       "main:error",
@@ -645,9 +667,10 @@ export class BoundedWorkerPortQueue<T extends WorkerProtocolMessage = WorkerProt
         return true;
       }
     }
-    // Never drop ordered barrier messages if avoidable; fallback to oldest non-barrier.
+    // Never drop ordered barrier messages or batched ingress:ticks if avoidable; fallback to oldest non-barrier.
     for (let i = 0; i < this.items.length; i++) {
-      if (!isOrderedBarrierMessage(this.items[i])) {
+      const item = this.items[i];
+      if (!isOrderedBarrierMessage(item) && item.kind !== "ingress:ticks") {
         this.items.splice(i, 1);
         return true;
       }
