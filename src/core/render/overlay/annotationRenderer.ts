@@ -15,11 +15,16 @@ import {
 import { placeVerticalLabels } from "../../axisLabelUtils.js";
 import type { PriceAxisKeepOut } from "../priceAxisRenderer.js";
 import {
-  calculateVolumeProfile,
-  sessionBars,
   type VolumeProfileResult,
   type VolumeProfileSettings,
 } from "../../analysis/volumeProfile.js";
+import {
+  accumulateOrderFlowProfileBar,
+  cloneOrderFlowProfileAccumulator,
+  createOrderFlowProfileAccumulator,
+  finishOrderFlowProfile,
+  type OrderFlowProfileAccumulator,
+} from "../../analysis/orderFlowProfile.js";
 import type { NakedPocLevel } from "../../analysis/nakedPoc.js";
 import type { ReferenceLevel } from "../../analysis/referenceLevels.js";
 import type { PreviousWeekStrategyLevel, PreviousWeekStrategySettings } from "../../analysis/previousWeekStrategy.js";
@@ -44,6 +49,11 @@ export interface VolumeProfileCacheState {
   key: string;
   result: VolumeProfileResult;
   maxVolume: number;
+  prefixKey?: string;
+  prefixCount?: number;
+  nonTailRevision?: number;
+  resetEpoch?: number;
+  prefixAcc?: OrderFlowProfileAccumulator;
 }
 
 export interface LineLabelEntry {
@@ -165,6 +175,57 @@ function drawStrategyLevels<TId extends string, TGroup extends string>(
   ctx.restore();
 }
 
+function findSessionRange(all: readonly FootprintBar[], anchorTime: number, anchorIndexHint: number): [number, number] {
+  const dayStart = Math.floor(anchorTime / 86_400_000) * 86_400_000;
+  const dayEnd = dayStart + 86_400_000;
+  let selFrom = Math.min(Math.max(0, anchorIndexHint), Math.max(0, all.length - 1));
+  while (selFrom > 0 && all[selFrom - 1].startTime >= dayStart) selFrom--;
+  while (selFrom < all.length && all[selFrom].startTime < dayStart) selFrom++;
+  let selTo = Math.max(selFrom, Math.min(all.length, anchorIndexHint + 1));
+  while (selTo < all.length && all[selTo].startTime < dayEnd) selTo++;
+  while (selTo > selFrom && all[selTo - 1].startTime >= dayEnd) selTo--;
+  return [selFrom, selTo];
+}
+
+function buildVolumeProfileResultAndMax(
+  acc: OrderFlowProfileAccumulator,
+  valueAreaPercent: number,
+): { result: VolumeProfileResult; maxVolume: number } {
+  const ofResult = finishOrderFlowProfile(acc, {
+    profileMetric: "volume",
+    profileSide: "total",
+    valueAreaPercent,
+  });
+  let maxVolume = 0;
+  const levels = new Array(ofResult.levels.length);
+  for (let i = 0; i < ofResult.levels.length; i++) {
+    const level = ofResult.levels[i];
+    if (level.totalVol > maxVolume) maxVolume = level.totalVol;
+    levels[i] = {
+      priceBin: level.priceBin,
+      buyVol: level.buyVol,
+      sellVol: level.sellVol,
+      totalVol: level.totalVol,
+    };
+  }
+  return {
+    result: {
+      levels,
+      totalVolume: ofResult.totalVolume,
+      poc: ofResult.poc,
+      vah: ofResult.vah,
+      val: ofResult.val,
+      fromTime: ofResult.fromTime,
+      toTime: ofResult.toTime,
+      provenance: ofResult.provenance,
+      isEstimated: ofResult.isEstimated,
+      exactBarCount: ofResult.exactBarCount,
+      estimatedBarCount: ofResult.estimatedBarCount,
+    },
+    maxVolume,
+  };
+}
+
 export function drawVolumeProfile(
   host: AnnotationRendererHost,
   view: View,
@@ -174,21 +235,64 @@ export function drawVolumeProfile(
   const cfg = host.getProfileSettings?.();
   if (!cfg || !settings.volumeProfile || from >= to) return;
   const all = series.listReadonly();
-  const visible = all.slice(from, to);
-  const anchor = visible[visible.length - 1]?.startTime;
-  const selected = cfg.mode === "session" && anchor !== undefined ? sessionBars(all, anchor) : visible;
-  const last = selected[selected.length - 1];
-  const key = [
-    cfg.mode, cfg.valueAreaPercent, selected.length, selected[0]?.startTime ?? 0,
-    last?.startTime ?? 0, series.revision,
-  ].join("|");
-  if (host.profileCache?.key !== key) {
-    const result = calculateVolumeProfile(selected, cfg.valueAreaPercent);
-    let maxVolume = 0;
-    for (const level of result.levels) {
-      if (level.totalVol > maxVolume) maxVolume = level.totalVol;
+  const safeFrom = Math.max(0, from);
+  const safeTo = Math.min(all.length, to);
+  if (safeFrom >= safeTo) return;
+
+  const anchorIdx = safeTo - 1;
+  const anchor = all[anchorIdx]?.startTime;
+  const [selFrom, selTo] = cfg.mode === "session" && anchor !== undefined
+    ? findSessionRange(all, anchor, anchorIdx)
+    : [safeFrom, safeTo];
+  const selCount = selTo - selFrom;
+  if (selCount <= 0) return;
+
+  const firstStart = all[selFrom]?.startTime ?? 0;
+  const lastIdx = selTo - 1;
+  const lastStart = all[lastIdx]?.startTime ?? 0;
+  const key = `${cfg.mode}|${cfg.valueAreaPercent}|${selCount}|${firstStart}|${lastStart}|${series.revision}`;
+
+  const prev = host.profileCache;
+  if (prev?.key !== key) {
+    const closedCount = selCount - 1;
+    const prefixKey = `${cfg.mode}|${selFrom}|${closedCount > 0 ? firstStart : 0}|${series.resetEpoch}`;
+    const accOptions = {
+      profileMetric: "volume" as const,
+      profileSide: "total" as const,
+      valueAreaPercent: cfg.valueAreaPercent,
+    };
+
+    let prefixAcc: OrderFlowProfileAccumulator;
+    if (
+      prev?.prefixAcc
+      && prev.prefixKey === prefixKey
+      && prev.nonTailRevision === series.nonTailRevision
+      && (prev.prefixCount === closedCount || prev.prefixCount === closedCount - 1)
+    ) {
+      prefixAcc = prev.prefixAcc;
+      if (prev.prefixCount === closedCount - 1 && lastIdx > selFrom) {
+        accumulateOrderFlowProfileBar(prefixAcc, all[lastIdx - 1], accOptions);
+      }
+    } else {
+      prefixAcc = createOrderFlowProfileAccumulator();
+      for (let i = selFrom; i < lastIdx; i++) {
+        accumulateOrderFlowProfileBar(prefixAcc, all[i], accOptions);
+      }
     }
-    host.profileCache = { key, result, maxVolume };
+
+    const tailAcc = cloneOrderFlowProfileAccumulator(prefixAcc);
+    accumulateOrderFlowProfileBar(tailAcc, all[lastIdx], accOptions);
+    const { result, maxVolume } = buildVolumeProfileResultAndMax(tailAcc, cfg.valueAreaPercent);
+    host.profileCache = {
+      key,
+      result,
+      maxVolume,
+      prefixKey,
+      prefixCount: closedCount,
+      nonTailRevision: series.nonTailRevision,
+      resetEpoch: series.resetEpoch,
+      prefixAcc,
+    };
   }
   const result = host.profileCache.result;
   if (!result.levels.length) return;

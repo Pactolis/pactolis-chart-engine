@@ -11,6 +11,10 @@ import {
   configureOrderbookHeatmapSettingsSource,
   orderbookHeatmapSettingsSource,
 } from "../dist/features/orderbook/heatmapSettingsSource.js";
+import {
+  decodeHeatmapBarsFromBuffer,
+  encodeHeatmapBarsToBuffer,
+} from "../dist/features/chart/worker/workerProtocol.js";
 import { ChartWorkerPanelRuntime } from "../dist/features/chart/worker/chartWorkerRuntime.js";
 import { WorkerChartHostBridge } from "../dist/features/chart/worker/workerRuntimeAdapter.js";
 
@@ -370,6 +374,96 @@ test("ChartWorkerPanelRuntime achieves shared-core parity for footprint cells, s
   assert.equal(diag.heatmap.heatmapPath, "cpu");
   assert.equal(diag.heatmap.fallbackReason, "backend_unsupported");
   assert.ok(diag.heatmapRaster !== null, "OrderbookHeatmapOverlay raster diagnostics must be present");
+
+  runtime.dispose();
+  bridge.dispose();
+});
+
+test("#410: transferable ArrayBuffer heatmap protocol round-trips identically and ingests cleanly in worker runtime", async () => {
+  const sampleBars = [
+    {
+      t: 1_700_000_000_000,
+      cells: [
+        [100.25, 250.5, 10],
+        [101.5, 0, 420.75],
+      ],
+    },
+    {
+      t: 1_700_000_060_000,
+      cells: [
+        [99.75, 512, 32.25],
+      ],
+    },
+  ];
+  const encoded = encodeHeatmapBarsToBuffer(sampleBars);
+  assert.ok(encoded instanceof ArrayBuffer);
+  assert.deepEqual(decodeHeatmapBarsFromBuffer(encoded), sampleBars);
+
+  const mainPorts = createMockMessageChannel();
+  const ingressPorts = createMockMessageChannel();
+  const historyPorts = createMockMessageChannel();
+
+  const runtime = new ChartWorkerPanelRuntime({
+    panelId: "worker-panel-binary-hm",
+    marketId: "BINANCE_FUTURES:btcusdt",
+    ports: {
+      mainPort: mainPorts.portB,
+      ingressPort: ingressPorts.portB,
+      historyPort: historyPorts.portB,
+    },
+  });
+
+  const bridge = new WorkerChartHostBridge({
+    panelId: "worker-panel-binary-hm",
+    marketId: "BINANCE_FUTURES:btcusdt",
+  });
+  bridge.attachPorts({ mainPort: mainPorts.portA });
+  bridge.init({
+    viewport: { width: 640, height: 360, dpr: 1 },
+    surfaces: [
+      { role: "gpu-scene", zIndex: 0, width: 640, height: 360, dpr: 1 },
+      { role: "annotation", zIndex: 1, width: 640, height: 360, dpr: 1 },
+      { role: "interaction", zIndex: 2, width: 640, height: 360, dpr: 1 },
+    ],
+    backendPreference: "canvas2d",
+  });
+  bridge.sendStateUpdate({ orderbookHeatmapMode: "aggregated" });
+  await new Promise((r) => setTimeout(r, 0));
+
+  const chunkBuf = encodeHeatmapBarsToBuffer([sampleBars[0]]);
+  historyPorts.portA.postMessage({
+    channel: "history",
+    kind: "history:heatmap-chunk",
+    panelId: "worker-panel-binary-hm",
+    marketId: "BINANCE_FUTURES:btcusdt",
+    generation: 0,
+    seq: 1,
+    revision: 1,
+    payload: {
+      resolution: "1m",
+      bucketStep: 0.25,
+      bars: chunkBuf,
+    },
+  }, [chunkBuf]);
+
+  const tailBuf = encodeHeatmapBarsToBuffer([sampleBars[1]]);
+  ingressPorts.portA.postMessage({
+    channel: "ingress",
+    kind: "ingress:heatmap-tail",
+    panelId: "worker-panel-binary-hm",
+    marketId: "BINANCE_FUTURES:btcusdt",
+    generation: 0,
+    seq: 1,
+    revision: 2,
+    payload: {
+      market: "BINANCE_FUTURES:btcusdt",
+      timestamp: 1_700_000_060_000,
+      bars: tailBuf,
+    },
+  }, [tailBuf]);
+
+  const diag = runtime.getDiagnostics();
+  assert.ok(diag.heatmapRaster !== null);
 
   runtime.dispose();
   bridge.dispose();

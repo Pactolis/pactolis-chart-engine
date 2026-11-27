@@ -201,6 +201,8 @@ export interface IndicatorDefinition<S extends IndicatorSettings = IndicatorSett
   /** Opt-in only for preparation that is pure for series revision + visible range + instance/chart identity. */
   prepareCache?: "series-range" | { mode: "series-range"; maxAgeMs: number };
   prepareData?(ctx: IndicatorDrawContext<S>): IndicatorPreparedData;
+  /** Optional incremental tail update when only the live tail changed (`nonTailRevision` matches). */
+  prepareDataTail?(ctx: IndicatorDrawContext<S>, previous: IndicatorPreparedData): IndicatorPreparedData | undefined;
   /** Optional typed numeric export for non-standard prepared-data shapes. It must be read-only and must not draw. */
   analysisExport?(ctx: IndicatorDrawContext<S>, prepared: IndicatorPreparedData | undefined): IndicatorAnalysisExport;
   getReadout?(

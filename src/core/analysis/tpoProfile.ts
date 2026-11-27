@@ -221,6 +221,7 @@ export function aggregateTpoBrackets(
           ...bar,
           startTime,
           cells: new Map(),
+          sources: bar.sources ? bar.sources.slice() : undefined,
         },
       };
       brackets.push(current);
@@ -237,7 +238,17 @@ export function aggregateTpoBrackets(
     current.bar.liquidationSellVol = (current.bar.liquidationSellVol ?? 0) + (bar.liquidationSellVol ?? 0);
     current.bar.hasRef = current.bar.hasRef || bar.hasRef;
     current.bar.updatedAt = Math.max(current.bar.updatedAt ?? 0, bar.updatedAt ?? 0);
-    current.bar.sources = [...new Set([...(current.bar.sources ?? []), ...(bar.sources ?? [])])];
+    if (bar.sources?.length) {
+      let targetSources = current.bar.sources;
+      if (!targetSources) {
+        current.bar.sources = bar.sources.slice();
+      } else {
+        for (let s = 0; s < bar.sources.length; s++) {
+          const src = bar.sources[s];
+          if (!targetSources.includes(src)) targetSources.push(src);
+        }
+      }
+    }
   }
 
   return brackets;

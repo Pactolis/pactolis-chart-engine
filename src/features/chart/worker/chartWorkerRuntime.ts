@@ -36,6 +36,7 @@ import { ChartHeatmapGpuCoordinator } from "../ChartHeatmapGpuCoordinator.js";
 import type { HeatmapGpuCellFrame } from "../heatmap/gpu/heatmapGpuRenderer.js";
 import { IndicatorManager, drawIndicatorPaneBackground } from "../../indicators/IndicatorManager.js";
 import type {
+  OrderbookHeatmapBar,
   OrderbookHeatmapRequest,
   OrderbookHeatmapResponse,
 } from "../../orderbook/heatmapContracts.js";
@@ -46,6 +47,8 @@ import {
   type OrderbookHeatmapSettingsSource,
 } from "../../orderbook/heatmapSettingsSource.js";
 import {
+  decodeHeatmapBarsFromBuffer,
+  type HeatmapProtocolBar,
   type WorkerChartStatePatch,
   type WorkerHistoryBar,
   type WorkerInputEvent,
@@ -808,34 +811,34 @@ export class ChartWorkerPanelRuntime {
     bucketStep?: number;
     from?: number;
     to?: number;
-    bars: ReadonlyArray<{ t: number; cells: ReadonlyArray<readonly [number, number, number]> }>;
+    bars: ReadonlyArray<HeatmapProtocolBar> | ArrayBuffer;
   }): void {
     if (this.disposed || !this.orderbookHeatmap) return;
+    const bars = payload.bars instanceof ArrayBuffer
+      ? decodeHeatmapBarsFromBuffer(payload.bars)
+      : payload.bars as OrderbookHeatmapBar[];
     this.orderbookHeatmap.ingestWorkerHeatmapChunk({
       resolution: payload.resolution,
       bucketStep: payload.bucketStep,
       from: payload.from,
       to: payload.to,
-      bars: payload.bars.map((bar) => ({
-        t: bar.t,
-        cells: bar.cells.map(([p, b, a]) => [p, b, a]),
-      })),
+      bars,
     });
   }
 
   private handleHeatmapTail(payload: {
     market?: string;
     timestamp?: number;
-    bars?: ReadonlyArray<{ t: number; cells: ReadonlyArray<readonly [number, number, number]> }>;
+    bars?: ReadonlyArray<HeatmapProtocolBar> | ArrayBuffer;
   }): void {
     if (this.disposed || !this.orderbookHeatmap) return;
+    const bars = payload.bars instanceof ArrayBuffer
+      ? decodeHeatmapBarsFromBuffer(payload.bars)
+      : payload.bars as OrderbookHeatmapBar[] | undefined;
     this.orderbookHeatmap.ingestWorkerHeatmapTail({
       market: payload.market,
       timestamp: payload.timestamp,
-      bars: payload.bars?.map((bar) => ({
-        t: bar.t,
-        cells: bar.cells.map(([p, b, a]) => [p, b, a]),
-      })),
+      bars,
     });
   }
 

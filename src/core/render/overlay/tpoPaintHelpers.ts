@@ -132,12 +132,21 @@ export function drawTpo(
     if (retainHistory && !lettersMode && !view.isLogScale() && groups.length > 1) {
       // Only the group intersecting the series tail can change in a tail-only frame.
       const closedEnd = groups.at(-1)?.lastIdx === series.length - 1 ? groups.length - 1 : groups.length;
-      const key = JSON.stringify([
-        closedEnd, vaPercent, series.config.intervalMs, chartCfg.tpoProfilePeriod, chartCfg.tpoBracketSize,
-        [...host.tpoMergeLeftSessionStarts],
-        settings.profilePoc, settings.profileVah, settings.profileVal,
-        groups.some((group) => group.partial) ? tOr("analysis.tpo.partial") : "",
-      ]);
+      let mergeKey = "";
+      if (host.tpoMergeLeftSessionStarts.size > 0) {
+        for (const start of host.tpoMergeLeftSessionStarts) {
+          mergeKey = mergeKey ? `${mergeKey},${start}` : `${start}`;
+        }
+      }
+      let hasPartial = false;
+      for (let i = 0; i < groups.length; i++) {
+        if (groups[i].partial) {
+          hasPartial = true;
+          break;
+        }
+      }
+      const partialLabel = hasPartial ? tOr("analysis.tpo.partial") : "";
+      const key = `${closedEnd}|${vaPercent}|${series.config.intervalMs}|${chartCfg.tpoProfilePeriod}|${chartCfg.tpoBracketSize}|${mergeKey}|${settings.profilePoc ? 1 : 0}${settings.profileVah ? 1 : 0}${settings.profileVal ? 1 : 0}|${partialLabel}`;
       retainHistory(key, () => paintTpoGroups(host, cache, view, from, to, step, cellH, false, 0, closedEnd));
       if (closedEnd < groups.length) {
         paintTpoGroups(host, cache, view, from, to, step, cellH, false, closedEnd, groups.length);

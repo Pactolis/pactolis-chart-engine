@@ -758,6 +758,87 @@ export class WebGpuNativeHeatmapPipeline {
     }
   }
 
+  private createResidentDescriptors(): { bindGroupLayout: any; descriptor: any } {
+    const module = this.device.createShaderModule({
+      label: "NativeResidentHeatmapShader",
+      code: NATIVE_RESIDENT_HEATMAP_WGSL,
+    });
+
+    const bindGroupLayout = this.device.createBindGroupLayout({
+      label: "NativeResidentHeatmapBindGroupLayout",
+      entries: [
+        { binding: 0, visibility: 0x1, buffer: { type: "uniform" } },
+        { binding: 1, visibility: 0x1, buffer: { type: "read-only-storage" } },
+      ],
+    });
+
+    const pipelineLayout = this.device.createPipelineLayout({
+      label: "NativeResidentHeatmapPipelineLayout",
+      bindGroupLayouts: [bindGroupLayout],
+    });
+
+    const descriptor = {
+      label: "NativeResidentHeatmapRenderPipeline",
+      layout: pipelineLayout,
+      vertex: {
+        module,
+        entryPoint: "vs_main",
+      },
+      fragment: {
+        module,
+        entryPoint: "fs_main",
+        targets: [
+          {
+            format: this.format,
+            blend: {
+              color: {
+                srcFactor: "src-alpha",
+                dstFactor: "one-minus-src-alpha",
+                operation: "add",
+              },
+              alpha: {
+                srcFactor: "one",
+                dstFactor: "one-minus-src-alpha",
+                operation: "add",
+              },
+            },
+          },
+        ],
+      },
+      primitive: { topology: "triangle-list" },
+    };
+
+    return { bindGroupLayout, descriptor };
+  }
+
+  /**
+   * Asynchronously pre-compiles the resident heatmap render pipeline so first-frame
+   * transitions into resident mode avoid synchronous shader compilation stalls.
+   */
+  async prewarmResidentPipelineAsync(): Promise<boolean> {
+    if (this.disposed) return false;
+    if (!this.residentUniformBuffer) {
+      this.reserve(RESIDENT_HEATMAP_UNIFORM_BYTES);
+      this.residentUniformBuffer = this.device.createBuffer({
+        label: "NativeResidentHeatmapUniform",
+        size: RESIDENT_HEATMAP_UNIFORM_BYTES,
+        usage: 0x0040 | 0x0008, // UNIFORM | COPY_DST
+      });
+    }
+    if (!this.residentRenderPipeline) {
+      const { bindGroupLayout, descriptor } = this.createResidentDescriptors();
+      const pipeline = typeof this.device.createRenderPipelineAsync === "function"
+        ? await this.device.createRenderPipelineAsync(descriptor)
+        : this.device.createRenderPipeline(descriptor);
+      if (this.disposed) return false;
+      if (!this.residentRenderPipeline) {
+        this.residentBindGroupLayout = bindGroupLayout;
+        this.residentRenderPipeline = pipeline;
+      }
+    }
+    return this.ensureResidentStorageCells(0);
+  }
+
   private ensureResidentPipelineResources(): boolean {
     if (this.residentRenderPipeline && this.residentUniformBuffer && this.residentCellBuffer) {
       return true;
@@ -773,54 +854,9 @@ export class WebGpuNativeHeatmapPipeline {
     }
 
     if (!this.residentRenderPipeline) {
-      const module = this.device.createShaderModule({
-        label: "NativeResidentHeatmapShader",
-        code: NATIVE_RESIDENT_HEATMAP_WGSL,
-      });
-
-      this.residentBindGroupLayout = this.device.createBindGroupLayout({
-        label: "NativeResidentHeatmapBindGroupLayout",
-        entries: [
-          { binding: 0, visibility: 0x1, buffer: { type: "uniform" } },
-          { binding: 1, visibility: 0x1, buffer: { type: "read-only-storage" } },
-        ],
-      });
-
-      const pipelineLayout = this.device.createPipelineLayout({
-        label: "NativeResidentHeatmapPipelineLayout",
-        bindGroupLayouts: [this.residentBindGroupLayout],
-      });
-
-      this.residentRenderPipeline = this.device.createRenderPipeline({
-        label: "NativeResidentHeatmapRenderPipeline",
-        layout: pipelineLayout,
-        vertex: {
-          module,
-          entryPoint: "vs_main",
-        },
-        fragment: {
-          module,
-          entryPoint: "fs_main",
-          targets: [
-            {
-              format: this.format,
-              blend: {
-                color: {
-                  srcFactor: "src-alpha",
-                  dstFactor: "one-minus-src-alpha",
-                  operation: "add",
-                },
-                alpha: {
-                  srcFactor: "one",
-                  dstFactor: "one-minus-src-alpha",
-                  operation: "add",
-                },
-              },
-            },
-          ],
-        },
-        primitive: { topology: "triangle-list" },
-      });
+      const { bindGroupLayout, descriptor } = this.createResidentDescriptors();
+      this.residentBindGroupLayout = bindGroupLayout;
+      this.residentRenderPipeline = this.device.createRenderPipeline(descriptor);
     }
 
     return this.ensureResidentStorageCells(0);

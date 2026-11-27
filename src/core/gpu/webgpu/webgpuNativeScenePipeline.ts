@@ -859,6 +859,13 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
 export interface WebGpuNativeScenePipelineOptions {
   readonly supportsTimestampQuery?: boolean;
   readonly maxBufferSize?: number;
+  readonly precompiled?: {
+    readonly computeBindGroupLayout: any;
+    readonly renderBindGroupLayout: any;
+    readonly computePipeline: any;
+    readonly candlePipeline: any;
+    readonly footprintPipeline: any;
+  };
 }
 
 export interface PreparedNativeFrame {
@@ -981,18 +988,24 @@ export class WebGpuNativeScenePipeline {
   private dirtyCount = 0;
   private priceOriginValue = 0;
 
+  private pixelBucketShaderModuleCompute: any = null;
+  private pixelBucketShaderModuleRender: any = null;
+  private pixelBucketPrewarmPromise: Promise<void> | null = null;
+  private mergedCellsShaderModuleCompute: any = null;
+  private mergedCellsShaderModuleRender: any = null;
+  private mergedCellsPrewarmPromise: Promise<void> | null = null;
+  private lodPrewarmScheduled = false;
+
   private readonly maxBufferSize: number;
   private readonly querySet: any = null;
   private readonly timestampSlots: TimestampSlot[] = [];
   private disposed = false;
 
-  constructor(
-    private readonly device: any,
-    public readonly format: string,
-    options?: WebGpuNativeScenePipelineOptions,
-  ) {
-    this.maxBufferSize = options?.maxBufferSize ?? device.limits?.maxBufferSize ?? 268435456;
-
+  static async createAsync(
+    device: any,
+    format: string,
+    options?: Omit<WebGpuNativeScenePipelineOptions, "precompiled">,
+  ): Promise<WebGpuNativeScenePipeline> {
     const blend = {
       color: {
         srcFactor: "src-alpha",
@@ -1005,7 +1018,6 @@ export class WebGpuNativeScenePipeline {
         operation: "add",
       },
     };
-
     const computeShader = device.createShaderModule({
       label: "NativeSceneComputeStatsShader",
       code: COMPUTE_STATS_WGSL,
@@ -1018,6 +1030,82 @@ export class WebGpuNativeScenePipeline {
       label: "NativeSceneFootprintCellShader",
       code: FOOTPRINT_CELL_WGSL,
     });
+    const computeBindGroupLayout = device.createBindGroupLayout({
+      label: "NativeSceneComputeBindGroupLayout",
+      entries: [
+        { binding: 0, visibility: 0x4, buffer: { type: "uniform" } },
+        { binding: 1, visibility: 0x4, buffer: { type: "storage" } },
+        { binding: 2, visibility: 0x4, buffer: { type: "read-only-storage" } },
+      ],
+    });
+    const renderBindGroupLayout = device.createBindGroupLayout({
+      label: "NativeSceneRenderBindGroupLayout",
+      entries: [
+        { binding: 0, visibility: 0x1, buffer: { type: "uniform" } },
+        { binding: 1, visibility: 0x1, buffer: { type: "read-only-storage" } },
+        { binding: 2, visibility: 0x1, buffer: { type: "read-only-storage" } },
+      ],
+    });
+    const computePipelineLayout = device.createPipelineLayout({
+      label: "NativeSceneComputePipelineLayout",
+      bindGroupLayouts: [computeBindGroupLayout],
+    });
+    const renderPipelineLayout = device.createPipelineLayout({
+      label: "NativeSceneRenderPipelineLayout",
+      bindGroupLayouts: [renderBindGroupLayout],
+    });
+
+    const computeDesc = {
+      label: "NativeSceneComputeStatsPipeline",
+      layout: computePipelineLayout,
+      compute: { module: computeShader, entryPoint: "cs_main" },
+    };
+    const candleDesc = {
+      label: "NativeSceneCandlePipeline",
+      layout: renderPipelineLayout,
+      vertex: { module: candleShader, entryPoint: "vs_main" },
+      fragment: { module: candleShader, entryPoint: "fs_main", targets: [{ format, blend }] },
+      primitive: { topology: "triangle-list" },
+    };
+    const footprintDesc = {
+      label: "NativeSceneFootprintPipeline",
+      layout: renderPipelineLayout,
+      vertex: { module: footprintShader, entryPoint: "vs_main" },
+      fragment: { module: footprintShader, entryPoint: "fs_main", targets: [{ format, blend }] },
+      primitive: { topology: "triangle-list" },
+    };
+
+    const [computePipeline, candlePipeline, footprintPipeline] = await Promise.all([
+      typeof device.createComputePipelineAsync === "function"
+        ? device.createComputePipelineAsync(computeDesc)
+        : Promise.resolve(device.createComputePipeline(computeDesc)),
+      typeof device.createRenderPipelineAsync === "function"
+        ? device.createRenderPipelineAsync(candleDesc)
+        : Promise.resolve(device.createRenderPipeline(candleDesc)),
+      typeof device.createRenderPipelineAsync === "function"
+        ? device.createRenderPipelineAsync(footprintDesc)
+        : Promise.resolve(device.createRenderPipeline(footprintDesc)),
+    ]);
+
+    const pipeline = new WebGpuNativeScenePipeline(device, format, {
+      ...options,
+      precompiled: {
+        computeBindGroupLayout,
+        renderBindGroupLayout,
+        computePipeline,
+        candlePipeline,
+        footprintPipeline,
+      },
+    });
+    return pipeline;
+  }
+
+  constructor(
+    private readonly device: any,
+    public readonly format: string,
+    options?: WebGpuNativeScenePipelineOptions,
+  ) {
+    this.maxBufferSize = options?.maxBufferSize ?? device.limits?.maxBufferSize ?? 268435456;
 
     this.viewUniformBuffer = device.createBuffer({
       label: "NativeSceneViewUniform",
@@ -1030,70 +1118,104 @@ export class WebGpuNativeScenePipeline {
       usage: 0x0040 | 0x0008, // UNIFORM | COPY_DST
     });
 
-    this.computeBindGroupLayout = device.createBindGroupLayout({
-      label: "NativeSceneComputeBindGroupLayout",
-      entries: [
-        { binding: 0, visibility: 0x4, buffer: { type: "uniform" } },
-        { binding: 1, visibility: 0x4, buffer: { type: "storage" } },
-        { binding: 2, visibility: 0x4, buffer: { type: "read-only-storage" } },
-      ],
-    });
-    this.renderBindGroupLayout = device.createBindGroupLayout({
-      label: "NativeSceneRenderBindGroupLayout",
-      entries: [
-        { binding: 0, visibility: 0x1, buffer: { type: "uniform" } },
-        { binding: 1, visibility: 0x1, buffer: { type: "read-only-storage" } },
-        { binding: 2, visibility: 0x1, buffer: { type: "read-only-storage" } },
-      ],
-    });
+    if (options?.precompiled) {
+      this.computeBindGroupLayout = options.precompiled.computeBindGroupLayout;
+      this.renderBindGroupLayout = options.precompiled.renderBindGroupLayout;
+      this.computePipeline = options.precompiled.computePipeline;
+      this.candlePipeline = options.precompiled.candlePipeline;
+      this.footprintPipeline = options.precompiled.footprintPipeline;
+    } else {
+      const blend = {
+        color: {
+          srcFactor: "src-alpha",
+          dstFactor: "one-minus-src-alpha",
+          operation: "add",
+        },
+        alpha: {
+          srcFactor: "one",
+          dstFactor: "one-minus-src-alpha",
+          operation: "add",
+        },
+      };
 
-    const computePipelineLayout = device.createPipelineLayout({
-      label: "NativeSceneComputePipelineLayout",
-      bindGroupLayouts: [this.computeBindGroupLayout],
-    });
-    const renderPipelineLayout = device.createPipelineLayout({
-      label: "NativeSceneRenderPipelineLayout",
-      bindGroupLayouts: [this.renderBindGroupLayout],
-    });
+      const computeShader = device.createShaderModule({
+        label: "NativeSceneComputeStatsShader",
+        code: COMPUTE_STATS_WGSL,
+      });
+      const candleShader = device.createShaderModule({
+        label: "NativeSceneCandleShader",
+        code: CANDLE_WGSL,
+      });
+      const footprintShader = device.createShaderModule({
+        label: "NativeSceneFootprintCellShader",
+        code: FOOTPRINT_CELL_WGSL,
+      });
 
-    this.computePipeline = device.createComputePipeline({
-      label: "NativeSceneComputeStatsPipeline",
-      layout: computePipelineLayout,
-      compute: {
-        module: computeShader,
-        entryPoint: "cs_main",
-      },
-    });
+      this.computeBindGroupLayout = device.createBindGroupLayout({
+        label: "NativeSceneComputeBindGroupLayout",
+        entries: [
+          { binding: 0, visibility: 0x4, buffer: { type: "uniform" } },
+          { binding: 1, visibility: 0x4, buffer: { type: "storage" } },
+          { binding: 2, visibility: 0x4, buffer: { type: "read-only-storage" } },
+        ],
+      });
+      this.renderBindGroupLayout = device.createBindGroupLayout({
+        label: "NativeSceneRenderBindGroupLayout",
+        entries: [
+          { binding: 0, visibility: 0x1, buffer: { type: "uniform" } },
+          { binding: 1, visibility: 0x1, buffer: { type: "read-only-storage" } },
+          { binding: 2, visibility: 0x1, buffer: { type: "read-only-storage" } },
+        ],
+      });
 
-    this.candlePipeline = device.createRenderPipeline({
-      label: "NativeSceneCandlePipeline",
-      layout: renderPipelineLayout,
-      vertex: {
-        module: candleShader,
-        entryPoint: "vs_main",
-      },
-      fragment: {
-        module: candleShader,
-        entryPoint: "fs_main",
-        targets: [{ format, blend }],
-      },
-      primitive: { topology: "triangle-list" },
-    });
+      const computePipelineLayout = device.createPipelineLayout({
+        label: "NativeSceneComputePipelineLayout",
+        bindGroupLayouts: [this.computeBindGroupLayout],
+      });
+      const renderPipelineLayout = device.createPipelineLayout({
+        label: "NativeSceneRenderPipelineLayout",
+        bindGroupLayouts: [this.renderBindGroupLayout],
+      });
 
-    this.footprintPipeline = device.createRenderPipeline({
-      label: "NativeSceneFootprintPipeline",
-      layout: renderPipelineLayout,
-      vertex: {
-        module: footprintShader,
-        entryPoint: "vs_main",
-      },
-      fragment: {
-        module: footprintShader,
-        entryPoint: "fs_main",
-        targets: [{ format, blend }],
-      },
-      primitive: { topology: "triangle-list" },
-    });
+      this.computePipeline = device.createComputePipeline({
+        label: "NativeSceneComputeStatsPipeline",
+        layout: computePipelineLayout,
+        compute: {
+          module: computeShader,
+          entryPoint: "cs_main",
+        },
+      });
+
+      this.candlePipeline = device.createRenderPipeline({
+        label: "NativeSceneCandlePipeline",
+        layout: renderPipelineLayout,
+        vertex: {
+          module: candleShader,
+          entryPoint: "vs_main",
+        },
+        fragment: {
+          module: candleShader,
+          entryPoint: "fs_main",
+          targets: [{ format, blend }],
+        },
+        primitive: { topology: "triangle-list" },
+      });
+
+      this.footprintPipeline = device.createRenderPipeline({
+        label: "NativeSceneFootprintPipeline",
+        layout: renderPipelineLayout,
+        vertex: {
+          module: footprintShader,
+          entryPoint: "vs_main",
+        },
+        fragment: {
+          module: footprintShader,
+          entryPoint: "fs_main",
+          targets: [{ format, blend }],
+        },
+        primitive: { topology: "triangle-list" },
+      });
+    }
 
     const maxBarsFit = Math.max(1, Math.floor(this.maxBufferSize / BAR_RECORD_BYTES));
     const maxCellsFit = Math.max(1, Math.floor(this.maxBufferSize / CELL_RECORD_BYTES));
@@ -1352,9 +1474,15 @@ export class WebGpuNativeScenePipeline {
     return true;
   }
 
-  private writeStorageBuffer(buffer: any, dstByteOffset: number, src: ArrayBuffer, srcByteLength: number): void {
+  private writeStorageBuffer(
+    buffer: any,
+    dstByteOffset: number,
+    src: ArrayBuffer,
+    srcByteLength: number,
+    srcByteOffset = 0,
+  ): void {
     if (srcByteLength <= 0) return;
-    this.device.queue.writeBuffer(buffer, dstByteOffset, src, 0, srcByteLength);
+    this.device.queue.writeBuffer(buffer, dstByteOffset, src, srcByteOffset, srcByteLength);
   }
 
   private syncSeries(series: FootprintSeries, drawFootprint: boolean): boolean {
@@ -1488,25 +1616,37 @@ export class WebGpuNativeScenePipeline {
             if (canPatchInPlace) {
               const sortedCells = getSortedFootprintBarCells(tailBar);
               let changedCells = 0;
+              let runStart = -1;
+              const flushDirtyRun = (runEnd: number) => {
+                if (runStart < 0) return;
+                const byteLength = (runEnd - runStart) * CELL_RECORD_BYTES;
+                this.writeStorageBuffer(
+                  this.cellBuffer,
+                  (this.tailCellOffset + runStart) * CELL_RECORD_BYTES,
+                  this.cellStagingBuffer,
+                  byteLength,
+                  runStart * CELL_RECORD_BYTES,
+                );
+                dataBytes += byteLength;
+                runStart = -1;
+              };
               for (let i = 0; i < sortedCells.length; i++) {
                 const cell = sortedCells[i];
                 const rev = getFootprintCellRevision(cell);
                 if (rev !== this.syncedTailCellRevs[i]) {
-                  this.tailCellU32[0] = tailIdx;
-                  this.tailCellF32[1] = cell.priceBin - origin;
-                  this.tailCellF32[2] = cell.buyVol;
-                  this.tailCellF32[3] = cell.sellVol;
-                  this.writeStorageBuffer(
-                    this.cellBuffer,
-                    (this.tailCellOffset + i) * CELL_RECORD_BYTES,
-                    this.tailCellBuffer,
-                    CELL_RECORD_BYTES,
-                  );
+                  if (runStart < 0) runStart = i;
+                  const cellWord = i * CELL_RECORD_WORDS;
+                  this.cellStagingU32[cellWord] = tailIdx;
+                  this.cellStagingF32[cellWord + 1] = cell.priceBin - origin;
+                  this.cellStagingF32[cellWord + 2] = cell.buyVol;
+                  this.cellStagingF32[cellWord + 3] = cell.sellVol;
                   this.syncedTailCellRevs[i] = rev;
-                  dataBytes += CELL_RECORD_BYTES;
                   changedCells++;
+                } else {
+                  flushDirtyRun(i);
                 }
               }
+              flushDirtyRun(sortedCells.length);
               if (changedCells > 0 || !tailCellChanged) {
                 patchedInPlace = true;
               }
@@ -1790,21 +1930,20 @@ export class WebGpuNativeScenePipeline {
     };
   }
 
-  private ensurePixelBucketResources(bucketCount: number): boolean {
-    const needed = Math.max(1, bucketCount);
-    const neededBytes = needed * PIXEL_BUCKET_RECORD_BYTES;
-    if (neededBytes > this.maxBufferSize) return false;
-
-    const lodUniform = this.ensureLodUniformBuffer();
-    if (!this.pixelBucketComputePipeline) {
-      const computeMod = this.device.createShaderModule({
+  private preparePixelBucketDescriptors(): { computeDesc: any; renderDesc: any } {
+    if (!this.pixelBucketShaderModuleCompute) {
+      this.pixelBucketShaderModuleCompute = this.device.createShaderModule({
         label: "NativeSceneComputePixelBucketShader",
         code: COMPUTE_PIXEL_BUCKET_WGSL,
       });
-      const renderMod = this.device.createShaderModule({
+    }
+    if (!this.pixelBucketShaderModuleRender) {
+      this.pixelBucketShaderModuleRender = this.device.createShaderModule({
         label: "NativeScenePixelBucketCandleShader",
         code: PIXEL_BUCKET_CANDLE_WGSL,
       });
+    }
+    if (!this.pixelBucketComputeBindGroupLayout) {
       this.pixelBucketComputeBindGroupLayout = this.device.createBindGroupLayout({
         label: "NativeScenePixelBucketComputeBindGroupLayout",
         entries: [
@@ -1814,6 +1953,8 @@ export class WebGpuNativeScenePipeline {
           { binding: 3, visibility: 0x4, buffer: { type: "storage" } },
         ],
       });
+    }
+    if (!this.pixelBucketRenderBindGroupLayout) {
       this.pixelBucketRenderBindGroupLayout = this.device.createBindGroupLayout({
         label: "NativeScenePixelBucketRenderBindGroupLayout",
         entries: [
@@ -1821,24 +1962,150 @@ export class WebGpuNativeScenePipeline {
           { binding: 1, visibility: 0x1, buffer: { type: "read-only-storage" } },
         ],
       });
-      this.pixelBucketComputePipeline = this.device.createComputePipeline({
-        label: "NativeScenePixelBucketComputePipeline",
-        layout: this.device.createPipelineLayout({
-          label: "NativeScenePixelBucketComputePipelineLayout",
-          bindGroupLayouts: [this.pixelBucketComputeBindGroupLayout],
-        }),
-        compute: { module: computeMod, entryPoint: "cs_main" },
+    }
+    const computeDesc = {
+      label: "NativeScenePixelBucketComputePipeline",
+      layout: this.device.createPipelineLayout({
+        label: "NativeScenePixelBucketComputePipelineLayout",
+        bindGroupLayouts: [this.pixelBucketComputeBindGroupLayout],
+      }),
+      compute: { module: this.pixelBucketShaderModuleCompute, entryPoint: "cs_main" },
+    };
+    const renderDesc = {
+      label: "NativeScenePixelBucketCandlePipeline",
+      layout: this.device.createPipelineLayout({
+        label: "NativeScenePixelBucketRenderPipelineLayout",
+        bindGroupLayouts: [this.pixelBucketRenderBindGroupLayout],
+      }),
+      vertex: { module: this.pixelBucketShaderModuleRender, entryPoint: "vs_main" },
+      fragment: { module: this.pixelBucketShaderModuleRender, entryPoint: "fs_main", targets: [this.createAlphaBlendTarget()] },
+      primitive: { topology: "triangle-list" },
+    };
+    return { computeDesc, renderDesc };
+  }
+
+  private prepareMergedCellsDescriptors(): { computeDesc: any; renderDesc: any } {
+    if (!this.mergedCellsShaderModuleCompute) {
+      this.mergedCellsShaderModuleCompute = this.device.createShaderModule({
+        label: "NativeSceneComputeMergedCellsShader",
+        code: COMPUTE_MERGED_CELLS_WGSL,
       });
-      this.pixelBucketRenderPipeline = this.device.createRenderPipeline({
-        label: "NativeScenePixelBucketCandlePipeline",
-        layout: this.device.createPipelineLayout({
-          label: "NativeScenePixelBucketRenderPipelineLayout",
-          bindGroupLayouts: [this.pixelBucketRenderBindGroupLayout],
-        }),
-        vertex: { module: renderMod, entryPoint: "vs_main" },
-        fragment: { module: renderMod, entryPoint: "fs_main", targets: [this.createAlphaBlendTarget()] },
-        primitive: { topology: "triangle-list" },
+    }
+    if (!this.mergedCellsShaderModuleRender) {
+      this.mergedCellsShaderModuleRender = this.device.createShaderModule({
+        label: "NativeSceneMergedCellsShader",
+        code: MERGED_CELL_WGSL,
       });
+    }
+    if (!this.mergedCellsComputeBindGroupLayout) {
+      this.mergedCellsComputeBindGroupLayout = this.device.createBindGroupLayout({
+        label: "NativeSceneMergedCellsComputeBindGroupLayout",
+        entries: [
+          { binding: 0, visibility: 0x4, buffer: { type: "uniform" } },
+          { binding: 1, visibility: 0x4, buffer: { type: "uniform" } },
+          { binding: 2, visibility: 0x4, buffer: { type: "read-only-storage" } },
+          { binding: 3, visibility: 0x4, buffer: { type: "read-only-storage" } },
+          { binding: 4, visibility: 0x4, buffer: { type: "storage" } },
+          { binding: 5, visibility: 0x4, buffer: { type: "storage" } },
+        ],
+      });
+    }
+    if (!this.mergedCellsRenderBindGroupLayout) {
+      this.mergedCellsRenderBindGroupLayout = this.device.createBindGroupLayout({
+        label: "NativeSceneMergedCellsRenderBindGroupLayout",
+        entries: [
+          { binding: 0, visibility: 0x1, buffer: { type: "uniform" } },
+          { binding: 1, visibility: 0x1, buffer: { type: "uniform" } },
+          { binding: 2, visibility: 0x1, buffer: { type: "read-only-storage" } },
+          { binding: 3, visibility: 0x1, buffer: { type: "read-only-storage" } },
+          { binding: 4, visibility: 0x1, buffer: { type: "read-only-storage" } },
+        ],
+      });
+    }
+    const computeDesc = {
+      label: "NativeSceneMergedCellsComputePipeline",
+      layout: this.device.createPipelineLayout({
+        label: "NativeSceneMergedCellsComputePipelineLayout",
+        bindGroupLayouts: [this.mergedCellsComputeBindGroupLayout],
+      }),
+      compute: { module: this.mergedCellsShaderModuleCompute, entryPoint: "cs_main" },
+    };
+    const renderDesc = {
+      label: "NativeSceneMergedCellsRenderPipeline",
+      layout: this.device.createPipelineLayout({
+        label: "NativeSceneMergedCellsRenderPipelineLayout",
+        bindGroupLayouts: [this.mergedCellsRenderBindGroupLayout],
+      }),
+      vertex: { module: this.mergedCellsShaderModuleRender, entryPoint: "vs_main" },
+      fragment: { module: this.mergedCellsShaderModuleRender, entryPoint: "fs_main", targets: [this.createAlphaBlendTarget()] },
+      primitive: { topology: "triangle-list" },
+    };
+    return { computeDesc, renderDesc };
+  }
+
+  /** Asynchronously compiles LOD compute/render pipelines ahead of zoom-out transitions. */
+  prewarmLodPipelinesAsync(): Promise<void> {
+    if (this.disposed) return Promise.resolve();
+    this.ensureLodUniformBuffer();
+
+    if (!this.pixelBucketComputePipeline || !this.pixelBucketRenderPipeline) {
+      if (!this.pixelBucketPrewarmPromise) {
+        const { computeDesc, renderDesc } = this.preparePixelBucketDescriptors();
+        this.pixelBucketPrewarmPromise = Promise.all([
+          typeof this.device.createComputePipelineAsync === "function"
+            ? this.device.createComputePipelineAsync(computeDesc)
+            : Promise.resolve(this.device.createComputePipeline(computeDesc)),
+          typeof this.device.createRenderPipelineAsync === "function"
+            ? this.device.createRenderPipelineAsync(renderDesc)
+            : Promise.resolve(this.device.createRenderPipeline(renderDesc)),
+        ]).then(([computePipeline, renderPipeline]) => {
+          if (!this.disposed) {
+            if (!this.pixelBucketComputePipeline) this.pixelBucketComputePipeline = computePipeline;
+            if (!this.pixelBucketRenderPipeline) this.pixelBucketRenderPipeline = renderPipeline;
+          }
+        }).catch(() => {});
+      }
+    }
+
+    if (!this.mergedCellsComputePipeline || !this.mergedCellsRenderPipeline) {
+      if (!this.mergedCellsPrewarmPromise) {
+        const { computeDesc, renderDesc } = this.prepareMergedCellsDescriptors();
+        this.mergedCellsPrewarmPromise = Promise.all([
+          typeof this.device.createComputePipelineAsync === "function"
+            ? this.device.createComputePipelineAsync(computeDesc)
+            : Promise.resolve(this.device.createComputePipeline(computeDesc)),
+          typeof this.device.createRenderPipelineAsync === "function"
+            ? this.device.createRenderPipelineAsync(renderDesc)
+            : Promise.resolve(this.device.createRenderPipeline(renderDesc)),
+        ]).then(([computePipeline, renderPipeline]) => {
+          if (!this.disposed) {
+            if (!this.mergedCellsComputePipeline) this.mergedCellsComputePipeline = computePipeline;
+            if (!this.mergedCellsRenderPipeline) this.mergedCellsRenderPipeline = renderPipeline;
+          }
+        }).catch(() => {});
+      }
+    }
+
+    return Promise.all([
+      this.pixelBucketPrewarmPromise ?? Promise.resolve(),
+      this.mergedCellsPrewarmPromise ?? Promise.resolve(),
+    ]).then(() => undefined);
+  }
+
+  private ensurePixelBucketResources(bucketCount: number): boolean {
+    const needed = Math.max(1, bucketCount);
+    const neededBytes = needed * PIXEL_BUCKET_RECORD_BYTES;
+    if (neededBytes > this.maxBufferSize) return false;
+
+    const lodUniform = this.ensureLodUniformBuffer();
+    if (!this.pixelBucketComputePipeline || !this.pixelBucketRenderPipeline) {
+      const { computeDesc, renderDesc } = this.preparePixelBucketDescriptors();
+      if (!this.pixelBucketComputePipeline) {
+        this.pixelBucketComputePipeline = this.device.createComputePipeline(computeDesc);
+      }
+      if (!this.pixelBucketRenderPipeline) {
+        this.pixelBucketRenderPipeline = this.device.createRenderPipeline(renderDesc);
+      }
     }
 
     if (needed > this.pixelBucketCapacity) {
@@ -1890,54 +2157,14 @@ export class WebGpuNativeScenePipeline {
     }
 
     const lodUniform = this.ensureLodUniformBuffer();
-    if (!this.mergedCellsComputePipeline) {
-      const computeMod = this.device.createShaderModule({
-        label: "NativeSceneComputeMergedCellsShader",
-        code: COMPUTE_MERGED_CELLS_WGSL,
-      });
-      const renderMod = this.device.createShaderModule({
-        label: "NativeSceneMergedCellsShader",
-        code: MERGED_CELL_WGSL,
-      });
-      this.mergedCellsComputeBindGroupLayout = this.device.createBindGroupLayout({
-        label: "NativeSceneMergedCellsComputeBindGroupLayout",
-        entries: [
-          { binding: 0, visibility: 0x4, buffer: { type: "uniform" } },
-          { binding: 1, visibility: 0x4, buffer: { type: "uniform" } },
-          { binding: 2, visibility: 0x4, buffer: { type: "read-only-storage" } },
-          { binding: 3, visibility: 0x4, buffer: { type: "read-only-storage" } },
-          { binding: 4, visibility: 0x4, buffer: { type: "storage" } },
-          { binding: 5, visibility: 0x4, buffer: { type: "storage" } },
-        ],
-      });
-      this.mergedCellsRenderBindGroupLayout = this.device.createBindGroupLayout({
-        label: "NativeSceneMergedCellsRenderBindGroupLayout",
-        entries: [
-          { binding: 0, visibility: 0x1, buffer: { type: "uniform" } },
-          { binding: 1, visibility: 0x1, buffer: { type: "uniform" } },
-          { binding: 2, visibility: 0x1, buffer: { type: "read-only-storage" } },
-          { binding: 3, visibility: 0x1, buffer: { type: "read-only-storage" } },
-          { binding: 4, visibility: 0x1, buffer: { type: "read-only-storage" } },
-        ],
-      });
-      this.mergedCellsComputePipeline = this.device.createComputePipeline({
-        label: "NativeSceneMergedCellsComputePipeline",
-        layout: this.device.createPipelineLayout({
-          label: "NativeSceneMergedCellsComputePipelineLayout",
-          bindGroupLayouts: [this.mergedCellsComputeBindGroupLayout],
-        }),
-        compute: { module: computeMod, entryPoint: "cs_main" },
-      });
-      this.mergedCellsRenderPipeline = this.device.createRenderPipeline({
-        label: "NativeSceneMergedCellsRenderPipeline",
-        layout: this.device.createPipelineLayout({
-          label: "NativeSceneMergedCellsRenderPipelineLayout",
-          bindGroupLayouts: [this.mergedCellsRenderBindGroupLayout],
-        }),
-        vertex: { module: renderMod, entryPoint: "vs_main" },
-        fragment: { module: renderMod, entryPoint: "fs_main", targets: [this.createAlphaBlendTarget()] },
-        primitive: { topology: "triangle-list" },
-      });
+    if (!this.mergedCellsComputePipeline || !this.mergedCellsRenderPipeline) {
+      const { computeDesc, renderDesc } = this.prepareMergedCellsDescriptors();
+      if (!this.mergedCellsComputePipeline) {
+        this.mergedCellsComputePipeline = this.device.createComputePipeline(computeDesc);
+      }
+      if (!this.mergedCellsRenderPipeline) {
+        this.mergedCellsRenderPipeline = this.device.createRenderPipeline(renderDesc);
+      }
     }
 
     const safeNeededBytes = Math.max(16, neededBytes);
@@ -2014,6 +2241,15 @@ export class WebGpuNativeScenePipeline {
 
     if (!this.syncSeries(scene.series, scene.drawFootprint)) {
       return emptyFail;
+    }
+
+    if (
+      !this.lodPrewarmScheduled
+      && (typeof this.device.createComputePipelineAsync === "function"
+        || typeof this.device.createRenderPipelineAsync === "function")
+    ) {
+      this.lodPrewarmScheduled = true;
+      void this.prewarmLodPipelinesAsync();
     }
 
     if (this.dirtyCount > 0) {

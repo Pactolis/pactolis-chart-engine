@@ -70,7 +70,28 @@ interface HudMemoEntry {
   parts: readonly HudPart[] | null;
 }
 
-let lastHudMemo: HudMemoEntry | null = null;
+const HUD_TEXT_WIDTH_CACHE_MAX = 512;
+const hudMemoByCtx = new WeakMap<CanvasRenderingContext2D, HudMemoEntry>();
+const hudTextWidthCacheByCtx = new WeakMap<CanvasRenderingContext2D, Map<string, number>>();
+
+function measureHudTextWidth(ctx: CanvasRenderingContext2D, font: string, text: string): number {
+  let cache = hudTextWidthCacheByCtx.get(ctx);
+  if (!cache) {
+    cache = new Map();
+    hudTextWidthCacheByCtx.set(ctx, cache);
+  }
+  const key = `${font}|${text}`;
+  let width = cache.get(key);
+  if (width === undefined) {
+    width = ctx.measureText(text).width;
+    if (cache.size >= HUD_TEXT_WIDTH_CACHE_MAX) {
+      const oldest = cache.keys().next().value;
+      if (oldest !== undefined) cache.delete(oldest);
+    }
+    cache.set(key, width);
+  }
+  return width;
+}
 
 export function fmtFixed(v: number, digits: number, locale?: string, grouping = false): string {
   const legacyValue = v.toFixed(digits);
@@ -153,7 +174,7 @@ export function drawHud(
   const maxWidth = view.area.width - 16 - reserved;
   const font = ctx.font;
 
-  let entry = lastHudMemo;
+  let entry = hudMemoByCtx.get(ctx);
   if (
     !entry
     || entry.ctx !== ctx
@@ -194,17 +215,17 @@ export function drawHud(
 
     const hover = hovered ? "◆ " : "";
     const liveOnlyPart = liveOnlyTag ? `${hover}${liveOnlyTag}` : "";
-    const liveOnlyWidth = liveOnlyPart ? ctx.measureText(liveOnlyPart + "  ").width : 0;
+    const liveOnlyWidth = liveOnlyPart ? measureHudTextWidth(ctx, font, liveOnlyPart + "  ") : 0;
     const prefix = `${liveOnlyPart ? "" : hover}O ${fmtFixed(bar.open, pd, locale)}  H ${fmtFixed(bar.high, pd, locale)}  L ${fmtFixed(bar.low, pd, locale)}  C ${fmtFixed(bar.close, pd, locale)}  ${labels.volume} ${partialMarker}${unit}${volTxt}`;
-    const prefixWidth = ctx.measureText(prefix + "   ").width;
+    const prefixWidth = measureHudTextWidth(ctx, font, prefix + "   ");
     const deltaPart = `Δ ${partialMarker}${bar.delta >= 0 ? "+" : "-"}${unit}${deltaTxt}`;
-    const deltaWidth = ctx.measureText(deltaPart + "   ").width;
+    const deltaWidth = measureHudTextWidth(ctx, font, deltaPart + "   ");
     const tradesPart = `${labels.trades} ${partialMarker}${fmtFixed(bar.count, 0, locale, true)}`;
-    const tradesWidth = ctx.measureText(tradesPart + "   ").width;
+    const tradesWidth = measureHudTextWidth(ctx, font, tradesPart + "   ");
     const rangePart = `${labels.range} ${fmtFixed(rangePct, 2, locale)}%`;
-    const rangeWidth = ctx.measureText(rangePart + "   ").width;
+    const rangeWidth = measureHudTextWidth(ctx, font, rangePart + "   ");
     const chgPart = `${labels.change} ${changePct >= 0 ? "+" : ""}${fmtFixed(changePct, 2, locale)}%`;
-    const chgWidth = ctx.measureText(chgPart).width;
+    const chgWidth = measureHudTextWidth(ctx, font, chgPart);
 
     const overflows = liveOnlyWidth + prefixWidth + deltaWidth + tradesWidth + rangeWidth + chgWidth > maxWidth;
     const parts: readonly HudPart[] | null = overflows ? [
@@ -258,7 +279,7 @@ export function drawHud(
       changePct,
       parts,
     };
-    lastHudMemo = entry;
+    hudMemoByCtx.set(ctx, entry);
   }
 
   deps.onHudText?.(entry.hudText);
@@ -294,7 +315,8 @@ export function drawHud(
 /** The readout as rows of `parts`, widest row no wider than `maxWidth`; see layoutHud for what gives way. */
 function drawHudRows(ctx: CanvasRenderingContext2D, view: View, x: number, maxWidth: number, parts: readonly HudPart[]): void {
   if (maxWidth < 60) return;
-  const layout = layoutHud(parts, (text) => ctx.measureText(text).width, maxWidth, hudMaxRows(view.area.height), ctx.measureText("  ").width);
+  const font = ctx.font;
+  const layout = layoutHud(parts, (text) => measureHudTextWidth(ctx, font, text), maxWidth, hudMaxRows(view.area.height), measureHudTextWidth(ctx, font, "  "));
   const pillW = Math.min(Math.max(0, view.area.width - 8), layout.width + 12);
   drawOverlayPill(ctx, x - 6, 4, pillW, 20 + (layout.rows.length - 1) * HUD_ROW_HEIGHT, 5, "rgba(11, 16, 24, 0.78)", "rgba(148, 163, 184, 0.16)");
   layout.rows.forEach((row, index) => {
