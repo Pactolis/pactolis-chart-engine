@@ -47,6 +47,7 @@ import {
 } from "../../orderbook/heatmapSettingsSource.js";
 import {
   decodeHeatmapBarsFromBuffer,
+  INGRESS_TICKS_STRIDE,
   type HeatmapProtocolBar,
   type WorkerChartStatePatch,
   type WorkerHistoryBar,
@@ -281,6 +282,7 @@ export class ChartWorkerPanelRuntime {
   private scheduledFrame: { cancel: () => void } | null = null;
   private initPromise: Promise<void> = Promise.resolve();
   private hasInitialFit = false;
+  private expectedNextTickSeq: number | null = null;
   private dragging = false;
   private lastPointerX = 0;
   private readonly crosshair: Crosshair = { x: 0, y: 0, visible: false };
@@ -363,6 +365,9 @@ export class ChartWorkerPanelRuntime {
         },
         onTick: (payload) => {
           this.handleTick(payload);
+        },
+        onTicks: (payload) => {
+          this.handleTicks(payload);
         },
         onBar: (payload) => {
           this.handleBar(payload);
@@ -1019,6 +1024,33 @@ export class ChartWorkerPanelRuntime {
     this.indicatorManager?.layout(this.view);
   }
 
+  private applyTickTrade(
+    price: number,
+    size: number,
+    timestamp: number,
+    isBuy: boolean,
+    tradeId?: string,
+  ): void {
+    this.series.addTrade({
+      time: timestamp,
+      price,
+      qty: size,
+      isBuy,
+      id: tradeId,
+      market: this.marketId,
+      source: "live",
+    });
+  }
+
+  private finishTickUpdate(): void {
+    if (!this.hasInitialFit) {
+      this.fitViewToSeries();
+    } else if (this.view.isPriceAutoScale()) {
+      this.autoFitVisiblePrices();
+    }
+    this.invalidate(ChartChange.DataTail);
+  }
+
   private handleTick(payload: {
     price: number;
     size: number;
@@ -1027,21 +1059,68 @@ export class ChartWorkerPanelRuntime {
     tradeId?: string;
   }): void {
     if (this.disposed) return;
-    this.series.addTrade({
-      time: payload.timestamp,
-      price: payload.price,
-      qty: payload.size,
-      isBuy: payload.side !== "sell",
-      id: payload.tradeId,
-      market: this.marketId,
-      source: "live",
-    });
-    if (!this.hasInitialFit) {
-      this.fitViewToSeries();
-    } else if (this.view.isPriceAutoScale()) {
-      this.autoFitVisiblePrices();
+    this.applyTickTrade(
+      payload.price,
+      payload.size,
+      payload.timestamp,
+      payload.side !== "sell",
+      payload.tradeId,
+    );
+    this.finishTickUpdate();
+  }
+
+  /**
+   * Applies a packed `ingress:ticks` batch sequentially using `applyTickTrade`,
+   * performing a single viewport-fit and a single `ChartChange.DataTail`
+   * invalidation at the end of the batch, then emits `ingress:credit`
+   * (`{ granted: appliedCount }`) on the ingress port so the producer can
+   * maintain its in-flight tick budget.
+   */
+  private handleTicks(payload: {
+    buffer: ArrayBuffer;
+    count: number;
+    firstSeq: number;
+    schema: 1;
+  }): void {
+    try {
+      if (this.disposed || payload.schema !== 1 || payload.count <= 0) {
+        return;
+      }
+      const view = new Float64Array(payload.buffer);
+      const maxRecords = Math.floor(view.length / INGRESS_TICKS_STRIDE);
+      const appliedCount = Math.min(payload.count, maxRecords);
+      if (appliedCount <= 0) {
+        return;
+      }
+
+      if (this.expectedNextTickSeq !== null && payload.firstSeq > this.expectedNextTickSeq) {
+        this.endpoint.emitDiagnostic({
+          type: "ingress-gap",
+          expectedSeq: this.expectedNextTickSeq,
+          receivedSeq: payload.firstSeq,
+          gap: payload.firstSeq - this.expectedNextTickSeq,
+        });
+      }
+      const batchEndSeq = payload.firstSeq + appliedCount;
+      this.expectedNextTickSeq =
+        this.expectedNextTickSeq === null
+          ? batchEndSeq
+          : Math.max(this.expectedNextTickSeq, batchEndSeq);
+
+      for (let i = 0; i < appliedCount; i++) {
+        const base = i * INGRESS_TICKS_STRIDE;
+        const timestamp = view[base]!;
+        const price = view[base + 1]!;
+        const size = view[base + 2]!;
+        const sideFlag = view[base + 3]!;
+        this.applyTickTrade(price, size, timestamp, sideFlag !== -1);
+      }
+
+      this.finishTickUpdate();
+      this.endpoint.grantIngressCredits(appliedCount);
+    } finally {
+      this.endpoint.recycleBuffer(payload.buffer);
     }
-    this.invalidate(ChartChange.DataTail);
   }
 
   private handleBar(payload: WorkerHistoryBar): void {
@@ -1330,6 +1409,10 @@ export class ChartWorkerPanelRuntime {
         this.dispose();
         break;
       case "epoch-bump":
+        this.expectedNextTickSeq = null;
+        this.dragging = false;
+        this.crosshair.visible = false;
+        break;
       case "abort":
         this.dragging = false;
         this.crosshair.visible = false;
