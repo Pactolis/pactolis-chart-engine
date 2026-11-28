@@ -241,6 +241,10 @@ const CHART_LOCALE_FALLBACKS: Readonly<Record<string, { tr: string; en: string }
     tr: "Geçmiş başlangıcı: {time}",
     en: "History started: {time}",
   },
+  "indicator.crossExchangeOpenInterest.noExchangeSelected": {
+    tr: "OI için en az bir borsa seçilmelidir",
+    en: "Select at least one exchange for OI",
+  },
   "indicator.volumeProfile.metric.oiDelta": {
     tr: "OI Delta",
     en: "OI Delta",

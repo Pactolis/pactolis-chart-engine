@@ -222,19 +222,21 @@ export function normalizeCrossExchangeOpenInterestSettings(
     hyperliquid: false,
   };
 
+  let hasExplicitExchangeSetting = false;
   const rawExchanges = source.exchanges;
   if (rawExchanges && typeof rawExchanges === "object" && !Array.isArray(rawExchanges)) {
     const legacy = rawExchanges as Record<string, unknown>;
     for (const [key, val] of Object.entries(legacy)) {
       const mapped = LEGACY_EXCHANGE_KEY_MAP[key];
       if (!mapped || typeof val !== "boolean") continue;
+      hasExplicitExchangeSetting = true;
       if (key === mapped || !(mapped in legacy)) {
         exchanges[mapped] = val;
       }
     }
   }
 
-  if (!OPEN_INTEREST_VENUES.some((venue) => exchanges[venue])) {
+  if (!hasExplicitExchangeSetting) {
     for (const venue of OPEN_INTEREST_VENUES) {
       exchanges[venue] = true;
     }
@@ -577,6 +579,20 @@ function prepareCrossExchangeOpenInterestData(
       meta: emptyMeta(""),
       message: "chart context yok",
       error: "chart context yok",
+    };
+  }
+
+  if (venues.length === 0) {
+    const msg = trText(
+      "indicator.crossExchangeOpenInterest.noExchangeSelected",
+      "OI için en az bir borsa seçilmelidir",
+    );
+    return {
+      status: "no-data",
+      points: [],
+      range: { min: 0, max: 1 },
+      meta: emptyMeta(chart.timeframe),
+      message: msg,
     };
   }
 
