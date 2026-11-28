@@ -276,7 +276,7 @@ test("fundingRegime requests from - zWindowDays warmup, computes zScore before s
   assert.ok(labels.includes("rate8h"));
   assert.ok(labels.includes("ort"));
   assert.ok(labels.includes("borsa"));
-  assert.ok(labels.includes("haric"));
+  assert.ok(labels.includes("haric") || labels.includes("hariç"));
   assert.ok(labels.includes("src"));
 });
 

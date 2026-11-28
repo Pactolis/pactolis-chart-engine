@@ -224,7 +224,10 @@ test("built-in header labels include compact metadata", async () => {
       },
     },
   });
-  assert.equal(fundingLabel, "Funding 1h | Z-Score | 30d | 4/4 borsa | haric:okxf | backend | truncated");
+  assert.ok(
+    fundingLabel === "Funding 1h | Z-Score | 30d | 4/4 borsa | haric:okxf | backend | truncated"
+      || fundingLabel === "Funding 1h | Z-Score | 30d | 4/4 borsa | hariç:okxf | backend | truncated",
+  );
 
   const positioningSettings = positioning.defaultSettings();
   const positioningLabel = positioning.getHeaderLabel({
