@@ -1,4 +1,5 @@
 import { BoundedCache } from "../../../core/cache/boundedCache.js";
+import { tOr } from "../../../core/chartLocaleFallbacks.js";
 import { DAY_MS, DEFAULT_ZSCORE_MIN_SPAN_MS, rollingZScore } from "../../../core/analysis/rollingZScore.js";
 import { bucketEnd } from "../../../core/time.js";
 import { tzDateTimeHud } from "../../../core/tzFormat.js";
@@ -156,6 +157,15 @@ export function resetFundingRegimeCachesForTests(): void {
 function rememberPreparedData(key: string, value: FundingRegimeData): FundingRegimeData {
   preparedCache.set(key, value);
   return value;
+}
+
+function trText(key: string, fallback: string, params?: Record<string, string | number>): string {
+  try {
+    return tOr(key, params);
+  } catch {
+    if (!params) return fallback;
+    return fallback.replace(/\{(\w+)\}/g, (match, name: string) => (name in params ? String(params[name]) : match));
+  }
 }
 
 function showLastValueLabel(settings: FundingRegimeSettings): boolean {
@@ -754,18 +764,21 @@ function formatFundingRegimeReadout(
     { label: modeLabel(data.meta.mode), value: formatModeValue(data.meta.mode, point.value) },
   ];
   if (data.meta.mode === "zScore" && data.meta.insufficientData) {
-    items.push({ label: "durum", value: "yetersiz veri" });
+    items.push({
+      label: trText("indicator.fundingRegime.status", "durum"),
+      value: trText("indicator.fundingRegime.insufficientData", "yetersiz veri"),
+    });
   } else {
     items.push({ label: "Z", value: formatZScore(point.zScore) });
   }
   const activeVenueCount = data.meta.activeVenues?.length ?? activeFundingVenues(ctx.settings.exchanges).length;
   items.push(
     { label: "rate8h", value: formatFundingRate(point.fundingRate) },
-    { label: "ort", value: formatFundingRate(point.windowMean) },
-    { label: "borsa", value: `${activeVenueCount}/4` },
+    { label: trText("indicator.fundingRegime.mean", "ort"), value: formatFundingRate(point.windowMean) },
+    { label: trText("indicator.fundingRegime.venues", "borsa"), value: `${activeVenueCount}/4` },
   );
   if (data.meta.excludedVenues?.length) {
-    items.push({ label: "haric", value: data.meta.excludedVenues.join(",") });
+    items.push({ label: trText("indicator.fundingRegime.excluded", "haric"), value: data.meta.excludedVenues.join(",") });
   }
   if (data.meta.source) {
     items.push({ label: "src", value: data.meta.source });
@@ -832,7 +845,7 @@ function drawFundingRegime(ctx: IndicatorDrawContext<FundingRegimeSettings>, pre
   if (drawStatus(ctx, data)) return;
 
   if (data.meta.mode === "zScore" && data.meta.insufficientData) {
-    drawIndicatorMessage(ctx, "yetersiz veri", indicatorWarningMessageColor);
+    drawIndicatorMessage(ctx, trText("indicator.fundingRegime.insufficientData", "yetersiz veri"), indicatorWarningMessageColor);
     return;
   }
 
@@ -953,10 +966,12 @@ function fundingRegimeHeaderLabel(ctx: {
   if (ctx.settings.mode === "zScore") {
     parts.push(`${clampZWindowDays(ctx.settings.zWindowDays)}d`);
   }
-  parts.push(`${venues.length}/4 borsa`);
-  if (meta?.excludedVenues?.length) parts.push(`haric:${meta.excludedVenues.join(",")}`);
+  parts.push(`${venues.length}/4 ${trText("indicator.fundingRegime.venues", "borsa")}`);
+  if (meta?.excludedVenues?.length) {
+    parts.push(`${trText("indicator.fundingRegime.excluded", "haric")}:${meta.excludedVenues.join(",")}`);
+  }
   if (meta?.source) parts.push(meta.source);
-  if (meta?.insufficientData) parts.push("yetersiz veri");
+  if (meta?.insufficientData) parts.push(trText("indicator.fundingRegime.insufficientData", "yetersiz veri"));
   if (meta?.truncated) parts.push("truncated");
   return parts.join(" | ");
 }
