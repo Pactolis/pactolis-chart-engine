@@ -281,6 +281,26 @@ const CHART_LOCALE_FALLBACKS: Readonly<Record<string, { tr: string; en: string }
     tr: "OI kaydı {time}'dan beri · kapsama %{percent}",
     en: "OI recorded since {time} · coverage {percent}%",
   },
+  "indicator.fundingRegime.venues": {
+    tr: "borsa",
+    en: "exchanges",
+  },
+  "indicator.fundingRegime.excluded": {
+    tr: "hariç",
+    en: "excl",
+  },
+  "indicator.fundingRegime.insufficientData": {
+    tr: "yetersiz veri",
+    en: "insufficient data",
+  },
+  "indicator.fundingRegime.status": {
+    tr: "durum",
+    en: "status",
+  },
+  "indicator.fundingRegime.mean": {
+    tr: "ort",
+    en: "avg",
+  },
 };
 
 function formatParams(template: string, params?: Record<string, string | number>): string {
